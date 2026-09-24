@@ -5,9 +5,9 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  normalizeKeyedOrigin, authOriginForRequestUrl, originSecretName, originFromSecretName,
-  isPlausibleApiKey, buildOriginSecret, parseOriginAuth,
+  normalizeKeyedOrigin, originSecretName, originFromSecretName, isPlausibleApiKey, buildOriginSecret, parseOriginAuth,
 } from '../../extension/peerd-egress/fetch/origin-credentials.js';
+import { authOriginForRequestUrl } from '../../extension/peerd-egress/fetch/web-fetch.js';
 import { withApiCredentials } from '../../extension/peerd-egress/fetch/web-fetch.js';
 import { makeOriginCredentialRoutes } from '../../extension/peerd-egress/fetch/origin-credential-routes.js';
 

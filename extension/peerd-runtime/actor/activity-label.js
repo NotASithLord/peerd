@@ -58,16 +58,12 @@ const hostOf = (value) => {
 const PHRASES = Object.freeze({
   click: 'Clicking',
   type: 'Typing',
-  page_keys: 'Pressing keys',
   read_page: 'Reading the page',
-  read_pdf: 'Reading a PDF',
   read_doc: 'Reading a document',
   snapshot: 'Looking at the page',
   query_dom: 'Looking at the page',
   read_state: 'Looking at the page',
   watch_changes: 'Watching for changes',
-  page_exec: 'Running a script on the page',
-  page_eval: 'Running a script on the page',
 });
 
 /** What the indicator says when a tab tool has no specific phrase. */

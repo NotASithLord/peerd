@@ -49,13 +49,13 @@ const makeKV = () => {
 };
 
 /** @param delayMs widen the write window so a lock can race a persist. */
-const makeSession = (delayMs = 0) => {
+const makeSession = (delayMs = 0, onSet = () => {}) => {
   const store = new Map<string, any>();
   const wait = () => (delayMs ? new Promise((r) => setTimeout(r, delayMs)) : Promise.resolve());
   return {
     store,
     sessionGet: async (k: string) => store.get(k),
-    sessionSet: async (k: string, v: any) => { await wait(); store.set(k, v); },
+    sessionSet: async (k: string, v: any) => { onSet(); await wait(); store.set(k, v); },
     sessionDelete: async (k: string) => { await wait(); store.delete(k); },
   };
 };
@@ -69,7 +69,7 @@ const fakeArgon2 = async ({ passphrase, salt, memKiB, iters, parallelism }: any)
   return new Uint8Array(await crypto.subtle.digest('SHA-256', buf));
 };
 
-/** The mirror writes are fire-and-forget; let the queue drain. */
+/** Let fire-and-forget policy restamps and failed cleanup tails drain. */
 const flush = () => new Promise((r) => setTimeout(r, 5));
 
 /** A movable clock, so "an hour later" costs nothing. */
@@ -210,19 +210,208 @@ describe('lock() and the session mirror', () => {
     expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(false);
   });
 
+  test('a resume issued immediately after lock waits for a delayed mirror delete', async () => {
+    const kv = makeKV();
+    const sessionCache = makeSession(20);
+    const v = createVault({ kv, sessionCache, argon2: fakeArgon2, autoLockMs: 0 });
+    await v.initialize(PASS);
+    expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(true);
+
+    const locking = v.lock();
+    const resuming = v.attemptResume();
+    await expect(locking).resolves.toBeUndefined();
+    expect(await resuming).toBe(false);
+    expect(v.isLocked()).toBe(true);
+    expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(false);
+  });
+
   test('a persist still in flight when the lock lands cannot resurrect it', async () => {
     // The other half of the regression: _persistDK's write completing AFTER a
     // lock. The slow sessionSet widens the window; the epoch check + the
     // serialized queue mean the lock wins by CALL order.
-    const sessionCache = makeSession(20);
+    let markSetStarted = () => {};
+    const setStarted = new Promise<void>((resolve) => { markSetStarted = resolve; });
+    const sessionCache = makeSession(20, markSetStarted);
     const v = createVault({ kv: makeKV(), sessionCache, argon2: fakeArgon2, autoLockMs: 0 });
-    // initialize() does not await its own mirror write, so this returns with
-    // the persist mid-flight — exactly the real race.
-    await v.initialize(PASS);
-    v.lock();
+    const initializing = v.initialize(PASS);
+    await setStarted;
+    await v.lock();
+    await expect(initializing).rejects.toMatchObject({ name: 'VaultLockedError' });
     await new Promise((r) => setTimeout(r, 100));
     expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(false);
     expect(v.isLocked()).toBe(true);
+  });
+
+  test('a lock during slow unlock derivation wins before mirror persistence begins', async () => {
+    const kv = makeKV();
+    const seed = createVault({ kv, argon2: fakeArgon2, autoLockMs: 0 });
+    await seed.initialize(PASS);
+    await seed.lock();
+
+    let releaseDerive = () => {};
+    let noteDerive = () => {};
+    const deriveStarted = new Promise<void>((resolve) => { noteDerive = resolve; });
+    const deriveRelease = new Promise<void>((resolve) => { releaseDerive = resolve; });
+    const sessionCache = makeSession();
+    const vault = createVault({
+      kv,
+      sessionCache,
+      autoLockMs: 0,
+      argon2: async (args) => {
+        noteDerive();
+        await deriveRelease;
+        return fakeArgon2(args);
+      },
+    });
+    const unlocking = vault.unlock(PASS);
+    await deriveStarted;
+    await vault.lock('manual');
+    releaseDerive();
+
+    await expect(unlocking).rejects.toMatchObject({ name: 'VaultLockedError' });
+    expect(vault.isLocked()).toBe(true);
+    expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(false);
+  });
+
+  test('an unlock finishing after lock cannot delete the newer durable fence', async () => {
+    const kv = makeKV();
+    const seed = createVault({ kv, argon2: fakeArgon2, autoLockMs: 0 });
+    await seed.initialize(PASS);
+    await seed.lock();
+    await kv.set('vault.resume-fence.v1', { reason: 'idle', lockedAt: 1 });
+
+    let releaseFenceDelete = () => {};
+    let noteFenceDelete = () => {};
+    const fenceDeleteStarted = new Promise<void>((resolve) => { noteFenceDelete = resolve; });
+    const fenceDeleteRelease = new Promise<void>((resolve) => { releaseFenceDelete = resolve; });
+    const originalDelete = kv.delete;
+    let delayFenceDelete = true;
+    kv.delete = async (key: string) => {
+      if (key === 'vault.resume-fence.v1' && delayFenceDelete) {
+        delayFenceDelete = false;
+        noteFenceDelete();
+        await fenceDeleteRelease;
+      }
+      return originalDelete(key);
+    };
+    const sessionCache = makeSession();
+    const vault = createVault({ kv, sessionCache, argon2: fakeArgon2, autoLockMs: 0 });
+    const unlocking = vault.unlock(PASS);
+    const unlockOutcome = unlocking.then(() => null, (error) => error);
+    await fenceDeleteStarted;
+    sessionCache.sessionDelete = async () => { throw new Error('session delete unavailable'); };
+    const locking = vault.lock('manual');
+    releaseFenceDelete();
+
+    await expect(locking).resolves.toBeUndefined();
+    expect(await unlockOutcome).toMatchObject({ name: 'VaultLockedError' });
+    expect(vault.isLocked()).toBe(true);
+    expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(true);
+    expect(kv.store.get('vault.resume-fence.v1')).toMatchObject({ reason: 'manual' });
+  });
+
+  test('initialize and unlock fail closed when the restart mirror cannot persist', async () => {
+    const failingSession = () => {
+      const store = new Map<string, any>();
+      return {
+        store,
+        sessionGet: async (key: string) => store.get(key),
+        sessionSet: async () => { throw new Error('session storage unavailable'); },
+        sessionDelete: async (key: string) => { store.delete(key); },
+      };
+    };
+
+    const initialized = createVault({
+      kv: makeKV(), sessionCache: failingSession(), argon2: fakeArgon2, autoLockMs: 0,
+    });
+    await expect(initialized.initialize(PASS)).rejects.toThrow('session storage unavailable');
+    expect(initialized.isLocked()).toBe(true);
+    expect(await initialized.isInitialized()).toBe(false);
+
+    const passkeyInitialized = createVault({
+      kv: makeKV(), sessionCache: failingSession(), argon2: fakeArgon2, autoLockMs: 0,
+    });
+    await expect(passkeyInitialized.initializeWithPrfOnly(PRF))
+      .rejects.toThrow('session storage unavailable');
+    expect(passkeyInitialized.isLocked()).toBe(true);
+    expect(await passkeyInitialized.isInitialized()).toBe(false);
+
+    const kv = makeKV();
+    const seed = createVault({ kv, argon2: fakeArgon2, autoLockMs: 0 });
+    await seed.initialize(PASS);
+    await seed.lock();
+    const unlocked = createVault({
+      kv, sessionCache: failingSession(), argon2: fakeArgon2, autoLockMs: 0,
+    });
+    await expect(unlocked.unlock(PASS)).rejects.toThrow('session storage unavailable');
+    expect(unlocked.isLocked()).toBe(true);
+  });
+
+  test('a failed mirror delete leaves a durable fence that every successor refuses', async () => {
+    const kv = makeKV();
+    const sessionCache = makeSession();
+    const originalDelete = sessionCache.sessionDelete;
+    const first = createVault({ kv, sessionCache, argon2: fakeArgon2, autoLockMs: 0 });
+    await first.initialize(PASS);
+    sessionCache.sessionDelete = async () => { throw new Error('session delete unavailable'); };
+
+    await expect(first.lock('manual')).resolves.toBeUndefined();
+    expect(first.isLocked()).toBe(true);
+    expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(true);
+    expect(kv.store.get('vault.resume-fence.v1')).toMatchObject({ reason: 'manual' });
+
+    const successor = createVault({ kv, sessionCache, argon2: fakeArgon2, autoLockMs: 0 });
+    expect(await successor.attemptResume()).toBe(false);
+    expect(successor.isLocked()).toBe(true);
+    expect(successor.lockReason()).toBe('manual');
+    expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(true);
+
+    sessionCache.sessionDelete = originalDelete;
+    expect(await successor.attemptResume()).toBe(false);
+    expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(false);
+    expect(kv.store.has('vault.resume-fence.v1')).toBe(false);
+  });
+
+  test('a failed unlock cannot leave an older mirror resumable by a successor', async () => {
+    const kv = makeKV();
+    const sessionCache = makeSession();
+    const seed = createVault({ kv, sessionCache, argon2: fakeArgon2, autoLockMs: 0 });
+    await seed.initialize(PASS);
+    expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(true);
+
+    const originalDelete = sessionCache.sessionDelete;
+    sessionCache.sessionSet = async () => { throw new Error('session write unavailable'); };
+    sessionCache.sessionDelete = async () => { throw new Error('session delete unavailable'); };
+    const failed = createVault({ kv, sessionCache, argon2: fakeArgon2, autoLockMs: 0 });
+    await expect(failed.unlock(PASS)).rejects.toThrow('session write unavailable');
+    expect(failed.isLocked()).toBe(true);
+    expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(true);
+    expect(kv.store.get('vault.resume-fence.v1')).toMatchObject({ reason: 'manual' });
+
+    const successor = createVault({ kv, sessionCache, argon2: fakeArgon2, autoLockMs: 0 });
+    expect(await successor.attemptResume()).toBe(false);
+    expect(successor.isLocked()).toBe(true);
+    sessionCache.sessionDelete = originalDelete;
+    expect(await successor.attemptResume()).toBe(false);
+    expect(sessionCache.store.has(SESSION_DK_KEY)).toBe(false);
+  });
+
+  test('lock rejects only when neither mirror deletion nor durable fencing works', async () => {
+    const kv = makeKV();
+    const originalSet = kv.set;
+    const sessionCache = makeSession();
+    const vault = createVault({ kv, sessionCache, argon2: fakeArgon2, autoLockMs: 0 });
+    await vault.initialize(PASS);
+    kv.set = async (key: string, value: any) => {
+      if (key === 'vault.resume-fence.v1') throw new Error('fence unavailable');
+      return originalSet(key, value);
+    };
+    sessionCache.sessionDelete = async () => { throw new Error('delete unavailable'); };
+
+    await expect(vault.lock()).rejects.toThrow('delete unavailable');
+    expect(vault.isLocked()).toBe(true);
+    expect(await vault.attemptResume()).toBe(false);
+    expect(vault.isLocked()).toBe(true);
   });
 });
 

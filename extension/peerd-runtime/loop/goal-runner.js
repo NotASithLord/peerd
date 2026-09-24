@@ -1,24 +1,8 @@
 // @ts-check
-// peerd-runtime/loop/goal-runner — "Goal mode": keep running normal agent
-// turns in the MAIN session until the agent declares the goal met (the
-// complete_goal tool), or a safety cap / the user's Stop ends it.
-//
-// This is the loop the mode-row Goal toggle drives — just the ordinary agent
-// turn, re-entered:
-//   - turn 1 is the user's goal text (a REAL, visible message);
-//   - every later turn is a hidden `synthetic` continuation nudge, so the
-//     chat reads like a normal session that simply doesn't stop to wait for
-//     you — reasoning + tool calls stream inline exactly as always.
-// The agent ends the run by calling complete_goal (revealed only while a run
-// is active — see tools/exposure.js). A hard iteration cap and the Stop
-// button are the backstops behind "until it's done".
-//
-// Run state is keyed by session id and MIRRORED to storage (the injected kv),
-// so a run survives an SW restart and keeps going while the user is in another
-// chat: resume() (called on vault unlock) re-drives any persisted active run.
-// Each chat owns at most one run. Functional-core / imperative-shell: `runTurn`
-// (runAgentTurn), `onEvent`, and `kv` are injected, so the control logic is
-// otherwise pure and unit-testable with fakes (kv optional → pure in-memory).
+// Goal mode continues a chat until completion, Stop, or the turn limit.
+// The first turn shows the user's goal. Later turns use hidden continuations.
+// why: Stored state permits recovery after worker loss. Stop must remove it.
+// Each chat owns one run. IO enters through runTurn, onEvent, and kv.
 
 // Hard backstop on autonomous turns — generous for real multi-step work,
 // still a wall against a run that never calls complete_goal. The Stop button
@@ -87,37 +71,58 @@ export const goalContinuationPrompt = (goal, todoBlock = '') => [
  * @param {(sessionId: string) => Promise<boolean>} [deps.hasUnresolvedSideEffects]
  *   Stops autonomous continuations when an earlier Class D/E dispatch may
  *   have landed. A new user turn can verify or deliberately start fresh work.
+ * @param {(operation: () => Promise<void>) => Promise<void>} [deps.withRun]
  * @param {number} [deps.maxIterations]
  * @param {() => number} [deps.now]
  */
 export const makeGoalRunner = ({
   runTurn, onEvent = () => {}, onRunEnd = () => {}, kv, getTodoBlock,
-  hasUnresolvedSideEffects, maxIterations = GOAL_MAX_ITERATIONS, now = Date.now,
+  hasUnresolvedSideEffects, withRun = (operation) => operation(),
+  maxIterations = GOAL_MAX_ITERATIONS, now = Date.now,
 }) => {
   /** @type {Map<string, GoalRun>} */
   const runs = new Map();
   /** @type {Set<string>} */
   const stopping = new Set();
-  /** @type {Promise<void>} */
-  let persistenceTail = Promise.resolve();
-  // why: Queue mirror changes so Stop wins over older writes.
-  /** @param {() => Promise<void>} operation */
-  const queuePersistence = (operation) => {
-    const pending = persistenceTail.then(operation);
-    persistenceTail = pending.catch(() => {});
-    return pending;
+  // why: only outstanding recovery reads need cancellation memory; completed
+  // chats must not accumulate a permanent generation registry.
+  /** @type {Set<Set<string>>} */
+  const recovering = new Set();
+  /** @param {string} sid */
+  const invalidateRecovery = (sid) => {
+    for (const cancelled of recovering) cancelled.add(sid);
+  };
+  let persistenceQueued = 0;
+  let persistenceLane = Promise.resolve();
+
+  // why: a terminal clear must settle after every older live snapshot.
+  /** @param {()=>Promise<void>} operation */
+  const enqueuePersistence = (operation) => {
+    /** @type {Promise<void>} */
+    let running;
+    if (persistenceQueued === 0) {
+      persistenceQueued = 1;
+      try { running = Promise.resolve(operation()); }
+      catch (error) { running = Promise.reject(error); }
+    } else {
+      persistenceQueued += 1;
+      running = persistenceLane.then(operation);
+    }
+    const settled = running.finally(() => { persistenceQueued -= 1; });
+    persistenceLane = settled.catch(() => {});
+    return running;
   };
 
-  // Mirror active runs. A mirror failure must not stop a live run.
+  // why: Live snapshots permit recovery. A failed snapshot does not stop work.
   const persist = () => {
-    if (!kv) return;
+    if (!kv) return Promise.resolve();
     /** @type {Record<string, { goal: string, iteration: number, startedAt: number }>} */
     const out = {};
     for (const [sid, r] of runs) {
       if (r.completed || r.halted) continue;
       out[sid] = { goal: r.goal, iteration: r.iteration, startedAt: r.startedAt };
     }
-    queuePersistence(() => kv.set(GOAL_RUNS_KEY, out)).catch(() => {});
+    return enqueuePersistence(() => kv.set(GOAL_RUNS_KEY, out)).catch(() => {});
   };
 
   /** @param {string} sid @returns {GoalRun | null} */
@@ -133,7 +138,11 @@ export const makeGoalRunner = ({
   };
 
   /**
-   * Check the live map and durable mirror for a run.
+   * Is a run for this session recorded in the DURABLE mirror: live OR
+   * merely not-yet-resumed after an SW restart OR vault-lock-paused (evicted
+   * from the map but kept in the mirror for resume)? Prewalk's reconcile
+   * consults this so a mid-restart/paused run is never mistaken for a dead one
+   * and wrongly restored to the planner model. A no-op (false) without kv.
    * @param {string} sid @returns {Promise<boolean>}
    */
   const isPersisted = async (sid) => {
@@ -183,23 +192,27 @@ export const makeGoalRunner = ({
   /** Stop / steer-takeover: end the run without declaring success. @param {string} sid */
   const halt = (sid) => { const r = runs.get(sid); if (r) { r.halted = true; persist(); } };
 
-  // A paused run is not in the map, so remove its durable record by id. Report
-  // storage errors. Success must mean that the run cannot resume.
-  /** @param {string} sid */
-  const forget = async (sid) => {
+  // why: Stop must remove paused records too and report storage failure.
+  /** @param {string} sid @param {GoalRun} [expectedRun] */
+  const forget = async (sid, expectedRun) => {
     if (!kv) return;
-    await queuePersistence(async () => {
+    await enqueuePersistence(async () => {
+      if (expectedRun && runs.get(sid) !== expectedRun) return;
       const stored = await kv.get(GOAL_RUNS_KEY);
-      if (!stored || typeof stored !== 'object' || !Object.hasOwn(stored, sid)) return;
-      const next = { ...stored };
-      delete next[sid];
-      await kv.set(GOAL_RUNS_KEY, next);
+      if (expectedRun && runs.get(sid) !== expectedRun) return;
+      if (stored && typeof stored === 'object' && Object.hasOwn(stored, sid)) {
+        const next = { ...stored };
+        delete next[sid];
+        await kv.set(GOAL_RUNS_KEY, next);
+      }
     });
   };
 
   /** Stop a live or paused run. @param {string} sid */
   const stop = async (sid) => {
+    // why: A failed removal must block recovery until Stop succeeds.
     stopping.add(sid);
+    invalidateRecovery(sid);
     const r = runs.get(sid);
     if (r) r.halted = true;  // its drive() loop sees !alive() and exits to the terminal finally
     await forget(sid);
@@ -207,8 +220,8 @@ export const makeGoalRunner = ({
   };
 
   /** @param {string} sid @param {'running'|'done'|'halted'|'capped'} phase */
-  const emit = (sid, phase) => {
-    const r = runs.get(sid);
+  const emit = (sid, phase, source = runs.get(sid)) => {
+    const r = source;
     onEvent({
       type: 'goal/state', sessionId: sid, phase,
       active: phase === 'running',
@@ -217,10 +230,9 @@ export const makeGoalRunner = ({
     });
   };
 
-  /** Run turns until complete / halted / capped, then clean up. @param {string} sid */
-  const drive = async (sid) => {
-    const run = runs.get(sid);
-    if (!run) return;
+  /** Run turns until complete / halted / capped, then clean up.
+   * @param {string} sid @param {GoalRun} run */
+  const driveRun = async (sid, run) => {
     // why identity check (not just isActive): a fresh start() for the SAME
     // session replaces the map entry and halts THIS one — the old drive must
     // see it's been superseded and exit WITHOUT deleting the new run.
@@ -234,6 +246,7 @@ export const makeGoalRunner = ({
         if (!first && typeof hasUnresolvedSideEffects === 'function') {
           let unresolved = true;
           try { unresolved = await hasUnresolvedSideEffects(sid); } catch { /* fail closed */ }
+          if (!alive()) break;
           if (unresolved) {
             run.halted = true;
             run.lastError = 'an earlier action needs verification before autonomous work can continue';
@@ -252,6 +265,7 @@ export const makeGoalRunner = ({
         if (!first && typeof getTodoBlock === 'function') {
           try { todoBlock = await getTodoBlock(sid); } catch { todoBlock = ''; }
         }
+        if (!alive()) break;
         try {
           outcome = await runTurn({
             sessionId: sid,
@@ -291,21 +305,51 @@ export const makeGoalRunner = ({
         } else {
           const phase = run.completed ? 'done' : run.halted ? 'halted'
             : run.iteration >= maxIterations ? 'capped' : 'done';
-          emit(sid, phase);
+          // why: Failed cleanup must finish the UI state and block recovery.
+          try { await forget(sid, run); }
+          catch { if (runs.get(sid) === run) stopping.add(sid); }
+          // why: storage cleanup may overlap a replacement in the same chat.
+          if (runs.get(sid) !== run) return;
+          runs.delete(sid);
+          emit(sid, phase, run);
           try { onRunEnd(sid, { phase, summary: run.summary, reason: run.lastError ?? null }); }
           catch (e) { console.error('[goal] onRunEnd threw', e); }
-          runs.delete(sid);
-          persist();  // terminal — clear it from the durable mirror
         }
       }
     }
   };
+  /** @param {string} sid */
+  const drive = async (sid) => {
+    // why: acquiring the controller can outlive this run's ownership.
+    const run = runs.get(sid);
+    if (!run) return;
+    let entered = false;
+    try {
+      await withRun(() => {
+        entered = true;
+        return driveRun(sid, run);
+      });
+    } catch (e) {
+      if (runs.get(sid) !== run) return;
+      if (entered) { halt(sid); throw e; }
+      // why re-enter only the local lifecycle: acquisition failed before the
+      // drive could reach its terminal finally, so close the run without work.
+      run.halted = true;
+      run.lastError = /** @type {any} */ (e)?.message ?? String(e);
+      await driveRun(sid, run);
+    }
+  };
 
-  /** Start or replace a goal run. @param {{ sessionId: string, goal: string }} req */
+  /**
+   * Start (or supersede) a goal run for a session. Fire-and-forget: returns
+   * immediately; the turns stream over the port like any chat.
+   * @param {{ sessionId: string, goal: string }} req
+   */
   const start = async ({ sessionId, goal }) => {
     if (!sessionId || typeof goal !== 'string' || !goal.trim()) {
       return { ok: false, error: 'goal-required' };
     }
+    invalidateRecovery(sessionId);
     stopping.delete(sessionId);
     if (runs.has(sessionId)) halt(sessionId);  // supersede any prior run
     runs.set(sessionId, {
@@ -313,39 +357,51 @@ export const makeGoalRunner = ({
       summary: null, lastError: null, startedAt: now(),
     });
     persist();
+    emit(sessionId, 'running');
     drive(sessionId).catch((e) => {
       console.error('[goal] drive threw', e);
-      halt(sessionId);
     });
     return { ok: true };
   };
 
-  /** Restore durable runs after restart. Skip live and stopping runs.
-   * @returns {Promise<{ resumed: number }>} */
+  /** Resume saved runs after unlock. Skip live runs and cancelled recovery.
+   * @returns {Promise<{ resumed: number }>}
+   */
   const resume = async () => {
     if (!kv) return { resumed: 0 };
+    const cancelled = new Set();
+    recovering.add(cancelled);
+    let stored;
+    try {
+      // why: recovery begun during a Stop must wait for its durable removal.
+      await persistenceLane;
+      stored = await kv.get(GOAL_RUNS_KEY);
+    } catch { return { resumed: 0 }; }
+    finally { recovering.delete(cancelled); }
+    if (!stored || typeof stored !== 'object') return { resumed: 0 };
     let resumed = 0;
-    await queuePersistence(async () => {
-      let stored;
-      try { stored = await kv.get(GOAL_RUNS_KEY); } catch { return; }
-      if (!stored || typeof stored !== 'object') return;
-      for (const [sid, raw] of Object.entries(stored)) {
-        if (!sid || runs.has(sid) || stopping.has(sid)) continue;
-        const rec = /** @type {{ goal?: unknown, iteration?: unknown, startedAt?: unknown }} */ (raw);
-        if (!rec || typeof rec.goal !== 'string' || !rec.goal) continue;
-        // A crash during the final allowed turn must re-run that turn once.
-        const storedIteration = Number(rec.iteration) || 0;
-        const iteration = storedIteration >= maxIterations ? Math.max(0, maxIterations - 1) : storedIteration;
-        runs.set(sid, {
-          goal: rec.goal,
-          iteration,
-          completed: false, halted: false, summary: null, lastError: null,
-          startedAt: Number(rec.startedAt) || now(),
-        });
-        drive(sid).catch((e) => { console.error('[goal] resume drive threw', e); halt(sid); });
-        resumed += 1;
-      }
-    });
+    for (const [sid, raw] of Object.entries(stored)) {
+      if (!sid || runs.has(sid) || cancelled.has(sid) || stopping.has(sid)) continue;
+      const rec = /** @type {{ goal?: unknown, iteration?: unknown, startedAt?: unknown }} */ (raw);
+      if (!rec || typeof rec.goal !== 'string' || !rec.goal) continue;
+      // why clamp at the cap: persist() records the iteration ABOUT to run, so a
+      // crash resumes there. But if the SW died DURING the final allowed turn, the
+      // stored iteration === maxIterations and drive()'s `iteration < maxIterations`
+      // would be false immediately, declaring 'capped' for a turn that never
+      // actually ran. Rewind one so that interrupted final turn re-runs once.
+      const storedIteration = Number(rec.iteration) || 0;
+      const iteration = storedIteration >= maxIterations ? Math.max(0, maxIterations - 1) : storedIteration;
+      invalidateRecovery(sid);
+      runs.set(sid, {
+        goal: rec.goal,
+        iteration,
+        completed: false, halted: false, summary: null, lastError: null,
+        startedAt: Number(rec.startedAt) || now(),
+      });
+      emit(sid, 'running');
+      drive(sid).catch((e) => { console.error('[goal] resume drive threw', e); });
+      resumed += 1;
+    }
     return { resumed };
   };
 

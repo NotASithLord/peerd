@@ -40,6 +40,8 @@ const makeSend = (overrides = {}) => {
           return { ok: true, integrations: [{ origin: 'https://api.stripe.com', header: 'Authorization' }] };
         case 'git-cred/list':       // the folded-in Git credentials subsection loads on mount
           return { ok: true, hosts: [] };
+        case 'site-client/list':
+          return { ok: true, clients: [] };
         default:
           return { ok: true };
       }
@@ -51,12 +53,20 @@ const makeSend = (overrides = {}) => {
 
 const flush = async () => { await new Promise((r) => setTimeout(r, 0)); m.redraw.sync(); };
 
+/** @param {() => boolean} predicate */
+const until = async (predicate) => {
+  for (let i = 0; i < 20; i += 1) {
+    if (predicate()) return;
+    await flush();
+  }
+  throw new Error('timed out waiting for API integrations to settle');
+};
+
 const mountView = async (/** @type {any} */ send) => {
   const root = document.createElement('div');
   document.body.appendChild(root);
   m.mount(root, { view: () => m(OptionsApp, { state: UNLOCKED_STATE, send, section: 'api-integrations' }) });
-  await flush();
-  await flush();
+  await until(() => !root.textContent?.includes('Loading…'));
   return { root, unmount: () => { m.mount(root, null); root.remove(); } };
 };
 
@@ -95,7 +105,7 @@ describe('options.api-integrations', () => {
     } finally { unmount(); }
   });
 
-  it('treats successful list replies without arrays as empty, never as renderer input', async () => {
+  it('treats malformed site-client lists as a visible retryable load failure', async () => {
     const { root, unmount } = await mountView(makeSend({
       'origin-cred/list': () => ({ ok: true }),
       'git-cred/list': () => ({ ok: true }),
@@ -104,7 +114,9 @@ describe('options.api-integrations', () => {
     try {
       expect(root.textContent).toContain('No API integrations yet');
       expect(root.textContent).toContain('No git tokens yet');
-      expect(root.textContent).toContain('No site clients yet');
+      expect(root.textContent).toContain('Site clients could not be loaded.');
+      expect(root.textContent).toContain('Retry');
+      expect(root.textContent.includes('No site clients yet')).toBe(false);
     } finally { unmount(); }
   });
 
@@ -167,6 +179,54 @@ describe('options.api-integrations', () => {
       expect(set.origin).toBe('api.github.com');
       expect(set.key).toBe('ghp_abcdefgh1234');
       expect(set.header).toBe(undefined);   // blank header → Bearer (no raw scheme)
+    } finally { unmount(); }
+  });
+
+  it('keeps pre-dispatch validation known-safe and sends no mutation', async () => {
+    const send = makeSend();
+    const { root, unmount } = await mountView(send);
+    try {
+      const apiForm = root.querySelectorAll('.provider-card-form')[0];
+      const inputs = apiForm.querySelectorAll('input');
+      const origin = /** @type {HTMLInputElement} */ (inputs[0]);
+      const key = /** @type {HTMLInputElement} */ (inputs[1]);
+      origin.value = 'api.example.com'; origin.dispatchEvent(new Event('input'));
+      key.value = 'short'; key.dispatchEvent(new Event('input'));
+      apiForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await flush();
+      expect(send.calls.some((call) => call.type === 'origin-cred/set')).toBe(false);
+      expect(root.textContent).toContain('Paste a complete key.');
+      expect(root.textContent?.includes('could not confirm')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('reconciles a thrown post-dispatch save without raw text or a stuck busy latch', async () => {
+    let lists = 0;
+    const send = makeSend({
+      'origin-cred/list': () => {
+        lists += 1;
+        if (lists === 1) return { ok: true, integrations: [] };
+        throw new Error('raw-reconcile-port-epoch');
+      },
+      'origin-cred/set': () => { throw new Error('raw-private-port-epoch'); },
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      const apiForm = root.querySelectorAll('.provider-card-form')[0];
+      const inputs = apiForm.querySelectorAll('input');
+      const origin = /** @type {HTMLInputElement} */ (inputs[0]);
+      const key = /** @type {HTMLInputElement} */ (inputs[1]);
+      origin.value = 'api.example.com'; origin.dispatchEvent(new Event('input'));
+      key.value = 'token_abcdefghijk'; key.dispatchEvent(new Event('input'));
+      apiForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await flush();
+      await flush();
+      expect(lists).toBe(2); // mount + post-loss reconciliation read
+      expect(root.textContent).toContain('could not confirm whether saving the API integration finished');
+      expect(root.textContent?.includes('raw-private-port-epoch')).toBe(false);
+      const save = /** @type {HTMLButtonElement} */ (apiForm.querySelector('button[type=submit]'));
+      expect(save.disabled).toBe(true);
+      expect(save.textContent).toBe('Save');
     } finally { unmount(); }
   });
 });

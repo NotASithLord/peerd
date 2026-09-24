@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // Internal mapped primitive for app.act(). Argument validation is duplicated at
 // this gate because a worker/client bug must not widen the App runtime surface.
 
@@ -8,17 +10,7 @@ const SAFE_ACTION = /^[a-z][a-z0-9-]{0,63}$/;
 const MAX_PARAMS_CHARS = 20_000;
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const appActTool = {
-  name: 'app_act',
-  primitive: 'app',
-  description: 'Internal exact-instance App action primitive.',
-  schema: {
-    type: 'object',
-    properties: { action: { type: 'string' }, params: { type: 'object' } },
-    required: ['action'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const appActTool = composeTool("app_act", {
   execute: async (args, ctx) => {
     if (typeof args?.action !== 'string' || !SAFE_ACTION.test(args.action)) {
       return { ok: false, error: 'invalid_app_action', outcomeKnown: true, outcomeKind: 'pre-effect-failure' };
@@ -31,10 +23,11 @@ export const appActTool = {
     try { encoded = JSON.stringify(params); }
     catch { return { ok: false, error: 'app_action_params_not_serializable', outcomeKnown: true, outcomeKind: 'pre-effect-failure' }; }
     if (encoded.length > MAX_PARAMS_CHARS) return { ok: false, error: 'app_action_params_too_large', outcomeKnown: true, outcomeKind: 'pre-effect-failure' };
-    const call = /** @type {any} */ (ctx).appAgentCall;
-    if (typeof call !== 'function') return { ok: false, error: 'app_playtest_not_available' };
+    const authority = /** @type {{ actRuntime?: Function } | undefined} */ (
+      /** @type {any} */ (ctx).appAuthority);
+    if (!authority?.actRuntime) return { ok: false, error: 'app_playtest_not_available' };
     try {
-      const result = await call('act', { action: args.action, params }, /** @type {any} */ (ctx).abortSignal);
+      const result = await authority.actRuntime(args.action, params);
       if (!result?.ok) {
         // appAgentCall crossed into the App document. A naked handler error is
         // not proof that the action failed before mutation: Apps routinely
@@ -68,4 +61,4 @@ export const appActTool = {
       };
     }
   },
-};
+});

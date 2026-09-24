@@ -2,8 +2,9 @@
 
 import { describe, expect, it } from '../../framework.js';
 import { createAppTabTracker } from '/background/app-tab-tracker.js';
+import browser from '/shared/browser-api.js';
 import { AppRoomAuthorityChangedError, createAppRoomAuthority } from '/offscreen/app-room-authority.js';
-import { makeEngineLiveness } from '/peerd-runtime/background.js';
+import { makeEngineLiveness } from '/peerd-runtime/index.js';
 
 const deferred = () => {
   /** @type {(value:any)=>void} */ let resolve = () => {};
@@ -27,7 +28,7 @@ describe('App tab tracker quiescence', () => {
       set: async (/** @type {any} */ values) => { Object.assign(stored, values); },
     });
     const tracker = createAppTabTracker({
-      tabs: /** @type {any} */ ({ query: async () => [], remove: async () => {} }),
+      tabs: /** @type {any} */ ({ query: async () => [{ id: 41, url: browser.runtime.getURL('engine-tabs/app-tab/index.html#app-1') }], remove: async () => {} }),
       sendTabMessage: async (tabId, message) => {
         messages.push({ tabId, message });
         if (message.action !== 'invalidate-dweb') return { ok: true };
@@ -58,7 +59,7 @@ describe('App tab tracker quiescence', () => {
 
   it('fails closed when the App editor refuses to flush', async () => {
     const tracker = createAppTabTracker({
-      tabs: /** @type {any} */ ({ query: async () => [], remove: async () => {} }),
+      tabs: /** @type {any} */ ({ query: async () => [{ id: 41, url: browser.runtime.getURL('engine-tabs/app-tab/index.html#app-1') }], remove: async () => {} }),
       sendTabMessage: async () => ({ ok: false, error: 'save failed' }),
       storage: /** @type {any} */ ({ get: async () => ({}), set: async () => {} }),
     });
@@ -277,7 +278,7 @@ describe('App tab tracker quiescence', () => {
     const hydration = deferred();
     /** @type {any[]} */ const messages = [];
     const tracker = createAppTabTracker({
-      tabs: /** @type {any} */ ({ query: async () => [], remove: async () => {} }),
+      tabs: /** @type {any} */ ({ query: async () => [{ id: 41, url: browser.runtime.getURL('engine-tabs/app-tab/index.html#app-1') }], remove: async () => {} }),
       sendTabMessage: async (_tabId, message) => {
         messages.push(message);
         return { ok: true };
@@ -304,7 +305,7 @@ describe('App tab tracker quiescence', () => {
     const hydration = deferred();
     /** @type {any[]} */ const messages = [];
     const tracker = createAppTabTracker({
-      tabs: /** @type {any} */ ({ query: async () => [], remove: async () => {} }),
+      tabs: /** @type {any} */ ({ query: async () => [{ id: 41, url: browser.runtime.getURL('engine-tabs/app-tab/index.html#app-1') }], remove: async () => {} }),
       sendTabMessage: async (_tabId, message) => {
         messages.push(message);
         return { ok: true };
@@ -340,6 +341,72 @@ describe('App tab tracker quiescence', () => {
     expect(tracker.getOwnedTabId('app-1', 'root-b')).toBe(null);
     await expect(() => tracker.ensureTab('app-1', { ownerSessionId: 'chat-b' }))
       .toThrow((error) => error?.message === 'app-owned-by-another-chat');
+  });
+
+  it('drops a stale claim only after a complete tab snapshot proves it left', async () => {
+    let queryFails = true;
+    const tabs = /** @type {any} */ ({
+      get: async () => null,
+      sendMessage: async () => ({ ok: true }),
+      query: async () => {
+        if (queryFails) throw new Error('tabs unavailable');
+        return [];
+      },
+      create: async () => ({ id: 42 }), reload: async () => {}, remove: async () => {},
+    });
+    const tracker = createAppTabTracker({
+      tabs, storage: /** @type {any} */ ({ get: async () => ({}), set: async () => {} }),
+    });
+    tracker.onTabPending('app-1', 41, 'chat-a', 'root-a');
+    tracker.onTabReady('app-1', 41, 'chat-a', 'root-a');
+    expect(await tracker.reconcileTabClaim('app-1', 42)).toBe(41);
+    expect(tracker.getTabId('app-1')).toBe(41);
+    queryFails = false;
+    expect(await tracker.reconcileTabClaim('app-1', 42)).toBe(null);
+    expect(tracker.getTabId('app-1')).toBe(null);
+  });
+
+  it('does not close a tab that navigated away from its App claim', async () => {
+    /** @type {number[]} */ const removed = [];
+    const tabs = /** @type {any} */ ({
+      sendMessage: async () => ({ ok: true }),
+      query: async () => [{ id: 41, url: 'moz-extension://test/home/home.html' }],
+      remove: async (/** @type {number} */ tabId) => { removed.push(tabId); },
+    });
+    const tracker = createAppTabTracker({
+      tabs, storage: /** @type {any} */ ({ get: async () => ({}), set: async () => {} }),
+    });
+    tracker.onTabPending('app-1', 41, 'chat-a', 'root-a');
+    tracker.onTabReady('app-1', 41, 'chat-a', 'root-a');
+    expect(await tracker.closeTab('app-1')).toBe(false);
+    expect(removed).toEqual([]);
+    expect(tracker.getTabId('app-1')).toBe(null);
+  });
+
+  it('closes only a snapshot-verified App tab and fails closed without a snapshot', async () => {
+    /** @type {number[]} */ const removed = [];
+    let snapshotFails = false;
+    const tabs = /** @type {any} */ ({
+      sendMessage: async () => ({ ok: true }),
+      query: async () => {
+        if (snapshotFails) throw new Error('tabs unavailable');
+        return [{ id: 41, url: browser.runtime.getURL('/engine-tabs/app-tab/index.html#app-1') }];
+      },
+      remove: async (/** @type {number} */ tabId) => { removed.push(tabId); },
+    });
+    const tracker = createAppTabTracker({
+      tabs, storage: /** @type {any} */ ({ get: async () => ({}), set: async () => {} }),
+    });
+    tracker.onTabPending('app-1', 41, 'chat-a', 'root-a');
+    tracker.onTabReady('app-1', 41, 'chat-a', 'root-a');
+    snapshotFails = true;
+    await expect(() => tracker.closeTab('app-1'))
+      .toThrow((error) => error?.message === 'app-tab-state-unavailable');
+    expect(removed).toEqual([]);
+    expect(tracker.getTabId('app-1')).toBe(41);
+    snapshotFails = false;
+    expect(await tracker.closeTab('app-1')).toBe(true);
+    expect(removed).toEqual([41]);
   });
 });
 

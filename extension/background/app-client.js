@@ -11,6 +11,8 @@ import {
   parseAppManifest,
 } from '/peerd-engine/background.js';
 import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
+import { APP_DATA_PATH_RE } from '/shared/app-dweb-identity.js';
+export { appReleaseDescriptorMatches } from '/shared/app-dweb-identity.js';
 
 export const APP_TAB_GROUP_TITLE = 'peerd';
 
@@ -18,24 +20,6 @@ export const APP_TAB_GROUP_TITLE = 'peerd';
 export const MAX_APP_TOTAL_BYTES = 50_000_000;
 export const MAX_APP_FILES = 256;
 const MAX_APP_PATH_CHARS = 512;
-const APP_DATA_PATH_RE = /^data\/[a-z0-9][a-z0-9._-]{0,63}\.json$/i;
-
-/** @param {unknown} value */
-const releaseKindRows = (value) => value && typeof value === 'object' && !Array.isArray(value)
-  ? Object.entries(value).filter(([path]) => !APP_DATA_PATH_RE.test(path))
-    .map(([path, kind]) => `${path}\0${kind}`).sort()
-  : null;
-
-/** @param {any} record */
-export const appReleaseDescriptorMatches = (record) => {
-  const expected = releaseKindRows(record?.dweb?.release_file_kinds);
-  const current = releaseKindRows(record?.fileKinds ?? {});
-  return typeof record?.dweb?.release_entry_file === 'string'
-    && record.entryFile === record.dweb.release_entry_file
-    && expected !== null && current !== null
-    && expected.length === current.length
-    && expected.every((row, index) => row === current[index]);
-};
 
 export class AppFileContentError extends Error {
   /** @param {string} message */
@@ -61,6 +45,79 @@ export class AppBinaryFileError extends Error {
     this.code = 'binary_asset_not_text';
   }
 }
+
+export class AppDefaultMissingError extends Error {
+  constructor() {
+    // why: resolving a session default happens before OPFS is touched. The
+    // type lets trusted callers report that proven refusal without matching
+    // or forwarding storage-layer prose.
+    super('no current app for this session; create one first');
+    this.name = 'AppDefaultMissingError';
+    this.code = 'app_default_missing';
+  }
+}
+
+/**
+ * @param {unknown} original
+ * @param {PromiseSettledResult<unknown>[]} cleanup
+ */
+const throwAppRollbackResult = (original, cleanup) => {
+  const cleanupFailures = cleanup
+    .filter((result) => result.status === 'rejected')
+    .map((result) => /** @type {PromiseRejectedResult} */ (result).reason);
+  if (!cleanupFailures.length) throw original;
+  // why: once catalog/OPFS/repository creation began, failed rollback proves
+  // durable residue may remain. Report performed custody and forbid retry.
+  const failure = new AggregateError(
+    [original, ...cleanupFailures],
+    `App creation failed and rollback was incomplete: ${String(/** @type {any} */ (original)?.message ?? original)}`,
+  );
+  Object.assign(failure, {
+    performed: true,
+    outcomeKnown: false,
+    outcomeKind: 'host-lost',
+    retryable: false,
+  });
+  throw failure;
+};
+
+/**
+ * A completed rollback proves the attempted mutation left no durable change.
+ * Keep the original failure only as an internal cause; the host-facing message
+ * and custody fields are fixed and cannot inherit storage/backend text.
+ * @param {unknown} cause
+ * @param {string} message
+ */
+const appRollbackCompleted = (cause, message) => Object.assign(
+  new Error(message, { cause }),
+  {
+    performed: false,
+    outcomeKnown: true,
+    outcomeKind: 'pre-effect-failure',
+    retryable: true,
+  },
+);
+
+/** @param {unknown[]} failures @param {string} message */
+const appRollbackIncomplete = (failures, message) => Object.assign(
+  new AggregateError(failures, message),
+  {
+    performed: true,
+    outcomeKnown: false,
+    outcomeKind: 'host-lost',
+    retryable: false,
+  },
+);
+
+/** @param {AbortSignal|undefined} signal */
+const requireLiveAppMutation = (signal) => {
+  if (!signal?.aborted) return;
+  // why: a caller can wait behind the per-App transaction lane after Stop.
+  // Recheck beside the first durable edge, not merely before joining the lane.
+  throw Object.assign(new Error('App operation stopped before mutation'), {
+    outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+  });
+};
 
 /** @param {string} path */
 const validateAppPath = (path) => {
@@ -177,45 +234,46 @@ const opfsForApp = (appId, beforeMutation = () => {}) =>
  * @param {ReturnType<typeof import('/peerd-engine/background.js').createAppRegistry>} deps.registry
  * @param {ReturnType<typeof import('./app-tab-tracker.js').createAppTabTracker>} deps.tracker
  * @param {() => void | Promise<void>} [deps.beforeOpfsMutation]
+ * @param {typeof opfsForApp} [deps.opfsForApp]
  * @param {(appId:string)=>void|Promise<void>} [deps.onManifestMutation]
  * @param {(ownerSessionId:string,record:any)=>Promise<string>} [deps.resolveOwnerRoot]
- * @param {ReturnType<typeof import('/peerd-engine/background.js').createRepositoryService>} [deps.repositories]
+ * @param {ReturnType<typeof import('/peerd-engine/repository.js').createRepositoryService>} deps.repositories
  */
 export const createAppClient = ({
   registry, tracker, beforeOpfsMutation = () => {}, onManifestMutation = () => {},
-  resolveOwnerRoot = async (ownerSessionId) => ownerSessionId, repositories = undefined,
+  resolveOwnerRoot = async (ownerSessionId) => ownerSessionId, repositories,
+  opfsForApp: openAppOpfs = opfsForApp,
 }) => {
-  // why: The injected guard applies policy at each OPFS mutation boundary.
+  if (typeof repositories?.coordinate !== 'function') {
+    // why: every App byte mutation must share the repository transaction lane;
+    // silently falling back to a private queue permits storage/Git races.
+    throw new TypeError('repositories.coordinate is required');
+  }
+  // why injected: App files are a self-hosted durable surface. The lifecycle
+  // schema guard must run at the physical OPFS boundary, including callers of
+  // the exposed helper, without making the engine module import runtime policy.
   const guardedOpfsForApp = (/** @type {string} */ appId) =>
-    opfsForApp(appId, beforeOpfsMutation);
-  /** @type {Map<string, Promise<unknown>>} */
-  const mutationTails = new Map();
-
-  /** why: One App lane prevents concurrent callers from using a stale size check. @template T @param {string} appId @param {()=>Promise<T>} operation @returns {Promise<T>} */
-  const withLocalMutation = async (appId, operation) => {
-    const prior = mutationTails.get(appId) ?? Promise.resolve();
-    const current = prior.catch(() => {}).then(operation);
-    mutationTails.set(appId, current);
-    try { return await current; }
-    finally {
-      if (mutationTails.get(appId) === current) mutationTails.delete(appId);
-    }
-  };
-  /** why: Serialize App byte changes with repository changes. @template T @param {string} appId @param {()=>Promise<T>} operation @returns {Promise<T>} */
+    openAppOpfs(appId, beforeOpfsMutation);
+  /**
+   * Serialize every App byte mutation with repository restore/checkout/commit.
+   * @template T
+   * @param {string} appId
+   * @param {() => Promise<T>} operation
+   * @returns {Promise<T>}
+   */
   const withMutation = async (appId, operation, invalidateDweb = true) => {
-    const mutate = () => withLocalMutation(appId, () => repositories?.coordinate
-      ? repositories.coordinate({ kind: 'app', id: appId }, operation)
-      : operation());
+    const mutate = () => repositories.coordinate({ kind: 'app', id: appId }, operation);
     if (!invalidateDweb) return mutate();
+    // why: rotate consent before the repository lock, matching room admission's
+    // authority→repository order. A generic lock must never rotate reads.
     if (tracker.withDwebAuthority) return tracker.withDwebAuthority(appId, mutate, { invalidate: true });
     await tracker.invalidateDweb?.(appId);
     return mutate();
   };
 
-  /** Hold the App lane without re-entering a client mutation. @template T @param {string} appId @param {()=>Promise<T>} operation @returns {Promise<T>} */
-  const withWriteLock = (appId, operation) => repositories?.coordinate
-    ? repositories.coordinate({ kind: 'app', id: appId }, operation)
-    : withLocalMutation(appId, operation);
+  // The public write lock is the same repository lane used by every mutation.
+  const withWriteLock = (/** @type {string} */ appId, /** @type {()=>Promise<any>} */ operation) =>
+    repositories.coordinate({ kind: 'app', id: appId }, operation);
 
   /** @param {ReturnType<typeof opfsForApp>} opfs */
   const currentFileSizes = async (opfs) => {
@@ -270,9 +328,10 @@ export const createAppClient = ({
    * before the first byte changes; a failed later write restores earlier files.
    * @param {ReturnType<typeof opfsForApp>} opfs
    * @param {Array<{ path: string, stored: string | Uint8Array<ArrayBuffer>, size: number }>} replacements
+   * @param {AbortSignal} [signal]
    * @returns {Promise<() => Promise<void>>}
    */
-  const writeReplacements = async (opfs, replacements) => {
+  const writeReplacements = async (opfs, replacements, signal) => {
     const current = await currentFileSizes(opfs);
     assertReplacementFits(current, replacements);
     /** @type {Map<string, Uint8Array<ArrayBuffer> | null>} */
@@ -280,15 +339,18 @@ export const createAppClient = ({
     for (const { path } of replacements) {
       backups.set(path, current.has(path) ? await opfs.readBytes(path) : null);
     }
+    requireLiveAppMutation(signal);
     try {
       for (const { path, stored } of replacements) await opfs.write(path, stored);
     } catch (writeError) {
       try {
         await restoreBackups(opfs, backups);
       } catch (rollbackError) {
-        throw new AggregateError([writeError, rollbackError], 'App write and rollback both failed');
+        throw appRollbackIncomplete(
+          [writeError, rollbackError], 'App write and rollback both failed',
+        );
       }
-      throw writeError;
+      throw appRollbackCompleted(writeError, 'App write failed; rollback completed');
     }
     return () => restoreBackups(opfs, backups);
   };
@@ -323,9 +385,11 @@ export const createAppClient = ({
     }
     try { await restoreRecord(id, record); } catch (error) { failures.push(error); }
     if (failures.length) {
-      throw new AggregateError([cause, ...failures], 'App mutation and rollback both failed');
+      throw appRollbackIncomplete(
+        [cause, ...failures], 'App mutation and rollback both failed',
+      );
     }
-    throw cause;
+    throw appRollbackCompleted(cause, 'App mutation failed; rollback completed');
   };
 
   /** @param {{ sessionId?: string, appId?: string }} [opts] @returns {Promise<string>} */
@@ -337,7 +401,7 @@ export const createAppClient = ({
     }
     if (!sessionId) throw new Error('sessionId or appId required');
     const defaultId = await registry.getDefaultForSession(sessionId);
-    if (!defaultId) throw new Error('no current app for this session — create one first');
+    if (!defaultId) throw new AppDefaultMissingError();
     return defaultId;
   };
 
@@ -407,10 +471,12 @@ export const createAppClient = ({
       }
       if (sessionId) await registry.setDefaultForSession(sessionId, record.id);
     } catch (error) {
-      try { await guardedOpfsForApp(record.id).nuke(); } catch { /* best effort before catalog rollback */ }
-      try { await repositories?.destroyApp?.(record.id); } catch { /* best effort repository rollback */ }
-      await registry.delete(record.id);
-      throw error;
+      const cleanup = await Promise.allSettled([
+        guardedOpfsForApp(record.id).nuke(),
+        repositories?.destroyApp ? repositories.destroyApp(record.id) : Promise.resolve(),
+        registry.delete(record.id),
+      ]);
+      throwAppRollbackResult(error, cleanup);
     }
     return record;
   };
@@ -472,9 +538,11 @@ export const createAppClient = ({
       if (sessionId) await registry.setDefaultForSession(sessionId, record.id);
       return { record: updated, repository, contract };
     } catch (error) {
-      await repositories.destroy({ kind: 'app', id: record.id }, { worktree: true }).catch(() => {});
-      await registry.delete(record.id).catch(() => {});
-      throw error;
+      const cleanup = await Promise.allSettled([
+        repositories.destroy({ kind: 'app', id: record.id }, { worktree: true }),
+        registry.delete(record.id),
+      ]);
+      throwAppRollbackResult(error, cleanup);
     }
   };
 
@@ -483,9 +551,12 @@ export const createAppClient = ({
    * entry file; `path`+`content` updates an arbitrary file. The tab
    * reloads either way so the user sees the result.
    * @param {{ appId?: string, name?: string, html?: string, path?: string,
-   *   content?: unknown, tags?: string[], entryFile?: string, sessionId?: string }} [opts]
+   *   content?: unknown, tags?: string[], entryFile?: string, sessionId?: string,
+   *   signal?: AbortSignal }} [opts]
    */
-  const update = async ({ appId, name, html, path, content, tags, entryFile, sessionId } = {}) => {
+  const update = async ({
+    appId, name, html, path, content, tags, entryFile, sessionId, signal,
+  } = {}) => {
     const id = await resolveId({ sessionId, appId });
     const updated = await withMutation(id, async () => {
       const rec = await registry.get(id);
@@ -519,13 +590,15 @@ export const createAppClient = ({
 
       const nextKinds = { ...(rec.fileKinds ?? {}) };
       for (const replacement of replacements) nextKinds[replacement.path] = replacement.kind;
-      const rollbackBytes = replacements.length ? await writeReplacements(opfs, replacements) : null;
+      const rollbackBytes = replacements.length
+        ? await writeReplacements(opfs, replacements, signal) : null;
       /** @type {Partial<import('/peerd-engine/app-registry.js').AppRecord>} */
       const patch = { fileKinds: nextKinds };
       if (typeof name === 'string') patch.name = name.trim().slice(0, 80);
       if (Array.isArray(tags)) patch.tags = tags;
       if (typeof entryFile === 'string') patch.entryFile = entryFile;
       try {
+        requireLiveAppMutation(signal);
         const result = await registry.update(id, patch);
         if (!result) throw new Error(`app not found after update: ${id}`);
         return result;
@@ -541,31 +614,85 @@ export const createAppClient = ({
     return updated;
   };
 
-  /** Write a single file in the app's OPFS subdir.
-   * @param {{ appId?: string, path: string, content: unknown, sessionId?: string, reload?: boolean, invalidateDweb?: boolean }} args */
-  const writeFile = async ({ appId, path, content, sessionId, reload = true, invalidateDweb = true }) => {
-    const id = await resolveId({ sessionId, appId });
+  /** @param {string} id @param {string} path @param {unknown} content @param {AbortSignal} [signal] */
+  const writeFileUnlocked = async (id, path, content, signal) => {
     validateAppPath(path);
     const replacement = { path, ...normalizeFileContent(path, content) };
-    await withMutation(id, async () => {
-      const rec = await registry.get(id);
-      if (!rec) throw new Error(`app not found: ${id}`);
-      if (path === rec.entryFile && replacement.kind === 'binary') {
-        throw new AppFileContentError(`entryFile must be text: ${path}`);
-      }
-      const rollbackBytes = await writeReplacements(guardedOpfsForApp(id), [replacement]);
-      try {
-        const updated = await registry.update(id, {
-          fileKinds: { ...(rec.fileKinds ?? {}), [path]: replacement.kind },
-        });
-        if (!updated) throw new Error(`app not found after write: ${id}`);
-      } catch (error) {
-        return rollbackMutation(error, rollbackBytes, id, rec);
-      }
-    }, invalidateDweb);
-    if (path === 'peerd.json') await onManifestMutation(id);
-    if (reload) await tracker.reloadTab(id).catch(() => {});
+    const rec = await registry.get(id);
+    if (!rec) throw new Error(`app not found: ${id}`);
+    if (path === rec.entryFile && replacement.kind === 'binary') {
+      throw new AppFileContentError(`entryFile must be text: ${path}`);
+    }
+    const rollbackBytes = await writeReplacements(guardedOpfsForApp(id), [replacement], signal);
+    try {
+      const updated = await registry.update(id, {
+        fileKinds: { ...(rec.fileKinds ?? {}), [path]: replacement.kind },
+      });
+      if (!updated) throw new Error(`app not found after write: ${id}`);
+    } catch (error) {
+      return rollbackMutation(error, rollbackBytes, id, rec);
+    }
     return { bytesWritten: replacement.size, kind: replacement.kind };
+  };
+
+  /** Write a single file in the app's OPFS subdir.
+   * @param {{ appId?: string, path: string, content: unknown, sessionId?: string,
+   *   reload?: boolean, signal?: AbortSignal, invalidateDweb?: boolean }} args */
+  const writeFile = async ({ appId, path, content, sessionId, reload = true, signal, invalidateDweb = true }) => {
+    validateAppPath(path);
+    normalizeFileContent(path, content);
+    if (!invalidateDweb && !APP_DATA_PATH_RE.test(path)) throw new AppFileContentError('Only runtime data can retain App consent');
+    const id = await resolveId({ sessionId, appId });
+    const result = await withMutation(id, () => writeFileUnlocked(id, path, content, signal), invalidateDweb);
+    if (path === 'peerd.json') await onManifestMutation(id);
+    // why: a following actor write must not invalidate a document still
+    // reloading. Wait outside the consent/repository lanes so attach can finish.
+    if (reload) await tracker.reloadTab(id).catch(() => {});
+    return result;
+  };
+
+  /**
+   * Compare and write under the App/repository transaction lane.
+   * @param {{appId?:string,path:string,content:string,sessionId?:string,
+   *   expectedExists:boolean,expectedContent:string,signal?:AbortSignal,reload?:boolean}} args
+   */
+  const compareAndWriteFile = async ({
+    appId, path, content, sessionId, expectedExists, expectedContent, signal, reload = true,
+  }) => {
+    const id = await resolveId({ sessionId, appId });
+    const result = await withMutation(id, async () => {
+      validateAppPath(path);
+      let exists = true;
+      let source = '';
+      try {
+        const rec = await registry.get(id);
+        if (!rec) throw new Error(`app not found: ${id}`);
+        const bytes = await guardedOpfsForApp(id).readBytes(path);
+        if (isBinaryAppFile(path, bytes, rec.fileKinds?.[path])) {
+          throw new AppBinaryFileError(path);
+        }
+        source = new TextDecoder().decode(bytes);
+      } catch (cause) {
+        if (/** @type {{name?:string}} */ (cause)?.name !== 'NotFoundError') throw cause;
+        exists = false;
+      }
+      if (exists !== expectedExists || source !== expectedContent) return {
+        ok: false, code: 'edit_conflict', retryable: false,
+        error: 'The file changed after it was read; review the latest contents before writing.',
+        outcomeKind: 'pre-effect-failure',
+      };
+      if (signal?.aborted) return {
+        ok: false, code: 'edit_aborted', retryable: false,
+        error: 'The edit was stopped before writing.', outcomeKind: 'pre-effect-failure',
+      };
+      return { ok: true, value: await writeFileUnlocked(id, path, content, signal) };
+    });
+    if (result.ok) {
+      if (path === 'peerd.json') await onManifestMutation(id);
+      // why: preserve the same settled reload boundary as an ordinary write.
+      if (reload) await tracker.reloadTab(id).catch(() => {});
+    }
+    return result;
   };
 
   /** @param {{ appId?: string, path: string, sessionId?: string }} args */
@@ -633,9 +760,11 @@ export const createAppClient = ({
           for (const [path, bytes] of Object.entries(oldFiles)) await opfs.write(path, bytes);
           await restoreRecord(id, oldRecord);
         } catch (rollbackError) {
-          throw new AggregateError([writeError, rollbackError], 'App replacement and rollback both failed');
+          throw appRollbackIncomplete(
+            [writeError, rollbackError], 'App replacement and rollback both failed',
+          );
         }
-        throw writeError;
+        throw appRollbackCompleted(writeError, 'App replacement failed; rollback completed');
       }
     });
     await onManifestMutation(id);
@@ -646,11 +775,15 @@ export const createAppClient = ({
   /** Caller holds the App lane so version checks, bytes, Git, and metadata stay atomic.
    * @param {{ appId: string, files: Record<string, unknown>, entryFile: string,
    *   fileKinds?: Record<string, unknown>, message?: string,
-   *   metadataForOid?: (oid: string | null, oldRecord: import('/peerd-engine/app-registry.js').AppRecord, fileKinds: Record<string, 'text'|'binary'>) => Partial<import('/peerd-engine/app-registry.js').AppRecord> }} args
+   *   metadataForOid?: (oid: string | null, oldRecord: import('/peerd-engine/app-registry.js').AppRecord, fileKinds: Record<string, 'text'|'binary'>) => Partial<import('/peerd-engine/app-registry.js').AppRecord>,
+   *   isCurrent?: () => boolean,
+   *   afterCommit: (record: import('/peerd-engine/app-registry.js').AppRecord) => Promise<void>|void }} args
    */
   const replaceVersionedFilesUnlocked = async ({
     appId, files, entryFile, fileKinds, message = 'replace App release', metadataForOid = () => ({}),
+    isCurrent = () => true, afterCommit,
   }) => {
+    if (typeof afterCommit !== 'function') throw new TypeError('afterCommit is required');
     if (!repositories?.replaceWorkingTree || !repositories?.rollbackWorkingTree || !repositories?.statusApp) {
       throw new Error('browser Git is unavailable');
     }
@@ -685,22 +818,20 @@ export const createAppClient = ({
       if (APP_DATA_PATH_RE.test(path)) nextFiles[path] = bytes;
     }
     const nextEntries = Object.values(nextFiles);
-    if (nextEntries.length > MAX_APP_FILES) {
-      throw new AppFileLimitError(`App has too many files: ${nextEntries.length} > ${MAX_APP_FILES}`);
-    }
+    if (nextEntries.length > MAX_APP_FILES) throw new AppFileLimitError('App has too many files including runtime data');
     let nextTotalBytes = 0;
     for (const value of nextEntries) {
       nextTotalBytes += typeof value === 'string' ? new TextEncoder().encode(value).byteLength : value.byteLength;
-      if (nextTotalBytes > MAX_APP_TOTAL_BYTES) {
-        throw new AppFileLimitError(`App is too large: ${nextTotalBytes} > ${MAX_APP_TOTAL_BYTES} bytes`);
-      }
+      if (nextTotalBytes > MAX_APP_TOTAL_BYTES) throw new AppFileLimitError('App is too large including runtime data');
     }
 
     try {
+      if (!isCurrent()) throw new Error('dweb-custody-changed');
       const committed = await repositories.replaceWorkingTree(
         { kind: 'app', id },
         { files: nextFiles, message, includeIgnored: true },
       );
+      if (!isCurrent()) throw new Error('dweb-custody-changed');
       const patch = {
         entryFile,
         fileKinds: normalized.fileKinds,
@@ -708,23 +839,31 @@ export const createAppClient = ({
       };
       const updated = await registry.update(id, /** @type {any} */ (patch));
       if (!updated) throw new Error(`app not found after versioned replacement: ${id}`);
+      if (!isCurrent()) throw new Error('dweb-custody-changed');
       await onManifestMutation(id);
-      await tracker.reloadTab(id).catch(() => {});
+      if (!isCurrent()) throw new Error('dweb-custody-changed');
+      await afterCommit(updated);
+      tracker.reloadTab(id).catch(() => {});
       return { record: updated, oid: committed.oid ?? null, created: committed.created === true };
     } catch (cause) {
       /** @type {unknown[]} */
       const rollbackFailures = [];
-      // why: Reset the failed release index before ignored local bytes return.
+      // why: restore the old HEAD/index before ignored local bytes, so a
+      // failed release cannot turn those bytes into a committed local fork.
       try {
         await repositories.rollbackWorkingTree(
           { kind: 'app', id },
           { to: previousOid, files: oldFiles },
         );
       } catch (error) { rollbackFailures.push(error); }
-      try { await restoreRecord(id, oldRecord); }
+      try {
+        await restoreRecord(id, oldRecord);
+      }
       catch (error) { rollbackFailures.push(error); }
       if (rollbackFailures.length) {
-        throw new AggregateError([cause, ...rollbackFailures], 'App release update and rollback both failed');
+        throw appRollbackIncomplete(
+          [cause, ...rollbackFailures], 'App release update and rollback both failed',
+        );
       }
       throw cause;
     }
@@ -776,9 +915,11 @@ export const createAppClient = ({
     return { ...snapshot, files };
   };
 
-  /** @param {{ appId?: string, path: string, sessionId?: string, reload?: boolean, invalidateDweb?: boolean }} args */
-  const deleteFile = async ({ appId, path, sessionId, reload = true, invalidateDweb = true }) => {
+  /** @param {{ appId?: string, path: string, sessionId?: string, reload?: boolean,
+   *   signal?: AbortSignal, invalidateDweb?: boolean }} args */
+  const deleteFile = async ({ appId, path, sessionId, reload = true, signal, invalidateDweb = true }) => {
     validateAppPath(path);
+    if (!invalidateDweb && !APP_DATA_PATH_RE.test(path)) throw new AppFileContentError('Only runtime data can retain App consent');
     const id = await resolveId({ sessionId, appId });
     await withMutation(id, async () => {
       const rec = await registry.get(id);
@@ -786,6 +927,7 @@ export const createAppClient = ({
       if (path === rec.entryFile) throw new Error(`refusing to delete entry file: ${path}`);
       const opfs = guardedOpfsForApp(id);
       const backup = await opfs.readBytes(path);
+      requireLiveAppMutation(signal);
       await opfs.delete(path);
       const nextKinds = { ...(rec.fileKinds ?? {}) };
       delete nextKinds[path];
@@ -922,7 +1064,7 @@ export const createAppClient = ({
   return {
     resolveId,
     create, createFromGit, update,
-    writeFile, readFile, readFileBytes, replaceFiles, listFiles, deleteFile,
+    writeFile, compareAndWriteFile, readFile, readFileBytes, replaceFiles, listFiles, deleteFile,
     replaceVersionedFilesUnlocked,
     snapshotFiles, snapshotFilesBase64,
     open,

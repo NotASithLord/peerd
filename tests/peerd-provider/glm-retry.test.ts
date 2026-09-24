@@ -8,6 +8,7 @@
 import { describe, test, expect } from 'bun:test';
 import { callGlm } from '../../extension/peerd-provider/adapters/glm.js';
 import { ProviderHttpError } from '../../extension/peerd-provider/errors.js';
+import { makeModelEgress } from './model-egress-fixture';
 
 const stubResponse = (status: number, headers: Record<string, string> = {}, bodyText = '') => ({
   ok: status >= 200 && status < 300,
@@ -31,8 +32,7 @@ const okStreamingResponse = () => {
 const baseArgs = (overrides: Record<string, unknown> = {}) => ({
   messages: [{ role: 'user', content: 'hi', id: 'u', when: 0 }],
   system: 'sys',
-  getSecret: async () => 'fake-glm-key',
-  safeFetch: async () => { throw new Error('safeFetch not set'); },
+  modelEgress: makeModelEgress(),
   _sleep: async () => {},
   ...overrides,
 });
@@ -48,24 +48,24 @@ describe('callGlm — retryable status set', () => {
   // retry, not kill the turn.
   test.each([429, 500, 503, 529])('retries %i and recovers on the next attempt', async (status) => {
     let calls = 0;
-    const safeFetch = async () => {
+    const openInference = async () => {
       calls++;
       if (calls === 1) return stubResponse(status, {}, '{"error":{"message":"transient upstream error"}}');
       return okStreamingResponse();
     };
-    const events = await drain(callGlm(baseArgs({ safeFetch }) as any));
+    const events = await drain(callGlm(baseArgs({ modelEgress: makeModelEgress({ openInference }) }) as any));
     expect(calls).toBe(2);
     expect(events[0].type).toBe('rate-limit-pause');
   });
 
   test.each([400, 401, 403, 404])('throws immediately on non-retryable %i', async (status) => {
     let calls = 0;
-    const safeFetch = async () => {
+    const openInference = async () => {
       calls++;
       return stubResponse(status, {}, 'bad');
     };
     let thrown: any;
-    try { await drain(callGlm(baseArgs({ safeFetch }) as any)); }
+    try { await drain(callGlm(baseArgs({ modelEgress: makeModelEgress({ openInference }) }) as any)); }
     catch (e) { thrown = e; }
     expect(calls).toBe(1);
     expect(thrown).toBeInstanceOf(ProviderHttpError);
@@ -73,17 +73,15 @@ describe('callGlm — retryable status set', () => {
     expect(thrown.provider).toBe('glm');
   });
 
-  test('uses the Z.ai paas/v4 endpoint and Bearer auth', async () => {
-    let url = '';
-    let init: any;
-    const safeFetch = async (u: any, i: any) => { url = String(u); init = i; return okStreamingResponse(); };
-    await drain(callGlm(baseArgs({ safeFetch }) as any));
-    expect(url).toBe('https://api.z.ai/api/paas/v4/chat/completions');
-    expect(init.headers.authorization).toBe('Bearer fake-glm-key');
-    // The body carries the default model glm-5.2 unless overridden.
-    const body = JSON.parse(init.body);
-    expect(body.model).toBe('glm-5.2');
-    expect(body.stream).toBe(true);
+  test('passes an exact provider/model/native-body request', async () => {
+    let request: any;
+    const openInference = async (args: any) => { request = args; return okStreamingResponse(); };
+    await drain(callGlm(baseArgs({ modelEgress: makeModelEgress({ openInference }) }) as any));
+    expect(Object.keys(request).sort()).toEqual(['modelId', 'nativeBody', 'providerId', 'signal']);
+    expect(request.providerId).toBe('glm');
+    expect(request.modelId).toBe('glm-5.2');
+    expect(request.nativeBody.model).toBe('glm-5.2');
+    expect(request.nativeBody.stream).toBe(true);
   });
 
   test('defaults model to glm-5.2 and surfaces usage+stop from the stream', async () => {
@@ -97,8 +95,8 @@ describe('callGlm — retryable status set', () => {
         controller.close();
       },
     });
-    const safeFetch = async () => ({ ok: true, status: 200, headers: new Headers(), body, text: async () => '' });
-    const events = await drain(callGlm(baseArgs({ safeFetch }) as any));
+    const openInference = async () => ({ ok: true, status: 200, headers: new Headers(), body, text: async () => '' });
+    const events = await drain(callGlm(baseArgs({ modelEgress: makeModelEgress({ openInference }) }) as any));
     expect(events.find((e) => e.type === 'text-delta').text).toBe('hi');
     expect(events.find((e) => e.type === 'usage').usage).toMatchObject({ inputTokens: 5, outputTokens: 2 });
     expect(events[events.length - 1]).toMatchObject({ type: 'message-stop', stopReason: 'end_turn' });

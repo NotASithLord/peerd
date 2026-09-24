@@ -75,22 +75,3 @@ export const isBinaryAppFile = (path, bytes, declaredKind) => {
   if (isBinaryAssetPath(path) || declaredKind === 'binary') return true;
   return !isLosslessUtf8Text(bytes);
 };
-
-/**
- * Shape one App file for text-only checkpoint and review storage. Binary bytes
- * become a stable, collision-resistant marker so add, change, and delete events
- * remain visible without decoding or exposing their content.
- *
- * @param {string} path
- * @param {Uint8Array} bytes
- * @param {unknown} declaredKind
- */
-export const appFileCheckpointContent = async (path, bytes, declaredKind) => {
-  if (!isBinaryAppFile(path, bytes, declaredKind)) return new TextDecoder().decode(bytes);
-  const stableBytes = new Uint8Array(bytes);
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', stableBytes));
-  const hash = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
-  // why the escaped NUL prefix: editable text classification rejects NUL, so
-  // user text cannot collide with this review-only marker.
-  return `\u0000peerd-binary:${bytes.byteLength}:${hash}`;
-};

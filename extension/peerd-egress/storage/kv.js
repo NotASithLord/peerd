@@ -20,7 +20,7 @@
 // Anything that exceeds those bounds — large blobs, persistent queues —
 // goes to IndexedDB via peerd-egress/storage/idb.js instead.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 
 /**
  * @typedef {Object} KV
@@ -31,20 +31,30 @@ import browser from '/vendor/browser-polyfill.js';
  * @property {() => Promise<void>} clear
  */
 
-/** @returns {KV} */
-export const makeRealKV = () => ({
+/**
+ * Browser-neutral adapter over a promise-returning WebExtension StorageArea.
+ * Chrome MV3 and pinned Firefox both implement this exact shape.
+ * @param {{
+ *   get: (key: string|null) => Promise<Record<string, any>>,
+ *   set: (values: Record<string, any>) => Promise<void>,
+ *   remove: (key: string) => Promise<void>,
+ *   clear: () => Promise<void>,
+ * }} area
+ * @returns {KV}
+ */
+export const makeStorageAreaKV = (area) => ({
   get: async (key) => {
-    const result = await browser.storage.local.get(key);
+    const result = await area.get(key);
     return result[key];
   },
   set: async (key, value) => {
-    await browser.storage.local.set({ [key]: value });
+    await area.set({ [key]: value });
   },
   delete: async (key) => {
-    await browser.storage.local.remove(key);
+    await area.remove(key);
   },
   list: async (prefix) => {
-    const all = await browser.storage.local.get(null);
+    const all = await area.get(null);
     if (!prefix) return all;
     /** @type {Record<string, any>} */
     const out = {};
@@ -54,9 +64,36 @@ export const makeRealKV = () => ({
     return out;
   },
   clear: async () => {
-    await browser.storage.local.clear();
+    await area.clear();
   },
 });
+
+/**
+ * Build a KV whose StorageArea is resolved at operation time. The HTTP
+ * in-browser suite installs its WebExtension storage shim after importing the
+ * public egress surface; production also benefits from failing at the actual
+ * storage operation instead of during otherwise-pure module evaluation.
+ *
+ * @param {() => Parameters<typeof makeStorageAreaKV>[0] | null | undefined} resolveArea
+ * @returns {KV}
+ */
+export const makeDeferredStorageAreaKV = (resolveArea) => {
+  const area = () => {
+    const resolved = resolveArea();
+    if (!resolved) throw new Error('browser.storage.local is unavailable');
+    return resolved;
+  };
+  return {
+    get: async (key) => makeStorageAreaKV(area()).get(key),
+    set: async (key, value) => makeStorageAreaKV(area()).set(key, value),
+    delete: async (key) => makeStorageAreaKV(area()).delete(key),
+    list: async (prefix) => makeStorageAreaKV(area()).list(prefix),
+    clear: async () => makeStorageAreaKV(area()).clear(),
+  };
+};
+
+/** @returns {KV} */
+export const makeRealKV = () => makeDeferredStorageAreaKV(() => browser.storage?.local);
 
 /**
  * The production KV singleton. Feature code that doesn't take a kv via

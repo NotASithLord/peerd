@@ -14,7 +14,13 @@
 // home surface).
 
 import m from '/vendor/mithril/mithril.js';
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
+import { makeUiStatePort } from '/shared/cold-port-recovery.js';
+import { makeUiRuntimeClient } from '/shared/ui-runtime-client.js';
+import {
+  makeReconciledUiSender, putUiEffectFailureNotice, settleUiEffect, redrawForRuntimeMessage,
+} from '/shared/ui-effects.js';
+import { makeConfirmationAnswer } from '/sidepanel/confirmation-answer.js';
 import { CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { loadDweb } from '/shared/dweb-loader.js';
 import { openOptions } from '/shared/open-options.js';
@@ -26,7 +32,7 @@ import { ActorsSection } from './actors-section.js';
 // EvalSection (the Lab) is LAZY-loaded — see loadEvalSection below.
 import { INITIAL_STATE, reduceChat, putSpawnedSession } from '../sidepanel/chat-reducer.js';
 import { ChatView } from '../sidepanel/components/chat-view.js';
-import { ConfirmModal, NoticeBar } from '../sidepanel/components/app.js';
+import { ConfirmModal, NoticeBar, StateRuntimeFailure } from '../sidepanel/components/app.js';
 import { ActorIsolationBanner } from '../sidepanel/components/actor-isolation-banner.js';
 import { VaultGate } from '../sidepanel/components/vault-gate.js';
 import { OnboardingView, needsOnboarding } from '../sidepanel/components/onboarding-view.js';
@@ -144,79 +150,102 @@ const toggleChatList = () => {
 };
 
 // ---- live port to the SW (home is an equal live surface, DESIGN-12) -------
-/** @type {import('webextension-polyfill').Runtime.Port | null} */
-let port = null;
-const connectPort = () => {
-  port = browser.runtime.connect({ name: 'home' });
-  port.onMessage.addListener(handlePortMessage);
-  port.onDisconnect.addListener(handlePortDisconnect);
-};
-/** @param {any} msg */
+/** @param {any} msg @returns {boolean} */
 const handlePortMessage = (msg) => {
-  if (!msg || typeof msg.type !== 'string') return;
+  if (!msg || typeof msg.type !== 'string') return false;
   // Voice is side-panel-only (no mic surface here) — ignore voice/* pushes.
-  if (msg.type.startsWith('voice/')) return;
+  if (msg.type.startsWith('voice/')) return true;
   // Surface presence (not chat state, so it bypasses the reducer): when a side
   // panel opens, hand Chat + Chats to it and drop to a tool view; when it closes,
   // take chat back to where we were.
-  if (msg.type === 'surfaces') { applySidePanelOpen(!!msg.sidePanelOpen); return; }
+  if (msg.type === 'surfaces') { applySidePanelOpen(!!msg.sidePanelOpen); return true; }
   // §4e: tag which surface this fold is FOR, so the answering surface doesn't
   // transcript-line its own click (mirrors the side panel).
   const folded = msg.type === 'confirm/resolved' ? { ...msg, confirmSurface: 'home' } : msg;
   const next = reduceChat(currentState, folded);
-  if (next === currentState) return;
+  if (next === currentState) return msg.type === 'state';
   currentState = next;
   if (msg.type === 'state') { booted = true; seedDwebApps(); }
-  m.redraw();
+  redrawForRuntimeMessage(m.redraw, msg);
+  return true;
 };
-const handlePortDisconnect = () => {
+
+const resetAfterDisconnect = () => {
   // SW restart — reset to the locked default (don't show stale "unlocked")
   // and reconnect, mirroring the side panel.
   currentState = INITIAL_STATE;
   booted = false;
-  port = null;
+  actorFetchInFlight.clear();
   m.redraw();
-  setTimeout(connectPort, 200);
 };
 
-/**
- * @param {{ type: string } & Record<string, any>} msg
- * @returns {Promise<any>}
- */
-const send = (msg) => browser.runtime.sendMessage(msg);
+const uiRuntime = makeUiRuntimeClient({ browser });
+const statePort = makeUiStatePort({
+  browser,
+  name: 'home',
+  isHydrated: () => booted || currentState.hydrated,
+  onMessage: handlePortMessage,
+  onDisconnect: resetAfterDisconnect,
+  onStatusChange: () => m.redraw(),
+});
+const reconcileState = () => statePort.reconcile(() => uiRuntime.send({ type: 'state/get' }));
+/** @param {any} _message @param {unknown} cause */
+const showEffectFailure = (_message, cause) => {
+  currentState = {
+    ...currentState,
+    notices: putUiEffectFailureNotice(currentState.notices, cause),
+  };
+  m.redraw();
+};
+const send = makeReconciledUiSender({
+  send: (/** @type {any} */ msg) => uiRuntime.send(msg),
+  fold: () => {}, reconcile: reconcileState, afterReply: () => false,
+  onEffectFailure: showEffectFailure,
+});
+/** @param {object} message @param {()=>unknown} [onSuccess] */
+const settleSessionEffect = (message, onSuccess = () => {}) => {
+  const effect = send(message);
+  settleUiEffect(effect);
+  void effect.then((reply) => { if (reply?.ok) onSuccess(); }).catch(() => {});
+};
 
 // ---- chat-component uiActions (the subset home needs; no voice) -----------
 /** @type {Set<string>} */
 const actorFetchInFlight = new Set();
-/** @param {string} sessionId */
-const loadActor = (sessionId) => {
+/** @param {string} sessionId @param {boolean} [retry] */
+const loadActor = (sessionId, retry = false) => {
   if (!sessionId) return;
-  if (currentState.spawned.sessions[sessionId]?.messages?.length) return;
+  const current = currentState.spawned.sessions[sessionId];
+  if (current?.messages?.length || (!retry && current?.loadError)) return;
   if (actorFetchInFlight.has(sessionId)) return;
   actorFetchInFlight.add(sessionId);
   send({ type: 'session/get', sessionId }).then((/** @type {any} */ resp) => {
     actorFetchInFlight.delete(sessionId);
     if (resp?.ok && resp.session) {
-      currentState = putSpawnedSession(currentState, resp.session);
-      m.redraw();
+      currentState = putSpawnedSession(currentState, { ...resp.session, loadError: undefined });
+    } else {
+      currentState = putSpawnedSession(currentState, {
+        sessionId, messages: [], loadError: resp?.error ?? 'Temporarily unavailable. Try again.',
+      });
     }
-  }).catch(() => { actorFetchInFlight.delete(sessionId); });
-};
-/**
- * @param {{ id: string, ownerSessionId?: string|null, sessionId?: string|null,
- *   dispatchId?: string|null }} prompt
- * @param {string} answer
- */
-const confirmAnswer = (prompt, answer) => {
-  send({
-    type: 'confirm/answer', id: prompt.id, answer,
-    ownerSessionId: prompt.ownerSessionId ?? null,
-    sessionId: prompt.sessionId ?? null,
-    dispatchId: prompt.dispatchId ?? null,
+    m.redraw();
+  }).catch(() => {
+    actorFetchInFlight.delete(sessionId);
+    currentState = putSpawnedSession(currentState, {
+      sessionId, messages: [], loadError: 'Temporarily unavailable. Try again.',
+    });
+    m.redraw();
   });
-  currentState = { ...currentState, pendingConfirm: null };
-  m.redraw();
 };
+const confirmAnswer = makeConfirmationAnswer({
+  send,
+  reconcile: reconcileState,
+  getState: () => currentState,
+  setState: (/** @type {import('/sidepanel/chat-reducer.js').ChatState} */ state) => {
+    currentState = state;
+  },
+  redraw: () => m.redraw(),
+});
 /** @param {string} id */
 const dismissNotice = (id) => {
   currentState = { ...currentState, notices: currentState.notices.filter((/** @type {any} */ n) => n.id !== id) };
@@ -294,19 +323,20 @@ const popToSide = () => {
 };
 // Bring the chat back from the panel into home (the inverse of pop-to-side / the
 // "go to tab" card). The panel's own close button does the same.
-const bringChatHome = () => send({ type: 'sidepanel/close' });
+const bringChatHome = () => settleUiEffect(send({ type: 'sidepanel/close' }));
 
 // Actor Space spans every session, but its room action still lands on one
 // concrete chat. When home owns chat, navigate there; when the side panel owns
 // it, switching the shared session is enough; the visible panel updates live.
 /** @param {string} sessionId */
-const openActorSession = async (sessionId) => {
-  const result = await send({ type: 'session/switch', sessionId });
-  if (!result?.ok) return;
-  if (!sidePanelOpen) setView('chat');
-  m.redraw();
-  if (!sidePanelOpen) focusActiveContent();
-};
+const openActorSession = (sessionId) => settleSessionEffect(
+  { type: 'session/switch', sessionId },
+  () => {
+    if (!sidePanelOpen) setView('chat');
+    m.redraw();
+    if (!sidePanelOpen) focusActiveContent();
+  },
+);
 
 // Auto-close the side panel when the user RETURNS to the home tab (a hidden →
 // visible transition) — UNLESS they explicitly popped it (sticky). So a card-
@@ -317,7 +347,9 @@ const openActorSession = async (sessionId) => {
 let homeWasHidden = (typeof document !== 'undefined' && document.hidden);
 const onVisibility = () => {
   const hidden = document.hidden;
-  if (homeWasHidden && !hidden && sidePanelOpen && !panelStickyByPop) send({ type: 'sidepanel/close' });
+  if (homeWasHidden && !hidden && sidePanelOpen && !panelStickyByPop) {
+    settleUiEffect(send({ type: 'sidepanel/close' }));
+  }
   homeWasHidden = hidden;
 };
 
@@ -361,7 +393,7 @@ const seedDwebApps = async () => {
         return res.text();
       },
     });
-    await browser.runtime.sendMessage({ type: 'dweb/ensure-seed-app', seed });
+    await send({ type: 'dweb/ensure-seed-app', seed });
   } catch (e) { console.debug('[home] dweb seed skipped', e); }
 };
 
@@ -508,16 +540,28 @@ const fmtAgo = (ms) => {
 // The recent-chats list column (ChatGPT-style): "+ New chat" + every chat,
 // newest-active first. Lives to the LEFT of the chat, off the rail. Selecting a
 // chat switches the SW session; "New chat" resets to a fresh one. Refreshed on
-// a light interval so a freshly-titled chat (the agent titles it) updates.
+// state changes so a freshly-titled chat (the agent titles it) updates.
 const ChatListPanel = () => {
   /** @type {any[] | null} */
   let sessions = null;
-  /** @type {ReturnType<typeof setInterval> | number} */
-  let timer = 0;
+  let error = '';
+  /** @type {string|null} */
+  let sessionStamp = null;
+  let queued = false;
+  const loadVisible = () => { if (!document.hidden) load(); };
   /** @type {string | null} */
   let deletingId = null;   // the row currently playing its delete animation
   const load = () => send({ type: 'session/list' })
-    .then((/** @type {any} */ r) => { if (r?.ok) { sessions = r.sessions ?? []; m.redraw(); } }).catch(() => {});
+    .then((/** @type {any} */ r) => {
+      if (r?.ok) {
+        sessions = r.sessions ?? [];
+        error = '';
+      } else error = r?.error ?? 'Temporarily unavailable. Try again.';
+      m.redraw();
+    }).catch(() => {
+      error = 'Temporarily unavailable. Try again.';
+      m.redraw();
+    });
   // Animate the row out, THEN archive it (a deleted chat leaves the list). If it
   // was the current chat, drop into a fresh one so the view isn't left on a
   // now-deleted session.
@@ -531,20 +575,41 @@ const ChatListPanel = () => {
     m.redraw();
     setTimeout(async () => {
       try {
-        await send({ type: 'session/archive', sessionId });
-        if (isCurrent) await send({ type: 'session/reset' });
+        const archive = send({ type: 'session/archive', sessionId });
+        settleUiEffect(archive);
+        if (!(await archive)?.ok) return;
+        if (isCurrent) {
+          const reset = send({ type: 'session/reset' });
+          settleUiEffect(reset);
+          if (!(await reset)?.ok) return;
+        }
       } catch (e) { console.warn('[home] delete chat failed', e); }
-      deletingId = null;
-      load();
+      finally {
+        deletingId = null;
+        load();
+      }
     }, 340);   // ≈ the reverse-type backspace (190ms) + row collapse (130ms)
   };
   return {
     oninit: load,
-    oncreate() { timer = setInterval(() => { if (!document.hidden) load(); }, 5000); },
-    onremove() { if (timer) clearInterval(timer); },
+    oncreate() {
+      document.addEventListener('visibilitychange', loadVisible);
+      window.addEventListener('focus', load);
+    },
+    onremove() {
+      document.removeEventListener('visibilitychange', loadVisible);
+      window.removeEventListener('focus', load);
+    },
     /** @param {{ attrs: { state: any } }} vnode */
     view: ({ attrs: { state } }) => {
       const cur = state.session?.sessionId;
+      const nextStamp = `${cur ?? ''}:${state.session?.title ?? ''}:${state.session?.messages?.length ?? 0}`;
+      if (sessionStamp === null) sessionStamp = nextStamp;
+      else if (sessions !== null && sessionStamp !== nextStamp && !queued) {
+        sessionStamp = nextStamp;
+        queued = true;
+        queueMicrotask(() => { queued = false; load(); });
+      }
       const visible = (sessions ?? []).filter((/** @type {any} */ s) => !s.archived)
         .sort((/** @type {any} */ a, /** @type {any} */ b) => (b.lastMessageAt ?? b.createdAt ?? 0) - (a.lastMessageAt ?? a.createdAt ?? 0));
       return m('.chat-list', [
@@ -552,13 +617,22 @@ const ChatListPanel = () => {
           m('span.chat-list-head-title', 'Chats'),
           m('button.chat-list-toggle', { title: 'Hide chats', 'aria-label': 'Hide chats', onclick: toggleChatList }, '«'),
         ]),
-        m('button.chat-list-new', { onclick: async () => { await send({ type: 'session/reset' }); load(); } }, '＋ New chat'),
-        m('.chat-list-items', visible.length
+        m('button.chat-list-new', {
+          onclick: () => settleSessionEffect({ type: 'session/reset' }, load),
+        }, '＋ New chat'),
+        m('.chat-list-items', error
+          ? m('button.chat-list-empty.muted', { type: 'button', onclick: load }, error)
+          : sessions === null
+            ? m('.chat-list-empty.muted', 'Loading…')
+            : visible.length
           ? visible.map((/** @type {any} */ s) => m('.chat-list-item', {
               key: s.sessionId,
               class: [s.sessionId === cur ? 'is-active' : '', deletingId === s.sessionId ? 'is-deleting' : ''].filter(Boolean).join(' '),
               role: 'button', tabindex: '0',
-              onclick: () => { if (deletingId || s.sessionId === cur) return; send({ type: 'session/switch', sessionId: s.sessionId }).then(load); },
+              onclick: () => {
+                if (deletingId || s.sessionId === cur) return;
+                settleSessionEffect({ type: 'session/switch', sessionId: s.sessionId }, load);
+              },
             }, [
               m('.chat-list-item-title', (s.title && s.title.trim()) || 'New chat'),
               m('.chat-list-item-meta', fmtAgo(s.lastMessageAt ?? s.createdAt)),
@@ -568,7 +642,7 @@ const ChatListPanel = () => {
                 onclick: (/** @type {Event} */ e) => { e.stopPropagation(); deleteChat(s.sessionId, s.sessionId === cur); },
               }),
             ]))
-          : m('.chat-list-empty.muted', 'No chats yet.')),
+            : m('.chat-list-empty.muted', 'No chats yet.')),
       ]);
     },
   };
@@ -639,7 +713,10 @@ const content = (showDweb) => {
       chatListCollapsed
         ? m('.chat-list.is-collapsed', [
             m('button.chat-list-toggle', { title: 'Show chats', 'aria-label': 'Show chats', onclick: toggleChatList }, '»'),
-            m('button.chat-list-toggle', { title: 'New chat', 'aria-label': 'New chat', onclick: async () => { await send({ type: 'session/reset' }); } }, '＋'),
+            m('button.chat-list-toggle', {
+              title: 'New chat', 'aria-label': 'New chat',
+              onclick: () => settleSessionEffect({ type: 'session/reset' }),
+            }, '＋'),
           ])
         : m(ChatListPanel, { state: currentState }),
       m('.home-chat', [
@@ -679,6 +756,8 @@ const content = (showDweb) => {
 
 const HomeApp = {
   view() {
+    if (!booted && statePort.failed) return m('.options-gate', m('.options-gate-card',
+      m(StateRuntimeFailure, { retry: statePort.retry, lead: m(Wordmark) })));
     if (!booted) return gate(null, 'Loading…');
     // Set up / unlock the vault RIGHT HERE — home is the SPA's primary surface, so
     // it hosts the same VaultGate the side panel does (passkey + passphrase, first-
@@ -695,11 +774,13 @@ const HomeApp = {
     // latch flips on the next state push. It deliberately does NOT live in the
     // side panel, and the panel is a front door of its own, so the SW closes
     // the latch for any install that already has chat history
-    // (background/onboarding-reconcile.js). Net: the funnel only ever greets a
+    // (background/vault-kernel-core.js). Net: the funnel only ever greets a
     // genuinely fresh install; a panel-first user who clicks Home mid-use lands
     // on home, never on a surprise re-onboarding.
     if (needsOnboarding(currentState)) {
-      return m('.options-gate', m(OnboardingView, { state: currentState, send }));
+      return m('.options-gate', m(OnboardingView, {
+        state: currentState, send, reconcileState,
+      }));
     }
 
     const showDweb = DWEB_ENABLED && currentState.settings?.dwebEnabled;
@@ -744,7 +825,8 @@ const HomeApp = {
       // Manual lock — for stepping away. The SW pushes the locked state, which
       // flips home back to the vault gate.
       m('button.home-nav-item.home-rail-action.home-rail-lock', {
-        'aria-label': 'Lock', onclick: () => send({ type: 'vault/lock' }),
+        'aria-label': 'Lock',
+        onclick: () => settleUiEffect(send({ type: 'vault/lock' })),
       }, [
         m('span.home-action-icon', { 'aria-hidden': 'true' }, railIcon('lock')),
         m('span.home-action-label', 'Lock'),
@@ -790,16 +872,23 @@ const HomeApp = {
   },
 };
 
-connectPort();
-document.addEventListener('visibilitychange', onVisibility);
 // A deep-link to an ALREADY-open home tab (openHome('library') focusing this
 // tab) changes only the fragment — no reload — so honor it via hashchange too,
 // then clear the fragment so it stays a one-shot jump.
-window.addEventListener('hashchange', () => {
+const onHashChange = () => {
   const v = viewFromHash();
   clearHash();
   if (v && v !== activeView) { setView(v); m.redraw(); }
-});
+};
 const root = document.getElementById('app');
 if (!root) throw new Error('home: #app missing from HTML');
-m.mount(root, HomeApp);
+let started = false;
+export const startHome = () => {
+  if (started) return;
+  if (document.documentElement.dataset.peerdBootStage === 'failed') return;
+  started = true;
+  statePort.start();
+  document.addEventListener('visibilitychange', onVisibility);
+  window.addEventListener('hashchange', onHashChange);
+  m.mount(root, HomeApp);
+};

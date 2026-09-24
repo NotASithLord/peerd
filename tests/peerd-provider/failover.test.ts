@@ -1,12 +1,15 @@
 // Provider failover — the pure decision layer (peerd-provider/failover.js).
 
 import { describe, test, expect } from 'bun:test';
-import { shouldFailover, planFailoverChain } from '../../extension/peerd-provider/failover.js';
+import {
+  planFailoverChain, providerFailureCode, shouldFailover,
+} from '../../extension/peerd-provider/failover.js';
 import {
   ProviderHttpError,
   ProviderUsageLimitError,
   ProviderKeyMissingError,
   ProviderError,
+  UnknownProviderError,
 } from '../../extension/peerd-provider/errors.js';
 
 describe('shouldFailover', () => {
@@ -38,6 +41,20 @@ describe('shouldFailover', () => {
     expect(shouldFailover(new ProviderError('anthropic', 'malformed body'))).toBe(false);
     expect(shouldFailover(undefined)).toBe(false);
     expect(shouldFailover('boom')).toBe(false);
+  });
+});
+
+describe('providerFailureCode', () => {
+  test('projects provider exceptions before they leave the sealed controller', () => {
+    expect(providerFailureCode(new ProviderKeyMissingError('anthropic')))
+      .toBe('provider-key-missing');
+    expect(providerFailureCode(new ProviderUsageLimitError(
+      'anthropic', { status: 402, detail: 'credit exhausted' },
+    ))).toBe('provider-usage-limit: credit exhausted');
+    expect(providerFailureCode(new ProviderHttpError('anthropic', 401, 'invalid key')))
+      .toBe('provider-http-401');
+    expect(providerFailureCode(new UnknownProviderError('missing'))).toBe('unknown-provider');
+    expect(providerFailureCode(new ProviderError('anthropic', 'bad body'))).toBeNull();
   });
 });
 

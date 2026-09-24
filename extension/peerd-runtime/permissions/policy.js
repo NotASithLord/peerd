@@ -34,7 +34,7 @@
 //   realization, generalized from terminal Build/Plan to the browser's
 //   bigger surface (DOM + tabs + fetch + shell, not just files).
 
-/** @typedef {import('/shared/tool-types.js').Tool} Tool */
+/** @typedef {ReturnType<typeof import('../tools/metadata/descriptor.js').toToolDescriptor>} Tool */
 /** @typedef {import('/shared/tool-types.js').SideEffect} SideEffect */
 
 // --- Modes (the top axis) --------------------------------------------------
@@ -45,7 +45,7 @@ export const PERMISSION_MODES = Object.freeze({
   // navigation carve-out below), but may NOT mutate anything: no
   // file/workspace writes, no shell, no side-effecting fetch, and — the
   // browser-native part — no side-effecting DOM actions (click/type/
-  // navigate/page_exec). Bigger blast radius than a terminal's
+  // navigation). Bigger blast radius than a terminal's
   // "plan", so the block list is bigger too.
   PLAN: /** @type {const} */ ('plan'),
   // ACT — writes allowed, subject to the confirmActions toggle.
@@ -78,9 +78,8 @@ export const DEFAULT_CONFIRM_ACTIONS = true;
 // primitive) pair into ONE of four action CLASSES. The confirm rule
 // itself no longer distinguishes the non-read classes (anything non-read
 // confirms when confirmActions is ON), but the taxonomy STAYS: the
-// lineage UI and the confirm prompt label actions by class, and the
-// review orchestrator intersects on READ. This is the single place the
-// taxonomy is encoded; the dispatcher and the UI both read it from here.
+// lineage UI and the confirm prompt label actions by class. This is the single
+// place the taxonomy is encoded; the dispatcher and the UI both read it from here.
 
 export const ACTION_CLASSES = Object.freeze({
   READ: /** @type {const} */ ('read'),
@@ -88,8 +87,8 @@ export const ACTION_CLASSES = Object.freeze({
   // OPFS, App bodies. Reversible, sandboxed, no effect on the user's live
   // web session.
   WORKSPACE_WRITE: /** @type {const} */ ('workspace_write'),
-  // Code execution: booting a VM, eval in the Notebook, page_exec/page_eval
-  // (arbitrary JS in a live page). Higher stakes than a file write — can
+  // Code execution: booting a VM or evaluating code in a sealed engine.
+  // Higher stakes than a file write: can
   // do anything within its runtime.
   SHELL: /** @type {const} */ ('shell'),
   // Acts on the user's LIVE web session or the outside world: DOM
@@ -117,8 +116,6 @@ const SHELL_TOOLS = Object.freeze(new Set([
   'vm_boot',     // boots/executes the Linux VM
   'js_notebook',     // runs arbitrary JS in the Notebook worker
   'pod_exec',    // runs shell/JS/WASI with files, Git, and brokered egress
-  'page_exec',   // CDP Runtime.evaluate in a live page
-  'page_eval',   // executeScript in a live page
   'script',      // headless JS with egress + delegation — the strongest code lane must not confirm softer than the rest
 ]));
 // Deliberately NOT in SHELL_TOOLS — don't "fix" these:
@@ -175,12 +172,18 @@ export const PLAN_NAVIGATION_TOOLS = Object.freeze(new Set(['navigate', 'open_ta
 // leaving Plan with no way to read a page at all — silently breaking Decision
 // #16's "go look at X and tell me what it says". But the delegation itself
 // mutates nothing: the actor it mints INHERITS the orchestrator's permission
-// mode (service-worker.js mintActor: `permissionMode: perm.mode`), so a
+// mode, so a
 // Plan-mode delegation spins up a Plan-mode actor whose OWN inner turn is the
 // real write barrier — its read_page/snapshot run, its click/type still block.
 // The outer gate allows the delegation; the inner inherited-Plan turn enforces
 // read-only. (Act-mode confirmation is untouched — see #7.)
 export const PLAN_DELEGATION_TOOLS = Object.freeze(new Set(['message_actor']));
+
+// Plan-mode composition carve-out. why: page_code is only a sealed program
+// container; it has no browser authority of its own. Every page.* call it
+// emits crosses an exact SW operation that re-reads the live permission mode,
+// so Plan may compose reads without permitting click/type/client writes.
+const PLAN_COMPOSITION_TOOLS = Object.freeze(new Set(['page_code']));
 
 // --- The decision ----------------------------------------------------------
 
@@ -201,7 +204,7 @@ export const PLAN_DELEGATION_TOOLS = Object.freeze(new Set(['message_actor']));
  *
  * Plan mode: anything that isn't READ is blocked (allowed:false). This is
  * the read-only guarantee — and it's browser-native: it blocks not just
- * file writes but click/type/navigate/page_exec and side-effecting fetch.
+ * file writes but click/type/navigation and side-effecting fetch.
  *
  * Act mode:
  *   confirmActions ON   READ auto · everything else confirms
@@ -226,7 +229,8 @@ export const decideAction = ({ mode, confirmActions, tool }) => {
   }
 
   // PLAN mode blocks every non-read action — the read-only contract —
-  // with one carve-out: pure URL loads (see PLAN_NAVIGATION_TOOLS).
+  // with narrow carve-outs for pure URL loads, bounded delegation, and the
+  // authority-free page-code composition container.
   if (mode !== PERMISSION_MODES.ACT) {
     if (tool?.name && PLAN_NAVIGATION_TOOLS.has(tool.name)) {
       return {
@@ -242,6 +246,14 @@ export const decideAction = ({ mode, confirmActions, tool }) => {
         confirm: false,
         actionClass,
         reason: 'plan: delegation carve-out — the actor inherits Plan; its inner turn is the read-only barrier',
+      };
+    }
+    if (tool?.name && PLAN_COMPOSITION_TOOLS.has(tool.name)) {
+      return {
+        allowed: true,
+        confirm: false,
+        actionClass,
+        reason: 'plan: composition carve-out; every nested page operation rechecks live Plan authority',
       };
     }
     return {

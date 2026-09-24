@@ -11,7 +11,14 @@ const assertStaticSource = (path) => {
   if (APP_DATA_PATH_RE.test(path)) throw new Error(`app runtime data cannot be a composed source: ${path}`);
 };
 
-/** @param {Record<string,string>} files @param {string} [entry] @returns {string} */
+/**
+ * Inline tag-relative <link rel="stylesheet"> and <script src> references
+ * by reading from `files` and substituting the file's content.
+ *
+ * @param {Record<string, string>} files - path → content
+ * @param {string} [entry='index.html']
+ * @returns {string} composed HTML
+ */
 export const composeApp = (files, entry = 'index.html') => {
   if (!(entry in files)) {
     throw new Error(`app entry not found: ${entry}`);

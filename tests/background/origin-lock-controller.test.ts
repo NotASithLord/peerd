@@ -9,9 +9,9 @@ const makeHarness = (over: { provisional?: boolean, siteActorBindings?: any } = 
   const audits: any[] = [];
   let judgeDeps: any;
   const state = { mode: 'bound', provisional: over.provisional ?? true };
+  const persisted: number[] = [];
   const siteActorBindings = over.siteActorBindings ?? makeApiActorBindings();
   if (!over.siteActorBindings) siteActorBindings.bind('chat-1', 'https://safe.example', 'actor');
-  const persisted: number[] = [];
   const deps: any = {
     originStates: {
       read: () => state,
@@ -50,7 +50,7 @@ const makeHarness = (over: { provisional?: boolean, siteActorBindings?: any } = 
     liveSiteClientLandingFor: async () => ({ status: 'none' }),
   };
   const resolve = makeOriginLockResolver(deps);
-  return { resolve, turnTokens, stopped, released, audits, siteActorBindings, persisted, getJudgeDeps: () => judgeDeps };
+  return { resolve, turnTokens, stopped, released, audits, persisted, siteActorBindings, getJudgeDeps: () => judgeDeps };
 };
 
 describe('origin lock controller', () => {

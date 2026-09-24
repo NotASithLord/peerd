@@ -36,6 +36,52 @@ const linkedPair = async () => {
 };
 
 describe('the dweb app store (base-network content + discovery)', () => {
+  test('a lone publisher can read its own announced bundle', async () => {
+    const identity = await generateIdentity();
+    const mesh = createRoomMesh({ roomId: 'base', identity });
+    const base = await createBaseNetwork({ identity, mesh });
+    const { uri } = await base.publishApp({
+      name: 'self', entry: 'index.html', files: { 'index.html': '<h1>self</h1>' },
+    });
+
+    const { manifest, payload, providers } = await base.fetchApp(uri);
+
+    expect(manifest.publisher).toBe(identity.did);
+    expect(providers).toEqual([identity.did]);
+    expect(new TextDecoder().decode(
+      (await unpackTransportBundle({ manifest, payload })).files['index.html'],
+    )).toBe('<h1>self</h1>');
+    base.close();
+  });
+
+  test('a self-publisher with not-yet-announced bytes fails fast and retryably', async () => {
+    const identity = await generateIdentity();
+    const mesh = createRoomMesh({ roomId: 'base', identity });
+    const base = await createBaseNetwork({ identity, mesh });
+    const { uri, hash } = await base.publishApp({
+      name: 'self pending', entry: 'index.html', files: { 'index.html': '<h1>pending</h1>' },
+    });
+    expect(base.unserveContent(hash)).toBe(true);
+
+    const settled = await Promise.race([
+      base.fetchApp(uri).then(
+        () => ({ result: 'unexpected-success' }),
+        (error) => ({ error }),
+      ),
+      tick(100).then(() => ({ result: 'timed-out' })),
+    ]);
+    expect(settled).toMatchObject({
+      error: {
+        code: 'dweb-local-content-unavailable',
+        performed: false,
+        outcomeKnown: true,
+        outcomeKind: 'pre-effect-failure',
+        retryable: true,
+      },
+    });
+    base.close();
+  });
+
   test('publish on one node, fetch + verify the signed bundle on a linked peer', async () => {
     const { a, b, ia } = await linkedPair();
     const { uri, hash } = await a.publishApp({

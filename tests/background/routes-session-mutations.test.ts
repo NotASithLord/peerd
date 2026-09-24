@@ -1,15 +1,13 @@
 import { describe, test, expect } from 'bun:test';
 import { makeSessionMutationRoutes } from '../../extension/background/routes/session-mutations.js';
 import { makeLifecycleBoot } from '../../extension/peerd-runtime/lifecycle/boot.js';
-import { beginSessionAuthorityChange } from '../../extension/shared/session-authority-epoch.js';
+import { bindCurrentChat } from '../../extension/shared/current-session-binding.js';
 
 class SessionNotFoundError extends Error {}
 
 const baseDeps = (over: any = {}) => {
-  const calls: any = { extract: [], updated: [], cacheSet: null, cacheCleared: false, halted: [] };
-  const cache: any = { current: { sessionId: 'cur', model: 'old' } };
+  const calls: any = { extract: [], updated: [], halted: [] };
   const deps = {
-    beginSessionAuthorityChange,
     vault: { isLocked: () => false },
     auditLog: { append: async () => {} },
     pushState: () => {},
@@ -23,11 +21,6 @@ const baseDeps = (over: any = {}) => {
       sessionGet: async (k: string) => (deps.sessionCache as any)._store[k],
       sessionSet: async (k: string, v: any) => { (deps.sessionCache as any)._store[k] = v; },
       sessionDelete: async (k: string) => { delete (deps.sessionCache as any)._store[k]; },
-    },
-    sessionState: {
-      current: () => cache.current,
-      set: (r: any) => { cache.current = r; calls.cacheSet = r; },
-      clear: () => { cache.current = null; calls.cacheCleared = true; },
     },
     autoMemory: { maybeExtract: async (id: string, reason: string) => { calls.extract.push([id, reason]); } },
     maybeAutoResumeAfterRecovery: () => {},
@@ -45,30 +38,6 @@ const baseDeps = (over: any = {}) => {
   };
   return { deps, calls };
 };
-
-describe('session/setModel', () => {
-  test('no session → no-session', async () => {
-    const { deps } = baseDeps();
-    deps.sessionCache._store = {};
-    expect(await makeSessionMutationRoutes(deps)['session/setModel']({ model: 'm' })).toEqual({ ok: false, error: 'no-session' });
-  });
-  test('invalid model rejected', async () => {
-    const { deps } = baseDeps();
-    expect(await makeSessionMutationRoutes(deps)['session/setModel']({ sessionId: 'cur', model: '  ' })).toEqual({ ok: false, error: 'invalid-model' });
-  });
-  test('updates record + keeps the active-session cache coherent', async () => {
-    const { deps, calls } = baseDeps();
-    const res = await makeSessionMutationRoutes(deps)['session/setModel']({ sessionId: 'cur', model: '  gpt-x  ' });
-    expect(res).toEqual({ ok: true, model: 'gpt-x' });
-    expect(calls.updated).toEqual([['cur', { model: 'gpt-x' }]]);
-    expect(calls.cacheSet).toEqual({ sessionId: 'cur', model: 'gpt-x' });
-  });
-  test('does NOT touch cache when the edited session is not the cached one', async () => {
-    const { deps, calls } = baseDeps();
-    await makeSessionMutationRoutes(deps)['session/setModel']({ sessionId: 's2', model: 'z' });
-    expect(calls.cacheSet).toBeNull();
-  });
-});
 
 describe('session/reset + switch + archive auto-memory seams', () => {
   test.each(['goal', 'read'])('archive stops all live work before a failed %s operation', async (failure) => {
@@ -116,7 +85,7 @@ describe('session/reset + switch + archive auto-memory seams', () => {
   test('reset clears cache + extracts from the previous session', async () => {
     const { deps, calls } = baseDeps();
     await makeSessionMutationRoutes(deps)['session/reset']();
-    expect(calls.cacheCleared).toBe(true);
+    expect(await deps.sessionCache.sessionGet('currentSessionId')).toBeUndefined();
     expect(calls.extract).toEqual([['cur', 'switch']]);
   });
   test('reset awaits the empty-chat projection before returning', async () => {
@@ -133,26 +102,61 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     await reset;
     expect(returned).toBe(true);
   });
-  test('switch sets cache + extracts from previous (only when different)', async () => {
+  test('switch sets the active session + extracts from previous (only when different)', async () => {
     const { deps, calls } = baseDeps();
     await makeSessionMutationRoutes(deps)['session/switch']({ sessionId: 's2' });
-    expect(calls.cacheSet).toEqual({ sessionId: 's2' });
+    expect(await deps.sessionCache.sessionGet('currentSessionId')).toBe('s2');
     expect(calls.extract).toEqual([['cur', 'switch']]);
   });
-  test('reset stops the root, bound actors, and spawned descendants', async () => {
-    // The current chat is 'cur' with two actors in flight. "New chat" must abort
-    // the orchestrator turn AND both actor slots — else they run on as zombies
-    // (the OM2W harness wedge). Mirrors agent/stop's cascade.
-    const stopped: string[] = [];
-    const subtreeRoots: string[] = [];
+  test('Plan chat → new chat gets the independent Act default; switching back restores Plan', async () => {
+    const records: Record<string, any> = {
+      cur: { sessionId: 'cur', permissionMode: 'plan', confirmActions: true },
+      fresh: { sessionId: 'fresh', permissionMode: 'act', confirmActions: false },
+    };
     const { deps } = baseDeps({
+      sessions: { get: async (id: string) => records[id] ?? null },
+    });
+    await deps.sessionCache.sessionSet('currentPermissionMode', 'plan');
+    await deps.sessionCache.sessionSet('currentConfirmActions', true);
+
+    const routes = makeSessionMutationRoutes(deps);
+    await routes['session/reset']();
+    expect((deps.sessionCache as any)._store).toMatchObject({
+      currentPermissionMode: 'act', currentConfirmActions: false,
+    });
+    expect(await deps.sessionCache.sessionGet('currentSessionId')).toBeUndefined();
+
+    // Mirrors the first-send creation boundary: durable row first, then all
+    // three current-chat cache fields before any turn projection can continue.
+    await bindCurrentChat(deps.sessionCache, records.fresh);
+    expect((deps.sessionCache as any)._store).toMatchObject({
+      currentSessionId: 'fresh', currentPermissionMode: 'act', currentConfirmActions: false,
+    });
+
+    await routes['session/switch']({ sessionId: 'cur' });
+    expect((deps.sessionCache as any)._store).toMatchObject({
+      currentSessionId: 'cur', currentPermissionMode: 'plan', currentConfirmActions: true,
+    });
+    await routes['session/switch']({ sessionId: 'fresh' });
+    expect((deps.sessionCache as any)._store).toMatchObject({
+      currentSessionId: 'fresh', currentPermissionMode: 'act', currentConfirmActions: false,
+    });
+  });
+  test.each(['session/reset', 'session/archive'])('%s stops all work before a failed goal write', async (route) => {
+    const stopped: string[] = [];
+    const { deps } = baseDeps({
+      haltGoalRun: async () => { throw new Error('storage unavailable'); },
       turnSlots: { stop: (sid: string) => { stopped.push(sid); return true; } },
       actorMessaging: { stopActorsFor: (sid: string) => (sid === 'cur' ? ['res-1', 'res-2'] : []) },
-      actorLifecycle: { stopSubtree: (sid: string) => { subtreeRoots.push(sid); return ['child-1']; } },
+      actorLifecycle: { stopSubtree: (sid: string) => { stopped.push(`children:${sid}`); return ['child']; } },
     });
-    await makeSessionMutationRoutes(deps)['session/reset']();
-    expect(stopped).toEqual(['cur', 'res-1', 'res-2']);   // orchestrator first, then its actors
-    expect(subtreeRoots).toEqual(['cur']);
+    let archived = false;
+    deps.sessions.get = async () => { throw new Error('session read unavailable'); };
+    deps.sessions.archive = async () => { archived = true; };
+    await expect(makeSessionMutationRoutes(deps)[route]({ sessionId: 'cur' }))
+      .rejects.toThrow('storage unavailable');
+    expect(stopped).toEqual(['cur', 'res-1', 'res-2', 'children:cur']);
+    expect([archived, await deps.sessionCache.sessionGet('currentSessionId')]).toEqual([false, 'cur']);
   });
   test('reset with nothing in flight does not over-stop', async () => {
     const stopped: string[] = [];
@@ -179,13 +183,13 @@ describe('session/reset + switch + archive auto-memory seams', () => {
   test('switch to the SAME (current) session does NOT re-extract', async () => {
     const { deps, calls } = baseDeps();
     await makeSessionMutationRoutes(deps)['session/switch']({ sessionId: 'cur' });
-    expect(calls.cacheSet).toEqual({ sessionId: 'cur' });
+    expect(await deps.sessionCache.sessionGet('currentSessionId')).toBe('cur');
     expect(calls.extract).toEqual([]); // previousId === sessionId → no auto-memory call
   });
   test('archiving a NON-active session leaves the active cache intact', async () => {
     const { deps, calls } = baseDeps();
     await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 's2' });
-    expect(calls.cacheCleared).toBe(false); // currentId !== archived id → cache untouched
+    expect(await deps.sessionCache.sessionGet('currentSessionId')).toBe('cur');
     expect(calls.extract).toEqual([['s2', 'archive']]);
   });
   test('archive stops the root and actor turns, then awaits lifecycle settlement', async () => {
@@ -194,7 +198,7 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     const { deps } = baseDeps({
       turnSlots: { stop: (sid: string) => { events.push(`stop:${sid}`); return true; } },
       actorMessaging: { stopActorsFor: () => ['actor-1', 'actor-2'] },
-      actorLifecycle: { stopSubtree: (sid: string) => { events.push(`subtree:${sid}`); return ['child-1']; } },
+      actorLifecycle: { stopSubtree: (sid: string) => { events.push(`children:${sid}`); return ['child']; } },
       purgeLifecycleSession: async (sid: string) => {
         events.push(`purge:${sid}`);
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -204,7 +208,7 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 's2' });
     expect(events).toEqual([
       'stop:s2', 'stop:actor-1', 'stop:actor-2',
-      'subtree:s2', 'purge:s2', 'purge:actor-1', 'purge:actor-2', 'purge:child-1',
+      'children:s2', 'purge:s2', 'purge:actor-1', 'purge:actor-2', 'purge:child',
     ]);
     expect(settled).toBe(true);
   });
@@ -256,15 +260,21 @@ describe('session/reset + switch + archive auto-memory seams', () => {
     const { deps } = baseDeps();
     expect(await makeSessionMutationRoutes(deps)['session/switch']({ sessionId: 'ghost' })).toEqual({ ok: false, error: 'session-not-found' });
   });
+  test('switch requires a session id before storage', async () => {
+    const { deps } = baseDeps({ sessions: { get: () => { throw new Error('storage reached'); } } });
+    expect(await makeSessionMutationRoutes(deps)['session/switch']({})).toEqual({ ok: false, error: 'sessionId-required' });
+  });
   test('archive of the active session clears cache + extracts with archive reason', async () => {
     const { deps, calls } = baseDeps();
     await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 'cur' });
-    expect(calls.cacheCleared).toBe(true);
+    expect(await deps.sessionCache.sessionGet('currentSessionId')).toBeUndefined();
     expect(calls.extract).toEqual([['cur', 'archive']]);
   });
   test('archive maps SessionNotFoundError', async () => {
-    const { deps } = baseDeps({ sessions: { get: async () => ({ sessionId: 'x' }),
-      archive: async () => { throw new SessionNotFoundError(); } } });
+    const { deps } = baseDeps({ sessions: {
+      get: async (sessionId: string) => ({ sessionId }),
+      archive: async () => { throw new SessionNotFoundError(); },
+    } });
     expect(await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 'x' })).toEqual({ ok: false, error: 'session-not-found' });
   });
   // Archive is the terminal session-lifecycle event (there is no delete route),
@@ -286,31 +296,30 @@ describe('session/reset + switch + archive auto-memory seams', () => {
   test('a FAILED archive (unknown session) does not nuke the workspace', async () => {
     const nuked: string[] = [];
     const { deps } = baseDeps({
-      sessions: { get: async () => null },
+      sessions: { get: async () => null, archive: async () => { throw new SessionNotFoundError(); } },
       nukeSessionWorkspace: (sid: string) => { nuked.push(sid); return Promise.resolve(); },
     });
     await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 'ghost' });
     expect(nuked).toEqual([]);
   });
-});
-
-describe('permission/set', () => {
-  test('no mode or confirm → error', async () => {
-    const { deps } = baseDeps();
-    expect(await makeSessionMutationRoutes(deps)['permission/set']({})).toEqual({ ok: false, error: 'no-mode-or-confirm' });
-  });
-  test('normalizes + caches + persists + returns resolved', async () => {
-    const { deps, calls } = baseDeps();
-    const res = await makeSessionMutationRoutes(deps)['permission/set']({ mode: 'plan', confirmActions: true });
-    expect(res.ok).toBe(true);
-    expect(res.permission).toEqual({ mode: 'act', confirmActions: false }); // from resolvePermission(session)
-    expect(deps.sessionCache._store.currentPermissionMode).toBe('plan');
-    expect(deps.sessionCache._store.currentConfirmActions).toBe(true);
-    expect(calls.updated).toEqual([['cur', { permissionMode: 'plan', confirmActions: true }]]);
+  test.each(['session/reset', 'session/archive'])('%s audits stopped descendants', async (route) => {
+    const events: any[] = [];
+    const { deps } = baseDeps({
+      auditLog: { append: async (event: any) => { events.push(event); } },
+      actorLifecycle: { stopSubtree: () => ['child'] },
+    });
+    await makeSessionMutationRoutes(deps)[route]({ sessionId: 'cur' });
+    expect(events).toContainEqual({
+      type: 'actor_stopped', sessionId: 'cur',
+      details: { childSessionId: 'child', reason: route.replace('/', '_') + '_cascade' },
+    });
   });
 });
 
-// A route must finish durable Goal Stop before it resets or archives a session.
+// #60 (related): new-chat and archive must AWAIT the durable goal Stop, so the
+// run's persisted record is forgotten before the handler returns; otherwise an
+// SW teardown right after could let resume() resurrect the stopped run. A
+// late-resolving haltGoalRun reverts-proves the await (un-awaited → not done yet).
 describe('durable goal Stop is awaited on new-chat / archive (#60)', () => {
   const slowHalt = () => {
     let done = false;
@@ -327,13 +336,8 @@ describe('durable goal Stop is awaited on new-chat / archive (#60)', () => {
 
   test('session/archive awaits the durable Stop before returning', async () => {
     const halt = slowHalt();
-    let archivedAfterHalt = false;
-    const { deps } = baseDeps({
-      haltGoalRun: halt.haltGoalRun,
-      sessions: { get: async () => ({ sessionId: 'cur' }),
-        archive: async () => { archivedAfterHalt = halt.isDone(); } },
-    });
+    const { deps } = baseDeps({ haltGoalRun: halt.haltGoalRun });
     await makeSessionMutationRoutes(deps)['session/archive']({ sessionId: 'cur' });
-    expect(archivedAfterHalt).toBe(true);
+    expect(halt.isDone()).toBe(true);
   });
 });

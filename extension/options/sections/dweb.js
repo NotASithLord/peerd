@@ -25,6 +25,7 @@ export const DwebSection = {
     vnode.state.dwebBusy = false;
     vnode.state.dwebError = null;
     vnode.state.dwebStopIncomplete = false;
+    vnode.state.dwebOutcomeUnknown = false;
     if (DWEB_ENABLED) {
       const loadStatus = vnode.attrs?.loadStatus
         ?? (() => loadDweb().then((client) => client.getStatus()));
@@ -51,23 +52,32 @@ export const DwebSection = {
     const stopFailed = !!ui.dwebStopIncomplete;
     const applyNetwork = async () => {
       if (ui.dwebBusy) return;
+      if (ui.dwebOutcomeUnknown) {
+        location.reload();
+        return;
+      }
       const targetEnabled = stopFailed ? false : !dwebEnabled;
       ui.dwebBusy = true;
       ui.dwebError = null;
       try {
         const reply = await send({ type: 'settings/update', patch: { dwebEnabled: targetEnabled } });
-        if (reply?.ok) {
+        if (reply?.outcomeKnown === false) {
+          ui.dwebOutcomeUnknown = true;
+          ui.dwebStopIncomplete = false;
+          ui.dwebError = 'Peerd could not confirm whether the dweb change finished. Reload settings to reconcile before changing it again.';
+        } else if (reply?.ok) {
+          ui.dwebOutcomeUnknown = false;
           ui.dwebStopIncomplete = false;
         } else if (!targetEnabled && reply?.settings?.dwebEnabled === false) {
           ui.dwebStopIncomplete = true;
           ui.dwebError = 'dweb is set to Off, but the live network could not be stopped. Restart peerd or try again.';
         } else {
-          ui.dwebError = `Could not update dweb: ${reply?.error ?? 'unknown error'}. Try again.`;
+          ui.dwebError = 'Could not update dweb. Try again.';
         }
       } catch {
-        ui.dwebError = ui.dwebStopIncomplete
-          ? 'dweb is set to Off, but the live network could not be stopped. Restart peerd or try again.'
-          : 'Could not confirm the dweb change. Try again.';
+        ui.dwebOutcomeUnknown = true;
+        ui.dwebStopIncomplete = false;
+        ui.dwebError = 'Peerd could not confirm whether the dweb change finished. Reload settings to reconcile before changing it again.';
       } finally {
         ui.dwebBusy = false;
         m.redraw();
@@ -87,9 +97,11 @@ export const DwebSection = {
       id: 'dweb-network',
       label: 'Participate in the dweb',
       pill: networkBusy ? '\u2026' : dwebEnabled ? 'ON' : 'OFF',
-      badge: stopFailed ? 'STILL RUNNING' : null,
+      badge: ui.dwebOutcomeUnknown ? 'STATUS UNKNOWN' : stopFailed ? 'STILL RUNNING' : null,
       summary: networkBusy
         ? 'Saving\u2026'
+        : ui.dwebOutcomeUnknown
+          ? 'The last change could not be confirmed. Reload settings to reconcile.'
         : stopFailed
           ? 'Set to Off, but the live network is still running. Retry to stop it.'
           : dwebEnabled
@@ -108,7 +120,9 @@ export const DwebSection = {
           + 'Nothing connects anywhere until you explicitly join a room.',
       open: whyOpen('dweb-network'),
       onToggleWhy: toggleWhy('dweb-network'),
-      control: toggleSwitch({
+      control: ui.dwebOutcomeUnknown ? m('button.secondary', {
+        type: 'button', disabled: networkBusy, onclick: applyNetwork,
+      }, 'Reload dweb status') : toggleSwitch({
         on: dwebEnabled,
         busy: networkBusy,
         label: stopFailed
@@ -138,6 +152,7 @@ export const DwebSection = {
         label: 'dweb agent',
         on: agentOn,
         busyKey: 'dwebAgentBusy',
+        disabled: ui.dwebOutcomeUnknown,
         summary: agentOn
           ? 'Addressable as "dweb" in chat (message_actor); joins the agent inbox on unlock.'
           : 'The mesh tools are unavailable - they live on this agent, not the chat agent.',
@@ -164,7 +179,7 @@ export const DwebSection = {
         m('button.secondary', { type: 'button', onclick: () => openHome('library') }, 'Open Library'),
       ]) : null,
 
-      resetRow(send, ['dwebEnabled', 'dwebAgentEnabled']),
+      ui.dwebOutcomeUnknown ? null : resetRow(send, ['dwebEnabled', 'dwebAgentEnabled']),
     ]);
   },
 };

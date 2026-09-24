@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // dweb_share — publish one of the user's Apps to the dweb app store, peer to peer.
 //
 // The app's signed bundle goes out over the always-on base network: announced by
@@ -31,55 +33,44 @@
  */
 
 /** @type {DwebTool} */
-export const dwebShareTool = {
-  name: 'dweb_share',
-  primitive: 'dweb',
-  dweb: true,
-  description: [
-    'Publish one of the user\'s Apps to the dweb app store so peers can discover',
-    'and install it peer-to-peer (no server). Pass the app id (from actor_list). The',
-    'app travels as a signed bundle over the base network and shows up in peers\'',
-    'Discover view. Use after building an app the user wants to share. CONFIRMS',
-    'with the user every time — it is public and outward-facing.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: { appId: { type: 'string', description: 'The app id to publish (from actor_list).' } },
-    required: ['appId'],
-  },
-  sideEffect: 'mutate_external',
-  origins: () => [],
+export const dwebShareTool = composeTool("dweb_share", {
 
   execute: async (args, ctx) => {
     // why: narrow ctx to the dweb-only slots (dweb surface + force-confirm) the
     // SW injects for dweb builds — absent/loosely-typed on the base ToolContext.
-    const dctx = /** @type {DwebShareCtx} */ (/** @type {unknown} */ (ctx));
-    if (!dctx.dweb) return {
+    const authority = /** @type {{publishConfirmedApp?:(appId:string)=>Promise<any>}|undefined} */ (
+      /** @type {{dwebAuthority?:unknown}} */ (ctx).dwebAuthority);
+    if (typeof authority?.publishConfirmedApp !== 'function') return {
       ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.',
       outcomeKind: 'pre-effect-failure',
     };
     const appId = String(args?.appId ?? '').trim();
     if (!appId) return { ok: false, error: 'appId_required', outcomeKind: 'pre-effect-failure' };
-    // Publishing is public, so confirm even if the global confirm toggle is OFF
-    // (the dispatcher's gate already confirms it when the toggle is on).
-    if (dctx.permission?.confirmActions === false && dctx.confirm) {
-      const ans = await dctx.confirm({
-        tool: 'dweb_share', kind: 'dweb_publish', origins: [],
-        summary: `Publish app "${appId}" to the dweb app store? Peers will be able to discover and install it.`,
-        sessionId: ctx.session?.sessionId ?? null,
-      }, ctx.abortSignal);
-      if (ans !== 'yes_once' && ans !== 'yes_session') {
-        return {
-          ok: false, error: 'declined', content: 'User declined to publish to the dweb.',
-          outcomeKind: 'pre-effect-failure',
-        };
-      }
-    }
-    const r = await dctx.dweb.share(appId);
+    const r = await authority.publishConfirmedApp(appId);
+    if (r?.error === 'dweb_unavailable') return {
+      ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.',
+      outcomeKind: 'pre-effect-failure',
+    };
+    if (r?.declined === true) return {
+      ok: false, error: 'declined', content: 'User declined to publish to the dweb.',
+      outcomeKind: 'pre-effect-failure',
+    };
     if (!r?.ok) {
       const error = r?.error ?? 'share_failed';
+      if (error === 'share-propagation-failed') return {
+        ok: false,
+        error,
+        content: 'The App is published and saved locally, but its discovery card was not forwarded to peers. It may not be discoverable yet; retry sharing later.',
+        outcomeKnown: true,
+        outcomeKind: 'effect-completed',
+        retryable: false,
+        structured: { localPublished: true, propagated: false },
+      };
       const preEffect = ['dweb-disabled', 'dweb-start-failed', 'app-not-found'].includes(error);
-      return { ok: false, error, ...(preEffect ? { outcomeKind: 'pre-effect-failure' } : {}) };
+      return {
+        ok: false, error,
+        ...(preEffect ? { outcomeKind: /** @type {const} */ ('pre-effect-failure') } : {}),
+      };
     }
     return {
       ok: true,
@@ -96,4 +87,4 @@ export const dwebShareTool = {
       }, null, 2),
     };
   },
-};
+});

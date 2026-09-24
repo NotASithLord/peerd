@@ -38,18 +38,16 @@ describe('dweb tool exposure (off the store build)', () => {
 describe('dweb tool exposure (progressive disclosure of the SECONDARY surface)', () => {
   const dwebOn = [
     { name: 'dweb_discover' }, { name: 'dweb_share' }, { name: 'dweb_install' },
-    { name: 'dweb_peers' }, { name: 'dweb_block' }, { name: 'dweb_discovery' }, { name: 'dweb_guide' },
+    { name: 'dweb_peers' }, { name: 'dweb_block' }, { name: 'dweb_discovery' },
     { name: 'sandbox_create' },
   ];
-  test('isDwebSecondaryTool flags exactly the deferred set (dweb_guide is ENTRY, not deferred)', () => {
+  test('isDwebSecondaryTool flags exactly the deferred set', () => {
     for (const n of ['dweb_peers', 'dweb_block', 'dweb_discovery']) expect(isDwebSecondaryTool(n)).toBe(true);
-    // dweb_guide is an ENTRY tool — the prompt tells the agent to call it FIRST,
-    // before any other dweb tool, so it must NOT be gated behind engagement.
-    for (const n of ['dweb_discover', 'dweb_share', 'dweb_install', 'dweb_guide', 'sandbox_create']) expect(isDwebSecondaryTool(n)).toBe(false);
+    for (const n of ['dweb_discover', 'dweb_share', 'dweb_install', 'sandbox_create']) expect(isDwebSecondaryTool(n)).toBe(false);
   });
-  test('hides the secondary tools until the session has engaged the dweb; dweb_guide stays visible', () => {
+  test('hides the secondary tools until the session has engaged the dweb', () => {
     expect(filterByDwebActive(dwebOn, false).map((t) => t.name))
-      .toEqual(['dweb_discover', 'dweb_share', 'dweb_install', 'dweb_guide', 'sandbox_create']); // entry tools (incl. guide) survive
+      .toEqual(['dweb_discover', 'dweb_share', 'dweb_install', 'sandbox_create']);
   });
   test('reveals the secondary tools once engaged', () => {
     expect(filterByDwebActive(dwebOn, true).map((t) => t.name)).toEqual(dwebOn.map((t) => t.name));
@@ -58,7 +56,7 @@ describe('dweb tool exposure (progressive disclosure of the SECONDARY surface)',
 
 describe('tool exposure (main-agent cutover)', () => {
   test('hides the low-level DOM/page tools from the main agent', () => {
-    for (const name of ['snapshot', 'read_page', 'read_state', 'watch_changes', 'query_dom', 'page_eval', 'page_exec', 'page_keys', 'navigate', 'type', 'click', 'read_pdf']) {
+    for (const name of ['snapshot', 'read_page', 'read_state', 'watch_changes', 'query_dom', 'page_code', 'navigate', 'type', 'click', 'read_doc']) {
       expect(isHiddenFromMain(name)).toBe(true);
     }
   });
@@ -70,20 +68,20 @@ describe('tool exposure (main-agent cutover)', () => {
   });
 
   test('mainAgentDescriptors removes exactly the hidden set, order preserved', () => {
-    const all = [{ name: 'message_actor' }, { name: 'snapshot' }, { name: 'click' }, { name: 'open_tab' }, { name: 'actor_list' }, { name: 'page_exec' }, { name: 'remember' }];
+    const all = [{ name: 'message_actor' }, { name: 'snapshot' }, { name: 'click' }, { name: 'open_tab' }, { name: 'actor_list' }, { name: 'page_code' }, { name: 'remember' }];
     expect(mainAgentDescriptors(all).map((t) => t.name)).toEqual(['message_actor', 'open_tab', 'actor_list', 'remember']);
   });
 });
 
 describe('exposureGate — enforcement at dispatch (not just the descriptor list)', () => {
   test('refuses a hidden tool when the context is the MAIN agent', () => {
-    const r = eg({ name: 'page_exec' }, {}, { exposure: 'main' });
+    const r = eg({ name: 'snapshot' }, {}, { exposure: 'main' });
     expect(r.allowed).toBe(false);
     expect(r.reason).toContain('actor-only');
   });
 
   test('allows a hidden tool for the actor / actor (exposure unset)', () => {
-    expect(eg({ name: 'page_exec' }, {}, {}).allowed).toBe(true);
+    expect(eg({ name: 'snapshot' }, {}, {}).allowed).toBe(true);
     expect(eg({ name: 'snapshot' }, {}, { exposure: null }).allowed).toBe(true);
   });
 
@@ -283,7 +281,7 @@ describe('DESIGN-17 actor tier — the gate (the wall)', () => {
 });
 
 describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () => {
-  // Production shape (buildToolContext, service-worker.js): the per-chat web
+  // Production shape: the per-chat web
   // actor's actorInstanceId is the FIXED literal 'web' (its message_actor
   // address — stable across re-navigation), never a tab id. The actor's
   // actually-owned tab lives at ctx.activeTab.id, resolved separately. A
@@ -296,16 +294,12 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
   const web = (over: object = {}) =>
     ({ exposure: EXPOSURE_ACTOR, actorType: 'web', actorInstanceId: 'web', activeTab: { id: 42, url: 'https://example.test/', origin: 'https://example.test' }, ...over });
 
-  test('WEB_ACTOR_DOM_TOOLS is the DOM read/mutate set (no code-exec)', () => {
-    // The web actor owns page reads + DOM mutators but NOT page_eval/page_exec —
-    // it ingests untrusted page text, so it must not also wield code-exec.
+  test('WEB_ACTOR_DOM_TOOLS is the discrete DOM read/mutate set', () => {
     expect([...WEB_ACTOR_DOM_TOOLS].sort()).toEqual([
-      'click', 'navigate', 'query_dom', 'read_page', 'read_pdf',
+      'click', 'navigate', 'query_dom', 'read_page',
       'read_state', 'snapshot', 'type', 'view', 'watch_changes',
     ].sort());
-    expect(WEB_ACTOR_DOM_TOOLS).not.toContain('page_eval');
-    expect(WEB_ACTOR_DOM_TOOLS).not.toContain('page_exec');
-    expect(WEB_ACTOR_DOM_TOOLS).not.toContain('page_keys');
+    expect(WEB_ACTOR_DOM_TOOLS).not.toContain('page_code');
   });
 
   test('a web actor may call its DOM tools (read + mutate) + the sessionless fetch_url', () => {
@@ -320,7 +314,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // call_api stays OUT — the web actor's open-web read is fetch_url (sessionless),
     // not the credential-capable call_api.
     expect(isAllowedForActorType('call_api', 'web')).toBe(false);
-    // == DOM toolset + fetch_url + read_doc + read_web_cache + the 4 DESIGN-19
+    // == DOM toolset + fetch_url + read_doc + read_result + the 4 DESIGN-19
     // site-client tools (run/read/write/capture) + login (Tier 0)
     // (drift: bump if the set grows).
     expect(actorAllowedTools('web').size).toBe(WEB_ACTOR_DOM_TOOLS.length + 8);
@@ -336,9 +330,9 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // Tier 0 login — web-actor-only, refused for every other kind.
     expect(isAllowedForActorType('login', 'web')).toBe(true);
     expect(isAllowedForActorType('login', 'app')).toBe(false);
-    // read_web_cache pages a spilled fetch_url body — same tier as the fetch.
-    expect(isAllowedForActorType('read_web_cache', 'web')).toBe(true);
-    expect(isAllowedForActorType('read_web_cache', 'app')).toBe(false);
+    // read_result pages any supported oversized result: same tier as the producer.
+    expect(isAllowedForActorType('read_result', 'web')).toBe(true);
+    expect(isAllowedForActorType('read_result', 'app')).toBe(false);
   });
 
   test('DESIGN-18: an API backing keeps only its tab-free origin surface', () => {
@@ -346,8 +340,8 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     // never has). The gate refuses a DOM tool for backing:'api' at the gate.
     expect(isAllowedForActor('fetch_url', 'web', 'api')).toBe(true);
     // ...and its paging read side — an API actor that overflows must page too.
-    expect(isAllowedForActor('read_web_cache', 'web', 'api')).toBe(true);
-    for (const n of ['click', 'type', 'navigate', 'snapshot', 'read_page', 'query_dom', 'read_pdf']) {
+    expect(isAllowedForActor('read_result', 'web', 'api')).toBe(true);
+    for (const n of ['click', 'type', 'navigate', 'snapshot', 'read_page', 'query_dom', 'read_doc']) {
       expect(isAllowedForActor(n, 'web', 'api')).toBe(false);
     }
     // DESIGN-19: an API actor CAN run/read/write a site client for its fixed origin,
@@ -355,7 +349,7 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
     expect(isAllowedForActor('site_client_run', 'web', 'api')).toBe(true);
     expect(isAllowedForActor('site_client_write', 'web', 'api')).toBe(true);
     expect(isAllowedForActor('site_capture', 'web', 'api')).toBe(false);
-    // fetch_url + read_web_cache + site_client_run/read/write (capture excluded).
+    // fetch_url + read_result + site_client_run/read/write (capture excluded).
     expect(actorAllowedToolsFor('web', 'api').size).toBe(5);
     // A tab backing (and an absent backing — the DESIGN-17 default) keeps the FULL set.
     expect(isAllowedForActor('click', 'web', 'tab')).toBe(true);
@@ -386,10 +380,9 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
   });
 
   test('a web actor is positively scoped — foreign + powerful tools refused', () => {
-    // notably page_eval/page_exec (code-exec) are NOT in the web toolset — the
-    // exclusion that IS the web actor's boundary, enforced at the gate.
+    // Foreign engine, actor, and direct API tools are excluded at the gate.
     for (const n of ['app_update', 'vm_boot', 'js_notebook', 'edit_file',
-      'call_api', 'actor_create', 'page_eval', 'page_exec', 'message_actor']) {
+      'call_api', 'actor_create', 'message_actor']) {
       expect(rt({ name: n }, {}, web())?.allowed).toBe(false);
     }
   });
@@ -441,18 +434,18 @@ describe('DESIGN-17 web actor — the fourth kind (DOM toolset + tab pin)', () =
   test('DESIGN-18: actorDescriptors advertises the API actor tab-free surface', () => {
     const all = [
       { name: 'click' }, { name: 'snapshot' }, { name: 'navigate' },
-      { name: 'fetch_url' }, { name: 'read_web_cache' },
+      { name: 'fetch_url' }, { name: 'read_result' },
       { name: 'site_client_run' }, { name: 'site_client_read' }, { name: 'site_client_write' },
       { name: 'site_capture' }, { name: 'app_update' },
     ];
     // An API backing drops the DOM tools from the ADVERTISED list (matching the gate +
     // the actor's own "no DOM" lore — so the model isn't shown tools it'd only be refused).
     expect(actorDescriptors(all, 'web', 'api').map((t) => t.name)).toEqual([
-      'fetch_url', 'read_web_cache', 'site_client_run', 'site_client_read', 'site_client_write',
+      'fetch_url', 'read_result', 'site_client_run', 'site_client_read', 'site_client_write',
     ]);
     // A tab backing (and an absent backing) keep the full web surface.
     expect(actorDescriptors(all, 'web', 'tab').map((t) => t.name).sort()).toEqual([
-      'click', 'fetch_url', 'navigate', 'read_web_cache', 'site_capture',
+      'click', 'fetch_url', 'navigate', 'read_result', 'site_capture',
       'site_client_read', 'site_client_run', 'site_client_write', 'snapshot',
     ]);
   });
@@ -474,7 +467,7 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
     // perception is page.snapshot()/page.content() INSIDE page_code, not a direct
     // tool (a direct snapshot resolves the tab from the actor's turn ctx, which a
     // fresh actor lacks — the mid-turn-adopted tab never repins it, so it fails).
-    for (const n of ['click', 'type', 'navigate', 'query_dom', 'page_keys', 'fetch_url', 'snapshot', 'read_page']) {
+    for (const n of ['click', 'type', 'navigate', 'query_dom', 'fetch_url', 'snapshot', 'read_page']) {
       expect(isAllowedForActor(n, 'web', 'tab', 'code')).toBe(false);
     }
   });
@@ -488,7 +481,7 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
     expect(isAllowedForActor('navigate', 'web', 'tab', undefined)).toBe(true);
     // An API backing ignores the surface entirely — still fetch/site-client only.
     expect(isAllowedForActor('page_code', 'web', 'api', 'code')).toBe(false);
-    expect(actorAllowedToolsFor('web', 'api', 'code').size).toBe(5);   // fetch_url + read_web_cache + site_client run/read/write (surface ignored for api)
+    expect(actorAllowedToolsFor('web', 'api', 'code').size).toBe(5);   // fetch_url + read_result + site-client run/read/write (surface ignored for api)
   });
 
   test('page_code is contained: hidden from main, in NO other actor kind\'s allow-set', () => {
@@ -498,8 +491,8 @@ describe('PR #119 web actor — the code-REPL action surface (A/B arm)', () => {
     // closed at exposureGate), and present ONLY in the code-surface web actor's
     // positive set. (The spawn_subagent path is walled separately: the
     // capability strip drops jsOffscreenClient for any non-code-surface ctx,
-    // and the SW page/call route refuses a non-web-actor owner — the slice-3
-    // security tests.)
+    // and nested page-program execution refuses a non-web-actor owner: the
+    // slice-3 security tests.)
     expect(isHiddenFromMain('page_code')).toBe(true);
     const r = eg({ name: 'page_code' }, {}, { exposure: 'main' });
     expect(r?.allowed).toBe(false);

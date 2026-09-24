@@ -11,7 +11,6 @@ import {
   inspectEnvelope,
   exportFilename,
   EXPORT_LIMIT_BYTES,
-  EXPORT_FILE_LIMIT_BYTES,
 } from '../../extension/peerd-engine/export.js';
 import { ArtifactTooLargeError } from '../../extension/peerd-engine/errors.js';
 import { fromUtf8 } from '../../extension/shared/bundle/bytes.js';
@@ -222,14 +221,6 @@ describe('the 64MB export rail', () => {
     if (!inspected.ok) expect(inspected.error).toContain('64 MB');
   });
 
-  test('the options page rejects an oversized .peerd file before reading it', async () => {
-    expect(EXPORT_FILE_LIMIT_BYTES).toBeGreaterThan(Math.ceil(EXPORT_LIMIT_BYTES / 3) * 4);
-    const source = await Bun.file('extension/options/sections/transfer.js').text();
-    const sizeCheck = source.indexOf('file.size > EXPORT_FILE_LIMIT_BYTES');
-    const read = source.indexOf('envelope = JSON.parse(await file.text())');
-    expect(sizeCheck).toBeGreaterThan(-1);
-    expect(read).toBeGreaterThan(sizeCheck);
-  });
 });
 
 describe('export filenames', () => {

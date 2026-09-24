@@ -55,7 +55,7 @@ export const APP_RUNTIME_NOTE = [
   'belongs to the web actor;',
   'the web actor can prefetch data for a bundled snapshot, not relay a live runtime',
   'connection into an ordinary App. Apps currently run only on Chrome. A dwapp:true App gets only the',
-  'consent-gated parent dweb bridge — call dweb_guide before building one. External',
+  'consent-gated parent dweb bridge. External',
   'HTTP(S) links work only through peerd\'s per-click confirmation.',
   '</app-runtime>',
 ].join('\n');

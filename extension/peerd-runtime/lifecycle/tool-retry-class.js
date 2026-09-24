@@ -3,13 +3,13 @@
 // side-effecting tool has a retry classification" — realized as ONE pure
 // function over a tool DESCRIPTOR.
 //
-// why a descriptor and not the tool objects themselves: importing
-// BUILTIN_TOOLS here would drag every def's chrome.* / engine-client import
-// graph into a module that must stay pure, IO-free and browser-free
+// why a descriptor and not executable tool objects: importing implementations
+// here would drag their chrome.* / engine-client graph into a module that must
+// stay pure, IO-free and browser-free
 // (functional core, imperative shell). The classifier reads only
 // { name, sideEffect, primitive, retryClass } — the shape every tool already
 // declares in /shared/tool-types.js — so the dispatcher can classify a
-// registered tool and a Bun test can classify the entire live inventory
+// controller tool and a Bun test can classify the entire live inventory
 // without a browser.
 //
 // The decision order, and why it is that order:
@@ -76,7 +76,6 @@ export const RETRY_CLASS_OVERRIDES = Object.freeze(
     // budget)" preconditions exist for. A LOCAL read (inspect, a page already
     // in the tab, a cache, a stored record) has none of that cost and stays A.
     fetch_url: 'B',
-    read_pdf: 'B',
     read_doc: 'B',
     // why: site_client_run reads at the tool boundary but EXECUTES the stored
     // client, whose every op is an origin-pinned fetch — requests on the wire,
@@ -124,10 +123,6 @@ export const RETRY_CLASS_OVERRIDES = Object.freeze(
     sandbox_create: 'F',
     vm_boot: 'F',
     actor_create: 'F',
-    // why: request_review declares `read` (the reviewer is read-only and
-    // cannot edit), but it SPAWNS a second agent session. The resource — not
-    // the read — is what recovery has to reason about.
-    request_review: 'F',
   }),
 );
 

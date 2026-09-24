@@ -11,7 +11,6 @@ export const ACTOR_ISOLATION_UNSUPPORTED_USER_FAILURE = 'The actor request was n
 export const ACTOR_ISOLATION_UNAVAILABLE_TOOLS = Object.freeze(new Set([
   'message_actor',
   'actor_create',
-  'request_review',
 ]));
 
 /**
@@ -88,7 +87,7 @@ export const actorIsolationRefusal = (capability, effects = {}) => ({
 });
 
 /**
- * Refuse a spawned/review actor before its parent session is read or a child
+ * Refuse a spawned actor before its parent session is read or a child
  * session is created. This is the central backstop for non-tool callers too.
  * @param {ActorIsolationCapability} capability
  * @param {number} [parentDepth]

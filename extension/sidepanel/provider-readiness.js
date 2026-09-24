@@ -26,6 +26,11 @@ const providerLabel = (name) => (/** @type {Record<string, string>} */ ({
 
 /** @param {any} composer @param {{ compact?: boolean }} [opts] */
 export const composerUnavailableCopy = (composer, { compact = false } = {}) => {
+  if (composer?.reason === 'controller-not-ready') {
+    return compact
+      ? 'Starting up. Try again in a moment.'
+      : 'peerd is starting up. Try again in a moment.';
+  }
   if (composer?.reason === 'settings-unavailable') {
     return compact
       ? 'Provider settings are temporarily unavailable.'

@@ -14,6 +14,7 @@ export const createDwebBridgeLifecycle = () => {
     return pending.dispose ??= settle(false).finally(() => { pending.dispose = null; });
   };
   return {
+    isInvalidated: () => invalidated,
     allow() { if (!invalidated) blocked = false; },
     /** @param {() => Promise<DisposableBridge | null>} create */
     attach(create) {

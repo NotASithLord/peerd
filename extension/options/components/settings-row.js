@@ -146,30 +146,40 @@ export const rowController = (ui) => {
    * A row whose control is a switch.
    * @param {{ id: string, label: string, on: boolean, busyKey: string,
    *   summary: string, why?: string | null, apply: () => Promise<any>,
-   *   badge?: string | null, pill?: string | null, children?: any }} p
+   *   badge?: string | null, pill?: string | null, disabled?: boolean, children?: any }} p
    */
   const toggleRow = ({
     id, label, on, busyKey, summary, why = null, apply,
-    badge = null, pill = null, children = null,
+    badge = null, pill = null, disabled = false, children = null,
   }) => {
     const busy = !!ui[busyKey];
+    const failure = ui[`${busyKey}Error`];
     return settingsRow({
       id,
       label,
       pill: busy ? '\u2026' : pill ?? (on ? 'ON' : 'OFF'),
       badge,
-      summary: busy ? 'Saving\u2026' : summary,
+      summary: busy ? 'Saving\u2026' : failure || summary,
       why,
       open: whyOpen(id),
       onToggleWhy: toggleWhy(id),
       control: toggleSwitch({
         on,
         busy,
+        disabled,
         label: `${label} - ${on ? 'on' : 'off'}`,
         onclick: async () => {
-          if (ui[busyKey]) return;
-          ui[busyKey] = true; m.redraw();
-          try { await apply(); } catch (e) { console.warn(`[options] ${id} toggle failed`, e); }
+          if (ui[busyKey] || disabled) return;
+          ui[busyKey] = true;
+          ui[`${busyKey}Error`] = '';
+          m.redraw();
+          try {
+            const reply = await apply();
+            if (reply?.ok === false) throw new Error(reply.error ?? 'Temporarily unavailable. Try again.');
+          } catch (e) {
+            ui[`${busyKey}Error`] = e instanceof Error
+              ? e.message : 'Temporarily unavailable. Try again.';
+          }
           finally { ui[busyKey] = false; m.redraw(); }
         },
       }),

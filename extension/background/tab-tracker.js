@@ -1,7 +1,7 @@
 // @ts-check
 // Track each tab-hosted engine instance across service-worker restarts.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 
 /** @typedef {Object} TabTrackerConfig
  * @property {string} tabPath

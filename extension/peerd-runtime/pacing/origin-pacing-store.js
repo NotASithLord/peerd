@@ -357,7 +357,8 @@ export const createOriginPacingStore = ({
     return lanes.enqueue(origin, async () => {
       let waitedMs = 0;
       for (;;) {
-        // why: cancellation and persistence failure can happen while queued.
+        // why: a queued request may have been canceled or the previous
+        // reservation may have discovered a persistence failure.
         signal?.throwIfAborted();
         if (loadFailed && isWrite) return { outcome: 'unavailable', waitedMs, origin };
         const at = now();

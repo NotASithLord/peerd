@@ -3,252 +3,57 @@
 // Chrome offscreen transport, this path is entirely in-process: no runtime
 // message exposes actor relay routes or the per-run grant to extension pages.
 
-import { runActor, abortActor } from '/offscreen/actor-runner.js';
+export {
+  makeRefCountedFirefoxBackgroundLifetime,
+  makeStorageSessionKeepAlive,
+} from './firefox-storage-keepalive.js';
+import {
+  makeBoundedModuleLoader, STARTUP_UNAVAILABLE_USER_FAILURE,
+} from '/shared/bounded-module-load.js';
 
-/**
- * Own the Firefox event-page heartbeat behind one serialized state machine.
- * Firefox resets an MV3 event page's idle budget when storage.session changes.
- * This is Mozilla's documented extension-side workaround until the platform
- * exposes an official long-task lifetime signal.
- * @param {Object} deps
- * @param {{ set: (items: Record<string, unknown>) => Promise<void>, remove: (key: string) => Promise<void> }} deps.storage
- * @param {string} deps.key
- * @param {number} deps.intervalMs
- * @param {number} deps.ackTimeoutMs
- * @param {() => string} [deps.makeLeaseId]
- * @param {typeof setInterval} [deps.setIntervalFn]
- * @param {typeof clearInterval} [deps.clearIntervalFn]
- * @param {typeof setTimeout} [deps.setTimeoutFn]
- * @param {typeof clearTimeout} [deps.clearTimeoutFn]
- * @param {(error: Error) => void} [deps.onLost]
- */
-export const makeStorageSessionKeepAlive = ({
-  storage,
-  key,
-  intervalMs,
-  ackTimeoutMs,
-  makeLeaseId = () => crypto.randomUUID(),
-  setIntervalFn = setInterval,
-  clearIntervalFn = clearInterval,
-  setTimeoutFn = setTimeout,
-  clearTimeoutFn = clearTimeout,
-  onLost = () => {},
-}) => {
-  let leaseIntended = false;
-  let leaseEstablished = false;
-  let leaseId = '';
-  let sequence = 0;
-  /** @type {ReturnType<typeof setInterval>|null} */
-  let interval = null;
-  /** @type {Promise<void>|null} */
-  let pendingWrite = null;
-  /** @type {Promise<void>} */
-  let cleanupBarrier = Promise.resolve();
-  let cleanupPending = false;
-  /** @type {{ leaseId: string, sequence: number, resolve: () => void, reject: (error: Error) => void, timeout: ReturnType<typeof setTimeout> } | null} */
-  let pendingAcknowledgment = null;
-  /** @type {Promise<unknown>} */
-  let transition = Promise.resolve();
-
-  /** @param {() => unknown|Promise<unknown>} operation */
-  const queue = (operation) => {
-    const result = transition.then(operation);
-    transition = result.catch(() => {});
-    return result;
-  };
-
-  const writeHeartbeat = async () => {
-    sequence += 1;
-    const value = { leaseId, sequence };
-    let resolveAcknowledgment = () => {};
-    /** @type {(error: Error) => void} */
-    let rejectAcknowledgment = () => {};
-    /** @type {Promise<void>} */
-    const acknowledgment = new Promise((resolve, reject) => {
-      resolveAcknowledgment = resolve;
-      rejectAcknowledgment = reject;
-    });
-    const timeout = setTimeoutFn(() => {
-      const pending = pendingAcknowledgment;
-      if (pending?.leaseId !== value.leaseId || pending?.sequence !== value.sequence) return;
-      pendingAcknowledgment = null;
-      pending.reject(new Error('actor host storage heartbeat was not acknowledged'));
-    }, ackTimeoutMs);
-    const expected = {
-      ...value,
-      resolve: resolveAcknowledgment,
-      reject: rejectAcknowledgment,
-      timeout,
-    };
-    pendingAcknowledgment = expected;
-    const write = storage.set({ [key]: value });
-    pendingWrite = write;
-    try {
-      await Promise.all([write, acknowledgment]);
-      if (pendingWrite === write) pendingWrite = null;
-    } catch (error) {
-      if (pendingAcknowledgment === expected && expected) {
-        clearTimeoutFn(expected.timeout);
-        pendingAcknowledgment = null;
-        expected.reject(error instanceof Error ? error : new Error(String(error)));
-        await acknowledgment.catch(() => {});
-      }
-      throw error;
-    }
-  };
-
-  const clearHeartbeat = async () => {
-    if (interval !== null) {
-      clearIntervalFn(interval);
-      interval = null;
-    }
-    const write = pendingWrite;
-    if (write) {
-      await write.catch(() => {});
-      if (pendingWrite === write) pendingWrite = null;
-    }
-    await storage.remove(key);
-  };
-
-  const beginCleanup = () => {
-    if (cleanupPending) return cleanupBarrier;
-    cleanupPending = true;
-    cleanupBarrier = clearHeartbeat()
-      .catch(() => {})
-      .finally(() => { cleanupPending = false; });
-    return cleanupBarrier;
-  };
-
-  const waitForCleanup = async () => {
-    if (!cleanupPending) return;
-    /** @type {ReturnType<typeof setTimeout>|null} */
-    let timeout = null;
-    const finished = await Promise.race([
-      cleanupBarrier.then(() => true),
-      new Promise((resolve) => {
-        timeout = setTimeoutFn(() => resolve(false), ackTimeoutMs);
-      }),
-    ]);
-    if (timeout !== null) clearTimeoutFn(timeout);
-    if (!finished) throw new Error('previous actor host heartbeat cleanup is still pending');
-  };
-
-  const loseLease = (/** @type {unknown} */ reason) => {
-    if (!leaseIntended) return;
-    const notify = leaseEstablished;
-    leaseIntended = false;
-    leaseEstablished = false;
-    if (notify) onLost(reason instanceof Error ? reason : new Error(String(reason)));
-    void beginCleanup();
-  };
-
-  const tick = () => {
-    void queue(async () => {
-      if (!leaseIntended) return;
-      try {
-        await writeHeartbeat();
-      } catch (error) {
-        loseLease(error);
-      }
-    });
-  };
-
-  // why: a crash can strand the session key. Every acquisition waits on this
-  // barrier, but a stuck storage removal gets only the bounded startup budget.
-  void beginCleanup();
-
-  const start = async () => {
-    await waitForCleanup();
-    await queue(async () => {
-      leaseIntended = true;
-      leaseEstablished = false;
-      leaseId = makeLeaseId();
-      sequence = 0;
-      try {
-        await writeHeartbeat();
-        if (!leaseIntended) {
-          void beginCleanup();
-          throw new Error('actor host storage heartbeat stopped during startup');
-        }
-        leaseEstablished = true;
-        interval = setIntervalFn(tick, intervalMs);
-      } catch (error) {
-        leaseIntended = false;
-        leaseEstablished = false;
-        void beginCleanup();
-        throw error;
-      }
-    });
-  };
-
-  const stop = () => {
-    leaseIntended = false;
-    leaseEstablished = false;
-    if (interval !== null) {
-      clearIntervalFn(interval);
-      interval = null;
-    }
-    if (cleanupPending) return;
-    // why: actor completion must not wait forever on best-effort storage
-    // cleanup. A later start observes the barrier and fails closed if needed.
-    void beginCleanup();
-  };
-
-  // why: Mozilla's workaround requires an extension listener for the
-  // storage.session change event. Matching the exact lease generation makes
-  // each write prove that event path before actor work begins or continues.
-  /** @param {Record<string, { oldValue?: unknown, newValue?: unknown }>} changes */
-  const onChanged = (changes) => {
-    if (!Object.hasOwn(changes, key)) return false;
-    const value = /** @type {{ leaseId?: unknown, sequence?: unknown } | undefined} */ (
-      changes[key]?.newValue
-    );
-    const oldValue = /** @type {{ leaseId?: unknown } | undefined} */ (
-      changes[key]?.oldValue
-    );
-    const expected = pendingAcknowledgment;
-    if (expected
-        && value?.leaseId === expected.leaseId
-        && value?.sequence === expected.sequence) {
-      clearTimeoutFn(expected.timeout);
-      pendingAcknowledgment = null;
-      expected.resolve();
-      return true;
-    }
-    // A cold-start cleanup event can arrive after its remove() promise settles.
-    // If a heartbeat write is pending, wait for that exact write's event or its
-    // timeout instead of mistaking the earlier deletion for active tampering.
-    if (value === undefined
-        && (expected || oldValue?.leaseId !== leaseId)) return false;
-    if (!leaseIntended) return false;
-    const error = new Error('actor host storage heartbeat changed unexpectedly');
-    if (expected) {
-      clearTimeoutFn(expected.timeout);
-      pendingAcknowledgment = null;
-      expected.reject(error);
-    }
-    void queue(() => loseLease(error));
-    return false;
-  };
-
-  return { start, stop, onChanged };
-};
+/** @typedef {Pick<typeof import('/offscreen/actor-runner.js'), 'runActor'|'abortActor'>} ActorRunner */
+// Chrome never uses the Firefox background-page host, so keep its runner out
+// of the cold service-worker graph. Firefox background pages support import().
+const loadActorRunner = () => import('/offscreen/actor-runner.js');
 
 /**
  * @param {Object} deps
  * @param {string} deps.workerUrl
- * @param {typeof runActor} [deps.run]
- * @param {typeof abortActor} [deps.abort]
+ * @param {ActorRunner['runActor']} [deps.run]
+ * @param {ActorRunner['abortActor']} [deps.abort]
+ * @param {() => Promise<ActorRunner>} [deps.loadRunner]
+ * @param {number} [deps.loadTimeoutMs]
+ * @param {number} [deps.relayDrainTimeoutMs]
  * @param {() => void|Promise<void>} [deps.startKeepAlive]
  * @param {() => void|Promise<void>} [deps.stopKeepAlive]
+ * @param {(error:Error) => void|Promise<void>} [deps.onKeepAliveLost]
+ * @param {number} [deps.healthTransitionTimeoutMs]
+ * @param {typeof setTimeout} [deps.setTimeoutFn]
+ * @param {typeof clearTimeout} [deps.clearTimeoutFn]
  */
 export const makeDirectActorHost = ({
   workerUrl,
-  run = runActor,
-  abort = abortActor,
+  run,
+  abort,
+  loadRunner = loadActorRunner,
+  loadTimeoutMs,
+  relayDrainTimeoutMs = 5_000,
   startKeepAlive = () => {},
   stopKeepAlive = () => {},
+  onKeepAliveLost = () => {},
+  healthTransitionTimeoutMs = 1_000,
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
 }) => {
+  let runnerLoaded = false;
+  const runner = makeBoundedModuleLoader(loadRunner, {
+    ...(loadTimeoutMs === undefined ? {} : { timeoutMs: loadTimeoutMs }),
+    loadCode: 'actor_host_load_failed',
+    timeoutCode: 'actor_host_load_timeout',
+  });
+  const abortActor = abort ?? ((runId) => {
+    if (runnerLoaded) void runner().then((value) => value.abortActor(runId)).catch(() => {});
+  });
   // Object identity is the sender proof. It never leaves this closure and is
   // never posted, serialized, stored, or exposed on runtime.onMessage.
   const relaySender = Object.freeze({});
@@ -261,8 +66,9 @@ export const makeDirectActorHost = ({
   let keepAliveReady = null;
   /** @type {Error|null} */
   let keepAliveLoss = null;
-  /** @type {Map<symbol, { runId: string|null, settle: (error: Error) => void }>} */
+  /** @type {Map<symbol, { runId: string|null, started:boolean, stopped:boolean, lossReady:Promise<void>|null, armDrain:()=>void, settle:(value:any)=>void }>} */
   const activeRunLosses = new Map();
+  const pendingAborts = new Set();
 
   /** @param {() => void|Promise<void>} operation */
   const queueKeepAliveTransition = (operation) => {
@@ -310,20 +116,70 @@ export const makeDirectActorHost = ({
   /** @param {Record<string, (payload: any, sender?: unknown) => any>} routes */
   const bindRelayRoutes = (routes) => { relayRoutes = routes; };
   const isRelaySender = (/** @type {unknown} */ sender) => sender === relaySender;
+  /** @param {Error} error @returns {Promise<void>} */
+  const completeHealthTransition = (error) => new Promise((resolve) => {
+    let finished = false;
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    let timer = null;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      if (timer) clearTimeoutFn(timer);
+      resolve();
+    };
+    timer = setTimeoutFn(finish, Math.max(1, healthTransitionTimeoutMs));
+    void Promise.resolve().then(() => onKeepAliveLost(error)).catch(() => {}).then(finish);
+  });
   const failKeepAlive = (/** @type {unknown} */ reason) => {
     const error = reason instanceof Error ? reason : new Error(String(reason));
     if (keepAliveLoss) return;
     keepAliveLoss = error;
-    for (const { runId, settle } of activeRunLosses.values()) {
-      if (runId) abort(runId);
-      settle(error);
+    // why: actor isolation health is host authority, not a later semantic
+    // result code. Every lost-run result waits for this bounded transition so
+    // a successor demand cannot race ahead of the durable refusal.
+    const lossReady = completeHealthTransition(error);
+    for (const active of activeRunLosses.values()) {
+      active.stopped = true;
+      active.lossReady = lossReady;
+      if (active.started && active.runId) abortActor(active.runId);
+      active.settle({
+        ok: false,
+        started: active.started,
+        phase: active.started ? 'run' : 'startup',
+        code: 'actor_host_keepalive_lost',
+        error: `direct actor host: ${error.message}`,
+        outcomeKnown: !active.started,
+      });
     }
   };
 
   /** @param {{ type?: string, runId?: string, job?: any }} message */
   const sendMessage = async (message) => {
     if (message?.type === 'actor/abort') {
-      if (typeof message.runId === 'string') abort(message.runId);
+      if (typeof message.runId === 'string') {
+        let activeMatch = false;
+        for (const active of activeRunLosses.values()) {
+          if (active.runId !== message.runId) continue;
+          activeMatch = true;
+          if (active.started) {
+            abortActor(message.runId);
+            active.armDrain();
+          }
+          else {
+            active.stopped = true;
+            active.settle({
+              ok: false, started: false, phase: 'startup',
+              code: 'actor_host_aborted', outcomeKnown: true,
+            });
+          }
+        }
+        if (!activeMatch) {
+          pendingAborts.add(message.runId);
+          const oldest = pendingAborts.values().next().value;
+          if (pendingAborts.size > 256 && typeof oldest === 'string') pendingAborts.delete(oldest);
+          abortActor(message.runId);
+        }
+      }
       return { ok: true };
     }
     if (message?.type !== 'actor/run' || !message.job) {
@@ -346,34 +202,99 @@ export const makeDirectActorHost = ({
     try {
       const runKey = Symbol('direct-actor-run');
       const runId = typeof message.job.runId === 'string' ? message.job.runId : null;
-      const keepAliveLost = new Promise((resolve) => {
-        activeRunLosses.set(runKey, {
-          runId,
-          settle: (error) => resolve({
+      if (runId && pendingAborts.delete(runId)) {
+        return {
+          ok: false, started: false, phase: 'startup',
+          code: 'actor_host_aborted', outcomeKnown: true,
+        };
+      }
+      /** @type {(value:any)=>void} */
+      let settle = () => {};
+      const active = {
+        runId, started: false, stopped: false, lossReady: null,
+        armDrain: () => {},
+        settle: (/** @type {any} */ value) => settle(value),
+      };
+      let relayDrainTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
+      const armRelayDrain = () => {
+        if (active.stopped || relayDrainTimer) return;
+        relayDrainTimer = setTimeoutFn(() => {
+          active.stopped = true;
+          if (runId) abortActor(runId);
+          active.settle({
+            ok: false, started: true, phase: 'run',
+            code: 'actor_relay_drain_timeout',
+            error: 'direct actor host relay drain timed out',
+            outcomeKnown: false, retryable: false,
+          });
+        }, Math.max(1, relayDrainTimeoutMs));
+      };
+      active.armDrain = armRelayDrain;
+      const stopped = new Promise((resolve) => {
+        settle = resolve;
+      });
+      activeRunLosses.set(runKey, active);
+      const actorRun = (async () => {
+        let execute = run;
+        if (!execute) {
+          let loaded;
+          try { loaded = await runner(); }
+          catch (cause) {
+            return {
+              ok: false,
+              started: false,
+              phase: 'startup',
+              code: /** @type {{code?:string}} */ (cause)?.code ?? 'actor_host_load_failed',
+              error: STARTUP_UNAVAILABLE_USER_FAILURE,
+              outcomeKnown: true,
+            };
+          }
+          if (active.stopped) return undefined;
+          runnerLoaded = true;
+          execute = loaded.runActor;
+        }
+        if (active.stopped) return undefined;
+        if (typeof execute !== 'function') {
+          return {
+            ok: false, started: false, phase: 'startup',
+            code: 'actor_host_load_failed', outcomeKnown: true,
+          };
+        }
+        active.started = true;
+        try {
+          return await execute(message.job, {
+            workerUrl,
+            onRelayDrain: armRelayDrain,
+            sendToSW: async (type, payload) => {
+              const route = relayRoutes?.[type];
+              if (!route) return { ok: false, error: `direct actor host: unknown relay '${type}'` };
+              return route(payload, relaySender);
+            },
+          });
+        } catch (cause) {
+          return {
             ok: false,
             started: true,
             phase: 'run',
-            code: 'actor_host_keepalive_lost',
-            error: `direct actor host: ${error.message}`,
+            code: 'actor_host_run_failed',
+            error: `direct actor host: ${cause instanceof Error ? cause.message : String(cause)}`,
             outcomeKnown: false,
-          }),
-        });
-      });
-      const actorRun = run(message.job, {
-        workerUrl,
-        sendToSW: async (type, payload) => {
-          const route = relayRoutes?.[type];
-          if (!route) return { ok: false, error: `direct actor host: unknown relay '${type}'` };
-          return route(payload, relaySender);
-        },
-      });
+          };
+        }
+      })();
       try {
-        return await Promise.race([actorRun, keepAliveLost]);
+        const result = await Promise.race([actorRun, stopped]);
+        await active.lossReady;
+        return result;
       } finally {
+        if (relayDrainTimer) clearTimeoutFn(relayDrainTimer);
         activeRunLosses.delete(runKey);
       }
     } finally { await releaseBackground(); }
   };
 
-  return { bindRelayRoutes, isRelaySender, failKeepAlive, sendMessage };
+  return {
+    bindRelayRoutes, isRelaySender, failKeepAlive, sendMessage,
+    hasActiveRuns: () => activeRuns > 0 || activeRunLosses.size > 0,
+  };
 };

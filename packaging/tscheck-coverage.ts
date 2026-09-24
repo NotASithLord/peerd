@@ -22,7 +22,7 @@ export const ES5_INJECTED = new Set<string>([
   'peerd-runtime/dom/pull-in-hint-injected.js',
   'peerd-runtime/dom/fetch-tap-injected.js',
   'background/debugger-pool.js',
-  'peerd-runtime/tools/defs/watch-changes.js',
+  'background/page-authority/watch-changes.js',
 ]);
 
 const walk = (dir: string, out: string[] = []): string[] => {

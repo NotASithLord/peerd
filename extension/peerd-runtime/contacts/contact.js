@@ -8,8 +8,8 @@
 // derived at read time from durable sources (the App catalog + the audit log),
 // so a contact record stays a tiny, hand-editable overlay (see aggregate.js).
 //
-// Pure module: shape + validation + the peerd:// did parser. IO lives in
-// store.js (the functional-core / imperative-shell rule).
+// Pure module: shape + validation + the peerd:// did parser. IO lives in the
+// background kernel's contact authority.
 
 export const MAX_CONTACT_NAME = 64;
 export const MAX_CONTACT_NOTES = 1000;

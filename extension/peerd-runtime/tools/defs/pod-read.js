@@ -1,17 +1,11 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { buildPagedResult, clampPageLimit, pageStatusLine, SPILL_PAGE_CHARS } from '../web/spill.js';
+import { buildPagedResult, clampPageLimit, pageStatusLine } from '../web/spill.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const podReadTool = {
-  name: 'pod_read', primitive: 'pod',
-  description: 'Read one UTF-8 file from this Pod workspace. Results are fenced as untrusted data and large files are pageable with offset/limit.',
-  schema: { type: 'object', properties: {
-    path: { type: 'string' }, podId: { type: 'string' },
-    offset: { type: 'number', description: 'Start character offset. Default 0.' },
-    limit: { type: 'number', description: `Max characters, capped at ${SPILL_PAGE_CHARS}.` },
-  }, required: ['path'] },
-  sideEffect: 'read', origins: () => [],
+export const podReadTool = composeTool("pod_read", {
   execute: async (args, ctx) => {
     if (typeof args?.path !== 'string') return { ok: false, error: 'path_required' };
     const client = /** @type {any} */ (ctx).podClient;
@@ -33,4 +27,4 @@ export const podReadTool = {
       });
     } catch (error) { return { ok: false, error: `pod_read_failed: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}` }; }
   },
-};
+});

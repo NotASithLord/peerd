@@ -7,7 +7,7 @@
 // a socket (ARCHITECTURE §8, MIGRATION §5). RTCPeerConnection is injected
 // (defaults to the global) so the module stays testable.
 //
-// PHASE 0 ICE: default to public STUN (Google + Cloudflare). why this is
+// PHASE 0 ICE: default to public STUN (Cloudflare + independent fallbacks). why this is
 // still "no server in the path": a STUN server is consulted ONLY during
 // ICE gathering, to learn each peer's reflexive (public) candidate. It is
 // NOT in the data path — once connected, bytes flow directly peer-to-peer
@@ -37,8 +37,8 @@ import { dlog, dwarn } from '../log.js';
 // operator is unreachable; it can't fix a remote peer's symmetric NAT, which no
 // STUN server of ours can see past — that stays the D-5 floor.)
 export const DEFAULT_ICE_SERVERS = [
-  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] },
   { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] },
   { urls: 'stun:global.stun.twilio.com:3478' },
   { urls: 'stun:stun.relay.metered.ca:80' },     // :80 also slips past some 3478-blocking firewalls
 ];
@@ -71,11 +71,12 @@ export const createPeer = ({
   onCandidate = null,
 } = {}) => {
   if (!RTCPeerConnection) throw new Error('createPeer: WebRTC unavailable in this context');
-  // iceCandidatePoolSize warms the gather at construction, so the reflexive
-  // candidate is usually ready by the time we offer instead of racing it (the
-  // window where only mDNS/host candidates exist). max-bundle = one transport for
-  // our single data channel = fewer pairs to check. Both squeeze ICE without TURN.
-  const pc = new RTCPeerConnection({ iceCandidatePoolSize: 4, bundlePolicy: 'max-bundle', ...config });
+  // why no candidate pool: ordered trickle signaling preserves every candidate,
+  // so pre-gathering only creates speculative STUN work and, when an embedding
+  // app appends TURN, speculative relay allocations. `all` preserves ICE's native
+  // host → server-reflexive → relay preference; max-bundle keeps one transport for
+  // our single data channel. Callers can still explicitly override the policy.
+  const pc = new RTCPeerConnection({ bundlePolicy: 'max-bundle', iceTransportPolicy: 'all', ...config });
 
   // --- Trickle ICE -------------------------------------------------------
   // Surface each local candidate as it's discovered (onCandidate), and

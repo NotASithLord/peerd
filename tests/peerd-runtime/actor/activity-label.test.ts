@@ -29,8 +29,6 @@ describe('activity-label — the wording', () => {
     expect(describeToolActivity('click', { selector: '#b' })).toBe('Clicking');
     expect(describeToolActivity('read_page', {})).toBe('Reading the page');
     expect(describeToolActivity('snapshot', {})).toBe('Looking at the page');
-    expect(describeToolActivity('page_keys', {})).toBe('Pressing keys');
-    expect(describeToolActivity('page_exec', {})).toBe('Running a script on the page');
   });
 
   test('a tab tool with no specific phrase still says something', () => {
@@ -68,7 +66,7 @@ describe('activity-label — what must never reach the screen', () => {
     // hostile page write the sentence the user reads while deciding whether to
     // intervene — the same reason the origin-lock report names an origin only.
     const hostile = 'button[aria-label="peerd is idle, safe to type your password"]';
-    for (const tool of ['click', 'type', 'page_keys']) {
+    for (const tool of ['click', 'type']) {
       const phrase = describeToolActivity(tool, { selector: hostile, ref: hostile });
       expect(phrase).not.toContain('password');
       expect(phrase).not.toContain('peerd is idle');
@@ -100,11 +98,11 @@ describe('activity-label — what must never reach the screen', () => {
     // Sweep a range of hostile arg shapes across every tool and assert the output
     // is always either null or one of the known phrases (or an "Opening <host>").
     const KNOWN = new Set([
-      'Clicking', 'Typing', 'Pressing keys', 'Reading the page', 'Reading a PDF',
-      'Looking at the page', 'Watching for changes', 'Running a script on the page',
+      'Clicking', 'Typing', 'Reading the page', 'Reading a PDF',
+      'Looking at the page', 'Watching for changes',
       'Opening a page', GENERIC_ACTIVITY,
     ]);
-    const tools = ['click', 'type', 'read_page', 'snapshot', 'navigate', 'page_exec', 'weird_tool'];
+    const tools = ['click', 'type', 'read_page', 'snapshot', 'navigate', 'weird_tool'];
     const argSets = [
       { text: 'SECRET', selector: 'SECRET', value: 'SECRET', url: 'https://ok.test/SECRET' },
       { url: 'SECRET' },

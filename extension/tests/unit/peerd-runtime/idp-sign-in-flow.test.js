@@ -8,7 +8,15 @@ import {
   makeSignInExcursionAuthorizer,
 } from '/peerd-runtime/actor/origin-lock.js';
 import { isKnownIdp, isKnownIdpHost } from '/peerd-runtime/actor/idp-registry.js';
-import { loginTool } from '/peerd-runtime/tools/defs/login.js';
+import { performConfirmedOwnedLoginAuthority } from '/background/page-authority/login.js';
+import { loginTool as controllerLoginTool } from '/peerd-runtime/tools/defs/login.js';
+
+const loginTool = { execute: (/** @type {any} */ args, /** @type {any} */ ctx) => controllerLoginTool.execute(args, {
+  ...ctx,
+  pageAuthority: {
+    performConfirmedOwnedLogin: () => performConfirmedOwnedLoginAuthority(args, ctx),
+  },
+}) };
 
 describe('identity-provider transit sign-in flow', () => {
   it('binds the relying site, parks at the exact confirmed IdP, and resumes at home', async () => {
@@ -54,6 +62,7 @@ describe('identity-provider transit sign-in flow', () => {
       scripting: { executeScript },
       denylist: [],
       confirm: async () => 'yes_once',
+      readAuthorityPermission: async () => ({ mode: 'act', confirmActions: true }),
       audit: async () => {},
       authorizeSignInOrigin,
       authorizeSignInExcursion,

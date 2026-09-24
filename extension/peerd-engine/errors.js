@@ -5,7 +5,7 @@
 // structured-clone across the SW/offscreen and SW/sidepanel boundaries.
 // The dispatcher and side panel branch on `.name`, not `instanceof`.
 
-import { TypedError } from '/shared/errors.js';
+import { TypedError } from '../shared/errors.js';
 
 /**
  * The VM hasn't booted yet (or is mid-boot) and a tool call asked it
@@ -13,6 +13,8 @@ import { TypedError } from '/shared/errors.js';
  * indicator with the boot progress card pinned alongside.
  */
 export class VMNotReadyError extends TypedError {
+  static errorName = 'VMNotReadyError';
+
   /** @param {string} reason */
   constructor(reason) {
     super(`VM not ready: ${reason}`);
@@ -28,6 +30,8 @@ export class VMNotReadyError extends TypedError {
  * VM's socket layer; agent must use vm_write_file to seed artifacts.
  */
 export class VMNetworkDeniedError extends TypedError {
+  static errorName = 'VMNetworkDeniedError';
+
   /** @param {string} host */
   constructor(host) {
     super(`VM network denied: ${host}`);
@@ -41,6 +45,8 @@ export class VMNetworkDeniedError extends TypedError {
  * The `cause` field carries the original throw for debugging.
  */
 export class VMBootFailedError extends TypedError {
+  static errorName = 'VMBootFailedError';
+
   /**
    * @param {string} stage
    * @param {unknown} cause  the original throw (may be a DOMException)
@@ -59,6 +65,8 @@ export class VMBootFailedError extends TypedError {
  * inside the VM doesn't pin the offscreen doc indefinitely.
  */
 export class VMRunTimeoutError extends TypedError {
+  static errorName = 'VMRunTimeoutError';
+
   /**
    * @param {string} cmd
    * @param {number} timeoutMs
@@ -80,6 +88,8 @@ export class VMRunTimeoutError extends TypedError {
  * Re-running the command will respawn the tab (ensureTab).
  */
 export class VMTabClosedError extends TypedError {
+  static errorName = 'VMTabClosedError';
+
   /** @param {string} vmId */
   constructor(vmId) {
     super(`VM tab closed: the tab hosting ${vmId} was closed while a command was pending. `
@@ -142,6 +152,8 @@ export const moduleImportPolicyMessage = (code) => code && Object.hasOwn(MODULE_
  * tool layer can render a policy failure instead of a successful code error.
  */
 export class RemoteModuleImportsUnavailableError extends TypedError {
+  static errorName = 'RemoteModuleImportsUnavailableError';
+
   /** @param {string} specifier */
   constructor(specifier) {
     super(REMOTE_MODULE_IMPORTS_UNAVAILABLE_MESSAGE);
@@ -156,6 +168,8 @@ export class RemoteModuleImportsUnavailableError extends TypedError {
  * Import options are not supported by the resolver transform.
  */
 export class UnsupportedNativeModuleImportError extends TypedError {
+  static errorName = 'UnsupportedNativeModuleImportError';
+
   constructor() {
     super(UNSUPPORTED_NATIVE_MODULE_IMPORT_MESSAGE);
     this.code = UNSUPPORTED_NATIVE_MODULE_IMPORT_CODE;
@@ -164,6 +178,8 @@ export class UnsupportedNativeModuleImportError extends TypedError {
 
 /** Invalid JavaScript found by the resolver's grammar-correct preflight. */
 export class ModuleSyntaxError extends TypedError {
+  static errorName = 'ModuleSyntaxError';
+
   /** @param {string} detail */
   constructor(detail) {
     super(`JavaScript syntax error: ${detail}`);
@@ -176,6 +192,8 @@ export class ModuleSyntaxError extends TypedError {
  * This is a loader failure, not an error in the executing Notebook realm.
  */
 export class ModuleLinkError extends TypedError {
+  static errorName = 'ModuleLinkError';
+
   /** @param {string} detail */
   constructor(detail) {
     super(`cannot link Notebook module graph: ${detail}`);
@@ -192,6 +210,8 @@ export class ModuleLinkError extends TypedError {
  * typo it should retry.
  */
 export class RemoteImportBlockedError extends TypedError {
+  static errorName = 'RemoteImportBlockedError';
+
   /**
    * @param {string} specifier
    * @param {string} [reason]
@@ -209,6 +229,8 @@ export class RemoteImportBlockedError extends TypedError {
  * amplification vector). The rails live in module-resolver.js.
  */
 export class RemoteModuleCapError extends TypedError {
+  static errorName = 'RemoteModuleCapError';
+
   /**
    * @param {string} specifier
    * @param {string} reason
@@ -225,6 +247,8 @@ export class RemoteModuleCapError extends TypedError {
  * integrity pin. Fails closed — the module never reaches the worker.
  */
 export class RemoteModuleIntegrityError extends TypedError {
+  static errorName = 'RemoteModuleIntegrityError';
+
   /**
    * @param {string} url
    * @param {string} expected  the pinned hash (normalized base64)
@@ -248,6 +272,8 @@ export class RemoteModuleIntegrityError extends TypedError {
  * the pathological case, with the limit named in the message.
  */
 export class ArtifactTooLargeError extends TypedError {
+  static errorName = 'ArtifactTooLargeError';
+
   /**
    * @param {number} size
    * @param {number} limit
@@ -264,6 +290,8 @@ export class ArtifactTooLargeError extends TypedError {
  * tag/version, missing manifest, non-base64 chunks, unknown kind).
  */
 export class EnvelopeFormatError extends TypedError {
+  static errorName = 'EnvelopeFormatError';
+
   /** @param {string} reason */
   constructor(reason) {
     super(`not a valid .peerd envelope: ${reason}`);
@@ -276,6 +304,8 @@ export class EnvelopeFormatError extends TypedError {
  * commitments (tampered or corrupted in transit). Import fails closed.
  */
 export class EnvelopeIntegrityError extends TypedError {
+  static errorName = 'EnvelopeIntegrityError';
+
   /** @param {string} reason */
   constructor(reason) {
     super(`envelope failed verification: ${reason}`);

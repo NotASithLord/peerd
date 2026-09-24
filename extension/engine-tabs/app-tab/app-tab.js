@@ -2,7 +2,8 @@
 // Host a rendered App or its editor in one trusted parent tab.
 // why: App code stays in the opaque runner while the parent owns storage and controls.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
+import { makeUiRuntimeClient } from '/shared/ui-runtime-client.js';
 import {
   composeApp,
   stripMetaRefresh,
@@ -17,6 +18,9 @@ import { isServiceWorkerSender } from '/shared/messaging.js';
 import { createAppDataClient } from './app-data-client.js';
 import { mithrilClassicSource } from './mithril-classic-source.js';
 import { createDwebBridgeLifecycle } from './dweb-bridge-lifecycle.js';
+import { makeAppActorAttachRecovery } from './actor-attach-recovery.js';
+
+const uiRuntime = makeUiRuntimeClient({ browser });
 
 const appId = location.hash.slice(1).split(/[?&]/)[0];
 const hashParams = new URLSearchParams(location.hash.slice(1).split('?')[1] ?? '');
@@ -117,6 +121,7 @@ const showNotice = (text, { persistent = false } = {}) => {
 };
 
 let actorChatBusy = false;
+let actorChatUnconfirmed = false;
 /** @param {boolean} open */
 const setActorChatOpen = (open) => {
   actorChatDrawer.hidden = !open;
@@ -137,7 +142,7 @@ const appendActorChatMessage = (role, text) => {
 
 const sendActorChatMessage = async () => {
   const prompt = actorChatInput.value.trim();
-  if (!prompt || actorChatBusy) return;
+  if (!prompt || actorChatBusy || actorChatUnconfirmed) return;
   actorChatBusy = true;
   actorChatSend.disabled = true;
   actorChatInput.disabled = true;
@@ -145,22 +150,30 @@ const sendActorChatMessage = async () => {
   appendActorChatMessage('user', prompt);
   actorChatInput.value = '';
   try {
-    const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+    const reply = /** @type {any} */ (await uiRuntime.send({
       type: 'app/actor-chat', appId, message: prompt,
     }));
     if (reply?.ok === true && typeof reply.content === 'string') {
       appendActorChatMessage('actor', reply.content);
+    } else if (reply?.outcomeKnown === false) {
+      actorChatUnconfirmed = true;
+      appendActorChatMessage('status', 'Peerd could not confirm whether the App actor received that message. Inspect its transcript in peerd before sending another.');
     } else {
-      appendActorChatMessage('status', String(reply?.error || 'The App actor did not reply.'));
+      appendActorChatMessage('status', 'The App actor did not reply. Try again.');
     }
-  } catch {
-    appendActorChatMessage('status', 'The App actor connection was interrupted. Inspect the App before retrying an action.');
+  } catch (cause) {
+    actorChatUnconfirmed = /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown === false;
+    appendActorChatMessage('status', actorChatUnconfirmed
+      ? 'Peerd could not confirm whether the App actor received that message. Inspect its transcript in peerd before sending another.'
+      : 'The App actor connection was interrupted. Try again.');
   } finally {
     actorChatBusy = false;
-    actorChatSend.disabled = false;
-    actorChatInput.disabled = false;
-    actorChatStatus.textContent = 'Enter to send · Shift+Enter for a new line';
-    actorChatInput.focus({ preventScroll: true });
+    actorChatSend.disabled = actorChatUnconfirmed;
+    actorChatInput.disabled = actorChatUnconfirmed;
+    actorChatStatus.textContent = actorChatUnconfirmed
+      ? 'Delivery unconfirmed · inspect the actor in peerd'
+      : 'Enter to send · Shift+Enter for a new line';
+    if (!actorChatUnconfirmed) actorChatInput.focus({ preventScroll: true });
   }
 };
 
@@ -182,7 +195,7 @@ const opfs = opfsHelpers(['peerd-apps', appId]);
 const appData = createAppDataClient({
   appId,
   opfs,
-  send: (message) => browser.runtime.sendMessage(message),
+  send: (message) => uiRuntime.send(/** @type {any} */ (message)),
 });
 /** @type {{ name: string, entryFile: string, fileKinds: Record<string, 'text' | 'binary'>, dweb: any, agent: { kind: string, name?: string, instructions?: string, runtime?: string[] } } | null} */
 let appMeta = null;        // { name, entryFile }
@@ -230,19 +243,34 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
 }));
 /** @type {HTMLElement | null} */
 let saveReturnFocus = null;
-/** @param {string} path */
-const showSaveFailure = (path) => {
+let saveOutcomeUnknown = false;
+/** @param {unknown} reply @param {string} knownMessage */
+const replyFailure = (reply, knownMessage) => Object.assign(
+  new Error(/** @type {{outcomeKnown?:boolean}} */ (reply)?.outcomeKnown === false
+    ? 'Peerd could not confirm whether the change finished.' : knownMessage),
+  /** @type {object} */ (reply ?? {}),
+);
+/** @param {string} path @param {unknown} error @param {'save'|'create'|'delete'} [action] */
+const showSaveFailure = (path, error, action = 'save') => {
   if (saveStatus.hidden && document.activeElement instanceof HTMLElement) {
     saveReturnFocus = document.activeElement;
   }
-  saveMessage.textContent = `Could not save ${path}. Your edits are still open. Reduce the file or free browser storage, then retry.`;
+  saveOutcomeUnknown ||= /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown === false;
+  const pastAction = action === 'delete' ? 'deleted' : action === 'create' ? 'created' : 'saved';
+  saveMessage.textContent = saveOutcomeUnknown
+    ? `Peerd could not confirm whether ${path} was ${pastAction}. Your edits are still open. Download a copy before reopening the App to check the saved file.`
+    : `Could not ${action} ${path}. Your edits are still open. Reduce the file or free browser storage, then retry.`;
   saveStatus.hidden = false;
   saveRetry.disabled = false;
+  saveRetry.textContent = saveOutcomeUnknown ? 'Download edits' : 'Retry';
 };
 const clearSaveFailure = () => {
+  // why: an editor's clean-state callback is not a receipt or reconciliation.
+  if (saveOutcomeUnknown) return;
   const restoreFocus = saveStatus.contains(document.activeElement);
   saveStatus.hidden = true;
   saveRetry.disabled = false;
+  saveRetry.textContent = 'Retry';
   if (restoreFocus) {
     if (saveReturnFocus?.isConnected) saveReturnFocus.focus({ preventScroll: true });
     else editorApi?.focus?.();
@@ -251,6 +279,17 @@ const clearSaveFailure = () => {
 };
 saveRetry.addEventListener('click', async () => {
   if (!editorApi) return;
+  if (saveOutcomeUnknown) {
+    // why: a lost save receipt may be the only copy of these edits. Export
+    // the current buffer without replacing it or repeating the uncertain write.
+    const url = URL.createObjectURL(new Blob([editorApi.getActiveContent()], { type: 'text/plain;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = editorApi.getActiveFile().split('/').at(-1) || 'app-edits.txt';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    return;
+  }
   saveRetry.disabled = true;
   try {
     await editorApi.flushSave();
@@ -350,9 +389,6 @@ let pendingBody = null;
 let pendingAssets = {};
 /** @type {MessagePort | null} */
 let runnerPort = null;
-// Set true right before WE point the frame at the runner, so the frame's load
-// event can tell our own (re)load apart from a navigation the app initiated.
-let expectingRunnerLoad = false;
 // The frame starts with NO src, so the browser fires one `load` for its initial
 // about:blank — before we've ever pointed it at the runner. That isn't an app
 // navigation; flip this true once we DO start the runner so the load handler
@@ -448,7 +484,6 @@ const startRunner = () => {
   runnerPort?.close();
   runnerPort = null;
   runnerPhase = 'awaiting-ready';
-  expectingRunnerLoad = true;
   runnerStarted = true;
   runnerGeneration += 1;
   frame.sandbox.add('allow-scripts');
@@ -471,7 +506,6 @@ const suspendRunnerForEdit = async () => {
   pendingAssets = {};
   runnerPhase = 'suspended';
   runnerStarted = false;
-  expectingRunnerLoad = false;
   expectingBodyLoad = false;
   await dwebBridgeLifecycle.dispose();
   // Replacing the document is the only way to stop a late async handler from
@@ -528,8 +562,8 @@ const renderMode = async () => {
 
   // Always refetch on entry. Edit mode can change peerd.json and a dweb update
   // can replace the package while this tab remains alive.
-  const meta = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'app/get-meta', appId }));
-  if (!meta?.ok) { fail(meta?.error ?? 'unknown error'); return; }
+  const meta = /** @type {any} */ (await uiRuntime.send({ type: 'app/get-meta', appId }));
+  if (!meta?.ok) { fail('App metadata is temporarily unavailable.', { retryActor: true }); return; }
   appMeta = {
     name: meta.name,
     entryFile: meta.entryFile,
@@ -578,6 +612,14 @@ window.addEventListener('securitypolicyviolation', (event) => {
 
 window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
   if (e.source !== frame.contentWindow) return;
+  if (e.data?.type === 'runner-loaded') {
+    if (runnerPhase === 'awaiting-ready'
+        && runnerPort == null
+        && e.data.generation === String(runnerGeneration)) {
+      initializeRunnerChannel();
+    }
+    return;
+  }
   if (e.data?.peerd === 'app:data:request' && runnerPhase === 'delivered') {
     const id = typeof e.data.id === 'string' && e.data.id.length <= 100 ? e.data.id : null;
     const op = ['get', 'set', 'delete', 'list'].includes(e.data.op) ? e.data.op : null;
@@ -690,11 +732,7 @@ window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
 // events can't reach whatever now occupies the frame.
 frame.addEventListener('load', () => {
   if (!runnerStarted) return;                 // the empty iframe's initial about:blank load — not an app navigation
-  if (expectingRunnerLoad) {
-    expectingRunnerLoad = false;
-    initializeRunnerChannel();
-    return;
-  }
+  if (runnerPhase === 'awaiting-ready') return;
   if (expectingBodyLoad) { expectingBodyLoad = false; return; }  // the runner's document.write delivery — not a navigation
   runnerPhase = 'idle';
   console.warn('[app-tab] app frame navigated unexpectedly; restarting the trusted runner');
@@ -774,11 +812,16 @@ const attachDwebBridge = () => {
       return client.createAppBridge({
         appId, appName: meta.name, appDweb: dweb, entryFile: meta.entryFile,
         frame, client,
-        swCall: (/** @type {string} */ type, /** @type {object} */ payload = {}) => browser.runtime.sendMessage({ type, ...payload }),
+        swCall: (/** @type {string} */ type, /** @type {object} */ payload = {}) => uiRuntime.send({ type, ...payload }),
         storage: browser.storage.local,
         confirmAction,
         onHostEvent: (/** @type {(msg: any) => void} */ handler) => {
-          const fn = (/** @type {any} */ msg) => { if (msg?.type === 'dweb/base-room/event') handler(msg); };
+        const offscreenUrl = browser.runtime.getURL('offscreen/offscreen.html');
+        const fn = (/** @type {any} */ msg, /** @type {any} */ sender) => {
+          if (sender?.url !== offscreenUrl) return;
+          if (msg?.type === 'dweb/base-room/event'
+              || msg?.type === 'dweb/base-host/generation') handler(msg);
+        };
           browser.runtime.onMessage.addListener(fn);
           return () => browser.runtime.onMessage.removeListener(fn);
         },
@@ -804,8 +847,8 @@ const editMode = async () => {
   frame.hidden = true;
 
   if (!appMeta) {
-    const meta = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'app/get-meta', appId }));
-    if (!meta?.ok) { fail(meta?.error ?? 'unknown error'); return; }
+    const meta = /** @type {any} */ (await uiRuntime.send({ type: 'app/get-meta', appId }));
+    if (!meta?.ok) { fail('App metadata is temporarily unavailable.', { retryActor: true }); return; }
     appMeta = {
       name: meta.name,
       entryFile: meta.entryFile,
@@ -831,22 +874,27 @@ const editMode = async () => {
         { persistent: true },
       ),
       writeFile: async (path, content) => {
-        const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+        // why: autosave, export and suspension all flush through this boundary;
+        // none may replay an uncertain write before the user reconciles it.
+        if (saveOutcomeUnknown) throw replyFailure({ outcomeKnown: false }, 'The previous save needs verification.');
+        const reply = /** @type {any} */ (await uiRuntime.send({
           type: 'app/editor-write', appId, path, content,
         }));
-        if (!reply?.ok) throw new Error(reply?.error ?? 'write failed');
+        if (!reply?.ok) throw replyFailure(reply, 'Could not save this file.');
         binaryFilePaths.delete(path);
         if (appMeta) appMeta.fileKinds[path] = 'text';
       },
       deleteFile: async (path) => {
-        const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+        if (saveOutcomeUnknown) throw replyFailure({ outcomeKnown: false }, 'The previous save needs verification.');
+        const reply = /** @type {any} */ (await uiRuntime.send({
           type: 'app/editor-delete', appId, path,
         }));
-        if (!reply?.ok) throw new Error(reply?.error ?? 'delete failed');
+        if (!reply?.ok) throw replyFailure(reply, 'Could not delete this file.');
         binaryFilePaths.delete(path);
         if (appMeta) delete appMeta.fileKinds[path];
       },
       onSaveError: showSaveFailure,
+      onMutationError: (action, path, error) => showSaveFailure(path, error, action),
       onDirtyChange: (dirty) => { if (!dirty) clearSaveFailure(); },
       onSaved: () => {
         if (!editorApi?.hasUnsavedChanges()) clearSaveFailure();
@@ -869,10 +917,10 @@ const exportApp = async () => {
   exportBtn.disabled = true;
   try {
     if (editorApi) await editorApi.flushSave?.();
-    const reply = /** @type {any} */ (await browser.runtime.sendMessage({
+    const reply = /** @type {any} */ (await uiRuntime.send({
       type: 'export/artifact', kind: 'app', id: appId,
     }));
-    if (!reply?.ok) throw new Error(reply?.error ?? 'export failed');
+    if (!reply?.ok) throw replyFailure(reply, 'Could not export this App.');
     const blob = new Blob([JSON.stringify(reply.envelope)], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -916,18 +964,20 @@ window.addEventListener('pagehide', () => {
 // Boot + toggle
 // ---------------------------------------------------------------------------
 
-/** @param {'app/tab-ready'|'app/actor-retry'} type */
-const attachRequiredActor = async (type) => /** @type {Promise<any>} */ (
-  browser.runtime.sendMessage({ type, appId, ownerSessionId })
-    .catch(() => ({
-      ok: false,
-      error: type === 'app/tab-ready'
-        ? 'The App isolation check did not respond.'
-        : 'The actor retry did not respond.',
-      actorRequired: type === 'app/actor-retry',
-      retryable: type === 'app/actor-retry',
-    }))
-);
+const actorAttachment = makeAppActorAttachRecovery({
+  request: (type) => uiRuntime.send({ type, appId, ownerSessionId }),
+});
+
+/** @param {any} reply @param {string} [knownFallback] */
+const showActorAttachFailure = (reply, knownFallback = 'The required App actor is unavailable.') => {
+  const unknown = reply?.outcomeKnown === false;
+  actorRetry.textContent = unknown ? 'Recheck actor' : 'Retry actor';
+  fail(unknown
+    ? 'Peerd could not confirm whether the App actor attached. Recheck the exact attachment without reopening the App.'
+    : reply?.error ?? knownFallback, {
+    retryActor: reply?.actorRequired === true && reply?.retryable === true,
+  });
+};
 
 toggleBtn.addEventListener('click', async () => {
   try {
@@ -936,9 +986,16 @@ toggleBtn.addEventListener('click', async () => {
     } else {
       // When leaving edit mode, flush save + force a fresh render.
       if (editorApi) await editorApi.flushSave?.();
-      const attachment = await attachRequiredActor('app/actor-retry');
+      if (dwebBridgeLifecycle.isInvalidated()) {
+        // why: code edits retire this trusted document's bridge permanently.
+        // A fresh host rehydrates consent/actor custody through normal gates;
+        // rearming the old host could grant its retired iframe new authority.
+        location.reload();
+        return;
+      }
+      const attachment = await actorAttachment.retry();
       if (!attachment?.ok) {
-        fail(attachment?.error ?? 'The required App actor is unavailable.', { retryActor: true });
+        showActorAttachFailure(attachment);
         return;
       }
       appMeta = null;
@@ -947,6 +1004,14 @@ toggleBtn.addEventListener('click', async () => {
     }
   } catch (error) {
     console.warn('[app-tab] mode switch failed:', error);
+    // why: a failed flush must leave the draft and its recovery action visible.
+    if (editorApi?.hasUnsavedChanges()) return;
+    fail(
+      /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown === false
+        ? 'Peerd could not confirm the App state. Reopen the App to reconcile.'
+        : 'The App could not switch modes. Retry after peerd reconnects.',
+      { retryActor: /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown !== false },
+    );
   }
 });
 
@@ -954,8 +1019,8 @@ toggleBtn.addEventListener('click', async () => {
 // edits flows via chrome.tabs.reload (in app-client.reloadTab); this
 // page re-runs, refetches OPFS + recomposes. No extra message
 // channel needed.
-const isolation = /** @type {{ ok?: boolean, error?: string, actorRequired?: boolean, retryable?: boolean }} */ (
-  await attachRequiredActor('app/tab-ready')
+const isolation = /** @type {{ ok?: boolean, error?: string, actorRequired?: boolean, retryable?: boolean, outcomeKnown?:boolean }} */ (
+  await actorAttachment.start()
 );
 
 // A peerd-owned tab carries the trigger to pull the side panel in — so you can
@@ -963,23 +1028,31 @@ const isolation = /** @type {{ ok?: boolean, error?: string, actorRequired?: boo
 mountPullInPeerd();
 
 if (!isolation?.ok) {
-  fail(isolation?.error ?? 'This browser cannot enforce App isolation.', {
-    retryActor: isolation?.actorRequired === true && isolation?.retryable === true,
-  });
+  showActorAttachFailure(isolation, 'This browser cannot enforce App isolation.');
 } else {
-  renderMode();
+  renderMode().catch((error) => fail(
+    /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown === false
+      ? 'Peerd could not confirm the App state after worker recovery. Reopen the App to reconcile.'
+      : 'The App could not finish loading. Retry after peerd reconnects.',
+    { retryActor: /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown !== false },
+  ));
 }
 
 actorRetry.addEventListener('click', async () => {
+  if (actorAttachment.pending()) return;
+  const operation = actorAttachment.nextOperation();
   actorRetry.disabled = true;
   boot.classList.remove('is-failed');
-  bootMsg.textContent = 'Attaching the required App actor…';
-  const reply = await attachRequiredActor('app/actor-retry');
+  bootMsg.textContent = operation === 'app/tab-ready'
+    ? 'Rechecking the exact App actor attachment…'
+    : 'Attaching the required App actor…';
+  const reply = await actorAttachment.retry();
   if (!reply?.ok) {
-    fail(reply?.error ?? 'The required App actor is unavailable.', { retryActor: true });
+    showActorAttachFailure(reply);
     return;
   }
   actorRetry.hidden = true;
+  actorRetry.textContent = 'Retry actor';
   boot.classList.remove('is-failed');
   renderMode().catch((error) => fail(
     /** @type {{message?:string}} */ (error)?.message ?? String(error),

@@ -35,6 +35,22 @@ describe('actor startup retry', () => {
     expect(attempt.exhausted).toBe(false);
   });
 
+  test('a frozen module-load timeout is not awaited twice', async () => {
+    let calls = 0;
+    const result = await runActorWithStartupRetry({
+      run: async () => {
+        calls += 1;
+        return {
+          ok: false, started: false, phase: 'startup', outcomeKnown: true,
+          code: 'actor_host_load_timeout',
+        };
+      },
+      isStartupFailure: isActorHostStartupFailure,
+    });
+    expect(calls).toBe(1);
+    expect(result).toMatchObject({ exhausted: true, result: { code: 'actor_host_load_timeout' } });
+  });
+
   for (const code of ['actor_worker_crashed', 'actor_worker_message_error']) {
     test(`${code} after work starts is never retried`, async () => {
       let calls = 0;

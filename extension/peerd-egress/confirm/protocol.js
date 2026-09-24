@@ -1,81 +1,18 @@
 // @ts-check
-// Confirmation prompt protocol (§4.4).
-//
-// The dispatcher calls `confirm(prompt)` and awaits the user's answer.
-// Under the hood this is a SW ↔ side panel round-trip:
-//
-//   1. SW puts a prompt on the queue keyed by its UUIDv7
-//   2. SW pushes a 'confirm/request' message to the side panel port
-//   3. Side panel renders the prompt inline (DECISIONS.md §5)
-//   4. User clicks Yes-once / Yes-session / No
-//   5. Side panel posts 'confirm/answer' with { id, answer }
-//   6. SW resolves the waiting Promise; the dispatcher proceeds
-//
-// Hang protection (alpha-hardening): a confirm MUST always settle — a turn that
-// awaits ctx.confirm() can never hang. So:
-//   - BROKEN CHANNEL (side panel closed / no port): auto-deny ('no') immediately
-//     — fail-closed, the agent reports it couldn't get approval and moves on.
-//   - OPEN BUT UNANSWERED: a generous timeout (the user may be deciding) then
-//     auto-deny. While a prompt is pending, the SW raises an action-badge so the
-//     user knows the agent is waiting on them (onPendingChange below).
-//
-// Session-scoped grants live in SW MEMORY (service-worker.js
-// sessionConfirmGrants): sessionId → the set of GRANT KEYS the user
-// blanket-approved for that chat. They die with the SW (same blast
-// radius as the vault DK). Since R5 the key is origin-bound when the
-// prompt carries an origin - `tool|origin` - and the bare tool name
-// only for tools with no origin surface (confirm-grant-key.js is the
-// authority). A persistent `tool_grants` store is a documented
-// follow-up (TODO.md).
 
-import { uuidv7 } from '/shared/util.js';
+import { uuidv7 } from '/shared/cold-util.js';
 
 /** @typedef {import('/shared/tool-types.js').ConfirmPrompt} ConfirmPrompt */
 /** @typedef {import('/shared/tool-types.js').ConfirmAnswer} ConfirmAnswer */
+/** @typedef {{answer:ConfirmAnswer,cause:'answer'|'timeout'|'abort'|'stop',via:string|null,sessionId:string|null}} ConfirmOutcome */
 
-/**
- * How and why a prompt settled.
- * @typedef {Object} ConfirmOutcome
- * @property {ConfirmAnswer} answer
- * @property {'answer'|'timeout'|'abort'|'stop'} cause
- *   'answer' - a surface posted confirm/answer; 'timeout' - the open-but-
- *   unanswered deadline hit; 'abort' - the requesting operation's signal fired
- *   (Stop / steer-live); 'stop' - declineSession()/reset() settled it.
- * @property {string|null} via  the surface that answered ('sidepanel'|'home'),
- *   null for every self-settle.
- * @property {string|null} sessionId  the CHAT whose transcript renders the
- *   settle line - prompt.chatSessionId when the SW mapped an actor-raised
- *   prompt to its root chat, else prompt.sessionId. (declineSession keeps
- *   matching on prompt.sessionId - the actor's own turn is what aborts.)
- */
-
-/**
- * Build a confirm coordinator. The SW creates exactly one of these and
- * passes its `confirm` function into every ToolContext.
- *
- * @param {Object} deps
- * @param {(prompt: ConfirmPrompt) => void} deps.notifySidePanel
- *   Push a 'confirm/request' to the side panel port. Called once per
- *   prompt; the side panel is responsible for rendering it.
- * @param {() => boolean} [deps.isChannelOpen]
- *   Whether the side panel can receive a prompt (port present). When it
- *   returns false, confirm() auto-denies immediately instead of hanging.
- *   Defaults to always-open (tests).
- * @param {number} [deps.timeoutMs]
- *   Max time to wait for the user before auto-denying an OPEN-but-unanswered
- *   prompt. Generous by default (the user may be deciding).
- * @param {(pendingCount: number) => void} [deps.onPendingChange]
- *   Called whenever the pending-prompt count changes, so the SW can raise/clear
- *   an action badge ("the agent is waiting on you"). Best-effort.
- * @param {(id: string, prompt: ConfirmPrompt, outcome: ConfirmOutcome) => void} [deps.onSettled]
- *   Called with a prompt's id, its custody, and HOW it settled, whenever it
- *   settles for any reason: user answer, timeout auto-deny, abort, or a session
- *   decline. The SW sends 'confirm/resolved' to the active owner surface so it
- *   dismisses the modal for every settlement path (DESIGN-12). why the outcome
- *   rides along: three of the four self-settles are otherwise invisible - the
- *   transcript must be able to say WHY a confirm ended without anyone
- *   clicking (UI redesign §4e).
- */
+/** @param {{
+ * notifySidePanel:(prompt:ConfirmPrompt)=>void,
+ * isChannelOpen?:()=>boolean,
+ * timeoutMs?:number,
+ * onPendingChange?:(pendingCount:number)=>void,
+ * onSettled?:(id:string,prompt:ConfirmPrompt,outcome:ConfirmOutcome)=>void,
+ * }} deps */
 export const makeConfirmCoordinator = ({
   notifySidePanel,
   isChannelOpen = () => true,
@@ -83,23 +20,15 @@ export const makeConfirmCoordinator = ({
   onPendingChange = () => {},
   onSettled = () => {},
 }) => {
-  /** @type {Map<string, { settle: (answer: ConfirmAnswer, cause?: ConfirmOutcome['cause'], via?: string|null) => void, prompt: ConfirmPrompt }>} */
+  /** @type {Map<string,{settle:(answer:ConfirmAnswer,cause?:ConfirmOutcome['cause'],via?:string|null)=>void,prompt:ConfirmPrompt}>} */
   const pending = new Map();
-  /** @type {Map<string, ReturnType<typeof setTimeout>>} */
+  /** @type {Map<string,ReturnType<typeof setTimeout>>} */
   const timers = new Map();
+  const notifyCount = () => { try { onPendingChange(pending.size); } catch {} };
 
-  const notifyCount = () => { try { onPendingChange(pending.size); } catch { /* best-effort */ } };
-
-  /**
-   * Return the latest prompt visible in one root chat. Confirmation state is
-   * per-SW-memory, so every live prompt uses explicit ownership and there is no
-   * legacy unscoped prompt to expose globally.
-   *
-   * @param {string | null | undefined} ownerSessionId
-   * @returns {ConfirmPrompt | null}
-   */
+  /** @param {string|null|undefined} ownerSessionId @returns {ConfirmPrompt|null} */
   const getPendingForOwner = (ownerSessionId) => {
-    /** @type {ConfirmPrompt | null} */
+    /** @type {ConfirmPrompt|null} */
     let last = null;
     for (const { prompt } of pending.values()) {
       if ((prompt.ownerSessionId ?? null) === (ownerSessionId ?? null)) last = prompt;
@@ -107,17 +36,8 @@ export const makeConfirmCoordinator = ({
     return last;
   };
 
-  /**
-   * Resolve a pending prompt. Called by the SW message handler when the
-   * side panel posts 'confirm/answer'.
-   *
-   * @param {{ id?: unknown, ownerSessionId?: unknown, sessionId?: unknown,
-   *   dispatchId?: unknown }} claim
-   * @param {ConfirmAnswer} answer
-   * @param {string|null} [via]  which surface answered ('sidepanel'|'home') -
-   *   rides the settle outcome so the OTHER surface can say who decided (§4e).
-   * @returns {boolean} true only when the claim exactly owns a live prompt
-   */
+  /** @param {{id?:unknown,ownerSessionId?:unknown,sessionId?:unknown,dispatchId?:unknown}} claim
+   * @param {ConfirmAnswer} answer @param {string|null} [via] */
   const resolve = (claim, answer, via = null) => {
     if (!claim || typeof claim.id !== 'string') return false;
     if (answer !== 'yes_once' && answer !== 'yes_session' && answer !== 'no') return false;
@@ -132,63 +52,38 @@ export const makeConfirmCoordinator = ({
     return true;
   };
 
-  /**
-   * Ask the user. Returns a Promise that ALWAYS settles with an answer
-   * (auto-denies on a broken channel or timeout — never hangs the turn).
-   *
-   * @param {Omit<ConfirmPrompt, 'id'>} promptInput
-   * @param {AbortSignal} [signal] the lifetime of the operation requesting consent
-   * @returns {Promise<ConfirmAnswer>}
-   */
-  const confirm = (promptInput, signal) => new Promise((res) => {
-    // A dead operation cannot leave a stale card behind or receive authority
-    // from a late click. Refuse before allocating an id or notifying the UI.
-    if (signal?.aborted) { res('no'); return; }
-    // Broken channel → fail-closed immediately. The agent can't reach the user,
-    // so it must not perform the side-effect AND must not hang.
-    if (!isChannelOpen()) { res('no'); return; }
-
+  /** @param {Omit<ConfirmPrompt,'id'>} promptInput @param {AbortSignal} [signal]
+   * @returns {Promise<ConfirmAnswer>} */
+  const confirm = (promptInput, signal) => new Promise((resolveAnswer) => {
+    if (signal?.aborted || !isChannelOpen()) { resolveAnswer('no'); return; }
     const id = uuidv7();
-    // raisedAt: lets a surface time UI against the auto-deny deadline (the 90s
-    // "No answer counts as Reject" hint) even when it joined late via replay.
     const prompt = { ...promptInput, id, raisedAt: Date.now() };
-    /** @type {(() => void) | undefined} */
+    /** @type {(()=>void)|undefined} */
     let onAbort;
-    /**
-     * @param {ConfirmAnswer} answer
-     * @param {ConfirmOutcome['cause']} [cause]
-     * @param {string|null} [via]
-     */
+    /** @param {ConfirmAnswer} answer @param {ConfirmOutcome['cause']} [cause]
+     * @param {string|null} [via] */
     const settle = (answer, cause = 'stop', via = null) => {
-      const t = timers.get(id); if (t) clearTimeout(t); timers.delete(id);
+      const timer = timers.get(id);
+      if (timer) clearTimeout(timer);
+      timers.delete(id);
       if (onAbort) signal?.removeEventListener('abort', onAbort);
-      // onSettled inside the delete-guard → fires EXACTLY once, on the first
-      // settle (answer or timeout), so every surface dismisses the modal.
-      if (pending.delete(id)) {
-        res(answer);
-        notifyCount();
-        try {
-          onSettled(id, prompt, {
-            answer, cause, via,
-            // The OWNER chat is where a settle line renders: an actor-raised
-            // prompt carries the actor's sessionId for custody, but
-            // ownerSessionId is the root chat a human actually watches.
-            sessionId: /** @type {{ ownerSessionId?: string }} */ (prompt).ownerSessionId ?? prompt.sessionId ?? null,
-          });
-        } catch { /* best-effort */ }
-        // why: the UI renders one modal. Parallel actors can queue more than one
-        // confirmation for a chat, so settling the visible prompt must reveal the
-        // next live one instead of leaving it hidden until its timeout.
-        const next = getPendingForOwner(prompt.ownerSessionId);
-        if (next) {
-          try { notifySidePanel(next); } catch { /* best-effort replay */ }
-        }
-      }
+      if (!pending.delete(id)) return;
+      resolveAnswer(answer);
+      notifyCount();
+      try {
+        onSettled(id, prompt, {
+          answer,
+          cause,
+          via,
+          sessionId: /** @type {{ownerSessionId?:string}} */ (prompt).ownerSessionId
+            ?? prompt.sessionId ?? null,
+        });
+      } catch {}
+      const next = getPendingForOwner(prompt.ownerSessionId);
+      if (next) { try { notifySidePanel(next); } catch {} }
     };
     pending.set(id, { settle, prompt });
     timers.set(id, setTimeout(() => settle('no', 'timeout'), timeoutMs));
-    // Install the listener before exposing the prompt. The second aborted check
-    // closes the race between the preflight above and addEventListener().
     if (signal) {
       onAbort = () => settle('no', 'abort');
       signal.addEventListener('abort', onAbort, { once: true });
@@ -198,29 +93,12 @@ export const makeConfirmCoordinator = ({
     notifySidePanel(prompt);
   });
 
-  /** Decline all pending prompts (e.g. on session end). `settle` clears each
-   * timer, resolves the blocked caller, and dismisses every open modal. */
   const reset = () => {
-    // snapshot: settle() mutates both maps while resolving each promise.
     for (const { settle } of [...pending.values()]) settle('no', 'stop');
   };
-
-  /**
-   * Decline (settle to 'no') every pending prompt for ONE session — called when
-   * that session's turn is aborted (Stop / steer-live). why: a turn parked on
-   * ctx.confirm() when the user aborts must NOT later run the side-effecting tool
-   * the user just cancelled, and must not stay parked for the full timeout while
-   * a steered turn writes the same session. Settling to 'no' unblocks the old
-   * turn straight into its abort exit, performing nothing. First-settle-wins (the
-   * settle guard): a user 'yes' that already landed is honored and this no-ops;
-   * otherwise 'no' wins and a late 'yes' for that id is dropped. Session-scoped —
-   * a Stop in one chat never touches a pending confirm in another.
-   *
-   * @param {string | null | undefined} sessionId
-   */
+  /** @param {string|null|undefined} sessionId */
   const declineSession = (sessionId) => {
     if (sessionId == null) return;
-    // snapshot: settle() mutates `pending` as it resolves each promise.
     for (const { settle, prompt } of [...pending.values()]) {
       if (prompt.sessionId === sessionId) settle('no', 'stop');
     }

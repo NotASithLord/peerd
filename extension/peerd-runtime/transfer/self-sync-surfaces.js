@@ -34,7 +34,7 @@
 // JSON+utf8 shape (self-sync-surfaces.test.ts round-trips it).
 
 import { utf8, fromUtf8 } from '/shared/bundle/bytes.js';
-import { isCustodySecretName, portableSecretEntries } from './secret-policy.js';
+import { portableSecretEntries } from './secret-policy.js';
 
 // ── the person-portable session projection ───────────────────────────
 // A session record carries two intermixed things: DURABLE conversation
@@ -160,24 +160,6 @@ export const shapeSecretsSurface = ({ secrets }) => ({
   v: 1,
   secrets: portableSecretEntries(secrets),
 });
-
-/**
- * Apply only ordinary provider/user secrets. Inbound filtering is mandatory
- * even though the sender filters: an authenticated but compromised self
- * device must not overwrite identity or per-install custody.
- * @param {any} payload
- * @param {{ setSecret: (name: string, value: string) => Promise<void> }} io
- */
-export const applySecretsSurface = async (payload, { setSecret }) => {
-  let written = 0;
-  let refused = 0;
-  for (const [name, value] of Object.entries(payload?.secrets ?? {})) {
-    if (isCustodySecretName(name) || typeof value !== 'string') { refused++; continue; }
-    await setSecret(name, value);
-    written++;
-  }
-  return { written, refused };
-};
 
 // ── apps (logical artifacts) ─────────────────────────────────────────
 // An App's portable form is its manifest + content-addressed files, NOT the

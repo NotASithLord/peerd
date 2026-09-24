@@ -17,7 +17,7 @@
 // NO engine clients, NO chrome.* — it ingests untrusted content (page DOM, VM
 // stdout, API/response bodies) that can reach neither the orchestrator's memory
 // nor the key. Its ONLY outward edges are two SW-gated relays:
-//   - the model call → the SW adds getSecret + safeFetch (the key stays in the SW);
+//   - exact inference stream effects → fixed SW egress authority;
 //   - a tool call → the SW builds the actor's instance-PINNED, gated tool context
 //     and dispatches THERE (the pin + gate + audit + engine clients + tabs are ALL
 //     SW-side). why the SW MUST re-pin+gate: the worker's `call` args are
@@ -59,7 +59,7 @@ export const finalAssistantText = (session) => {
  * the run. Seeded with the child/actor record the SW created (its id/provider/model
  * carry the lineage the SW already stamped).
  *
- * @param {{ sessionId: string, provider?: string, model?: string, depth?: number, messages?: any[] }} seed
+ * @param {{ sessionId: string, provider?: string, model?: string, kind?:'actor'|'spawned', depth?: number, messages?: any[], trimSummary?:any }} seed
  *   `messages` seeds prior history — a BOUND actor is stateful across turns, so the
  *   worker reasons over its accumulated transcript. An ephemeral reasoning child
  *   omits it (fresh each spawn). The array is copied (the worker owns its heap's
@@ -72,9 +72,11 @@ export const makeInMemorySessions = (seed) => {
     sessionId: seed.sessionId,
     provider: seed.provider ?? 'anthropic',
     model: seed.model ?? '',
-    kind: 'spawned',
+    kind: seed.kind === 'actor' ? 'actor' : 'spawned',
     depth: seed.depth ?? 1,
     messages: /** @type {any[]} */ (Array.isArray(seed.messages) ? [...seed.messages] : []),
+    ...(seed.trimSummary && typeof seed.trimSummary === 'object'
+      ? { trimSummary: structuredClone(seed.trimSummary) } : {}),
   });
   const store = {
     get: async (/** @type {string} */ id) => map.get(id),
@@ -98,40 +100,15 @@ export const makeInMemorySessions = (seed) => {
       else s.messages.push({ id: messageId, ...patch });
       return s;
     },
-    setTrimSummary: async () => {},
+    setTrimSummary: async (/** @type {string} */ id, /** @type {any} */ state) => {
+      const s = map.get(id); if (!s) return undefined;
+      s.trimSummary = state && typeof state === 'object' ? structuredClone(state) : null;
+      return s;
+    },
     setCost: async () => {},
   };
   return store;
 };
-
-/**
- * Build the RELAYED callModel the worker hands to runUserTurn. An async-generator
- * that DELEGATES the actual streaming call to the SW: it strips the non-serializable
- * fields (getSecret, safeFetch, signal — functions/AbortSignal that structured-clone
- * throws on, AND the key/egress path that must never leave the SW), hands the rest to
- * `requestModel`, and yields back the events the SW accumulated. The SW route re-adds
- * its OWN getSecret + safeFetch so the key stays there.
- *
- * @param {(args: object) => Promise<{ events?: any[], error?: string }>} requestModel
- * @param {number} [maxOutputTokens]  injected as maxTokens (the output cap), mirroring spawn.js.
- */
-export const makeRelayedCallModel = (requestModel, maxOutputTokens) =>
-  async function* relayedCallModel(/** @type {any} */ args) {
-    // Drop getSecret + safeFetch (FUNCTIONS — structured-clone throws DataCloneError
-    // on a function; a missed strip made the relay throw on EVERY call, silently
-    // falling back to the in-SW loop) AND signal (a non-cloneable AbortSignal).
-    // Belt-and-braces: also drop any OTHER function-valued field so a future loop
-    // addition can't re-break the clone.
-    const { getSecret, safeFetch, signal, ...rest } = args ?? {};
-    void getSecret; void safeFetch; void signal;
-    /** @type {Record<string, unknown>} */
-    const serializable = {};
-    for (const [k, v] of Object.entries(rest)) if (typeof v !== 'function') serializable[k] = v;
-    if (maxOutputTokens != null) serializable.maxTokens = maxOutputTokens;
-    const reply = await requestModel(serializable);
-    if (reply?.error) throw new Error(reply.error);
-    for (const ev of reply?.events ?? []) yield ev;
-  };
 
 /**
  * Reconstruct a WEB/API actor's rolling-summary SELF-FENCE for the worker loop ctx
@@ -157,35 +134,6 @@ export const makeActorSummaryFence = ({ actorType, backing, tabOrigin, origin } 
 };
 
 /**
- * Build the RELAYED toolDispatch the actor worker hands to runUserTurn. Each tool
- * call is delegated across the boundary to the SW, which pins + gates + dispatches
- * it and returns the ToolResult. The call object ({ name, args, id }) is
- * serializable; the result is a plain ToolResult (serializable). A relay failure
- * surfaces as a tool error (never throws the loop).
- *
- * @param {(call: object) => Promise<{ ok?: boolean, result?: any, error?: string }>} requestTool
- */
-export const makeRelayedToolDispatch = (requestTool) =>
-  async (/** @type {any} */ call) => {
-    try {
-      const reply = await requestTool({ name: call?.name, args: call?.args, id: call?.id });
-      if (reply && reply.ok && reply.result !== undefined) return reply.result;
-      // Shape a relay/dispatch failure into a ToolResult the loop can carry.
-      return {
-        ok: false,
-        error: reply?.error ?? 'actor tool relay failed',
-        meta: { toolName: call?.name, primitive: 'unknown', gates: [], durationMs: 0 },
-      };
-    } catch (e) {
-      return {
-        ok: false,
-        error: `actor tool relay threw: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`,
-        meta: { toolName: call?.name, primitive: 'unknown', gates: [], durationMs: 0 },
-      };
-    }
-  };
-
-/**
  * Drive one agent-loop turn to completion in the worker heap — a BOUND actor turn
  * (tools + relayed dispatch + prior-history statefulness) OR an ephemeral reasoning
  * actor (tools:[] → the relayed dispatch is never invoked). Returns the result
@@ -197,6 +145,8 @@ export const makeRelayedToolDispatch = (requestTool) =>
  * @param {ReturnType<typeof makeInMemorySessions>} deps.sessions
  * @param {(args: object) => AsyncIterable<any>} deps.callModel   the relayed callModel
  * @param {(call: object) => Promise<any>} deps.toolDispatch      the relayed toolDispatch
+ * @param {(name: string) => (import('../permissions/policy.js').PermissionVerdict | null)} [deps.classifyToolCall]
+ *   sealed descriptor + pinned-permission scheduler classification
  * @param {() => (Promise<string> | string)} deps.getSystemPrompt
  * @param {(entry: object) => (Promise<unknown> | void)} [deps.appendAudit]
  * @param {(ev: object) => void} [deps.onEvent]
@@ -207,7 +157,10 @@ export const makeRelayedToolDispatch = (requestTool) =>
  * @returns {Promise<{ finalText: string, newMessages: any[], usage: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, stopReason: string|undefined, toolCalls: number, error?: string }>}
  */
 export const runActorLoop = async (deps, req) => {
-  const { runUserTurn, sessions, callModel, toolDispatch, getSystemPrompt, onEvent, tools, fenceActorSummary } = deps;
+  const {
+    runUserTurn, sessions, callModel, toolDispatch, classifyToolCall,
+    getSystemPrompt, onEvent, tools, fenceActorSummary,
+  } = deps;
   // Defensive (phase-1 lesson): the loop fire-and-forgets audits as
   // appendAudit(...).catch(...) — a sync stub returning undefined would crash it.
   const appendAudit = (/** @type {object} */ e) => Promise.resolve(deps.appendAudit?.(e));
@@ -236,6 +189,7 @@ export const runActorLoop = async (deps, req) => {
     appendAudit,
     tools,
     toolDispatch,
+    ...(classifyToolCall ? { classifyToolCall } : {}),
     persistDeltas: false,
     // Preserve the SW's inbound provenance in the loop request as well as the
     // relay grant. These are strict literals derived from one monotonic bit; the

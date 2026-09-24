@@ -20,6 +20,22 @@
 // App. "subtree" narrows to a path/section inside that workspace and
 // loads ON DEMAND, keeping the always-loaded surface lean.
 
+import {
+  MAX_DOC_CHARS,
+  normalizeBody,
+  normalizeSubpath,
+  normalizeWorkspace,
+  scopeId,
+} from '../../shared/memory-authority-policy.js';
+
+export {
+  MAX_DOC_CHARS,
+  normalizeBody,
+  normalizeSubpath,
+  normalizeWorkspace,
+  scopeId,
+};
+
 /** @typedef {'user' | 'project' | 'subtree'} MemoryScopeKind */
 
 /**
@@ -66,77 +82,6 @@
 // fetched on demand, so deep per-folder notes never bloat the prompt.
 export const ALWAYS_LOADED_LINE_BUDGET = 200;
 
-// Cap a single document's body so one runaway write can't blow the
-// budget or the IDB value size. ~24KB of markdown is a generous ceiling
-// for hand-curated notes.
-export const MAX_DOC_CHARS = 24_000;
-
-/**
- * Canonical id for a scope. Stable + collision-free across kinds:
- *   user                 → 'user'
- *   project  + workspace → 'project:<workspace>'
- *   subtree  + ws + path → 'subtree:<workspace>:<subpath>'
- *
- * Pure. The store keys IDB rows on this; the loader dedupes on it.
- *
- * @param {MemoryScope} s
- * @returns {string}
- */
-export const scopeId = (s) => {
-  if (!s || typeof s.kind !== 'string') {
-    throw new TypeError('scopeId: kind is required');
-  }
-  if (s.kind === 'user') return 'user';
-  const ws = normalizeWorkspace(s.workspace);
-  if (!ws) throw new TypeError(`scopeId: ${s.kind} scope needs a workspace`);
-  if (s.kind === 'project') return `project:${ws}`;
-  if (s.kind === 'subtree') {
-    const sub = normalizeSubpath(s.subpath);
-    if (!sub) throw new TypeError('scopeId: subtree scope needs a subpath');
-    return `subtree:${ws}:${sub}`;
-  }
-  throw new TypeError(`scopeId: unknown kind '${s.kind}'`);
-};
-
-/**
- * Normalize a workspace key. A workspace is a browsing context, so we
- * accept an origin ('https://github.com'), a vm/app/js id
- * ('vm:abc123'), or a plain label. We lower-case the host of an origin
- * (origins are case-insensitive in their host) but leave opaque ids
- * untouched. Returns '' for falsy input.
- *
- * @param {string | undefined} ws
- * @returns {string}
- */
-export const normalizeWorkspace = (ws) => {
-  if (typeof ws !== 'string') return '';
-  const trimmed = ws.trim();
-  if (!trimmed) return '';
-  // why: only real web origins (have a host) get host-lowercased; an id
-  // like 'vm:AbC' parses as a URL with protocol 'vm:' but NO host, and
-  // must round-trip verbatim (it's a case-sensitive opaque id, not an
-  // origin). Guard on u.host so we don't mangle ids into 'vm://'.
-  try {
-    const u = new URL(trimmed);
-    if (u.host) return `${u.protocol}//${u.host.toLowerCase()}`;
-    return trimmed;
-  } catch {
-    return trimmed;
-  }
-};
-
-/**
- * Normalize a subtree path: trim, strip leading/trailing slashes,
- * collapse runs of slashes. '' when empty.
- *
- * @param {string | undefined} p
- * @returns {string}
- */
-export const normalizeSubpath = (p) => {
-  if (typeof p !== 'string') return '';
-  return p.trim().replace(/^\/+|\/+$/g, '').replace(/\/{2,}/g, '/');
-};
-
 /**
  * Does subtree `sub` live under the path scope the loader was asked for?
  * A subtree doc at 'src/api' is in scope for a request targeting
@@ -164,24 +109,6 @@ export const subpathInScope = (docSub, targetSub) => {
 export const countLines = (body) => {
   if (typeof body !== 'string' || body === '') return 0;
   return body.replace(/\n$/, '').split('\n').length;
-};
-
-/**
- * Validate + normalize a body for storage. Throws on over-budget so a
- * bad write fails loudly at the API boundary rather than silently
- * truncating the user's notes. Trims a trailing-whitespace-only body to
- * '' (an empty doc is a delete signal upstream).
- *
- * @param {string} body
- * @returns {string}
- */
-export const normalizeBody = (body) => {
-  if (typeof body !== 'string') throw new TypeError('memory body must be a string');
-  const trimmed = body.replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n');
-  if (trimmed.length > MAX_DOC_CHARS) {
-    throw new RangeError(`memory body too large: ${trimmed.length} > ${MAX_DOC_CHARS} chars`);
-  }
-  return trimmed.trim() === '' ? '' : trimmed;
 };
 
 /**

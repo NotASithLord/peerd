@@ -6,7 +6,8 @@ import { describe, test, expect } from 'bun:test';
 import {
   createContextSnapshots, shapeModelCall,
   SNAPSHOTS_PER_SESSION, SNAPSHOT_CONTENT_CHARS, SNAPSHOT_MAX_MESSAGES,
-} from '../../extension/background/context-snapshots.js';
+  mainModelContextLabel,
+} from '../../extension/shared/model-context-snapshot.js';
 
 describe('shapeModelCall — bounded and binary-free', () => {
   test('clips long content, keeps structure, strips base64 with a visible sentinel', () => {
@@ -70,6 +71,28 @@ describe('shapeModelCall — bounded and binary-free', () => {
     expect(() => shapeModelCall(undefined as any)).not.toThrow();
     expect(shapeModelCall({ messages: 'not-an-array' as any }).messages).toEqual([]);
     expect(shapeModelCall({ system: { odd: true } as any }).systemChars).toBe(0);
+    const cyclic: any = {};
+    cyclic.self = cyclic;
+    expect(() => shapeModelCall({ reasoning: cyclic, messages: [{
+      role: 'user', content: 1n,
+    }] })).not.toThrow();
+  });
+
+  test('the bounded wire shape is idempotent across both sides of the observation edge', () => {
+    const first = shapeModelCall({
+      provider: 'anthropic', model: 'model', system: 's'.repeat(8_000),
+      tools: [{ name: 'read_result' }],
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    expect(shapeModelCall(first)).toEqual(first);
+  });
+
+  test('labels fallback provider attempts without changing ordinary main calls', () => {
+    const requested = { provider: 'anthropic', model: 'primary' };
+    expect(mainModelContextLabel(requested, requested)).toBe('main');
+    expect(mainModelContextLabel(requested, {
+      provider: 'openai', model: 'fallback',
+    })).toBe('main:failover');
   });
 });
 

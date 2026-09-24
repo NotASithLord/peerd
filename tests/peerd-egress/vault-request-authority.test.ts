@@ -4,8 +4,8 @@ import { makeWebFetch, withDpopCredentials } from '../../extension/peerd-egress/
 
 const setup = async () => {
   const key = 'vault.unlocked.v1';
-  const mirror = { dk: btoa(String.fromCharCode(...new Uint8Array(32))), unlockedAt: 1 };
-  const session = new Map<string, any>([[key, mirror]]);
+  const session = new Map<string, any>();
+  const prfOutput = new Uint8Array(32).fill(7);
   const data = new Map<string, any>();
   let wait: Promise<void> | undefined;
   const vault = createVault({
@@ -15,12 +15,26 @@ const setup = async () => {
       sessionSet: async (k, v) => { session.set(k, v); }, sessionDelete: async (k) => { session.delete(k); } },
     autoLockMs: 0, now: () => 1,
   });
-  await vault.attemptResume();
+  await vault.initializeWithPrfOnly({
+    prfOutput, credentialId: new Uint8Array([1, 2, 3]), prfSalt: new Uint8Array(32).fill(9),
+  });
+  const mirror = session.get(key);
   return { vault, setWait: (value: Promise<void> | undefined) => { wait = value; },
-    reopen: async () => { session.set(key, mirror); await vault.attemptResume(); } };
+    reopen: () => vault.unlockWithPrf(prfOutput),
+    replayMirror: async () => { session.set(key, mirror); await vault.attemptResume(); } };
 };
 
 describe('raw vault request preparation authority', () => {
+  test('a stale session mirror cannot act as a fresh unlock', async () => {
+    const { vault, replayMirror } = await setup();
+    const before = vault.captureRequestAuthority();
+    await vault.lock();
+    await replayMirror();
+    expect(vault.isLocked()).toBe(true);
+    expect(before()).toBe(false);
+    expect(vault.captureRequestAuthority()()).toBe(false);
+  });
+
   test.each(['replace', 'delete'])('%s revokes before storage and does not revive captured leases', async (kind) => {
     const { vault, setWait } = await setup();
     const gate = Promise.withResolvers<void>();

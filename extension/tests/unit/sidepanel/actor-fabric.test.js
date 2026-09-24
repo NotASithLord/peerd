@@ -29,13 +29,13 @@ describe('ActorFabric', () => {
         'tu-web': {
           sessionId: 'web-1', rootSessionId: 'chat', parentSessionId: 'chat',
           kind: 'web', instanceId: 'web', task: 'compare the page price',
-          grantedTools: ['read_page'], streaming: true, messages: [],
+          visibleTools: ['read_page'], streaming: true, messages: [],
         },
       },
       spawned: { sessions: {
         child: {
           sessionId: 'child', parentSessionId: 'chat', task: 'compare plans',
-          rootSessionId: 'chat', running: true, grantedTools: ['script'], messages: [],
+          rootSessionId: 'chat', running: true, visibleTools: ['script'], messages: [],
         },
       } },
       asyncTasks: {},
@@ -57,7 +57,7 @@ describe('ActorFabric', () => {
         'tu-api': {
           sessionId: 'api-1', rootSessionId: 'chat', parentSessionId: 'chat',
           kind: 'web', instanceId: 'https://api.example', task: 'read the catalog',
-          grantedTools: ['fetch_url'], streaming: true, messages: [],
+          visibleTools: ['fetch_url'], streaming: true, messages: [],
         },
       },
     });
@@ -97,7 +97,7 @@ describe('ActorFabric', () => {
         'tu-a': {
           sessionId: 'actor-a', rootSessionId: 'chat-a', parentSessionId: 'chat-a',
           kind: 'web', instanceId: 'web', task: 'private task',
-          grantedTools: ['read_page'], streaming: true, messages: [],
+          visibleTools: ['read_page'], streaming: true, messages: [],
         },
       },
     });

@@ -28,7 +28,7 @@ import {
 // (ACTOR_TYPE_TOOLS.web below is the actor-side allow-list; this is the
 // main-side deny-list).
 //
-/** @typedef {import('/shared/tool-types.js').Tool} Tool */
+/** @typedef {ReturnType<typeof import('./metadata/descriptor.js').toToolDescriptor>} Tool */
 // web_search and submit_form are GONE (deleted, not hidden) — the web actor
 // covers search (navigate to an engine + read results) and form submission (its
 // DOM type/click tools) now. The ONE direct web-ish tool the orchestrator keeps
@@ -38,12 +38,10 @@ import {
 // Every web READ is the actor's, reached via message_actor.
 export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   'read_page', 'snapshot', 'read_state', 'watch_changes', 'query_dom',
-  'page_eval', 'page_exec', 'page_keys', 'navigate', 'type', 'click',
-  // read_pdf returns untrusted PDF text — same boundary as read_page; the
-  // web actor reaches it directly. read_doc is its office-format sibling
-  // (Word/Excel/PowerPoint/OpenDocument/RTF/EPUB/CSV) and returns the same
-  // thing — untrusted document text — so it sits on the same tier.
-  'read_pdf', 'read_doc',
+  'navigate', 'type', 'click',
+  // read_doc returns untrusted PDF/Office/OpenDocument text, so it sits on the
+  // same actor-only tier as page content.
+  'read_doc',
   // view returns an UNTRUSTED page screenshot as a model-visible image — same
   // boundary as read_page (raw page content), so it stays actor-only; the web
   // actor sees the pixels and reports back. (capture is NOT here: its image is
@@ -58,9 +56,6 @@ export const MAIN_AGENT_HIDDEN_TOOLS = Object.freeze(new Set([
   // page_code is the code-surface web actor's action tool (PR #119 A/B arm) —
   // same boundary as the DOM tools it wraps: page-driving stays off the main agent.
   'page_code',
-  // read_web_cache pages a SPILLED fetch_url body — the same fetched page
-  // content, so the same web-actor-only tier.
-  'read_web_cache',
   // DESIGN-19 site clients — per-origin derived API clients. All web-actor-only:
   // run executes a client (untrusted-provenance code) behind an origin-pinned
   // fetch; read/capture ingest page/response bytes; write persists them. Same
@@ -93,7 +88,7 @@ export const mainAgentDescriptors = (descriptors) =>
   // `dweb:true` flag: the descriptor PROJECTION (getToolDescriptors →
   // {name,description,schema}) strips the flag, so isDwebTool would be a no-op
   // on a projected list — the name is the only reliable signal here. (The gate
-  // sees the full registered tool and keeps using the flag.)
+  // sees the full controller tool and keeps using the flag.)
   descriptors.filter((t) => !MAIN_AGENT_HIDDEN_TOOLS.has(t.name) && !isDwebToolName(t.name));
 
 // ── DESIGN-17: actor tab agents — the capability tier ────────────────────
@@ -104,7 +99,7 @@ export const mainAgentDescriptors = (descriptors) =>
 // descriptor filters which are advisory):
 //
 //   - ACTOR_ONLY_TOOLS leave the MAIN agent. A non-actor ctx
-//     (main / actor / review / direct) is REFUSED any of them —
+//     (main / spawned / direct) is REFUSED any of them.
 //     so a one-line `actor_create({tools:['app_delete']})` can't escalate.
 //     Originally only MUTATION was tiered and the fenced READS
 //     (app_read_file/app_list_files/js_read_file) stayed global for cheap
@@ -150,51 +145,9 @@ export const ACTOR_ONLY_TOOLS = Object.freeze(new Set(
 /** Is this a tiered instance tool (actor-only, off the main agent)? Pure. @param {string} name */
 export const isActorOnlyTool = (name) => ACTOR_ONLY_TOOLS.has(name);
 
-// ── the review exemption (#160) ─────────────────────────────────────────────
-// The ONE hole in the actor-only wall, and it is deliberately shaped so it
-// cannot become two.
-//
-// The problem: #159 tiered the instance READS actor-only alongside the writes,
-// so the clean-context reviewer (request_review) — which is a SPAWNED child,
-// not an actor — can no longer open the files surrounding a diff. Reviews of
-// App/Notebook code became diff-only, which makes them materially worse.
-//
-// Why an exemption is safe HERE and nowhere else: the reviewer already runs in
-// a keyless offscreen heap (the same class of heap an actor uses), holds NO
-// outward closure at all (verified in review.test.ts: no safeFetch/webFetch/
-// dweb/messageActor/spawnActor survives its capability strip), cannot recurse,
-// and is ephemeral. So the isolation premise the tier defends — instance bytes
-// stay out of the orchestrator's key-holding heap — is upheld either way. What
-// the exemption widens is the reviewer's own untrusted-input blast radius (from
-// "the diff" to "the diff plus instance files"), which is the honest trade and
-// is bounded by having no channel out.
-//
-// READS ONLY, BY NAME. Not "the reviewer is exempt from the tier" and not "for
-// review, narrow from the full registry" — either of those would hand over
-// fetch_url / read_page / site_client_run in the same stroke and actually build
-// the exfiltration channel this whole design denies. Four names, derived from
-// the per-kind sets so a rename can't silently orphan the entry.
-export const EXPOSURE_REVIEW = 'review';
-
-export const REVIEW_INSTANCE_READS = Object.freeze(new Set(
-  ['js_read_file', 'pod_read', 'app_read_file', 'app_list_files']
-    .filter((n) => ACTOR_ONLY_TOOLS.has(n)),
-));
-
-/**
- * May this ctx hold this actor-only tool by way of the review exemption? Pure.
- * Positively scoped on BOTH axes: the SW-stamped review marker AND the
- * four-name read set. Anything else is refused exactly as before.
- *
- * @param {string} name @param {string | undefined} exposure
- */
-export const isReviewExemptRead = (name, exposure) =>
-  exposure === EXPOSURE_REVIEW && REVIEW_INSTANCE_READS.has(name);
-
 // DESIGN-17 web actor — the DOM toolset it owns. This list is the sole source
-// of truth for that set. why these and not page_eval/page_exec: the web actor
-// ingests untrusted page text, so it must not also wield code-exec — the
-// exclusion IS the boundary.
+// of truth for that set. The retired arbitrary page-code tools are not part of
+// any actor surface; page_code exposes only the named manifest below.
 export const WEB_ACTOR_DOM_TOOLS = WEB_ACTOR_DOM_TOOL_NAMES;
 
 // PR #119 — the CODE-surface web actor's toolset (the Aside-style A/B arm: the
@@ -202,16 +155,16 @@ export const WEB_ACTOR_DOM_TOOLS = WEB_ACTOR_DOM_TOOL_NAMES;
 // surface is derived from the page client manifest: the actor perceives AND
 // acts through page.* (page.snapshot()/page.content() for perception — still
 // the a11y snapshot, the unchanged axis — and page.goto/click/fill for action),
-// every call routing through the SW 'page/call' route to the SAME gated DOM
+// every call returning through the owning actor executor to the SAME gated DOM
 // tools on its owned tab. Operations not represented by a page method stay
 // discrete; today that is site_client_run, because nesting a second sealed job
 // inside page_code would deadlock the bounded relay pool.
 // why NOT also expose direct snapshot/read_page: those resolve the tab from the
 // ACTOR's turn context, which a fresh actor has none of — and a tab adopted
-// mid-turn inside page_code (SW-side) never repins that turn context, so a
+// mid-turn inside page_code (authority-side) never repins that turn context, so a
 // direct snapshot after a page.goto failed and the actor thrashed. Routing ALL
 // page interaction through page_code keeps ONE consistent tab. (page.snapshot()
-// still dispatches the snapshot tool via the route's inner tools-surface ctx.)
+// still executes the snapshot tool through the nested tools-surface ctx.)
 export const WEB_ACTOR_CODE_TOOLS = Object.freeze(new Set(actorCodeSurfaceTools('web', 'tab')));
 export const APP_ACTOR_CODE_TOOLS = Object.freeze(new Set(actorCodeSurfaceTools('app')));
 
@@ -368,10 +321,12 @@ export const actorWebTabTarget = (args) =>
 
 /**
  * The descriptor list an actor of `kind`/`backing` should SEE — its own toolset.
- * Pure. (The gate is the wall; this keeps the model's advertised list tight so it
- * isn't shown tools it would only get refused for.) DESIGN-18: backing-aware, so an
- * API actor is advertised ONLY fetch_url, matching its lore + the gate. PR #119:
- * surface-aware, so a code-surface web actor is advertised only its code toolset.
+ * Pure. This keeps the model's advertised list tight so it is not shown tools
+ * its semantic context would refuse. Host authority remains the fixed exact-op
+ * grant and live policy edge. DESIGN-18: backing-aware, so an API actor sees
+ * only its sessionless fetch, result paging, and origin-pinned site-client
+ * surface. PR #119: surface-aware, so a code-surface web actor is advertised
+ * only its code toolset.
  * @template {{ name: string }} T
  * @param {ReadonlyArray<T>} descriptors @param {string} [kind] @param {'tab' | 'api'} [backing] @param {'tools' | 'code'} [surface] @returns {T[]}
  */
@@ -403,7 +358,7 @@ export const isDwebTool = (tool) => tool?.dweb === true;
 // The name-based twin, for descriptor lists where the `dweb:true` flag has been
 // projected away (getToolDescriptors). Every dweb tool is named `dweb_*` and no
 // non-dweb tool is — the naming convention IS the contract. why both exist: the
-// gate holds the full registered tool (flag intact) and uses isDwebTool; the
+// gate holds the full controller tool (flag intact) and uses isDwebTool; the
 // exposure filters see a stripped projection and must go by name.
 /** @param {string} name @returns {boolean} */
 export const isDwebToolName = (name) => typeof name === 'string' && (name.startsWith('dweb_') || name === 'a2a_run');
@@ -421,19 +376,11 @@ export const filterByDwebEnabled = (descriptors, dwebOn) =>
   dwebOn ? [...descriptors] : descriptors.filter((t) => !isDwebTool(t));
 
 // ── dweb tools: progressive disclosure of the SECONDARY surface ──────────────
-// The dweb family has ENTRY tools — discover/share/install AND dweb_guide — always
-// on when the dweb is enabled, so a session can start a dweb flow (or read the
-// bridge reference BEFORE building a multiplayer dwapp) in one call. The SECONDARY
-// tools below (the sovereign controls) stay hidden until the session has ENGAGED
+// The dweb family has discover/share/install as entry tools whenever the dweb
+// is enabled. The SECONDARY tools below (the sovereign controls) stay hidden
+// until the session has ENGAGED
 // the dweb — i.e. a dweb tool was actually called this session. Then they appear
 // the next step, exactly like an instance-gated op after a create.
-//
-// why dweb_guide is ENTRY, not secondary: the prompt tells the agent to call it
-// FIRST when building a shared app — which is BEFORE any other dweb tool, so
-// dwebActive is still false. Gating it created a chicken-and-egg (the agent
-// couldn't see the tool it was told to call first, and fell back to load_skill).
-// The tool schema is tiny; the bulky guide text only loads when it's CALLED, so
-// keeping it always-visible costs ~nothing and keeps the bridge how-to reachable.
 //
 // why ENGAGEMENT, not connectivity (for the rest): the base network is always-on
 // and auto-connects to whatever peers are online, so "has peers" is true within

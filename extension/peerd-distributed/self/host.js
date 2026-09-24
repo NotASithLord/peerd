@@ -182,7 +182,6 @@ export const createSyncSource = ({
  * @param {number} [deps.maxRetries]
  * @param {number} [deps.stallTimeoutMs]
  * @param {number} [deps.retryBackoffMs]
- * @param {number} [deps.retryDelayMs] backwards-compatible alias for retryBackoffMs
  * @param {number} [deps.timeoutMs] total restore bound; zero disables it
  * @param {(fn: () => void, ms: number) => any} [deps.setTimer]   injected clock
  * @param {(handle: any) => void} [deps.clearTimer]
@@ -192,12 +191,11 @@ export const createSyncReceiver = ({
   maxRetries = DEFAULT_MAX_SURFACE_RETRIES,
   stallTimeoutMs = DEFAULT_STALL_TIMEOUT_MS,
   retryBackoffMs,
-  retryDelayMs,
   timeoutMs = 60_000,
   setTimer = (fn, ms) => setTimeout(fn, ms),
   clearTimer = (handle) => clearTimeout(handle),
 }) => {
-  const backoffMs = retryBackoffMs ?? retryDelayMs ?? DEFAULT_RETRY_BACKOFF_MS;
+  const backoffMs = retryBackoffMs ?? DEFAULT_RETRY_BACKOFF_MS;
   /** @type {import('./sync.js').SnapshotManifest | null} */
   let manifest = null;
   /** @type {Map<string, ReturnType<typeof createSurfaceCollector>>} */
@@ -210,7 +208,9 @@ export const createSyncReceiver = ({
   const refused = new Map();
   /** @type {Set<string>} */
   const wanted = new Set();
-  /** @type {Array<{ surface: string, defect: string }>} */
+  /** @type {Array<{ surface: string, defect: string, partial?: any,
+   *   performed?: boolean, outcomeKnown?: boolean, retryable?: boolean,
+   *   outcomeKind?: string }>} */
   const failed = [];
   /** @type {Map<string, number>} how many re-pulls a surface has already had */
   const attempts = new Map();
@@ -234,20 +234,29 @@ export const createSyncReceiver = ({
   let deferredFinish = null;
 
   /** @param {string} [defect] */
-  const resultFor = (defect) => ({
-    ok: !defect
-      && requested.size > 0
-      && applied.size === requested.size
-      && failed.length === 0
-      && refused.size === 0,
-    partial: (applied.size > 0 || partialEffects.size > 0)
-      && (Boolean(defect) || applied.size !== requested.size || failed.length > 0 || refused.size > 0),
-    applied: [...applied],
-    failed: [...failed],
-    ...(partialEffects.size > 0 ? { partialEffects: Object.fromEntries(partialEffects) } : {}),
-    refused: Object.fromEntries(refused),
-    ...(defect ? { defect } : {}),
-  });
+  const resultFor = (defect) => {
+    const unknown = failed.find((entry) => entry.outcomeKnown === false);
+    const performed = failed.some((entry) => entry.performed === true);
+    return {
+      ok: !defect
+        && requested.size > 0
+        && applied.size === requested.size
+        && failed.length === 0
+        && refused.size === 0,
+      partial: (applied.size > 0 || partialEffects.size > 0)
+        && (Boolean(defect) || applied.size !== requested.size
+          || failed.length > 0 || refused.size > 0),
+      applied: [...applied],
+      failed: [...failed],
+      ...(partialEffects.size > 0 ? { partialEffects: Object.fromEntries(partialEffects) } : {}),
+      refused: Object.fromEntries(refused),
+      ...(unknown ? {
+        performed: true, outcomeKnown: false, retryable: false,
+        outcomeKind: unknown.outcomeKind ?? 'host-lost',
+      } : performed ? { performed: true, outcomeKnown: true, retryable: false } : {}),
+      ...(defect ? { defect } : {}),
+    };
+  };
 
   /** @param {any} result */
   const finish = (result) => {
@@ -290,15 +299,26 @@ export const createSyncReceiver = ({
    * @param {string} surface
   * @param {string} defect
   * @param {any} [partial]
+  * @param {Record<string,any>} [custody]
   */
-  const failSurface = (surface, defect, partial) => {
+  const failSurface = (surface, defect, partial, custody = {}) => {
     if (!wanted.has(surface) || completedResult) return;
     clearSurfaceTimer(surface);
     collectors.delete(surface);
     wanted.delete(surface);
     if (partial && typeof partial === 'object') partialEffects.set(surface, partial);
-    failed.push({ surface, defect, ...(partial ? { partial } : {}) });
-    onEvent('surface_failed', { surface, defect, ...(partial ? { partial } : {}) });
+    const safeCustody = {
+      ...(typeof custody.performed === 'boolean' ? { performed: custody.performed } : {}),
+      ...(typeof custody.outcomeKnown === 'boolean'
+        ? { outcomeKnown: custody.outcomeKnown } : {}),
+      ...(typeof custody.retryable === 'boolean' ? { retryable: custody.retryable } : {}),
+      ...(['pre-effect-failure', 'effect-completed', 'host-lost', 'transport-lost']
+        .includes(custody.outcomeKind) ? { outcomeKind: custody.outcomeKind } : {}),
+    };
+    failed.push({ surface, defect, ...(partial ? { partial } : {}), ...safeCustody });
+    onEvent('surface_failed', {
+      surface, defect, ...(partial ? { partial } : {}), ...safeCustody,
+    });
     maybeComplete();
   };
 
@@ -441,7 +461,10 @@ export const createSyncReceiver = ({
             // the same bytes would fail the same way, so it is terminal.
             const partial = /** @type {{ partialResult?: any, result?: any }} */ (error)?.partialResult
               ?? /** @type {{ partialResult?: any, result?: any }} */ (error)?.result;
-            failSurface(surface, `apply-failed/${error instanceof Error ? error.name : 'Error'}`, partial);
+            failSurface(
+              surface, `apply-failed/${error instanceof Error ? error.name : 'Error'}`,
+              partial, /** @type {Record<string,any>} */ (error),
+            );
           } finally {
             inFlightApplies.delete(applying);
             applyingSurfaces.delete(surface);

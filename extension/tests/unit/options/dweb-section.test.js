@@ -71,4 +71,37 @@ describe('options.dweb live-stop status', () => {
       root.remove();
     }
   });
+
+  it('unknown lifecycle custody offers only read-only reload reconciliation', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const state = { settings: { dwebEnabled: true, dwebAgentEnabled: false } };
+    let calls = 0;
+    const send = async () => {
+      calls += 1;
+      return {
+        ok: false, error: 'raw host transport failure', outcomeKnown: false,
+        outcomeKind: 'unknown', retryable: false,
+      };
+    };
+    m.mount(root, { view: () => m(DwebSection, { state, send, loadStatus: async () => null }) });
+    try {
+      networkSwitch(root).click();
+      await settle();
+      expect(root.textContent).toContain('could not confirm whether the dweb change finished');
+      expect(root.textContent.includes('raw host transport failure')).toBe(false);
+      expect([...root.querySelectorAll('button')].some((button) =>
+        button.textContent === 'Reload dweb status')).toBe(true);
+      expect(rowState(root).badge).toBe('STATUS UNKNOWN');
+      expect(rowState(root).name.includes('retry stopping')).toBe(false);
+      expect([...root.querySelectorAll('button')].some((button) =>
+        button.textContent === 'Reset section to defaults')).toBe(false);
+      expect([...root.querySelectorAll('button[role="switch"]')].every((button) =>
+        button.hasAttribute('disabled'))).toBe(true);
+      expect(calls).toBe(1);
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
 });

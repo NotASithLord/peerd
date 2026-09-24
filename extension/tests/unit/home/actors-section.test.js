@@ -14,14 +14,14 @@ const OVERVIEW = {
         'tu-web': {
           sessionId: 'web-a', rootSessionId: 'chat-a', parentSessionId: 'chat-a',
           parentToolUseId: 'tu-web', kind: 'web', instanceId: 'web',
-          task: 'Read the pricing page', grantedTools: ['read_page'],
+          task: 'Read the pricing page', visibleTools: ['read_page'],
           messages: [], streaming: true,
         },
       },
       spawned: { byToolUse: {}, sessions: {
         child: {
           sessionId: 'child', rootSessionId: 'chat-a', parentSessionId: 'chat-a',
-          task: 'Compare warranty terms', grantedTools: [], messages: [], running: true,
+          task: 'Compare warranty terms', visibleTools: [], messages: [], running: true,
         },
       } },
       asyncTasks: {},
@@ -109,7 +109,7 @@ describe('home.actors', () => {
       expect(refresh.textContent).toBe('Refreshing…');
       expect(root.querySelector('[aria-live="polite"]')?.textContent).toContain('Refreshing actor activity');
       finishRefresh(OVERVIEW);
-      await flush();
+      await new Promise((resolve) => setTimeout(resolve, 0));
       expect(root.querySelector('[aria-live="polite"]')?.textContent).toContain('Actor activity refreshed');
     } finally {
       m.mount(root, null);

@@ -3,14 +3,14 @@
 //
 // The offscreen extractor (offscreen/pdf-extract.js) returns STRUCTURED page
 // data: [{ page, text }], plus document info and the engine that ran. This
-// module turns that into the capped plain-text body the read_pdf tool hands
+// module turns that into the capped plain-text body the read_doc tool hands
 // back (wrapped in <untrusted_web_content> by the tool, never here). Pure so
 // the pagination + cap + header logic is unit-tested without pdf.js.
 
 // Default output cap. PDFs can be enormous; the runner ingests this into a
 // throwaway context, but it still must not blow the window. ~50k chars ≈ 12k
 // tokens — generous for a document read, far below pathological. Overridable
-// per call (read_pdf's maxChars arg).
+// per call (read_doc's maxChars arg).
 export const DEFAULT_MAX_CHARS = 50_000;
 
 /**
@@ -74,7 +74,7 @@ export const assemblePages = (pages, { maxChars = DEFAULT_MAX_CHARS } = {}) => {
 };
 
 /**
- * Build the final model-facing body for read_pdf. A short provenance header
+ * Build the final model-facing PDF body for read_doc. A short provenance header
  * (engine, page count, title) then the assembled page text. The tool wraps
  * the WHOLE thing in <untrusted_web_content> — do not add trust language here.
  *
@@ -109,7 +109,7 @@ export const formatPdfBody = ({
       ocrAvailable
         ? '[note] This PDF has little or no embedded text (likely scanned); OCR did not recover more.'
         : '[note] This PDF has little or no embedded text — it looks scanned/image-only. '
-          + 'On-device OCR is available but not installed (Settings → Voice & OCR).',
+          + 'OCR is unavailable in this build; use a searchable PDF or page images.',
     );
   }
   if (truncated) {

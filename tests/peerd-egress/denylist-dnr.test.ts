@@ -343,6 +343,7 @@ describe('buildAppEgressBlockRule: App tabs have no remote network edge', () => 
     const rule: any = buildAppEgressBlockRule({ tabIds: [11, 11, -1, 12] });
     expect(rule.id).toBe(APP_EGRESS_RULE_ID);
     expect(rule.action).toEqual({ type: 'block' });
+    expect(rule.condition.regexFilter).toBe('^(?:https?|wss?)://');
     expect(rule.condition.regexFilter).toBe(APP_EGRESS_REGEX);
     expect(rule.condition.tabIds).toEqual([11, 12]);
     expect(rule.condition.resourceTypes).toEqual([...DENYLIST_RESOURCE_TYPES]);
@@ -367,6 +368,7 @@ describe('buildAppEgressBlockRule — App tabs have no remote network edge', () 
     const rule: any = buildAppEgressBlockRule({ tabIds: [11, 11, -1, 12] });
     expect(rule.id).toBe(APP_EGRESS_RULE_ID);
     expect(rule.action).toEqual({ type: 'block' });
+    expect(rule.condition.regexFilter).toBe('^(?:https?|wss?)://');
     expect(rule.condition.regexFilter).toBe(APP_EGRESS_REGEX);
     expect(rule.condition.tabIds).toEqual([11, 12]);
     expect(rule.condition.resourceTypes).toEqual([...DENYLIST_RESOURCE_TYPES]);

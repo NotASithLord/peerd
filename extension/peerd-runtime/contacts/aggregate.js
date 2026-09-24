@@ -2,7 +2,7 @@
 // Contacts — the pure read-time aggregation.
 //
 // "Known peers" is a UNION over everything durable that mentions a did: the
-// saved overlay (store.js), the App catalog (apps installed FROM a peer carry
+// saved overlay (held by the background kernel), the App catalog (apps installed FROM a peer carry
 // their publisher did), and the audit log (install/update events tied to a
 // publisher). For each did we fold a small activity summary — what they've
 // shared with us and when we last interacted. No network call: this is all

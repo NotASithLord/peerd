@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // read_memory — read memory the always-loaded block does NOT include.
 //
 // The user/project memory rides the system prompt every turn. This tool
@@ -16,37 +18,7 @@
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const readMemoryTool = {
-  name: 'read_memory',
-  primitive: 'memory',
-  description: [
-    'Read persistent memory not already in your always-loaded context.',
-    'Use when descending into a specific area of a workspace, or to see',
-    'the full body of a scope. With scope "subtree" + a subpath, returns',
-    'every subtree note covering that path (most specific first). With',
-    '"project"/"user", returns that scope\'s full doc.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      scope: {
-        type: 'string',
-        enum: ['user', 'project', 'subtree'],
-        description: 'Which scope to read.',
-      },
-      workspace: {
-        type: 'string',
-        description: 'Workspace key for project/subtree (origin, vm:id, app:id). Defaults to active tab origin.',
-      },
-      subpath: {
-        type: 'string',
-        description: 'Path within the workspace for subtree reads, e.g. "src/api".',
-      },
-    },
-    required: ['scope'],
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const readMemoryTool = composeTool("read_memory", {
 
   execute: async (args, ctx) => {
     // why: ctx.memory is the opaque `Object` contract slot; narrow it to the
@@ -78,4 +50,4 @@ export const readMemoryTool = {
       return { ok: false, error: `read_memory_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }
   },
-};
+});

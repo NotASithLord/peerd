@@ -4,12 +4,12 @@
 
 import { createTabTracker } from './tab-tracker.js';
 import { APP_TAB_PATH } from '/peerd-engine/background.js';
-import { APP_DWEB_GENERATION_PREFIX } from '/shared/dweb-interface.js';
-import browser from '/vendor/browser-polyfill.js';
+import { createAppDwebAuthority } from './app-dweb-authority.js';
+export { AppDwebAuthorityChangedError } from './app-dweb-authority.js';
+import browser from '/shared/browser-api.js';
 
 const READY_TIMEOUT_MS = 15_000;
 const QUIESCE_TIMEOUT_MS = 5_000;
-export class AppDwebAuthorityChangedError extends Error { constructor(/** @type {number} */ generation) { super('App dweb authority changed after approval'); this.name = 'AppDwebAuthorityChangedError'; this.generation = generation; } }
 
 /** @param {{ announce?: import('./tab-tracker.js').TabTrackerConfig['announce'],
  *   onAdopt?: import('./tab-tracker.js').TabTrackerConfig['onAdopt'],
@@ -17,13 +17,15 @@ export class AppDwebAuthorityChangedError extends Error { constructor(/** @type 
  *   tabs?: typeof browser.tabs,
  *   sendTabMessage?: (tabId:number, message:any)=>Promise<any>,
  *   purgeDwebOwners?: (appId:string,generation:number)=>Promise<void>,
- *   storage?: typeof browser.storage.session }} [deps] */
+ *   storage?: typeof browser.storage.session,
+ *   dwebAuthority?: ReturnType<typeof createAppDwebAuthority> }} [deps] */
 export const createAppTabTracker = ({
   announce, onAdopt, onDrop,
   tabs = browser.tabs,
   sendTabMessage = tabs.sendMessage.bind(tabs),
   purgeDwebOwners = async () => {},
   storage = browser.storage.session,
+  dwebAuthority: suppliedDwebAuthority,
 } = {}) => {
   const tracker = createTabTracker({
     tabPath: APP_TAB_PATH,
@@ -43,17 +45,8 @@ export const createAppTabTracker = ({
   const ownerRootByApp = new Map();
   /** @type {Map<number,string>} */
   const appByTab = new Map();
-  /** @type {Map<string,number>} */ const dwebGenerationByApp = new Map();
   /** @type {Map<number,{epoch:number,pending?:Promise<any>,result?:any}>} */ const attachByTab = new Map();
-  /** @type {Map<string,Promise<unknown>>} */ const dwebAuthorityTails = new Map();
   const tabUrlPrefix = browser.runtime.getURL(APP_TAB_PATH);
-  const generationHydration = storage.get(null).then((generations) => {
-    for (const [storageKey, generation] of Object.entries(generations)) if (storageKey.startsWith(APP_DWEB_GENERATION_PREFIX)
-      && typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 0)
-      dwebGenerationByApp.set(storageKey.slice(APP_DWEB_GENERATION_PREFIX.length), generation);
-  });
-  generationHydration.catch(() => {});
-  const dwebGenerationsReady = () => generationHydration;
 
   /** @param {string|undefined} url */
   const parseOwnerFromUrl = (url) => {
@@ -75,7 +68,7 @@ export const createAppTabTracker = ({
 
   /** why: A worker restart must revalidate each App tab before adoption. */
   const bootstrap = async () => {
-    await generationHydration;
+    await dwebAuthority.ready();
     const liveTabs = await tabs.query({ url: `${tabUrlPrefix}*` });
     return liveTabs
       .filter((tab) => tab.id != null && tracker.parseIdFromUrl(tab.url ?? ''))
@@ -106,6 +99,7 @@ export const createAppTabTracker = ({
   const onTabReady = (appId, tabId, ownerClaim = null, ownerRoot = null) => {
     if (tracker.getTabId(appId) !== tabId) return false;
     tracker.onTabReady(appId, tabId);
+    dwebAuthority.activateTab(appId, tabId);
     rememberOwner(appId, tabId, ownerClaim, ownerRoot);
     return true;
   };
@@ -134,6 +128,20 @@ export const createAppTabTracker = ({
     return removed ?? appId;
   };
 
+  /** Clear a stale rich claim only after a complete browser tab snapshot proves it left. */
+  /** @param {string} appId @param {number} claimantTabId */
+  const reconcileTabClaim = async (appId, claimantTabId) => {
+    const liveTabId = tracker.getTabId(appId);
+    if (liveTabId == null || liveTabId === claimantTabId) return liveTabId;
+    let liveTabs;
+    try { liveTabs = await tabs.query({}); }
+    catch { return liveTabId; }
+    const live = liveTabs.find((tab) => tab?.id === liveTabId);
+    if (live && tracker.parseIdFromUrl(live.url ?? '') === appId) return liveTabId;
+    onTabRemoved(liveTabId);
+    return null;
+  };
+
   /** Share one actor attach per tab document. @param {number} tabId @param {(epoch:number)=>Promise<any>} operation */
   const coordinateAttach = (tabId, operation) => {
     const state = attachByTab.get(tabId) ?? { epoch: 0 };
@@ -155,6 +163,8 @@ export const createAppTabTracker = ({
   /** @param {string} appId @param {string} ownerRoot */
   const getOwnedTabId = (appId, ownerRoot) => ownerRootByApp.get(appId) === ownerRoot
     ? tracker.getTabId(appId) : null;
+  /** Preserve the exact chat-root claim when lifecycle work closes/reopens a tab. */
+  const getOwnerClaim = (/** @type {string} */ appId) => ownerClaimByApp.get(appId) ?? null;
 
   /** Refuse ambient appId-only reuse across chat roots. */
   const ensureTab = async (/** @type {string} */ appId, /** @type {{active?:boolean,groupTitle?:string,hashSuffix?:string,ownerSessionId?:string}} */ opts = {}) => {
@@ -178,10 +188,15 @@ export const createAppTabTracker = ({
 
   /** Find every exact App page, including tabs not adopted after a worker restart. @param {string} appId */
   const exactTabIds = async (appId) => {
-    const tabIds = new Set((await tabs.query({ url: `${tabUrlPrefix}*` }))
+    let liveTabs;
+    try { liveTabs = await tabs.query({ url: `${tabUrlPrefix}*` }); }
+    catch (cause) { throw new Error('app-tab-state-unavailable', { cause }); }
+    const tabIds = new Set(liveTabs
       .filter((tab) => tab.id != null && tracker.parseIdFromUrl(tab.url ?? '') === appId)
       .map((tab) => /** @type {number} */ (tab.id)));
-    const tracked = tracker.getTabId(appId); if (tracked != null) tabIds.add(tracked);
+    // why: a stale numeric tab id must never authorize closing a different page.
+    const tracked = tracker.getTabId(appId);
+    if (tracked != null && !tabIds.has(tracked)) onTabRemoved(tracked);
     return [...tabIds];
   };
 
@@ -201,51 +216,22 @@ export const createAppTabTracker = ({
     return tabIds.length > 0;
   };
 
-  const getDwebGeneration = (/** @type {string} */ appId) => dwebGenerationByApp.get(appId) ?? 0;
-  const advanceDwebGeneration = async (/** @type {string} */ appId) => {
-    await generationHydration; const generation = getDwebGeneration(appId) + 1;
-    dwebGenerationByApp.set(appId, generation); await storage.set({ [`${APP_DWEB_GENERATION_PREFIX}${appId}`]: generation });
-    return generation;
-  };
-  const dwebGenerationSnapshot = async () => {
-    await generationHydration; return Object.fromEntries([...dwebGenerationByApp].map(([appId, generation]) =>
-      [`${APP_DWEB_GENERATION_PREFIX}${appId}`, generation]));
-  };
   const disposeDwebTab = async (/** @type {string} */ appId, /** @type {number} */ tabId) => {
     const response = /** @type {any} */ (await sendTabMessage(tabId, { type: 'app/quiesce', action: 'invalidate-dweb', appId }));
     if (!response?.ok) throw new Error(response?.error ?? `app ${appId} dweb bridge did not stop`);
     return true;
   };
-  /** End the App's network authority before its bytes change. */
-  const invalidateDweb = async (/** @type {string} */ appId) => {
-    const tabIds = await exactTabIds(appId); const generation = await advanceDwebGeneration(appId);
-    const stopped = await Promise.allSettled(tabIds.map((tabId) => disposeDwebTab(appId, tabId)));
-    let failure = null;
-    for (const [index, result] of stopped.entries()) {
-      if (result.status === 'fulfilled') continue;
-      failure ??= result.reason; try { await tabs.remove(tabIds[index]); } catch { /* mutation still fails closed */ }
-    }
-    await purgeDwebOwners(appId, generation);
-    if (failure) throw failure;
-    return tabIds.length > 0;
-  };
+  const dwebAuthority = suppliedDwebAuthority ?? createAppDwebAuthority({
+    storage, tabIds: exactTabIds, stopTab: disposeDwebTab,
+    closeTab: (tabId) => tabs.remove(tabId), purgeOwners: purgeDwebOwners,
+  });
+  const getDwebGeneration = dwebAuthority.generation;
+  const dwebGenerationsReady = dwebAuthority.ready;
+  const dwebGenerationSnapshot = dwebAuthority.snapshot;
+  const withDwebAuthority = dwebAuthority.run;
+  const invalidateDweb = dwebAuthority.invalidate;
+  const retireDwebTab = dwebAuthority.retire;
 
-  /** Serialize identity reads with pre-lock authority rotation and mutation. @template T @param {string} appId @param {()=>Promise<T>} operation @param {{invalidate?:boolean,expectedGeneration?:number}} [options] */
-  const withDwebAuthority = async (appId, operation, { invalidate = false, expectedGeneration } = {}) => {
-    const prior = dwebAuthorityTails.get(appId) ?? Promise.resolve();
-    const current = prior.catch(() => {}).then(async () => {
-      if (expectedGeneration != null) {
-        await generationHydration; const generation = getDwebGeneration(appId);
-        if (generation !== expectedGeneration) throw new AppDwebAuthorityChangedError(generation);
-      }
-      if (invalidate) await invalidateDweb(appId);
-      return operation();
-    });
-    dwebAuthorityTails.set(appId, current); try { return await current; }
-    finally { if (dwebAuthorityTails.get(appId) === current) dwebAuthorityTails.delete(appId); }
-  };
-  const retireDwebTab = (/** @type {string} */ appId) => withDwebAuthority(appId, async () =>
-    purgeDwebOwners(appId, await advanceDwebGeneration(appId)));
 
   /** Re-enable a quiesced tab if closing it failed. */
   const resumeTab = async (/** @type {string} */ appId) => {
@@ -271,8 +257,10 @@ export const createAppTabTracker = ({
     parseIdFromUrl: tracker.parseIdFromUrl,
     parseOwnerFromUrl,
     getTabId: tracker.getTabId,
+    reconcileTabClaim,
     getAppIdByTab: (/** @type {number} */ tabId) => appByTab.get(tabId) ?? null,
     getOwnedTabId,
+    getOwnerClaim,
     ensureTab,
     closeTab,
     quiesceTab,

@@ -6,10 +6,29 @@
 // that import the webextension-polyfill (we only need the surface our
 // tests exercise — list/get/sendMessage). Add more as tests require.
 
-import { mock } from 'bun:test';
 import { plugin } from 'bun';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+
+// The production cold-path adapter intentionally binds only to the browser's
+// native WebExtension object; it must never pull the compatibility polyfill
+// into a service-worker or offscreen graph. Give Bun the smallest equivalent
+// identity during module evaluation. Individual tests replace or extend this
+// object when they exercise an API; the default is deliberately nonfunctional
+// beyond URL identity so an accidental browser call still fails visibly.
+if (!(globalThis as any).browser && !(globalThis as any).chrome) {
+  (globalThis as any).chrome = {
+    runtime: {
+      id: 'peerd-bun-test',
+      getURL: (path: string) => `chrome-extension://peerd-bun-test/${path.replace(/^\/+/, '')}`,
+    },
+    // Some public background surfaces construct the lazy storage adapter
+    // after another test has already caused browser-api.js to capture this
+    // object. Expose the namespace, but no callable storage methods: an
+    // accidental read or write still fails visibly.
+    storage: { local: {} },
+  };
+}
 
 // Leading-slash import resolution.
 //
@@ -26,7 +45,11 @@ import { join } from 'node:path';
 // of whether its transitive import graph touches leading-slash
 // specifiers — removing the need for dependency-light duplicates kept
 // in sync by hand (see tests/.../wrap-parity, prompt-wrap).
-const extensionRoot = join(import.meta.dir, '..', 'extension');
+// why process.cwd(), not import.meta.dir: Bun's transpiler cache can preserve
+// the latter from a disposable worktree and resolve root-relative extension
+// imports into a directory that no longer exists. Test commands are rooted at
+// the repository, so the live working directory is the stable source of truth.
+const extensionRoot = join(process.cwd(), 'extension');
 plugin({
   name: 'peerd-leading-slash',
   setup(build) {
@@ -34,15 +57,16 @@ plugin({
     // extension/. Genuine filesystem-absolute paths (or typos) return
     // undefined and fall through to Bun's default resolver.
     build.onResolve({ filter: /^\// }, (args) => {
+      // why: live artifact/worktree imports must execute their own bytes.
+      if (existsSync(args.path)) return undefined;
       const candidate = join(extensionRoot, args.path.slice(1));
       return existsSync(candidate) ? { path: candidate } : undefined;
     });
   },
 });
 
-// fake-indexeddb gives us a real in-memory IDB so app-store.ts (which
-// uses standard IDB) can be tested without a browser. Pulled in
-// lazily so tests that don't touch IDB don't pay the import cost.
+// fake-indexeddb gives direct-IDB owners a real in-memory database. It loads
+// lazily so tests that do not touch IDB do not pay the import cost.
 let fakeIDB: any = null;
 export const useFakeIndexedDB = async () => {
   if (!fakeIDB) {

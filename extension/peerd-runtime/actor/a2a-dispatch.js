@@ -31,11 +31,11 @@ export const isA2AEnvelope = (d) =>
 
 /**
  * @param {Object} deps
- * @param {(toDid: string, envelope: A2AEnvelope) => Promise<{ ok: boolean, id?: string, error?: string }>} deps.sendDm
+ * @param {(toDid: string, envelope: A2AEnvelope) => Promise<{ ok: boolean, id?: string, error?: string, performed?:boolean, outcomeKnown?:boolean, outcomeKind?:string, retryable?:boolean }>} deps.sendDm
  *   Send one direct message on the peerd-agent room (offscreen op:'dm').
  * @param {() => Promise<Array<{ did: string, name?: string }>>} deps.listPeers
  * @param {(did: string) => Promise<any | null>} deps.fetchCard   fetch a peer's advertised card
- * @param {(card: object) => Promise<{ ok: boolean, did?: string, error?: string }>} deps.publishCard
+ * @param {(card: object) => Promise<{ ok: boolean, did?: string, error?: string, performed?:boolean, outcomeKnown?:boolean, outcomeKind?:string, retryable?:boolean }>} deps.publishCard
  * @param {() => number} [deps.now]
  * @param {() => string} [deps.newReqId]
  * @param {number} [deps.defaultTimeoutMs]
@@ -74,32 +74,69 @@ export const makeMeshDispatch = (deps) => {
    * @param {string} did @param {string} message @param {string} [convId] @param {number} [timeoutMs] @param {AbortSignal} [signal]
    */
   const sendAndAwait = async (did, message, convId, timeoutMs, signal) => {
-    if (signal?.aborted) return { ok: false, error: 'a2a: aborted before send' };
+    if (signal?.aborted) return { ok: false, error: 'a2a: aborted before peer request' };
     const reqId = mkReqId();
     const env = /** @type {A2AEnvelope} */ ({ __a2a: 1, kind: 'ask', reqId, message });
     if (convId) env.convId = convId;
+    const sentReceipt = {
+      performed: true, outcomeKnown: true,
+      outcomeKind: 'effect-completed', retryable: false,
+    };
+    const unacknowledgedReceipt = {
+      performed: true, outcomeKnown: false,
+      outcomeKind: 'transport-lost', retryable: false,
+    };
+    let sendAcknowledged = false;
+    let sendStarted = false;
+    /** @type {(afterSend?:boolean)=>void} */
+    let settleAbort = () => {};
     const ms = typeof timeoutMs === 'number' ? timeoutMs : defaultTimeoutMs;
+    // why: a peer can answer before the transport acknowledges send. Correlate
+    // first, and bound that pending acknowledgment with the same Stop/deadline.
     const reply = new Promise((resolve) => {
+      /** @type {ReturnType<typeof setTimeout>|undefined} */
+      let abortTimer;
       /** @param {any} value */
       const finish = (value) => {
         clearTimeout(timer);
+        clearTimeout(abortTimer);
         pendingAsks.delete(reqId);
         signal?.removeEventListener('abort', onAbort);
         resolve(value);
       };
-      const onAbort = () => finish({ ok: false, error: 'a2a: aborted while awaiting reply' });
-      const timer = setTimeout(() => finish({ ok: true, from: null, reply: null, timedOut: true }), ms);
+      settleAbort = (afterSend = false) => finish({
+        ok: false, error: afterSend ? 'a2a: aborted after peer request' : 'a2a: aborted while awaiting reply',
+        ...(sendAcknowledged ? sentReceipt : sendStarted ? unacknowledgedReceipt
+          : { performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false }),
+      });
+      const onAbort = () => {
+        pendingAsks.delete(reqId);
+        signal?.removeEventListener('abort', onAbort);
+        clearTimeout(timer);
+        // why: retain a send acknowledgment already settling in this tick,
+        // without making Stop depend on an unbounded transport promise.
+        if (sendStarted && !sendAcknowledged) abortTimer = setTimeout(() => settleAbort(), 0);
+        else settleAbort();
+      };
+      const timer = setTimeout(() => finish({ ok: true, from: null, reply: null, timedOut: true,
+        ...(!sendAcknowledged ? unacknowledgedReceipt : {}),
+      }), ms);
       pendingAsks.set(reqId, { resolve: finish, timer, did, convId });
       signal?.addEventListener('abort', onAbort, { once: true });
       if (signal?.aborted) onAbort();
     });
-    Promise.resolve().then(() => pendingAsks.has(reqId)
-      ? sendDm(did, env) : { ok: true, error: undefined }).then(
-      (sent) => {
-        if (!sent?.ok) pendingAsks.get(reqId)?.resolve({ ok: false, error: sent?.error ?? 'ask: could not reach the peer' });
-      },
-      (error) => pendingAsks.get(reqId)?.resolve(Promise.reject(error)),
-    );
+    Promise.resolve().then(() => {
+      if (!pendingAsks.has(reqId)) return null;
+      sendStarted = true;
+      return sendDm(did, env);
+    }).then((sent) => {
+      if (!sent) return;
+      if (sent.ok) {
+        sendAcknowledged = true;
+        if (signal?.aborted) settleAbort(true);
+      }
+      else pendingAsks.get(reqId)?.resolve({ ...sent, ok: false, error: sent?.error ?? 'mesh.call: could not reach the peer' });
+    }, (error) => pendingAsks.get(reqId)?.resolve(Promise.reject(error)));
     return await reply;
   };
 
@@ -132,12 +169,14 @@ export const makeMeshDispatch = (deps) => {
       case 'publishCard': {
         if (ctx.signal?.aborted) return { ok: false, error: 'a2a: run aborted before publish' };
         const r = await publishCard(args.card);
-        return r?.ok ? { ok: true, ...(r.did ? { did: r.did } : {}) } : { ok: false, error: r?.error ?? 'publishCard failed' };
+        return r?.ok ? { ok: true, ...(r.did ? { did: r.did } : {}) }
+          : { ...r, ok: false, error: r?.error ?? 'publishCard failed' };
       }
       case 'send': {
         if (ctx.signal?.aborted) return { ok: false, error: 'a2a: run aborted before cast' };
         const r = await sendDm(args.did, { __a2a: 1, kind: 'tell', reqId: mkReqId(), message: args.message });
-        return r?.ok ? { ok: true, ...(r.id ? { id: r.id } : {}) } : { ok: false, error: r?.error ?? 'send failed' };
+        return r?.ok ? { ok: true, ...(r.id ? { id: r.id } : {}) }
+          : { ...r, ok: false, error: r?.error ?? 'mesh.cast failed' };
       }
       case 'ask':
         // Single-shot: no convId, no registry recording — the legacy exchange.

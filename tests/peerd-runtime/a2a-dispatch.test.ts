@@ -61,38 +61,57 @@ describe('the first-contact signing gate', () => {
 });
 
 describe('ask / reply correlation', () => {
-  test('ask accepts a matching reply while sendDm stays pending', async () => {
+  test('an authenticated fast reply settles before the send acknowledgment returns', async () => {
     let envelope: any;
     const d = harness({ sendDm: (_to: string, env: any) => {
-      envelope = env;
-      return new Promise<{ ok: boolean }>(() => {});
+      envelope = env; return new Promise(() => {});
     } });
-    const ask = d.dispatch('ask', { did: DID, message: 'free Tuesday?', timeoutMs: 5000 }, { signs: true, allowed: () => true });
+    const ask = d.dispatch('ask', { did: DID, message: 'ping', timeoutMs: 5000 }, { signs: true, allowed: () => true });
     await tick();
-    expect(envelope).toMatchObject({ __a2a: 1, kind: 'ask', reqId: 'r1', message: 'free Tuesday?' });
-    d.handleInbound(DID, { __a2a: 1, kind: 'reply', reqId: envelope.reqId, message: 'yes, 2pm' });
+    d.handleInbound(DID, { __a2a: 1, kind: 'reply', reqId: envelope.reqId, message: 'pong' });
     expect(await Promise.race([ask, tick().then(() => ({ pending: true }))]))
-      .toEqual({ ok: true, from: DID, reply: 'yes, 2pm' });
+      .toEqual({ ok: true, from: DID, reply: 'pong' });
     expect(d._pendingCount()).toBe(0);
   });
 
-  test('ask returns an abort while sendDm stays pending', async () => {
-    const d = harness({ sendDm: () => new Promise<{ ok: boolean }>(() => {}) });
+  test('Stop during an unacknowledged send settles as unknown and never retryable', async () => {
+    const d = harness({ sendDm: () => new Promise(() => {}) });
     const controller = new AbortController();
-    const ask = d.dispatch('ask', { did: DID, message: 'ping', timeoutMs: 5000 }, { signs: true, allowed: () => true, signal: controller.signal });
+    const ask = d.dispatch('ask', { did: DID, message: 'ping', timeoutMs: 5000 },
+      { signs: true, allowed: () => true, signal: controller.signal });
     await tick();
     controller.abort();
-    expect(d._pendingCount()).toBe(0);
     expect(await Promise.race([ask, tick().then(() => ({ pending: true }))]))
-      .toEqual({ ok: false, error: 'a2a: aborted while awaiting reply' });
+      .toMatchObject({ ok: false, performed: true, outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false });
+    expect(d._pendingCount()).toBe(0);
   });
 
-  test('ask returns a timeout while sendDm stays pending', async () => {
-    const d = harness({ sendDm: () => new Promise<{ ok: boolean }>(() => {}) });
+  test('timeout also bounds an unacknowledged send and retains its uncertainty', async () => {
+    const d = harness({ sendDm: () => new Promise(() => {}) });
     const ask = d.dispatch('ask', { did: DID, message: 'ping', timeoutMs: 0 }, { signs: true, allowed: () => true });
-    const result = await Promise.race([ask, tick().then(() => ({ pending: true }))]);
+    expect(await Promise.race([ask, tick().then(() => ({ pending: true }))]))
+      .toMatchObject({ timedOut: true, outcomeKnown: false, retryable: false });
     expect(d._pendingCount()).toBe(0);
-    expect(result).toEqual({ ok: true, from: null, reply: null, timedOut: true });
+  });
+
+  test('a synchronous transport failure retires correlation without losing the rejection', async () => {
+    const d = harness({ sendDm: () => { throw new Error('transport down'); } });
+    await expect(d.dispatch('ask', { did: DID, message: 'ping' }, { signs: true, allowed: () => true }))
+      .rejects.toThrow('transport down');
+    expect(d._pendingCount()).toBe(0);
+  });
+
+  test('ask sends a tagged request and resolves when the matching reply lands', async () => {
+    const d = harness();
+    const p = d.dispatch('ask', { did: DID, message: 'free Tuesday?', timeoutMs: 5000 }, { signs: true, allowed: () => true });
+    await tick();
+    expect(d.sent[0].env).toMatchObject({ __a2a: 1, kind: 'ask', reqId: 'r1', message: 'free Tuesday?' });
+    expect(d._pendingCount()).toBe(1);
+    // the peer replies with the same reqId
+    const routed = d.handleInbound(DID, { __a2a: 1, kind: 'reply', reqId: 'r1', message: 'yes, 2pm' });
+    expect(routed.consumed).toBe(true);            // a reply is plumbing, never a wake
+    expect(await p).toEqual({ ok: true, from: DID, reply: 'yes, 2pm' });
+    expect(d._pendingCount()).toBe(0);
   });
 
   test('a reply from a DIFFERENT did than the ask targeted does NOT resolve it (forgery protection)', async () => {
@@ -125,10 +144,26 @@ describe('ask / reply correlation', () => {
     expect(d._pendingCount()).toBe(0);
   });
 
-  test('ask rejects and clears its correlation when sendDm throws', async () => {
-    const d = harness({ sendDm: () => { throw new Error('transport down'); } });
-    await expect(d.dispatch('ask', { did: DID, message: 'x' }, { signs: true, allowed: () => true }))
-      .rejects.toThrow('transport down');
+  test('irreversible mesh failures preserve unknown host custody', async () => {
+    const unknown = {
+      ok: false, error: 'response lost', performed: true,
+      outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+    };
+    const d = harness({
+      sendDm: async () => unknown,
+      publishCard: async () => unknown,
+    });
+    for (const result of [
+      await d.dispatch('send', { did: DID, message: 'x' }, {
+        signs: true, allowed: () => true,
+      }),
+      await d.dispatch('ask', { did: DID, message: 'x' }, {
+        signs: true, allowed: () => true,
+      }),
+      await d.dispatch('publishCard', { card: { name: 'me' } }, { signs: true }),
+    ]) {
+      expect(result).toMatchObject(unknown);
+    }
     expect(d._pendingCount()).toBe(0);
   });
 
@@ -143,7 +178,30 @@ describe('ask / reply correlation', () => {
     await tick();
     expect(d._pendingCount()).toBe(1);
     controller.abort();
-    expect(await pending).toEqual({ ok: false, error: 'a2a: aborted while awaiting reply' });
+    expect(await pending).toEqual({
+      ok: false, error: 'a2a: aborted while awaiting reply',
+      performed: true, outcomeKnown: true,
+      outcomeKind: 'effect-completed', retryable: false,
+    });
+    expect(d._pendingCount()).toBe(0);
+  });
+
+  test('an abort immediately after ask transmission preserves the completed-send receipt', async () => {
+    const controller = new AbortController();
+    const d = harness({
+      sendDm: async () => {
+        controller.abort();
+        return { ok: true, id: 'sent-before-stop' };
+      },
+    });
+    expect(await d.dispatch(
+      'ask', { did: DID, message: 'long request' },
+      { signs: true, allowed: () => true, signal: controller.signal },
+    )).toEqual({
+      ok: false, error: 'a2a: aborted after peer request',
+      performed: true, outcomeKnown: true,
+      outcomeKind: 'effect-completed', retryable: false,
+    });
     expect(d._pendingCount()).toBe(0);
   });
 });

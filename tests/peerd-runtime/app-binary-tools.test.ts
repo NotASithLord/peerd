@@ -1,15 +1,18 @@
 import { describe, expect, test } from 'bun:test';
 import { createAppSandbox } from '../../extension/peerd-runtime/tools/defs/app-create.js';
 import { appWriteFileTool } from '../../extension/peerd-runtime/tools/defs/app-write-file.js';
+import { executionToolContext } from '../helpers/execution-tool.js';
 
 const writeContext = () => {
   const calls: any[] = [];
   return {
     calls,
     ctx: {
-      session: { sessionId: 's-tools' },
-      appClient: {
-        writeFile: async (args: any) => { calls.push(args); return { bytesWritten: 3 }; },
+      appAuthority: {
+        writeFile: async (appId: string | undefined, path: string, content: unknown) => {
+          calls.push({ appId, path, content });
+          return { bytesWritten: 3 };
+        },
       },
     },
   };
@@ -54,7 +57,7 @@ describe('sandbox_create App binary contract', () => {
     const calls: any[] = [];
     return {
       calls,
-      ctx: {
+      ctx: executionToolContext({
         session: { sessionId: `s-create-${Math.random()}` },
         appClient: {
           create: async (args: any) => {
@@ -63,7 +66,7 @@ describe('sandbox_create App binary contract', () => {
           },
           open: async () => {},
         },
-      },
+      }),
     };
   };
 
@@ -100,8 +103,9 @@ describe('sandbox_create App Git contract', () => {
       gitUrl: 'https://github.com/example/browser-app',
       gitRef: 'release',
       gitDepth: 900,
-    }, {
+    }, executionToolContext({
       session: { sessionId: 's-git-app' },
+      permission: { mode: 'act' },
       abortSignal: controller.signal,
       confirm: async (prompt: any, signal: AbortSignal) => {
         confirmations.push({ prompt, signal });
@@ -118,7 +122,7 @@ describe('sandbox_create App Git contract', () => {
         },
         open: async () => {},
       },
-    } as any);
+    }) as any);
 
     expect(result.ok).toBe(true);
     expect(confirmations[0].signal).toBe(controller.signal);

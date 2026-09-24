@@ -92,8 +92,6 @@ import { normalizeApiOrigin } from './web-actor.js';
  *   a permanent hole. Always assign, never coalesce.
  */
 
-/** Kept as a public compatibility export. Exact-origin corridors use no hop budget. */
-export const EXCURSION_BUDGET = 4;
 /** A deadline keeps an unused grant or parked sign-in from living indefinitely. */
 export const EXCURSION_MS = 3 * 60_000;
 /** How many excursions one bound actor may open, ever.
@@ -386,7 +384,7 @@ export const decideLanding = (state) => {
  * with `withSessionScopedCredentials(webFetch, () => ctx.activeTab?.origin)`,
  * read live on every request. So the moment a page redirects itself onto a
  * credentialed origin, the actor's fetch scope moves there too — with no tool
- * call in between for decideLanding to judge. `fetch_url`, `read_web_cache` and
+ * call in between for decideLanding to judge. `fetch_url`, `read_result` and
  * the `site_client_*` tools never pass through resolveTargetTab, so they can
  * spend that scope before any DOM tool re-enters the chokepoint.
  *

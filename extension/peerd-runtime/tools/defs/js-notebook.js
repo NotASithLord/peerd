@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // js_notebook — run JS in a Notebook.
 //
 // Code runs in the worker's JS realm as an `async () => { code }`
@@ -14,7 +16,7 @@ import {
   moduleImportPolicyMessage,
   REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
   REMOTE_MODULE_RESTRICTED_CODE,
-} from '/peerd-engine/background.js';
+} from '/peerd-engine/errors.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
 import { pushValueBlock } from './value-block.js';
 
@@ -33,59 +35,15 @@ const MAX_TIMEOUT_MS = 120_000;
  */
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const jsNotebookTool = {
-  name: 'js_notebook',
-  primitive: 'notebook',
-  description: [
-    'Run JS in a Notebook — a VISIBLE tab the user watches (CodeMirror editor +',
-    'output pane + file tree), backed by a Web Worker + OPFS. Opens/focuses that',
-    'tab. For a quick result with NO tab (headless, ephemeral), use script',
-    'instead. The code is an async function body — top-level await works and',
-    '`return <value>` sends the result back. ✅ parsing, transforms, numeric work,',
-    'exercising a library. ❌ DOM (no document/window — use sandbox_create kind:"app") or',
-    'npm/native modules. EACH CALL IS A FRESH WORKER — module state does NOT',
-    'persist; write to OPFS via peerd.self.writeFile and read it back. Inside:',
-    'peerd.egress.fetch (audited HTTP), peerd.self.readFile/writeFile/listFiles;',
-    'literal relative static imports work across supported packaged browsers.',
-    'Literal HTTPS imports work only where the package enables them, always',
-    'under compute-only restrictions. Dynamic, computed, and attributed imports',
-    'do not. No `notebook` arg → the chat\'s',
-    'current Notebook. Returns the return value, console output, and any error.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      code: {
-        type: 'string',
-        description: 'JS code to evaluate. Async function body.',
-      },
-      notebook: {
-        type: 'string',
-        description: 'Optional. Notebook id or name to target.',
-      },
-      timeoutMs: {
-        type: 'integer',
-        description: 'Wall-clock cap in ms (default 30000, max 120000).',
-      },
-    },
-    required: ['code'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const jsNotebookTool = composeTool("js_notebook", {
 
   execute: async (args, ctx) => {
     if (typeof args?.code !== 'string' || args.code.length === 0) {
       return { ok: false, error: 'code_required' };
     }
-    // why: jsClient / jsRegistry ride the opaque ctx contract (not on the
-    // ToolContext typedef); narrow to the surface this tool touches.
-    const jsClient = /** @type {{ eval?: (code: string, opts: { timeoutMs: number, sessionId?: string, notebookId?: string, signal?: AbortSignal }) => Promise<EvalResult> } | undefined} */ (
-      /** @type {any} */ (ctx).jsClient);
-    const jsRegistry = /** @type {{ get: (id: string) => Promise<unknown>, list: () => Promise<Array<{ id: string, name: string }>>, setDefaultForSession: (sessionId: string, id: string) => Promise<unknown> } | undefined} */ (
-      /** @type {any} */ (ctx).jsRegistry);
-    if (!jsClient || typeof jsClient.eval !== 'function') {
-      return { ok: false, error: 'js_not_available' };
-    }
+    const authority = /** @type {{ readNotebook?: (id:string)=>Promise<unknown>, listNotebooks?: ()=>Promise<Array<{id:string,name:string}>>, setDefaultNotebook?: (id:string)=>Promise<unknown>, runNotebook?: (code:string,timeoutMs:number,notebookId?:string)=>Promise<EvalResult> }} */ (
+      /** @type {any} */ (ctx).notebookAuthority);
+    if (!authority?.runNotebook) return { ok: false, error: 'js_not_available' };
     if (ctx.abortSignal?.aborted) {
       return { ok: true, content: '[STOPPED] Notebook run was stopped. Do not retry automatically.' };
     }
@@ -94,30 +52,25 @@ export const jsNotebookTool = {
     let targetNotebookId;
     if (typeof args.notebook === 'string' && args.notebook.trim().length > 0) {
       const want = args.notebook.trim();
-      if (!jsRegistry) return { ok: false, error: 'js_registry_unavailable' };
+      if (!authority.readNotebook || !authority.listNotebooks || !authority.setDefaultNotebook) {
+        return { ok: false, error: 'js_registry_unavailable' };
+      }
       if (want.startsWith('notebook-')) {
-        const rec = await jsRegistry.get(want);
+        const rec = await authority.readNotebook(want);
         if (!rec) return { ok: false, error: `notebook_not_found: ${want}` };
         targetNotebookId = want;
       } else {
-        const all = await jsRegistry.list();
+        const all = await authority.listNotebooks();
         const lower = want.toLowerCase();
         const found = all.find((s) => s.name.toLowerCase() === lower);
         if (!found) return { ok: false, error: `notebook_not_found: ${want}` };
         targetNotebookId = found.id;
       }
-      if (ctx.session?.sessionId) {
-        try { await jsRegistry.setDefaultForSession(ctx.session.sessionId, targetNotebookId); }
-        catch (e) { console.debug('[js_notebook] MRU bump failed', e); }
-      }
+      try { await authority.setDefaultNotebook(targetNotebookId); }
+      catch (e) { console.debug('[js_notebook] MRU bump failed', e); }
     }
     try {
-      const result = await jsClient.eval(args.code, {
-        timeoutMs,
-        sessionId: ctx.session?.sessionId,
-        notebookId: targetNotebookId,
-        signal: ctx.abortSignal,
-      });
+      const result = await authority.runNotebook(args.code, timeoutMs, targetNotebookId);
       if (result.stopped) {
         return { ok: true, content: '[STOPPED] Notebook run was stopped. Do not retry automatically.' };
       }
@@ -149,7 +102,7 @@ export const jsNotebookTool = {
       return { ok: false, error: `js_notebook_failed: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}` };
     }
   },
-};
+});
 
 /**
  * @param {string} code

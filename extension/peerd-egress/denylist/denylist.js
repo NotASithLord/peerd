@@ -1,48 +1,12 @@
 // @ts-check
-// Origin denylist matcher (§4.2).
-//
-// The denylist is a flat array of glob patterns. Only allowed wildcard
-// is a leading `*.`, meaning "any subdomain of". This is intentional:
-//   - regex is too easy to write wrong
-//   - mid-pattern wildcards invite "evilchase.com matches *chase*" bugs
-//
-// The matcher MUST be careful about hostname boundaries. The key tests
-// to pass — and the bugs we're guarding against:
-//
-//   '*.proton.me'  should match 'mail.proton.me'    YES
-//   '*.proton.me'  should NOT  match 'protonmail.com'   ← substring/endsWith bug
-//   '*.chase.com'  should NOT  match 'evilchase.com'    ← boundary bug
-//   '*.chase.com'  should NOT  match 'chase.com'        ← apex (separately listed)
-//   'chase.com'    should NOT  match 'evilchase.com'    ← exact match
-//
-// The seed denylist (§15) lists apex AND subdomain wildcard separately
-// for each bank/etc. so that all forms are covered without the matcher
-// having to decide policy.
-
-/**
- * Reduce a host to the matcher's canonical form: lowercase, no `:port`, no
- * trailing dot. why DEFENSIVELY here (not just "callers must pass a clean
- * hostname"): callers pass `URL.host` (carries `:port`) and `URL.hostname`
- * (an absolute FQDN keeps its trailing dot — `new URL('https://chase.com./')`
- * → `'chase.com.'`). Either form silently misses the exact-match / `*.`-suffix
- * checks below, which is a denylist BYPASS (`chase.com.` and `chase.com:8443`
- * both slip past `chase.com`). Normalizing at the single matcher entry point
- * closes it for every caller (webFetch, the dispatcher origin gate, and the
- * WebVM HTTP bridge, which reaches webFetch with no other gate).
- *
- * @param {string} host
- * @returns {string}
- */
+/** @param {string} host @returns {string} */
 const canonicalHost = (host) =>
   String(host).toLowerCase().replace(/:\d+$/, '').replace(/\.+$/, '');
 
 /**
- * Find which pattern (if any) a host matches. Accepts a `URL.host` /
- * `URL.hostname` value (port and trailing dot are normalized away).
- *
- * @param {string} hostname        a hostname (scheme already stripped)
+ * @param {string} hostname
  * @param {readonly string[]} patterns
- * @returns {string | null}        the matched pattern, or null
+ * @returns {string | null}
  */
 export const findDenylistMatch = (hostname, patterns) => {
   const h = canonicalHost(hostname);
@@ -64,24 +28,13 @@ const matchPattern = (hostname, pattern) => {
   if (pattern.startsWith('*.')) {
     const base = pattern.slice(2);
     if (!base) return false;
-    // The wildcard requires at least one subdomain label. We enforce by
-    // checking the hostname ends with `.${base}` — that requires at
-    // least one char before the dot. `protonmail.com` ends with `.com`
-    // but NOT with `.proton.me`, so `*.proton.me` won't match it.
     return hostname.endsWith(`.${base}`);
   }
-  // No wildcard: exact match.
   return hostname === pattern;
 };
 
 /**
- * Flatten the categorised default denylist JSON shape into a flat
- * pattern array. The JSON groups patterns by category (banks_us,
- * health_us, etc.) for human readability; the matcher just wants the
- * full list.
- *
  * @param {{ categories?: Record<string, string[]> } | null | undefined} categorised
- *        e.g. { categories: { banks_us: [...] } }
  * @returns {string[]}
  */
 export const flattenCategorisedDenylist = (categorised) => {
@@ -89,27 +42,14 @@ export const flattenCategorisedDenylist = (categorised) => {
   return Object.values(categorised.categories).flat();
 };
 
-/**
- * Normalize + validate a user-entered denylist pattern. Returns the
- * canonical lowercase pattern, or null when the input isn't a pattern
- * the matcher above can honor — fail closed on anything fancy rather
- * than store a pattern that silently never matches.
- *
- * Accepted: an exact hostname (`chase.com`) or a leading-`*.` glob
- * (`*.chase.com`). A pasted URL is tolerated by stripping the scheme /
- * path / port. Rejected: empty, no dot (would match nothing real), any
- * non-leading wildcard, spaces, or characters outside hostname syntax.
- *
- * @param {unknown} input
- * @returns {string | null}
- */
+/** @param {unknown} input @returns {string | null} */
 export const normalizeDenylistPattern = (input) => {
   if (typeof input !== 'string') return null;
   let s = input.trim().toLowerCase();
   if (!s) return null;
-  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, '');   // strip scheme
-  s = s.replace(/[/?#].*$/, '');                  // strip path/query/hash
-  s = s.replace(/:\d+$/, '');                     // strip port
+  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, '');
+  s = s.replace(/[/?#].*$/, '');
+  s = s.replace(/:\d+$/, '');
   const glob = s.startsWith('*.');
   const host = glob ? s.slice(2) : s;
   if (!host.includes('.')) return null;

@@ -206,6 +206,9 @@
           directive: String(event.effectiveDirective || 'resource'),
         }, '*');
       });
+      // why: App scripts intentionally execute inside this opaque-origin
+      // sandbox, without extension APIs; only the parent supplies this document.
+      // codeql[js/eval-like-call]
       document.write(html);
       document.close();
 
@@ -362,6 +365,9 @@
       // Window after document.write but never gets a reference to this closure.
       port.postMessage({ type: 'runner-ready' });
     });
+    window.parent.postMessage({
+      type: 'runner-loaded', generation: location.hash.slice(1),
+    }, '*');
   })();
 </script>
 </body>

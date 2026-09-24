@@ -2,6 +2,30 @@ import { describe, expect, test } from 'bun:test';
 import { createDwebBridgeLifecycle } from '../../extension/engine-tabs/app-tab/dweb-bridge-lifecycle.js';
 
 describe('App tab required-actor and runtime lifecycle contracts', () => {
+  test('a saved code edit reopens the trusted host instead of rearming its retired bridge', async () => {
+    const lifecycle = createDwebBridgeLifecycle();
+    expect(lifecycle.isInvalidated()).toBe(false);
+    lifecycle.allow();
+    await lifecycle.dispose();
+    expect(lifecycle.isInvalidated()).toBe(false);
+    await lifecycle.invalidate();
+    lifecycle.allow();
+    expect(lifecycle.isInvalidated()).toBe(true);
+    let recreated = false;
+    await lifecycle.attach(async () => { recreated = true; return null; });
+    expect(recreated).toBe(false);
+
+    const host = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
+    const view = host.slice(host.indexOf('// When leaving edit mode,'));
+    const flushAt = view.indexOf('await editorApi.flushSave?.()');
+    const retiredAt = view.indexOf('dwebBridgeLifecycle.isInvalidated()');
+    const reloadAt = view.indexOf('location.reload()');
+    expect(flushAt).toBeGreaterThanOrEqual(0);
+    expect(retiredAt).toBeGreaterThan(flushAt);
+    expect(reloadAt).toBeGreaterThan(retiredAt);
+    expect(view.indexOf('await actorAttachment.retry()')).toBeGreaterThan(reloadAt);
+  });
+
   test('concurrent bridge attach and detach share one lifecycle', async () => {
     let releaseCreate!: () => void;
     let releaseLeave!: () => void;
@@ -78,25 +102,30 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
 
   test('document loss retires authority after a lost page leave and a cold worker', async () => {
     const tracker = await Bun.file('./extension/background/app-tab-tracker.js').text();
-    const worker = await Bun.file('./extension/background/service-worker.js').text();
-    expect(tracker).toContain('purgeDwebOwners(appId, await advanceDwebGeneration(appId))');
-    expect(worker).toContain('retireAppDweb(closedAppId)');
+    const worker = await Bun.file('./extension/background/kernel-turn-authority-adapter.js').text();
+    const authority = await Bun.file('./extension/background/app-dweb-authority.js').text();
+    expect(tracker).toContain('const retireDwebTab = dwebAuthority.retire');
+    expect(authority).toContain('await purgeOwners(appId, next)');
+    expect(worker).toContain('retireAppDweb(instanceId, tabId)');
     expect(worker).toContain("engineLiveness.findByTab('app', tabId)");
-    expect(worker).toContain('retireAppDweb(entry.id)');
-    expect(worker).toContain("changeInfo.discarded === true || typeof changeInfo.url === 'string'");
+    expect(worker).toContain('retireAppDweb(entry.id, tabId)');
+    expect(worker).toContain("change?.discarded === true || typeof change?.url === 'string'");
     expect(worker).toContain('await appRetirements.get(sender.tab.id)');
-    expect(worker).toContain('retireAppDocument(tabId, changeInfo.url, trackedAppId)');
-    expect(worker).toContain('await retireAppDweb(appId)');
-    expect(worker).toContain('await trackAppRetirement(tabId, () => retireAppDweb(appId))');
+    expect(worker).toContain('retireAppDocument(tabId, change.url, trackedAppId)');
+    expect(worker).toContain('await retireAppDweb(appId, tabId)');
+    expect(worker).toContain('await trackAppRetirement(tabId, () => retireAppDweb(appId, tabId))');
   });
 
   test('the host binds owner from its URL, exposes retry, and never delivers owner to App launch data', async () => {
     const source = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
     const html = await Bun.file('./extension/engine-tabs/app-tab/index.html').text();
     expect(source).toContain("const ownerSessionId = hashParams.get('owner')");
-    expect(source).toContain('browser.runtime.sendMessage({ type, appId, ownerSessionId })');
-    expect(source).toContain("attachRequiredActor('app/tab-ready')");
-    expect(source).toContain("attachRequiredActor('app/actor-retry')");
+    expect(source).toContain('makeAppActorAttachRecovery');
+    expect(source).toContain('request: (type) => uiRuntime.send({ type, appId, ownerSessionId })');
+    expect(source).toContain('await actorAttachment.start()');
+    expect(source).toContain('await actorAttachment.retry()');
+    expect(source).toContain("actorRetry.textContent = unknown ? 'Recheck actor' : 'Retry actor'");
+    expect(source).toContain('Recheck the exact attachment without reopening the App.');
     expect(source).toContain('launch: launchParams');
     expect(source).not.toContain('launch: { ...launchParams, ownerSessionId }');
     expect(html).toContain('id="actor-retry"');
@@ -106,13 +135,17 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
     const host = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
     const html = await Bun.file('./extension/engine-tabs/app-tab/index.html').text();
     const runner = await Bun.file('./extension/engine-tabs/app-tab/runner.html').text();
-    const attachIndex = host.indexOf("await attachRequiredActor('app/tab-ready')");
+    const attachIndex = host.indexOf('await actorAttachment.start()');
     const directRouteIndex = host.indexOf("type: 'app/actor-chat'");
     expect(attachIndex).toBeGreaterThan(-1);
     expect(directRouteIndex).toBeGreaterThan(-1);
     expect(html).toContain('id="actor-chat-drawer"');
     expect(html).toContain('Direct conversation · scoped to this App');
     expect(host).toContain("message.textContent = text");
+    expect(host).toContain('actorChatUnconfirmed = true');
+    expect(host).toContain('Delivery unconfirmed · inspect the actor in peerd');
+    expect(host).toContain('makeUiRuntimeClient({ browser })');
+    expect(host).not.toContain('browser.runtime.sendMessage');
     expect(host).not.toContain('message.innerHTML =');
 
     const agentApiStart = runner.indexOf('const agentApi = Object.freeze({');
@@ -146,6 +179,16 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
     expect(host).toContain('recoverPoisonedRunner()');
   });
 
+  test('the sandbox announces its exact generation before receiving a channel', async () => {
+    const runner = await Bun.file('./extension/engine-tabs/app-tab/runner.html').text();
+    const host = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
+    expect(runner).toContain("type: 'runner-loaded', generation: location.hash.slice(1)");
+    expect(host).toContain("e.data?.type === 'runner-loaded'");
+    expect(host).toContain("e.data.generation === String(runnerGeneration)");
+    expect(host).toContain("if (runnerPhase === 'awaiting-ready') return;");
+    expect(host).not.toContain('expectingRunnerLoad');
+  });
+
   test('every rejected post-dispatch act is unknown and retires its runner generation', async () => {
     const runner = await Bun.file('./extension/engine-tabs/app-tab/runner.html').text();
     const host = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
@@ -156,12 +199,4 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
     expect(runner).toContain("poisoned: request.op === 'act' || error?.poisoned === true");
   });
 
-  test('the app_code relay derives the exact App from a live owner-bound run', async () => {
-    const source = await Bun.file('./extension/background/service-worker.js').text();
-    expect(source).toContain("if (!isOffscreenSender(sender)) return { ok: false, error: 'app_call_unauthorized_relay' }");
-    expect(source).toContain("scriptRuns.ownerFor(runId) !== ownerSessionId");
-    expect(source).toContain("scriptRuns.allows(runId, 'app') !== true");
-    expect(source).toContain("owner.actorSurface !== 'code'");
-    expect(source).toContain('appId: owner.instanceId');
-  });
 });

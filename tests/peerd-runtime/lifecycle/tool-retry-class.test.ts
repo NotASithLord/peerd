@@ -1,6 +1,6 @@
 // Tool → retry class: the derivation rules, and §16.1's inventory obligation
 // ("every side-effecting tool has a retry classification") asserted against the
-// REAL registered tool list rather than a hand-copied one — so a new tool def
+// REAL authority inventory rather than a hand-copied one, so a new tool
 // that lands without a considered class fails here, not in production recovery.
 
 import { describe, test, expect } from 'bun:test';
@@ -9,44 +9,16 @@ import {
 } from '../../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
 import { isRetryClass } from '../../../extension/peerd-runtime/lifecycle/retry-class.js';
 
-// why the stub + dynamic import: the tool defs are BROWSER modules — the
-// barrels transitively pull in vendor/browser-polyfill.js, which throws unless
-// `chrome.runtime.id` exists. A static import would hoist above any assignment
-// in this file, so the globals are planted first and the inventory is pulled in
-// with top-level `await import`. Only the surface the defs touch AT MODULE LOAD
-// is stubbed; nothing here executes a tool.
-(globalThis as unknown as { chrome: unknown }).chrome = {
-  runtime: {
-    id: 'peerd-test',
-    getURL: (path: string) => `chrome-extension://peerd-test/${path}`,
-    getManifest: () => ({ version: '0.0.0' }),
-    onMessage: { addListener: () => {} },
-    sendMessage: async () => undefined,
-  },
-  storage: {
-    local: { get: async () => ({}), set: async () => {}, remove: async () => {} },
-    session: { get: async () => ({}), set: async () => {} },
-  },
-  tabs: {
-    query: async () => [],
-    onUpdated: { addListener: () => {} },
-    onRemoved: { addListener: () => {} },
-  },
-  alarms: { onAlarm: { addListener: () => {} } },
-};
+import { listToolAuthorities } from '../../../extension/peerd-runtime/tools/metadata/authority.js';
 
-const { BUILTIN_TOOLS } = await import('../../../extension/peerd-runtime/tools/defs/index.js');
-const { WEB_TOOLS } = await import('../../../extension/peerd-runtime/tools/web/index.js');
-const { CLOCK_TOOLS } = await import('../../../extension/peerd-runtime/clock/index.js');
-
-/** The whole registered inventory the SW assembles at boot. */
-const ALL_TOOLS = [...BUILTIN_TOOLS, ...WEB_TOOLS, ...CLOCK_TOOLS];
+/** The whole compact authority inventory the SW installs at boot. */
+const ALL_TOOLS = listToolAuthorities();
 
 const byName = new Map(ALL_TOOLS.map((t) => [t.name, t] as const));
 
 const classOf = (name: string): string => {
   const tool = byName.get(name);
-  if (!tool) throw new Error(`no registered tool named ${name}`);
+  if (!tool) throw new Error(`no controller tool named ${name}`);
   return retryClassForTool(tool);
 };
 
@@ -135,13 +107,13 @@ describe('garbage in, Class E out', () => {
   });
 });
 
-describe('§16.1 — the whole registered inventory is classified', () => {
+describe('§16.1: the whole controller inventory is classified', () => {
   test('the inventory actually loaded', () => {
     expect(ALL_TOOLS.length).toBeGreaterThan(50);
     expect(byName.size).toBe(ALL_TOOLS.length);
   });
 
-  test('EVERY registered tool resolves to a valid retry class', () => {
+  test('EVERY controller tool resolves to a valid retry class', () => {
     const unclassified = ALL_TOOLS
       .map((tool) => [tool.name, retryClassForTool(tool)] as const)
       .filter(([, cls]) => !isRetryClass(cls));
@@ -163,7 +135,7 @@ describe('§16.1 — the whole registered inventory is classified', () => {
     for (const tool of destructive) expect(retryClassForTool(tool)).toBe('E');
   });
 
-  test('the override table has no dead entries — every name is a registered tool', () => {
+  test('the override table has no dead entries: every name is a controller tool', () => {
     const dead = Object.keys(RETRY_CLASS_OVERRIDES).filter((name) => !byName.has(name));
     expect(dead).toEqual([]);
   });
@@ -178,11 +150,10 @@ describe('spot checks against the real defs', () => {
     // A — local reads; a duplicate is invisible.
     ['inspect', 'A'],
     ['read_page', 'A'],
-    ['read_web_cache', 'A'],
+    ['read_result', 'A'],
     ['now', 'A'],
     // B — reads that cross the network.
     ['fetch_url', 'B'],
-    ['read_pdf', 'B'],
     ['dweb_discover', 'B'],
     // C — deterministic local workspace writes.
     ['js_write_file', 'C'],
@@ -211,7 +182,6 @@ describe('spot checks against the real defs', () => {
     ['sandbox_create', 'F'],
     ['vm_boot', 'F'],
     ['actor_create', 'F'],
-    ['request_review', 'F'],
   ];
 
   for (const [name, expected] of EXPECTED) {

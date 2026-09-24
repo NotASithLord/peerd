@@ -15,6 +15,49 @@ const settle = async () => {
 };
 
 describe('provider settings request ordering', () => {
+  it('shows Retry when the initial provider status request fails', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    let attempts = 0;
+    const state = {
+      providers: { current: 'anthropic', hasKey: false, model: 'claude' },
+      settings: { providerName: '', providerModel: '' },
+      capabilities: { localWebGpuHost: { status: 'unsupported' } },
+    };
+    const send = async (/** @type {any} */ msg) => {
+      if (msg.type === 'provider/status') {
+        attempts += 1;
+        if (attempts === 1) return { ok: false, error: 'worker-unavailable' };
+        return {
+          ok: true,
+          providers: [{
+            name: 'anthropic', label: 'Anthropic', defaultModel: 'claude',
+            hasKey: false, keyless: false,
+          }],
+        };
+      }
+      if (msg.type === 'models/options') return { ok: true, options: [] };
+      return { ok: false };
+    };
+    m.mount(root, { view: () => m(ProvidersSection, { state, send }) });
+    try {
+      await settle();
+      expect(root.textContent).toContain('could not refresh provider status');
+      expect(root.textContent?.includes('worker-unavailable')).toBe(false);
+      const retry = [...root.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Retry provider status');
+      if (!(retry instanceof HTMLButtonElement)) throw new Error('provider status retry missing');
+      retry.click();
+      await settle();
+      expect(attempts).toBe(2);
+      expect(root.textContent?.includes('could not refresh provider status')).toBe(false);
+      expect(root.textContent).toContain('No key set');
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
   // why both directions: `localWebGpuHost` is available on EVERY Chrome (it only
   // reports that an offscreen document can be created), so gating selection on it
   // would name a default that ensureActiveProvider then refuses to bind. Settings
@@ -378,6 +421,61 @@ describe('provider settings request ordering', () => {
       await settle();
       expect(root.textContent).toContain('Key saved');
       expect(root.textContent?.includes('No key set')).toBe(false);
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
+  it('does not clear an unconfirmed key save from a causally stale status read', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    let statusCalls = 0;
+    /** @type {any[]} */ const saves = [];
+    const state = {
+      providers: { current: 'anthropic', hasKey: false, model: 'claude' },
+      settings: { providerName: 'anthropic', providerModel: '' },
+      capabilities: { localWebGpuHost: { status: 'unsupported' } },
+    };
+    const send = async (/** @type {any} */ msg) => {
+      if (msg.type === 'provider/status') {
+        statusCalls += 1;
+        return { ok: true, providers: [{
+          name: 'anthropic', label: 'Anthropic', defaultModel: 'claude',
+          hasKey: saves.length > 1, keyless: false,
+        }] };
+      }
+      if (msg.type === 'provider/setKey') {
+        saves.push(msg);
+        return saves.length === 1 ? { ok: false, outcomeKnown: false } : { ok: true };
+      }
+      if (msg.type === 'provider/test') return { ok: true };
+      if (msg.type === 'models/options') return { ok: true, options: [] };
+      return { ok: false };
+    };
+    m.mount(root, { view: () => m(ProvidersSection, { state, send }) });
+    try {
+      await settle();
+      const input = root.querySelector('.provider-card-form input');
+      if (!(input instanceof HTMLInputElement)) throw new Error('key input missing');
+      input.value = 'sk-ant-abcdefgh';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      root.querySelector('.provider-card-form')?.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await settle();
+      expect(statusCalls).toBe(1);
+      expect(root.textContent).toContain('could not confirm');
+      expect(input.disabled).toBe(true);
+      const finish = Array.from(root.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Finish the same save');
+      if (!(finish instanceof HTMLButtonElement)) throw new Error('finish-save control missing');
+      finish.click();
+      await settle(); await settle();
+      expect(saves.length).toBe(2);
+      expect(saves[1]).toEqual(saves[0]);
+      expect(statusCalls).toBe(2);
+      expect(root.textContent).toContain('Key saved');
     } finally {
       m.mount(root, null);
       root.remove();

@@ -157,19 +157,6 @@ const PAGE_METHODS = {
     },
     shape: passthrough,
   },
-  keys: {
-    tool: 'page_keys',
-    toArgs: (a) => {
-      if (typeof a?.sequence !== 'string' || !a.sequence) throw new PageApiError('page.keys(sequence): sequence must be a non-empty string');
-      return { keys: a.sequence };
-    },
-    shape: passthrough,
-  },
-  readPdf: {
-    tool: 'read_pdf',
-    toArgs: (a) => plainOptions(a.options),
-    shape: passthrough,
-  },
   view: {
     tool: 'view',
     toArgs: () => ({}),
@@ -190,15 +177,17 @@ const PAGE_METHODS = {
   readDocument: {
     tool: 'read_doc',
     toArgs: (a) => {
-      if (typeof a?.url !== 'string' || !a.url) throw new PageApiError('page.readDocument(url): url must be a non-empty string');
-      return { ...plainOptions(a.options), url: a.url };
+      if (a?.url !== undefined && (typeof a.url !== 'string' || !a.url)) {
+        throw new PageApiError('page.readDocument(url?, options?): url must be a non-empty string when supplied');
+      }
+      return { ...plainOptions(a.options), ...(typeof a?.url === 'string' ? { url: a.url } : {}) };
     },
     shape: passthrough,
   },
-  readCache: {
-    tool: 'read_web_cache',
+  readResult: {
+    tool: 'read_result',
     toArgs: (a) => {
-      if (typeof a?.key !== 'string' || !a.key) throw new PageApiError('page.readCache(key): key must be a non-empty string');
+      if (typeof a?.key !== 'string' || !a.key) throw new PageApiError('page.readResult(key): key must be a non-empty string');
       return { ...plainOptions(a.options), key: a.key };
     },
     shape: passthrough,
@@ -282,4 +271,48 @@ export const shapePageResult = (method, toolResult) => {
     throw new PageApiError(content ? `${code}: ${content}` : code);
   }
   return spec.shape(parseContent(toolResult.content));
+};
+
+/**
+ * Shape the raw exact-authority ToolResult into the page worker's response.
+ * @param {string} method
+ * @param {any} result
+ */
+export const shapePageCallOutcome = (method, result) => {
+  const structured = result?.structured && typeof result.structured === 'object'
+    ? result.structured : {};
+  const browserPolicies = Array.isArray(result?.browserPolicies)
+    ? result.browserPolicies
+    : result?.browserPolicy ? [result.browserPolicy]
+      : Array.isArray(structured.browserPolicies)
+        ? structured.browserPolicies
+        : structured.browserPolicy ? [structured.browserPolicy] : [];
+  const policyFields = browserPolicies.length ? { browserPolicies } : {};
+  const terminalFields = result?.endTurn === true ? {
+    endTurn: true,
+    endTurnContent: typeof result.endTurnContent === 'string'
+      ? result.endTurnContent
+      : typeof result.content === 'string' ? result.content : '',
+    ...(typeof result.endTurnOutcomeKind === 'string'
+      ? { endTurnOutcomeKind: result.endTurnOutcomeKind }
+      : typeof result.outcomeKind === 'string'
+        ? { endTurnOutcomeKind: result.outcomeKind } : {}),
+  } : {};
+  try {
+    return {
+      ok: true,
+      value: shapePageResult(method, result),
+      ...(Array.isArray(result?.images) && result.images.length
+        ? { images: result.images.slice(-1) } : {}),
+      ...policyFields,
+      ...terminalFields,
+    };
+  } catch (cause) {
+    return {
+      ok: false,
+      error: cause instanceof Error ? cause.message : String(cause),
+      ...policyFields,
+      ...terminalFields,
+    };
+  }
 };

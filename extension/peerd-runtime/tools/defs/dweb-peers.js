@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // dweb_peers — who I'm connected to on the dweb, and my discovery state.
 //
 // Read-only window onto the base network: the peers I hold a link to (and any I've
@@ -21,26 +23,15 @@
  */
 
 /** @type {DwebTool} */
-export const dwebPeersTool = {
-  name: 'dweb_peers',
-  primitive: 'dweb',
-  dweb: true,
-  description: [
-    'List the peers I am connected to on the dweb right now, plus my discovery',
-    'state: whether discovery is on, how many peers subscribe to my feed, my',
-    'Library size, and which publishers I have blocked. Read-only. Use it to find a',
-    "peer's did (e.g. to pass to dweb_block) or to confirm I am connected.",
-  ].join(' '),
-  schema: { type: 'object', properties: {} },
-  sideEffect: 'read',
-  origins: () => [],
+export const dwebPeersTool = composeTool("dweb_peers", {
 
   execute: async (_args, ctx) => {
     // why: narrow the SW-injected ctx.dweb slot to the one op this tool uses.
-    const dweb = /** @type {{ peers: () => Promise<PeersResult> } | null | undefined} */ (
-      /** @type {{ dweb?: unknown }} */ (ctx).dweb);
-    if (!dweb) return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
-    const r = await dweb.peers();
+    const authority = /** @type {{readPeers?:()=>Promise<PeersResult>}|undefined} */ (
+      /** @type {{dwebAuthority?:unknown}} */ (ctx).dwebAuthority);
+    if (typeof authority?.readPeers !== 'function') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
+    const r = await authority.readPeers();
+    if (r?.error === 'dweb_unavailable') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
     if (!r?.ok) return { ok: false, error: r?.error ?? 'peers_failed' };
     const peers = (r.peers ?? []).map((p) => ({ did: p.did, name: p.name ?? null, linked: !!p.linked, path: p.path ?? null }));
     return {
@@ -54,4 +45,4 @@ export const dwebPeersTool = {
       }, null, 2),
     };
   },
-};
+});

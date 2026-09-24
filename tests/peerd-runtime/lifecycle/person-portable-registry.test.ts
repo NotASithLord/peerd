@@ -5,13 +5,16 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  STORE_REGISTRY, storeEntry, personPortableStores, syncSurfaceStores,
+  STORE_REGISTRY, storeEntry,
 } from '../../../extension/peerd-runtime/lifecycle/store-registry.js';
 import { SYNC_SURFACES } from '../../../extension/peerd-distributed/self/sync.js';
 
 describe('person-portable classification', () => {
   test('the syncable surfaces are exactly the opted-in stores', () => {
-    const surfaces = Object.keys(syncSurfaceStores()).sort();
+    const surfaces = STORE_REGISTRY
+      .filter((entry) => entry.personPortable && entry.syncSurface)
+      .map((entry) => entry.syncSurface!)
+      .sort();
     expect(surfaces).toEqual(['apps', 'hooks', 'memory', 'secrets', 'sessions', 'skills', 'workspaces']);
     // Every syncSurface name is a real self/sync.js surface.
     for (const surface of surfaces) expect(SYNC_SURFACES).toContain(surface);
@@ -46,8 +49,9 @@ describe('person-portable classification', () => {
     expect(deviceKey.personPortable ?? false).toBe(false);
   });
 
-  test('personPortableStores enumerates exactly the opted-in stores', () => {
-    const names = personPortableStores().map((e) => e.store).sort();
+  test('the registry enumerates exactly the person-portable stores', () => {
+    const names = STORE_REGISTRY.filter((entry) => entry.personPortable)
+      .map((entry) => entry.store).sort();
     expect(names).toEqual(['app-manifests', 'hooks', 'memory', 'opfs-workspaces', 'sessions', 'skills', 'vault']);
   });
 

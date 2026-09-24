@@ -96,12 +96,12 @@ describe('createScriptRunRegistry', () => {
   test('every code relay gets the same atomic capability/operation wall', () => {
     const r = createScriptRunRegistry({ codeOpLimit: 2 });
     r.register('page-run', undefined, 'web-1', { page: true });
-    expect(r.admitOp('page-run', 'site')).toBe(false);
-    expect(r.admitOp('page-run', 'page')).toBe(true);
-    expect(r.admitOp('page-run', 'page')).toBe(true);
-    expect(r.admitOp('page-run', 'page')).toBe(false);
+    expect(r.admitCodeOp('page-run', 'site')).toBe(false);
+    expect(r.admitCodeOp('page-run', 'page')).toBe(true);
+    expect(r.admitCodeOp('page-run', 'page')).toBe(true);
+    expect(r.admitCodeOp('page-run', 'page')).toBe(false);
     r.abort('page-run');
-    expect(r.admitOp('page-run', 'page')).toBe(false);
+    expect(r.admitCodeOp('page-run', 'page')).toBe(false);
   });
 });
 
@@ -132,6 +132,8 @@ describe('createScriptRunRegistry — provider (sub-model) accounting', () => {
     r.settleProviderCall('run-p3', 1000, 100);
     r.settleProviderCall('run-p3', 1000, 50);
     expect(r.providerUsageFor('run-p3')).toEqual({ calls: 2, outputTokens: 150 });
+    r.cancelProviderCall('run-p3', 100);
+    expect(r.providerUsageFor('run-p3')).toEqual({ calls: 1, outputTokens: 50 });
   });
 
   test('a no-usage settle releases the whole reservation (an errored stream billed nothing)', () => {

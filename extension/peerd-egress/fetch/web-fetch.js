@@ -28,20 +28,34 @@
 //     denylist + per-tool confirmation gates are the right knobs.
 
 import { EgressDeniedError } from './errors.js';
-import { isPrivateOrLocalHost } from './private-network.js';
-import { authOriginForRequestUrl, originSecretName, parseOriginAuth } from './origin-credentials.js';
-import { accessTokenHashFor, dpopJkt, signDpopProof } from '../dpop/keys.js';
+import { isPrivateOrLocalHost } from '../../shared/private-network.js';
+import { originSecretName, parseOriginAuth } from './origin-credentials.js';
+import { dpopJkt } from '../dpop/keys.js';
+import { accessTokenHashFor, signDpopProof } from '../dpop/sign.js';
+
+/**
+ * THE SEND-TIME BINDING GATE (rules 2 + 3). Given an outbound request URL and the
+ * actor's owned origin, return the origin whose key may authenticate the request, or
+ * null to send anonymously. Authenticates ONLY when the request is https AND its
+ * URL.origin EQUALS the owned origin. Cross-origin, http, or a spoof
+ * (`owned.evil.com`, userinfo tricks) all land on a different origin → null. Does NOT
+ * decide whether a key EXISTS; the caller looks up originSecretName(origin) in the vault.
+ * @param {string} url  the outbound request url
+ * @param {string | undefined} ownedOrigin  the actor's fixed owned origin (URL.origin form)
+ * @returns {string | null}
+ */
+export const authOriginForRequestUrl = (url, ownedOrigin) => {
+  if (!ownedOrigin) return null;
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  if (u.protocol !== 'https:') return null;        // rule 2 (send): never over cleartext
+  return u.origin === ownedOrigin ? ownedOrigin : null;   // rule 3: URL.origin equality
+};
+
 import { makeNonceCache, readDpopNonce, replayableRequest, shouldRetryWithNonce } from '../dpop/nonce.js';
 
-// How long a NETWORK request may be held here before peerd refuses instead.
-//
-// why it is shorter than the action-path ceiling: every caller of this wrapper
-// runs it inside its own wall-clock timeout (the web primitives' is 20s), and a
-// courtesy pause that eats that budget turns a polite wait into a spurious
-// "the site did not respond". A browser ACTION has no such caller budget - it is
-// bounded by the turn and shows a live wait bar - so it is allowed the full
-// ceiling. Past this the request is refused with a typed reason, which the agent
-// can act on, rather than being stalled invisibly.
+// why: network waits share a caller-owned fetch deadline; longer site pauses
+// must become a visible refusal instead of consuming that entire deadline.
 const NETWORK_INLINE_WAIT_MS = 5_000;
 
 // Host closures never ride a RequestInit field: an actor's structured-cloned
@@ -384,21 +398,10 @@ export const withDpopCredentials = (webFetch, getOwnedOrigin, { getSecret, getDp
  *   pure matcher (passed in to avoid a cross-module import here)
  * @param {(partial: { type: string, details?: Record<string, any> }) => Promise<void>} [deps.audit]
  * @param {typeof fetch} [deps.fetchFn]
- * @param {{
- *   reserve: (origin: string, opts: { isWrite: boolean, signal?: AbortSignal, maxInlineWaitMs?: number })
- *     => Promise<{ outcome: string, waitedMs: number, untilMs?: number, reason?: string }>,
- *   observe: (signal: { origin: string, responseAtMs: number, status?: number, retryAfter?: unknown })
- *     => Promise<void>,
- *   isWriteMethod: (method: string) => boolean,
- *   canonicalOrigin: (input: string) => string | null,
- * }} [deps.pace]
- *   adaptive per-origin action pacing (#234). Injected, and absent in tests and
- *   on any host that has not wired it, in which case this wrapper behaves
- *   exactly as it did before. why HERE: this is the only place in the whole
- *   extension that holds a real Response for an arbitrary site, so it is the
- *   only place an HTTP status and a Retry-After header exist in a context a
- *   page cannot forge. Every other observation point is either page-world (the
- *   injected tap), status-free (tabs.onUpdated), or preview-only (CDP).
+ * @param {{reserve:(origin:string,opts:{isWrite:boolean,signal?:AbortSignal,maxInlineWaitMs?:number})
+ * => Promise<{outcome:string,waitedMs:number}>,
+ * observe:(signal:{origin:string,responseAtMs:number,status?:number,retryAfter?:unknown})=>Promise<void>,
+ * isWriteMethod:(method:string)=>boolean,canonicalOrigin:(input:string)=>string|null}} [deps.pace]
  */
 export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace }) => {
   const _fetch = fetchFn ?? fetch;
@@ -412,9 +415,9 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
     const urlString = resource instanceof Request ? resource.url
       : resource instanceof URL ? resource.toString()
       : resource;
-    // why: pacing and audit must use the method that fetch sends.
-    const method = (typeof init?.method === 'string' ? init.method : resource instanceof Request ? resource.method : 'GET').toUpperCase();
-    // why: a Request carries cancellation even when init does not repeat it.
+    // why: pacing and audit must use the method and cancellation fetch sends.
+    const method = (typeof init?.method === 'string' ? init.method
+      : resource instanceof Request ? resource.method : 'GET').toUpperCase();
     const signal = init?.signal ?? (resource instanceof Request ? resource.signal : undefined);
     let u;
     try { u = new URL(urlString); }
@@ -453,21 +456,12 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
     // header-less response), so we cannot re-validate and follow per hop;
     // we refuse the redirect instead. Forced regardless of the caller's
     // redirect mode (primitives.js used to ask for 'follow').
-    // ---- Per-origin pacing (#234) ---------------------------------------
-    // Last gate before the request leaves. Deliberately AFTER the scheme, SSRF
-    // and denylist checks: a request peerd refuses outright must never consume
-    // a pacing slot or make the caller wait first.
-    // why the injected canonicalizer rather than `u.origin`: a rule is keyed by
-    // the same strict canonical origin every other origin-keyed authority
-    // decision uses, and two spellings of one key space is the bug class that
-    // makes a rule silently miss. A host it refuses (an IP literal, a
-    // single-label intranet name) is simply unpaceable - and the private-network
-    // guard above has already turned back everything loopback or LAN.
+    // Only the kernel's real Response may teach a rule. Gate after the other
+    // refusals so invalid requests never consume a pacing reservation.
     const paceKey = pace ? pace.canonicalOrigin(u.origin) : null;
     if (pace && paceKey) {
       const clearance = await pace.reserve(paceKey, {
-        isWrite: pace.isWriteMethod(method),
-        signal,
+        isWrite: pace.isWriteMethod(method), signal: signal ?? undefined,
         maxInlineWaitMs: NETWORK_INLINE_WAIT_MS,
       });
       if (clearance.outcome === 'handoff' || clearance.outcome === 'unavailable') {
@@ -500,15 +494,10 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
     assertDenylist();
     signal?.throwIfAborted();
     const res = await _fetch(resource, finalInit);
-    if (pace && paceKey) {
-      // Await the trusted observation before a response leaves this boundary.
-      await pace.observe({
-        origin: paceKey,
-        responseAtMs: Date.now(),
-        status: res.status,
-        retryAfter: res.headers?.get?.('retry-after') ?? null,
-      });
-    }
+    if (pace && paceKey) await pace.observe({
+      origin: paceKey, responseAtMs: Date.now(), status: res.status,
+      retryAfter: res.headers?.get?.('retry-after') ?? null,
+    });
     if (isRedirect(res)) {
       _audit({ type: 'egress_denied', details: { origin: u.origin, reason: 'redirect_blocked', status: res.status } }).catch(() => {});
       throw new EgressDeniedError(u.origin, 'redirect_blocked');

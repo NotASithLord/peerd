@@ -38,7 +38,8 @@ const mount = async (importReply, inspectReply, stateOverrides = {}) => {
     identityConflict: null, replacementPending: false, importFileInput: null,
     importInspectGeneration: 0, restoreFocusToReview: false, focusImportFileOnUpdate: false,
     focusImportStatusOnUpdate: false,
-    artifactEnvelope: null, artifactSummary: null, artifactBusy: false, artifactMsg: null,
+    artifactEnvelope: null, artifactSummary: null, artifactInspectGeneration: 0,
+    artifactBusy: false, artifactMsg: null,
     debugSessions: [], debugSessionId: '', debugBusy: false, debugMsg: null,
     ...stateOverrides,
   };
@@ -47,7 +48,145 @@ const mount = async (importReply, inspectReply, stateOverrides = {}) => {
   return { root, calls, unmount: () => { m.mount(root, null); root.remove(); } };
 };
 
+/** @param {(msg: any) => Promise<any>} send */
+const mountWhole = async (send) => {
+  const root = document.createElement('div');
+  document.body.appendChild(root);
+  m.mount(root, { view: () => m(TransferSection, { send }) });
+  await flush();
+  return { root, unmount: () => { m.mount(root, null); root.remove(); } };
+};
+
+const flushUntil = async (/** @type {() => boolean} */ ready) => {
+  for (const _attempt of Array.from({ length: 20 })) {
+    await flush();
+    if (ready()) return;
+  }
+};
+
+describe('options.transfer: artifact import', () => {
+  it('loads the artifact rail on demand and inspects a small selected file', async () => {
+    const calls = /** @type {any[]} */ ([]);
+    let reads = 0;
+    const send = async (/** @type {any} */ message) => {
+      calls.push(message);
+      if (message.type === 'session/list') return { ok: true, sessions: [] };
+      if (message.type === 'import/inspect') return {
+        ok: true,
+        summary: { kind: 'app', name: 'Fixture', size: 12, fileCount: 1 },
+      };
+      return { ok: true };
+    };
+    const { root, unmount } = await mountWhole(send);
+    try {
+      const input = /** @type {HTMLInputElement} */ (root.querySelector('#peerd-artifact-file'));
+      Object.defineProperty(input, 'files', {
+        configurable: true,
+        value: [{ size: 12, text: async () => { reads += 1; return '{"fixture":true}'; } }],
+      });
+      input.dispatchEvent(new Event('change'));
+      await flushUntil(() => calls.some((call) => call.type === 'import/inspect'));
+      expect(reads).toBe(1);
+      expect(calls.filter((call) => call.type === 'import/inspect')).toEqual([
+        { type: 'import/inspect', envelope: { fixture: true } },
+      ]);
+      expect(root.textContent).toContain('Name: Fixture');
+    } finally { unmount(); }
+  });
+
+  it('rejects an oversized artifact before reading or sending it', async () => {
+    const calls = /** @type {any[]} */ ([]);
+    let reads = 0;
+    const send = async (/** @type {any} */ message) => {
+      calls.push(message);
+      return message.type === 'session/list' ? { ok: true, sessions: [] } : { ok: true };
+    };
+    const { root, unmount } = await mountWhole(send);
+    try {
+      const input = /** @type {HTMLInputElement} */ (root.querySelector('#peerd-artifact-file'));
+      Object.defineProperty(input, 'files', {
+        configurable: true,
+        value: [{ size: Number.MAX_SAFE_INTEGER, text: async () => { reads += 1; return '{}'; } }],
+      });
+      input.dispatchEvent(new Event('change'));
+      await flushUntil(() => root.textContent?.includes('too large to import safely') === true);
+      expect(root.textContent).toContain('96 MB maximum');
+      expect(reads).toBe(0);
+      expect(calls.some((call) => call.type === 'import/inspect')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('keeps the newer artifact when an older inspection resolves last', async () => {
+    /** @type {(value: any) => void} */ let resolveA = () => {};
+    const replyA = new Promise((resolve) => { resolveA = resolve; });
+    const applies = /** @type {any[]} */ ([]);
+    const inspections = /** @type {any[]} */ ([]);
+    const send = async (/** @type {any} */ message) => {
+      if (message.type === 'session/list') return { ok: true, sessions: [] };
+      if (message.type === 'import/inspect') {
+        inspections.push(message.envelope);
+        return message.envelope.id === 'A' ? replyA : {
+          ok: true, summary: { kind: 'app', name: 'B', size: 12, fileCount: 1 },
+        };
+      }
+      if (message.type === 'import/apply') {
+        applies.push(message.envelope);
+        return { ok: true, kind: 'app', id: 'app-b' };
+      }
+      return { ok: true };
+    };
+    const { root, unmount } = await mountWhole(send);
+    try {
+      const input = /** @type {HTMLInputElement} */ (root.querySelector('#peerd-artifact-file'));
+      const select = (/** @type {string} */ id) => {
+        Object.defineProperty(input, 'files', {
+          configurable: true,
+          value: [{ size: 12, text: async () => JSON.stringify({ id }) }],
+        });
+        input.dispatchEvent(new Event('change'));
+      };
+      select('A');
+      await flushUntil(() => inspections.some((envelope) => envelope.id === 'A'));
+      select('B');
+      await flushUntil(() => root.textContent?.includes('Name: B') === true);
+      resolveA({
+        ok: true, summary: { kind: 'app', name: 'A', size: 12, fileCount: 1 },
+      });
+      await flush();
+      await flush();
+      expect(root.textContent).toContain('Name: B');
+      expect(root.textContent?.includes('Name: A')).toBe(false);
+      /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Apply import')).click();
+      await flush();
+      expect(applies).toEqual([{ id: 'B' }]);
+    } finally { unmount(); }
+  });
+});
+
 describe('options.transfer — portable identity restore', () => {
+  it('shows and retries a chat-list startup failure', async () => {
+    let attempts = 0;
+    const send = async (/** @type {any} */ msg) => {
+      if (msg.type !== 'session/list') return { ok: true };
+      attempts += 1;
+      return attempts === 1 ? { ok: false, error: 'Temporarily unavailable. Try again.' }
+        : { ok: true, sessions: [{ sessionId: 'chat-1', title: 'Chat', createdAt: 1 }] };
+    };
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    m.mount(root, { view: () => m(TransferSection, { send }) });
+    try {
+      await flush();
+      const retry = /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Temporarily unavailable. Try again.'));
+      expect(retry).toBeTruthy();
+      retry.click();
+      await flush();
+      expect(root.querySelector('#dbgsess')?.textContent).toContain('Chat');
+    } finally { m.mount(root, null); root.remove(); }
+  });
+
   it('asks for a passphrase even when the backup carries no API keys', async () => {
     const { root, unmount } = await mount(() => ({ ok: false, error: 'unused' }));
     try {
@@ -243,6 +382,27 @@ describe('options.transfer — portable identity restore', () => {
       expect(root.textContent).toContain('2 setting(s), 1 stored credential(s), 0 provider endpoint(s), 3 memory doc(s), and 4 hook(s)');
       expect(root.textContent).toContain('peer identity was not changed');
       expect(root.textContent).toContain('peer network could not be paused safely');
+      expect(root.querySelector('#restore-summary')).toBeFalsy();
+    } finally { unmount(); }
+  });
+
+  it('never reports an uncertain final identity commit as unchanged', async () => {
+    const { root, unmount } = await mount(() => ({
+      ok: false, error: 'import-partial', outcomeKnown: false,
+      failure: 'dweb-identity-identity-store-outcome-unknown',
+      partial: { settings: 2, secrets: 1, dwebIdentity: 0 },
+      identityOutcome: 'unknown',
+    }));
+    try {
+      const passphrase = /** @type {HTMLInputElement} */ (root.querySelector('#imppass'));
+      passphrase.value = 'backup-passphrase';
+      passphrase.dispatchEvent(new Event('input'));
+      await flush();
+      /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Apply import')).click();
+      await flush();
+      expect(root.textContent).toContain('could not confirm');
+      expect(root.textContent?.includes('identity was not changed')).toBe(false);
       expect(root.querySelector('#restore-summary')).toBeFalsy();
     } finally { unmount(); }
   });

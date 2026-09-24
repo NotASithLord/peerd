@@ -22,7 +22,7 @@
 //   6. PLATFORM-TOUCH RATCHET — module-scope chrome./browser. touches must be
 //      in web-target.ts's reviewed KNOWN_BROWSER_TOUCHES allowlist; a NEW
 //      touch fails until the shim's coverage is reviewed and the list bumped
-//      (same posture as the tscheck floor).
+//      (same posture as complete tscheck coverage).
 //
 // Run: bun run check:web (also auto-runs at the end of `bun run package:web`).
 
@@ -173,7 +173,7 @@ export const checkWebBoundary = async (): Promise<void> => {
       });
     } else if (rel.endsWith('.html')) {
       const html = readFileSync(join(WEB_DIST, rel), 'utf8');
-      const scriptRe = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
+      const scriptRe = /<script\b([^>]*)>([\s\S]*?)<\/script(?=[\t\n\f\r />])/gi;
       let s: RegExpExecArray | null;
       while ((s = scriptRe.exec(html))) {
         const attrs = s[1];

@@ -13,7 +13,7 @@
 //
 //   persona      — active: Plan/Act enforcement via decideAction. Plan
 //                  mode blocks every non-read action outright; Act mode
-//                  passes here and defers auto-vs-ask to the dispatcher.
+//                  records whether exact SW authority must ask.
 //   exposure     — active: enforces the main-agent tool boundary at
 //                  dispatch. ctx.exposure === 'main' is refused any
 //                  actor-only (main-hidden) tool even if the model emits its
@@ -21,11 +21,10 @@
 //                  the instance-mutating set is actor-only, and an actor
 //                  is positively scoped to its own kind + pinned to its own
 //                  instance.
-//   origin       — active (denylist)
-//   confirmation — active as a lineage placeholder: computes the policy's
-//                  PLANNED verdict; the dispatcher resolves the real
-//                  async confirm after the chain and overwrites it.
-//   egress       — no-op IN THE CHAIN. The real egress enforcement lives
+//   origin: active (denylist)
+//   confirmation: active as a lineage placeholder; computes the planned
+//                  verdict; exact SW authority owns the real async prompt.
+//   egress: no-op IN THE CHAIN. The real egress enforcement lives
 //                  in the default egress-allowlist pre-tool-use hook
 //                  (hooks/defaults/egress-allowlist.js) plus safeFetch at
 //                  the actual fetch boundary; this gate stays so the
@@ -39,23 +38,24 @@
 // Deep import of the PURE matcher (not the /peerd-egress/index.js barrel,
 // which pulls in vault/storage + the browser polyfill and would make this
 // module unimportable under the bun test runner). Same pattern as
-// composer/resolvers.js and tools/defs/dom-helpers.js.
+// the composer-reference authority and browser-authority/dom-helpers.js.
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import {
   isHiddenFromMain,
   EXPOSURE_ACTOR, isActorOnlyTool, isAllowedForActor, actorTargetId, isDwebTool,
-  actorWebTabTarget, isReviewExemptRead,
+  actorWebTabTarget,
 } from './exposure.js';
 import {
   decideAction,
   PERMISSION_MODES,
   DEFAULT_CONFIRM_ACTIONS,
   normalizeMode,
-} from '../permissions/index.js';
+} from '../permissions/policy.js';
 import { ACTOR_ISOLATION_UNAVAILABLE_TOOLS, actorIsolationAvailable } from '../actor/isolation.js';
 import { runtimeCapabilityRefusal } from '../runtime-capabilities.js';
+import { resolveDeclaredToolOrigins } from '../tool-origin-policy.js';
 
-/** @typedef {import('/shared/tool-types.js').Tool} Tool */
+/** @typedef {ReturnType<typeof import('./metadata/descriptor.js').toToolDescriptor>} Tool */
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/shared/tool-types.js').GateResult} GateResult */
 
@@ -102,9 +102,9 @@ export const authWaitGate = (_tool, _args, ctx) => ctx.authWaitingForUser === tr
  * SYNCHRONOUS half of the permission policy: PLAN mode blocks every
  * non-read action outright (allowed:false). The CONFIRMATION half (auto
  * vs ask, by the confirmActions toggle) can't run here because it needs
- * an async user round-trip — the
- * dispatcher does it after the gate chain, also via decideAction, so the
- * single policy function is the only place the rules live.
+ * an async user round-trip. Exact service-worker authority performs that
+ * prompt after binding the final arguments and target; this pure gate only
+ * projects the decision into semantic lineage.
  *
  * ctx.permission = { mode: 'plan'|'act', confirmActions: boolean }.
  * Missing/garbage → safe defaults (plan + confirm ON), so a legacy
@@ -120,8 +120,8 @@ const personaGate = (tool, _args, ctx) => {
   if (!verdict.allowed) {
     return { allowed: false, reason: verdict.reason };
   }
-  // Allowed here; whether it still needs confirmation is decided in the
-  // dispatcher's async step. Surface the mode + action class so the
+  // Allowed here; exact authority decides whether it still needs confirmation.
+  // Surface the mode + action class so the
   // lineage UI shows e.g. "act/auto · external".
   const modeLabel = mode === PERMISSION_MODES.ACT
     ? (confirmActions === false ? 'act/auto' : 'act/confirm')
@@ -149,15 +149,7 @@ const personaGate = (tool, _args, ctx) => {
 export const actorTierGate = (tool, args, ctx) => {
   if (ctx?.exposure !== EXPOSURE_ACTOR) {
     if (isActorOnlyTool(tool.name)) {
-      // #160 review exemption — the ONE hole in this wall. A SW-stamped review
-      // ctx (spawn.js sets it; the model cannot reach it, actor_create builds
-      // its spawn request from an explicit field whitelist) may hold the three
-      // instance READS so a code review can open the files around a diff. Both
-      // axes are positive: the marker AND the name. Every other actor-only tool
-      // — every write, every other ctx — refuses exactly as before.
-      if (!isReviewExemptRead(tool.name, ctx?.exposure)) {
-        return { allowed: false, reason: `'${tool.name}' is actor-only — message the instance's actor (message_actor)` };
-      }
+      return { allowed: false, reason: `'${tool.name}' is actor-only; message the instance's actor (message_actor)` };
     }
     // Dweb tools are the DWEB ACTOR's family (owner call 2026-07-04): refused
     // for every non-actor ctx, unconditionally — the wall behind the
@@ -174,8 +166,8 @@ export const actorTierGate = (tool, args, ctx) => {
   // allow-set drops the DOM toolset (which needs a tab it never has), so a DOM tool
   // refuses HERE, at the gate, not just at execute-time. PR #119: surface-aware —
   // a code-surface web actor's set is {snapshot, read_page, page_code}, so a
-  // discrete click/type/navigate FROM THE MODEL refuses here too (the page/call
-  // route's inner dispatch builds a tools-surface ctx, which stays allowed).
+  // discrete click/type/navigate FROM THE MODEL refuses here too (the nested
+  // page-program execution builds a tools-surface ctx, which stays allowed).
   if (!isAllowedForActor(tool.name, ctx.actorType, ctx.backing, ctx.actorSurface)) {
     const scope = ctx.backing === 'api' ? 'API integration (no tab or DOM)' : `${ctx.actorType ?? 'unknown'}`;
     return { allowed: false, reason: `'${tool.name}' is not in this actor's (${scope}) toolset` };
@@ -236,12 +228,13 @@ export const actorTierGate = (tool, args, ctx) => {
 };
 
 /**
- * Exposure — enforces the main-agent tool boundary at DISPATCH, not just
+ * Exposure: enforces the main-agent semantic surface at DISPATCH, not just
  * in the advertised descriptor list. The low-level DOM/page tools
- * (snapshot, click, type, page_exec, …) are hidden from the main agent and
+ * (snapshot, click, type, page_code, …) are hidden from the main agent and
  * belong to the web actor. mainAgentDescriptors() keeps them out of the
  * model's tool list, but that's advisory — a prompt-injected model can
- * still EMIT a hidden tool name. This gate makes the boundary real: a
+ * still EMIT a hidden tool name. This semantic gate refuses it before tool
+ * execution: a
  * context marked `exposure: 'main'` (set only on the main turn) is refused
  * any hidden tool. Actors and spawned leave `exposure` unset — the actor
  * legitimately holds these tools, narrowed by its kind's allow-list (spawn.js).
@@ -249,12 +242,14 @@ export const actorTierGate = (tool, args, ctx) => {
  * SECOND check: the per-session tool manifest (tools/manifests.js).
  * ctx.toolAllow is the session's RESOLVED allow-set (null = no manifest =
  * everything). Descriptor filtering keeps excluded tools out of the
- * model's advertised list, but that's advisory too — this refusal makes
- * the manifest real at dispatch. Unlike the main-only hidden-tool check it
+ * model's advertised list; this refusal makes the semantic policy effective
+ * for honest runtime dispatch. Unlike the main-only hidden-tool check it
  * applies to EVERY context that carries it, main turn AND children: spawn.js
  * inherits the manifest into child session records, so a child's
- * effective set can intersect with, but never escalate past, its
- * parent's manifest.
+ * effective advertised set remains narrowed from its parent's manifest.
+ * The SW hard boundary remains exact operation grants plus live checks; this
+ * name policy is not an authority guarantee against a compromised semantic
+ * heap, and equivalent tools may intentionally share operations.
  *
  * @param {Tool} tool @param {any} args @param {GateContext} ctx
  * @returns {Omit<GateResult, 'name'>}
@@ -298,7 +293,7 @@ export const exposureGate = (tool, args, ctx) => {
  * @returns {Omit<GateResult, 'name'>}
  */
 const originGate = (tool, args, ctx) => {
-  const origins = tool.origins(args, ctx) ?? [];
+  const origins = resolveDeclaredToolOrigins(tool, args, ctx);
   if (origins.length === 0) {
     return { allowed: true, reason: 'no origins touched' };
   }
@@ -321,12 +316,10 @@ const originGate = (tool, args, ctx) => {
 };
 
 /**
- * Confirmation — a placeholder entry in the lineage. The actual confirm
- * decision (auto vs ask) is async, so the dispatcher resolves it AFTER
- * the gate chain and overwrites this entry's allowed/reason with the real
- * outcome (approved / rejected / auto-allowed). Here we just compute the
- * policy's PLANNED verdict from (mode, confirmActions, tool) so that even
- * before the round-trip the lineage shows whether a prompt is coming.
+ * Confirmation is a lineage placeholder. The semantic dispatcher records
+ * that exact service-worker authority will bind the final arguments and target,
+ * then decide and audit any prompt. Computing the planned verdict here keeps
+ * the gate pure; it never grants confirmation authority to the semantic heap.
  *
  * @param {Tool} tool @param {any} _args @param {GateContext} ctx
  * @returns {Omit<GateResult, 'name'>}

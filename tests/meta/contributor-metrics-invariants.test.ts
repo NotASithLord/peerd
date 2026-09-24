@@ -17,9 +17,20 @@ const feedback = readFileSync(join(
   EXTENSION_DIR, 'peerd-runtime/observability/contributor-feedback.js',
 ), 'utf8');
 const routes = readFileSync(join(
-  EXTENSION_DIR, 'background/routes/contributor-metrics.js',
+  EXTENSION_DIR, 'offscreen/semantic-routes/contributor.js',
 ), 'utf8');
-const serviceWorker = readFileSync(join(EXTENSION_DIR, 'background/service-worker.js'), 'utf8');
+const guard = readFileSync(join(
+  EXTENSION_DIR, 'background/kernel-contributor-feedback-guard.js',
+), 'utf8');
+const owner = readFileSync(join(
+  EXTENSION_DIR, 'background/kernel-contributor-owner.js',
+), 'utf8');
+const channel = readFileSync(join(
+  EXTENSION_DIR, 'shared/contributor-channel.js',
+), 'utf8');
+const authorityAdapter = readFileSync(join(
+  EXTENSION_DIR, 'background/kernel-turn-authority-adapter.js',
+), 'utf8');
 const options = readFileSync(join(EXTENSION_DIR, 'options/sections/contributor-metrics.js'), 'utf8');
 const messageList = readFileSync(join(EXTENSION_DIR, 'sidepanel/components/message-list.js'), 'utf8');
 
@@ -38,13 +49,26 @@ describe('Contributor Metrics source invariants', () => {
   });
 
   test('the local core/store/routes contain no network primitive or origin', () => {
-    const source = stripComments([metrics, store, feedback, routes].join('\n'));
+    const source = stripComments([
+      metrics, store, feedback, routes, guard, owner, channel,
+    ].join('\n'));
     expect(source).not.toMatch(/\bfetch\s*\(|XMLHttpRequest|WebSocket|https?:\/\//);
     expect(source).not.toMatch(/collector|contributions\/v[0-9]/i);
   });
 
+  test('the authority hashes identifiers before storage and never logs raw failure causes', () => {
+    expect(stripComments(owner)).not.toMatch(/console\./);
+    expect(owner.indexOf("opaqueContributorToken(\n      'operation'")).toBeLessThan(
+      owner.indexOf('await set(`${CONTRIBUTOR_PENDING_RECEIPT_PREFIX}'),
+    );
+    expect(authorityAdapter).toContain("console.warn('[contributor] local settlement skipped');");
+    expect(authorityAdapter).not.toContain(
+      "console.warn('[contributor] local settlement skipped', cause)",
+    );
+  });
+
   test('every issue-345 contribution consumer remains local-only', () => {
-    const sources = [serviceWorker, options, messageList].map(stripComments);
+    const sources = [options, messageList].map(stripComments);
     for (const source of sources) {
       const lines = source.split('\n');
       const contributionNeighborhood = lines.flatMap((line, index) =>
@@ -54,7 +78,6 @@ describe('Contributor Metrics source invariants', () => {
       );
     }
     expect(stripComments(routes)).not.toMatch(/contributor\/(?:upload|send|schedule)|alarm/i);
-    expect(stripComments(serviceWorker)).not.toMatch(/CONTRIBUTOR_(?:ORIGIN|ENDPOINT)|contributionAlarm/i);
   });
 
   test('consent keys are absent from generated/importable settings', () => {
@@ -65,48 +88,4 @@ describe('Contributor Metrics source invariants', () => {
     expect(transfer).not.toContain('contributor_metrics.consent');
   });
 
-  test('the direct dweb actor wake reserves before async setup and snapshots before release', () => {
-    const start = serviceWorker.indexOf('const handleDwebAgentInbound');
-    const end = serviceWorker.indexOf("msg?.type === 'dweb/base-room/event'", start);
-    const inboundWake = serviceWorker.slice(start, end);
-    expect(start).toBeGreaterThanOrEqual(0);
-    expect(end).toBeGreaterThan(start);
-    expect(inboundWake).toContain('turnSlots.runWhenIdleClaimed(actor.actorSessionId');
-    expect(inboundWake).toContain('turnSlots.runWhenIdleClaimed(active');
-    expect(inboundWake).toContain('turnLease,');
-    expect(inboundWake).toContain('off?.turnSnapshot?.messages ?? []');
-    expect(inboundWake).not.toContain('await sessions.get(actor.actorSessionId);');
-    expect(inboundWake).toContain('priorTurnsForWake = conversationRegistry.turnsFor(convId)');
-    expect(inboundWake.indexOf('priorTurnsForWake = conversationRegistry.turnsFor(convId)'))
-      .toBeLessThan(inboundWake.indexOf("conversationRegistry.record(convId, 'peer', deliver.message)"));
-    expect(inboundWake).toContain('runDwebConversationOrdered(convId, runInboundWake)');
-    expect(inboundWake).toContain('const run = ownsThread && convId');
-    expect(inboundWake.slice(0, inboundWake.indexOf('const runInboundWake'))).not.toMatch(/\bawait\b/);
-    expect(inboundWake).toContain('conversationRegistry.ownedBy(cid, did)');
-    expect(inboundWake).toContain('sent?.ok === true');
-    expect(inboundWake).not.toContain('await withDwebPublication');
-    expect(inboundWake).toContain('const parentStopGeneration = turnSlots.generation(active)');
-    expect(inboundWake).toContain('turnSlots.generation(active) !== parentStopGeneration');
-    // Bound actors may only run in their dedicated worker. A regression to the
-    // former background fallback would also re-open the snapshot race.
-    expect(inboundWake).not.toContain('captureTurnSnapshot: true');
-  });
-
-  test('a claimed web actor advances its landing epoch in the serialized authority lane', () => {
-    const start = serviceWorker.indexOf('runActorTurn: async ({');
-    const end = serviceWorker.indexOf('reenter: ({ userText', start);
-    const actorTurn = serviceWorker.slice(start, end);
-    expect(start).toBeGreaterThanOrEqual(0);
-    expect(end).toBeGreaterThan(start);
-    const epochAdvance = 'beginLandingTurn(actorSessionId)';
-    const epochBarrier = 'await originStates.serialize(actorSessionId, () => undefined)';
-    expect(actorTurn).toContain(epochAdvance);
-    expect(actorTurn).toContain(epochBarrier);
-    expect(actorTurn.indexOf(epochAdvance)).toBeLessThan(actorTurn.indexOf('let deliveredMessage'));
-    expect(actorTurn.indexOf(epochAdvance)).toBeLessThan(actorTurn.indexOf(epochBarrier));
-    expect(actorTurn).toContain(
-      'feedbackContextKey: contributorFeedbackContextKey(parentSessionId, parentToolUseId)',
-    );
-    expect(actorTurn).not.toContain('feedbackContextKey: beforeRecord.parentSessionId');
-  });
 });

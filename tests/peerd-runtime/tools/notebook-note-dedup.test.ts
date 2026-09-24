@@ -4,17 +4,16 @@
 // path (createNotebookSandbox) with mocked registry + tab tracker.
 
 import { describe, test, expect, beforeEach } from 'bun:test';
+import { executionToolContext } from '../../helpers/execution-tool.js';
 
-// js-create's import graph touches the webextension-polyfill (via
-// notebook-client), which throws unless a chrome global is present — stub it,
-// then dynamic-import, exactly as the runtime provides it.
-(globalThis as any).chrome = { runtime: { id: 'test' } };
+// The shared test bootstrap provides the browser identity required by the
+// js-create import graph. Keep that single identity for the whole Bun worker.
 const { createNotebookSandbox } = await import('../../../extension/peerd-runtime/tools/defs/js-create.js');
 const { _resetOncePerSession } = await import('../../../extension/peerd-runtime/tools/defs/once-per-session.js');
 
 beforeEach(() => { _resetOncePerSession(); });
 
-const ctxFor = (sessionId: string | null) => ({
+const ctxFor = (sessionId: string | null) => executionToolContext({
   session: sessionId ? { sessionId } : undefined,
   jsRegistry: {
     create: async () => ({ id: 'nb-1', name: 'Notebook' }),

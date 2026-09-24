@@ -1,10 +1,3 @@
-// Goal mode (the mode-row Goal toggle): makeGoalRunner keeps re-entering the
-// agent turn until the agent calls complete_goal, the user halts, or a cap is
-// hit. These tests pin the control loop with a fake runTurn (no real model):
-// the visible-goal-then-synthetic-continuation shape, the three exits
-// (complete / halt / cap), the terminal events, and the exposure filter that
-// reveals complete_goal only during a run.
-
 import { describe, it, expect } from 'bun:test';
 import {
   makeGoalRunner, goalContinuationPrompt, GOAL_MAX_ITERATIONS, GOAL_RUNS_KEY,
@@ -19,6 +12,128 @@ const settle = async (pred: () => boolean, tries = 500) => {
 type TurnArgs = { sessionId: string; userText: string; synthetic: boolean; trusted?: boolean };
 
 describe('makeGoalRunner — the goal loop', () => {
+  it('stop() reports a failed durable removal', async () => {
+    const kv = makeKv();
+    kv.store.set(GOAL_RUNS_KEY, { s: { goal: 'keep going', iteration: 1, startedAt: 1 } });
+    kv.set = async () => { throw new Error('storage unavailable'); };
+    let calls = 0;
+    const runner = makeGoalRunner({ runTurn: async () => { calls += 1; }, kv });
+
+    await expect(runner.stop('s')).rejects.toThrow('storage unavailable');
+    expect(kv.store.get(GOAL_RUNS_KEY).s).toMatchObject({ goal: 'keep going' });
+    expect(await runner.resume()).toEqual({ resumed: 0 });
+    expect(calls).toBe(0);
+  });
+
+
+  it('stop() wins a race with resume()', async () => {
+    const kv = makeKv();
+    kv.store.set(GOAL_RUNS_KEY, { s: { goal: 'keep going', iteration: 1, startedAt: 1 } });
+    const get = kv.get;
+    let releaseRead!: () => void;
+    let signalRead!: () => void;
+    const readBlocked = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
+    kv.get = async (key) => {
+      const value = await get(key);
+      kv.get = get;
+      signalRead();
+      await readBlocked;
+      return value;
+    };
+    let calls = 0;
+    const runner = makeGoalRunner({ runTurn: async () => { calls += 1; }, kv });
+
+    const resuming = runner.resume();
+    await readStarted;
+    const stopping = runner.stop('s');
+    releaseRead();
+    expect(await resuming).toEqual({ resumed: 0 });
+    await stopping;
+    expect([runner.isActive('s'), calls, kv.store.get(GOAL_RUNS_KEY)]).toEqual([false, 0, {}]);
+  });
+
+
+  it('announces a run before controller acquisition settles', async () => {
+    const events: any[] = [];
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      withRun: async (operation) => { await gate; await operation(); },
+      runTurn: async () => { runner.halt('s-starting'); },
+      onEvent: (event) => events.push(event),
+    });
+
+    await runner.start({ sessionId: 's-starting', goal: 'finish' });
+    expect(events).toEqual([expect.objectContaining({
+      type: 'goal/state', sessionId: 's-starting', phase: 'running',
+      active: true, iteration: 0,
+    })]);
+    release();
+    await settle(() => runner.get('s-starting') === null);
+  });
+
+  it('holds one run bracket across every autonomous turn and releases it once', async () => {
+    let entered = 0;
+    let exited = 0;
+    let depth = 0;
+    let turns = 0;
+    let releaseBracket = () => {};
+    const bracketReleased = new Promise<void>((resolve) => { releaseBracket = resolve; });
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      withRun: async (operation) => {
+        entered += 1;
+        depth += 1;
+        try { await operation(); }
+        finally {
+          depth -= 1;
+          exited += 1;
+          releaseBracket();
+        }
+      },
+      runTurn: async () => {
+        expect(depth).toBe(1);
+        turns += 1;
+        if (turns === 3) runner.complete('s-bracket');
+      },
+    });
+
+    await runner.start({ sessionId: 's-bracket', goal: 'finish' });
+    await bracketReleased;
+
+    expect({ entered, exited, depth, turns }).toEqual({ entered: 1, exited: 1, depth: 0, turns: 3 });
+    expect(runner.get('s-bracket')).toBe(null);
+  });
+
+  it('terminally cleans a run when its bracket rejects before entry', async () => {
+    const kv = makeKv();
+    const events: any[] = [];
+    const ends: any[] = [];
+    let turns = 0;
+    const runner = makeGoalRunner({
+      withRun: async () => { throw new Error('controller unavailable'); },
+      runTurn: async () => { turns += 1; },
+      onEvent: (event) => events.push(event),
+      onRunEnd: (sid, info) => ends.push({ sid, ...info }),
+      kv,
+    });
+
+    await runner.start({ sessionId: 's-rejected', goal: 'finish' });
+    await settle(() => runner.get('s-rejected') === null);
+
+    expect(turns).toBe(0);
+    expect(events.at(-1)).toMatchObject({
+      type: 'goal/state', phase: 'halted', active: false,
+    });
+    expect(ends).toEqual([{
+      sid: 's-rejected', phase: 'halted', summary: null,
+      reason: 'controller unavailable',
+    }]);
+    expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
+  });
+
   it('runs turn 1 as the visible goal, later turns as synthetic continuations, until complete_goal', async () => {
     const calls: TurnArgs[] = [];
     const events: any[] = [];
@@ -34,7 +149,7 @@ describe('makeGoalRunner — the goal loop', () => {
     });
 
     expect((await runner.start({ sessionId: 's1', goal: 'do the thing' })).ok).toBe(true);
-    await settle(() => !runner.isActive('s1'));
+    await settle(() => runner.get('s1') === null);
 
     expect(calls.length).toBe(2);
     // Turn 1: the user's real goal, NOT synthetic (renders in the chat).
@@ -213,24 +328,129 @@ const makeKv = () => {
   };
 };
 
+const makeDeferredKv = () => {
+  const store = new Map<string, any>();
+  const pending: Array<{ value: any; release: () => void }> = [];
+  let maxPending = 0;
+  const waitForWrite = async () => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (pending.length) return;
+      await Promise.resolve();
+    }
+    throw new Error('deferred-kv-write-missing');
+  };
+  return {
+    store,
+    pending,
+    maxPending: () => maxPending,
+    get: async (key: string) => structuredClone(store.get(key)),
+    set: (key: string, value: any) => new Promise<void>((resolve) => {
+      pending.push({
+        value: structuredClone(value),
+        release: () => { store.set(key, structuredClone(value)); resolve(); },
+      });
+      maxPending = Math.max(maxPending, pending.length);
+    }),
+    delete: async (key: string) => { store.delete(key); },
+    releaseNext: async () => {
+      await waitForWrite();
+      pending.shift()?.release();
+      await Promise.resolve();
+    },
+  };
+};
+
 describe('makeGoalRunner — persistence + resume (survives SW restart / other chats)', () => {
-  it('mirrors a live run to kv while running and clears it on a terminal phase', async () => {
+  it.each([false, true])('finishes delayed completion after a terminal read failure: %s', async (failRead) => {
+    const kv = makeDeferredKv();
+    const read = kv.get;
+    kv.get = async (key) => { if (failRead) { failRead = false; throw new Error('read failed'); } return read(key); };
+    const ends: any[] = [];
+    let runner: ReturnType<typeof makeGoalRunner>;
+    runner = makeGoalRunner({
+      runTurn: async () => { runner.complete('s', 'done'); },
+      onRunEnd: (sessionId, info) => { ends.push({ sessionId, ...info }); },
+      kv,
+    });
+
+    await runner.start({ sessionId: 's', goal: 'finish' });
+    expect(kv.pending).toHaveLength(1);
+    expect(ends).toEqual([]);
+    await kv.releaseNext();
+    await kv.releaseNext();
+    expect(ends).toEqual([]);
+    await kv.releaseNext();
+    await settle(() => ends.length === 1);
+
+    expect(runner.get('s')).toBeNull();
+    expect(kv.maxPending()).toBe(1);
+    expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
+    expect(ends).toEqual([{
+      sessionId: 's', phase: 'done', summary: 'done', reason: null,
+    }]);
+    const recycled = makeGoalRunner({ runTurn: async () => {}, kv });
+    await expect(recycled.resume()).resolves.toEqual({ resumed: 0 });
+  });
+
+  it('awaits delayed live writes and the keyed Stop clear before recycle', async () => {
+    const kv = makeDeferredKv();
+    let releaseTurn = () => {};
+    let turnStarted = () => {};
+    const started = new Promise<void>((resolve) => { turnStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    const ends: any[] = [];
+    const runner = makeGoalRunner({
+      runTurn: async () => { turnStarted(); await gate; },
+      onRunEnd: (_sessionId, info) => { ends.push(info); },
+      kv,
+    });
+
+    await runner.start({ sessionId: 's', goal: 'finish' });
+    await started;
+    let stopped = false;
+    const stop = runner.stop('s').then(() => { stopped = true; });
+    await kv.releaseNext();
+    expect(stopped).toBe(false);
+    await kv.releaseNext();
+    expect(stopped).toBe(false);
+    await kv.releaseNext();
+    await stop;
+
+    expect(kv.maxPending()).toBe(1);
+    expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
+    releaseTurn();
+    await settle(() => ends.length === 1);
+    const recycled = makeGoalRunner({ runTurn: async () => {}, kv });
+    await expect(recycled.resume()).resolves.toEqual({ resumed: 0 });
+  });
+
+  it.each([false, true])('finishes a halted run and blocks stale recovery after a write failure: %s', async (failWrite) => {
     const kv = makeKv();
+    const write = kv.set, ends: any[] = [];
     let seenWhileLive: any = null;
     let runner: ReturnType<typeof makeGoalRunner>;
     runner = makeGoalRunner({
-      runTurn: async () => { await Promise.resolve(); seenWhileLive = kv.store.get(GOAL_RUNS_KEY); runner.halt('s1'); },
-      kv,
+      runTurn: async () => {
+        seenWhileLive = kv.store.get(GOAL_RUNS_KEY);
+        if (failWrite) kv.set = async () => { throw new Error('write failed'); };
+        runner.halt('s1');
+      },
+      kv, onRunEnd: (_sid, info) => ends.push(info),
     });
     await runner.start({ sessionId: 's1', goal: 'do it' });
-    await settle(() => !runner.isActive('s1'));
-    await settle(() => JSON.stringify(kv.store.get(GOAL_RUNS_KEY)) === '{}');
+    await settle(() => runner.get('s1') === null);
     expect(seenWhileLive?.s1).toMatchObject({ goal: 'do it' });
+    expect(runner.get('s1')).toBeNull();
+    expect(ends).toEqual([{ phase: 'halted', summary: null, reason: null }]);
+    expect(await runner.resume()).toEqual({ resumed: 0 });
+    kv.set = write;
+    await runner.stop('s1');
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
   });
 
   it('resume() rehydrates a persisted run and continues it as a synthetic continuation', async () => {
     const kv = makeKv();
+    // Seed storage as if the SW died mid-run at iteration 2.
     kv.store.set(GOAL_RUNS_KEY, { sBoot: { goal: 'keep building', iteration: 2, startedAt: 1 } });
     const calls: TurnArgs[] = [];
     let runner: ReturnType<typeof makeGoalRunner>;
@@ -240,10 +460,11 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
     });
     const res = await runner.resume();
     expect(res.resumed).toBe(1);
-    await settle(() => !runner.isActive('sBoot'));
+    await settle(() => runner.get('sBoot') === null);
+    // Continues from the persisted iteration → a HIDDEN continuation that still
+    // carries the goal, NOT the goal replayed as a fresh visible message.
     expect(calls[0].synthetic).toBe(true);
     expect(calls[0].userText).toContain('keep building');
-    await settle(() => JSON.stringify(kv.store.get(GOAL_RUNS_KEY)) === '{}');
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
   });
 
@@ -255,6 +476,7 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
 
   it('resume() re-runs a final turn interrupted at the cap, not dropping it as capped', async () => {
     const kv = makeKv();
+    // SW died DURING the last allowed turn → stored iteration === maxIterations.
     kv.store.set(GOAL_RUNS_KEY, { s: { goal: 'finish it', iteration: 3, startedAt: 1 } });
     const calls: TurnArgs[] = [];
     const events: any[] = [];
@@ -265,7 +487,9 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
       kv,
     });
     await runner.resume();
-    await settle(() => !runner.isActive('s'));
+    await settle(() => runner.get('s') === null);
+    // The interrupted final turn re-ran exactly once, THEN the run caps; without
+    // the clamp the loop would exit immediately (0 turns) and still report capped.
     expect(calls.length).toBe(1);
     expect(events[events.length - 1].phase).toBe('capped');
   });
@@ -374,25 +598,18 @@ describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
     });
     await runner.start({ sessionId: 's', goal: 'keep going' });
     await settle(() => !runner.isActive('s'));
+    // Paused, NOT terminal: no onRunEnd, and the record survives in kv for resume.
     expect(ends).toHaveLength(0);
     expect(kv.store.get(GOAL_RUNS_KEY).s).toMatchObject({ goal: 'keep going' });
+    // resume() re-drives; this time it completes → terminal, onRunEnd, kv cleared.
     await runner.resume();
-    await settle(() => !runner.isActive('s'));
+    await settle(() => runner.get('s') === null);
     expect(ends).toHaveLength(1);
-    await settle(() => JSON.stringify(kv.store.get(GOAL_RUNS_KEY)) === '{}');
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
   });
 
-  it('stop() on a vault-lock-PAUSED run drops its kv record so it does NOT resurrect on resume()', async () => {
+  it.each([false, true])('Stop preserves paused recovery rules when storage fails: %s', async (failWrite) => {
     const kv = makeKv();
-    const set = kv.set;
-    let releaseFirstWrite = () => {};
-    const firstWrite = new Promise<void>((resolve) => { releaseFirstWrite = resolve; });
-    let delayWrite = true;
-    kv.set = async (key, value) => {
-      if (delayWrite) { delayWrite = false; await firstWrite; }
-      await set(key, value);
-    };
     let throwOnce = true;
     const calls: TurnArgs[] = [];
     let runner: ReturnType<typeof makeGoalRunner>;
@@ -406,56 +623,20 @@ describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
     await runner.start({ sessionId: 's', goal: 'keep going' });
     await settle(() => !runner.isActive('s'));
     expect(runner.get('s')).toBe(null);
-
-    // Stop waits for the late mirror write, then removes what it wrote.
-    const stopping = runner.stop('s');
-    releaseFirstWrite();
-    await stopping;
+    expect(kv.store.get(GOAL_RUNS_KEY).s).toMatchObject({ goal: 'keep going' });
+    if (failWrite) {
+      const set = kv.set;
+      kv.set = async () => { throw new Error('storage unavailable'); };
+      await expect(runner.stop('s')).rejects.toThrow('storage unavailable');
+      expect(await runner.resume()).toEqual({ resumed: 0 });
+      expect(calls).toHaveLength(1);
+      kv.set = set;
+    }
+    await runner.stop('s');
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
-
     const before = calls.length;
     await runner.resume();
     await settle(() => true, 5);
     expect(calls.length).toBe(before);
-  });
-
-  it('stop() reports a failed durable removal', async () => {
-    const kv = makeKv();
-    kv.store.set(GOAL_RUNS_KEY, { s: { goal: 'keep going', iteration: 1, startedAt: 1 } });
-    kv.set = async () => { throw new Error('storage unavailable'); };
-    let calls = 0;
-    const runner = makeGoalRunner({ runTurn: async () => { calls += 1; }, kv });
-
-    await expect(runner.stop('s')).rejects.toThrow('storage unavailable');
-    expect(kv.store.get(GOAL_RUNS_KEY).s).toMatchObject({ goal: 'keep going' });
-    expect(await runner.resume()).toEqual({ resumed: 0 });
-    expect(calls).toBe(0);
-  });
-
-  it('stop() wins a race with resume()', async () => {
-    const kv = makeKv();
-    kv.store.set(GOAL_RUNS_KEY, { s: { goal: 'keep going', iteration: 1, startedAt: 1 } });
-    const get = kv.get;
-    let releaseRead!: () => void;
-    let signalRead!: () => void;
-    const readBlocked = new Promise<void>((resolve) => { releaseRead = resolve; });
-    const readStarted = new Promise<void>((resolve) => { signalRead = resolve; });
-    kv.get = async (key) => {
-      const value = await get(key);
-      kv.get = get;
-      signalRead();
-      await readBlocked;
-      return value;
-    };
-    let calls = 0;
-    const runner = makeGoalRunner({ runTurn: async () => { calls += 1; }, kv });
-
-    const resuming = runner.resume();
-    await readStarted;
-    const stopping = runner.stop('s');
-    releaseRead();
-    expect(await resuming).toEqual({ resumed: 0 });
-    await stopping;
-    expect([runner.isActive('s'), calls, kv.store.get(GOAL_RUNS_KEY)]).toEqual([false, 0, {}]);
   });
 });

@@ -2,17 +2,15 @@
 // Skill registry — the core deliverable.
 //
 // It owns the PROGRESSIVE-DISCLOSURE contract:
-//   - at startup it loads only skill DESCRIPTIONS (cheap) into an
-//     in-memory index, by reading the meta store. No skill body is
+//   - when preparing a prompt it reads only skill DESCRIPTIONS (cheap)
+//     from the meta store. No skill body is
 //     deserialized. `describeForPrompt()` renders these into the system-
 //     prompt block. This is the <200-line lean-memory budget in action.
 //   - on invocation `loadBody(name)` reads the full SKILL.md body from
 //     the body store (expensive) — and ONLY then.
 //
-// The registry is the imperative shell's coordinator: it caches metas in
-// memory for the SW lifetime (rebuilt cheaply on cold start from the
-// store) and delegates persistence to the injected store (store.js, or
-// feature 01's workspace store once integrated).
+// why: persistence, runtime and export have separate readers. Reading current
+// metadata keeps them coherent without lifetime caches or invalidation relays.
 //
 // SAFETY: the registry never executes anything. Installing a skill only
 // records text. A skill's `allowedTools` are advisory metadata — the
@@ -49,17 +47,6 @@ export class SkillNotFoundError extends Error {
  */
 export const createSkillRegistry = ({ store, audit }) => {
   const _audit = audit ?? (async () => {});
-  /** @type {Map<string, import('./store.js').SkillMeta> | null} */
-  let cache = null;
-
-  // Lazily hydrate the in-memory description index from the meta store.
-  // Cold SW start pays one getAll over META ONLY — bodies stay on disk.
-  const ensureCache = async () => {
-    if (cache) return cache;
-    cache = new Map();
-    for (const meta of await store.listMeta()) cache.set(meta.id, meta);
-    return cache;
-  };
 
   /**
    * Install a parsed SKILL.md. `source`/`origin` describe provenance for
@@ -71,8 +58,7 @@ export const createSkillRegistry = ({ store, audit }) => {
    */
   const install = async (text, opts) => {
     const parsed = parseSkillMd(text); // throws SkillParseError on bad input
-    const c = await ensureCache();
-    if (c.has(parsed.name) && !opts.replace) {
+    if (!opts.replace && (await store.listMeta()).some((meta) => meta.id === parsed.name)) {
       throw new SkillExistsError(parsed.name);
     }
     const meta = {
@@ -89,7 +75,6 @@ export const createSkillRegistry = ({ store, audit }) => {
       installedAt: Date.now(),
     };
     await store.put(meta, parsed.body);
-    c.set(meta.id, meta);
     _audit({ type: 'skill_installed', details: { name: meta.id, source: meta.source, origin: meta.origin } }).catch(() => {});
     return meta;
   };
@@ -98,7 +83,7 @@ export const createSkillRegistry = ({ store, audit }) => {
    * List installed skill metas (descriptions only — never bodies).
    * @returns {Promise<import('./store.js').SkillMeta[]>}
    */
-  const list = async () => [...(await ensureCache()).values()]
+  const list = async () => (await store.listMeta())
     .sort((a, b) => a.name.localeCompare(b.name));
 
   /**
@@ -135,8 +120,7 @@ export const createSkillRegistry = ({ store, audit }) => {
    * @throws {SkillNotFoundError}
    */
   const loadBody = async (name) => {
-    const c = await ensureCache();
-    const meta = c.get(name);
+    const meta = (await store.listMeta()).find((entry) => entry.id === name);
     if (!meta) throw new SkillNotFoundError(name);
     if (!meta.enabled) throw new SkillNotFoundError(name);
     const body = await store.getBody(name);
@@ -151,13 +135,11 @@ export const createSkillRegistry = ({ store, audit }) => {
    * @param {boolean} enabled
    */
   const setEnabled = async (name, enabled) => {
-    const c = await ensureCache();
-    const meta = c.get(name);
+    const meta = (await store.listMeta()).find((entry) => entry.id === name);
     if (!meta) throw new SkillNotFoundError(name);
     const next = { ...meta, enabled: !!enabled };
     const body = await store.getBody(name);
     await store.put(next, body ?? '');
-    c.set(name, next);
     return next;
   };
 
@@ -166,25 +148,22 @@ export const createSkillRegistry = ({ store, audit }) => {
    * @param {string} name
    */
   const remove = async (name) => {
-    const c = await ensureCache();
-    if (!c.has(name)) return false;
+    if (!(await store.listMeta()).some((meta) => meta.id === name)) return false;
     await store.remove(name);
-    c.delete(name);
     _audit({ type: 'skill_removed', details: { name } }).catch(() => {});
     return true;
   };
 
   /**
-   * Enabled skills surfaced as composer slash commands — the feature-04
-   * integration point (composer/command-sources.js skillRegistrySource
-   * depends only on this method; see docs/COMMANDS-DESIGN.md).
+   * Enabled skills surfaced as composer slash commands. The semantic
+   * composer depends only on this method; see docs/COMMANDS-DESIGN.md.
    *
    * why the body routes through load_skill instead of inlining the skill
-   * body: progressive disclosure is the whole point of the skills tier —
+   * body: progressive disclosure is the whole point of the skills tier;
    * the command stays cheap (one instruction line), and the full
    * instructions load only when the agent calls the tool. A local
-   * .peerd/commands/ entry of the same name shadows these (earlier source
-   * wins in mergeSources), so users can always override.
+   * .peerd/commands/ entry of the same name shadows these, so users can
+   * always override.
    *
    * @returns {Promise<Array<{ name: string, body: string, description: string }>>}
    */

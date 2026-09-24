@@ -66,7 +66,7 @@ export const normalizeTally = (t) => {
  *
  * @param {CostTally} tally
  * @param {Partial<TokenUsage> | null | undefined} usage  fields read defensively
- * @param {number} cost   USD for THIS usage event (from costOf)
+ * @param {number} cost   USD for THIS usage event, projected by controller semantics
  * @returns {CostTally}
  */
 export const addUsage = (tally, usage, cost) => {
@@ -87,14 +87,6 @@ export const addUsage = (tally, usage, cost) => {
  * @returns {CostTally}
  */
 export const bumpTurn = (tally) => ({ ...tally, turns: tally.turns + 1 });
-
-/**
- * Total tokens across all four buckets — handy for the compact meter.
- * @param {CostTally} tally
- */
-export const totalTokens = (tally) =>
-  (tally.inputTokens || 0) + (tally.outputTokens || 0)
-  + (tally.cacheReadTokens || 0) + (tally.cacheWriteTokens || 0);
 
 /**
  * Hard-limit predicate. The user sets an optional session spend cap (USD);

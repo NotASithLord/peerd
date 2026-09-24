@@ -335,6 +335,12 @@
 .library-update-conflict p { margin: 5px 0 9px; color: var(--fg-muted); font-size: 11px; line-height: 1.4; }
 @media (max-width: 720px) {
   .library-git-import-row { grid-template-columns: 1fr; }
+  /* Keep both actions usable when the branch label and refresh control no
+     longer fit on one line. The branch takes its own row, never button space. */
+  .library-repository-head { flex-wrap: wrap; }
+  .library-repository-head > strong { flex: 1; min-width: 0; }
+  .library-repository-head .muted { flex-basis: 100%; min-width: 0; order: 1; overflow-wrap: anywhere; }
+  .library-repository-head button { flex-shrink: 0; min-width: 28px; min-height: 28px; white-space: nowrap; }
   .library-repository-dirty, .library-remote-actions, .library-branch-row, .library-remote-row { flex-wrap: wrap; }
   .library-repository-dirty input, .library-branch-row input, .library-remote-row input { flex-basis: 100%; }
   .library-commit { grid-template-columns: 72px minmax(0, 1fr) auto auto; }

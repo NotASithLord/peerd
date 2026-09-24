@@ -2,7 +2,21 @@
 // Drain the App editor before repository work.
 // why: Taking the repository lock before flushSave would deadlock.
 
-/** @param {{tracker:{getTabId:(id:string)=>number|null,quiesceTab?:(id:string)=>Promise<boolean>,resumeTab?:(id:string)=>Promise<boolean>,closeTab:(id:string)=>Promise<boolean>,ensureTab:(id:string,opts?:any)=>Promise<number>,reloadTab?:(id:string)=>Promise<boolean>,withDwebAuthority?:<T>(id:string,op:()=>Promise<T>,options?:{invalidate?:boolean,expectedGeneration?:number})=>Promise<T>},withLifecycle:<T>(id:string,op:()=>Promise<T>)=>Promise<T>,afterClose?:()=>Promise<void>}} deps */
+/**
+ * @param {Object} deps
+ * @param {{
+ *   getTabId: (appId:string)=>number|null,
+ *   getOwnerClaim?: (appId:string)=>string|null,
+ *   quiesceTab?: (appId:string)=>Promise<boolean>,
+ *   resumeTab?: (appId:string)=>Promise<boolean>,
+ *   closeTab: (appId:string)=>Promise<boolean>,
+ *   ensureTab: (appId:string, opts?:any)=>Promise<number>,
+ *   withDwebAuthority?: <T>(id:string, op:()=>Promise<T>, options?:{invalidate?:boolean,expectedGeneration?:number})=>Promise<T>,
+ *   reloadTab?: (appId:string)=>Promise<boolean>,
+ * }} deps.tracker
+ * @param {<T>(appId:string, operation:()=>Promise<T>)=>Promise<T>} deps.withLifecycle
+ * @param {()=>Promise<void>} [deps.afterClose]
+ */
 export const createAppQuiescence = ({
   tracker,
   withLifecycle,
@@ -26,6 +40,7 @@ export const createAppQuiescence = ({
     }
     else if (live) throw new Error('App editor quiesce is unavailable');
 
+    const ownerSessionId = tracker.getOwnerClaim?.(appId) ?? null;
     let closed = false;
     try {
       const execute = async () => {
@@ -41,7 +56,10 @@ export const createAppQuiescence = ({
         : execute());
     } finally {
       if (closed) {
-        tracker.ensureTab(appId, { active: false, groupTitle: 'peerd' }).catch(() => {});
+        tracker.ensureTab(appId, {
+          active: false, groupTitle: 'peerd',
+          ...(ownerSessionId ? { ownerSessionId } : {}),
+        }).catch(() => {});
       } else {
         await resumeOrReload(appId);
       }

@@ -33,6 +33,10 @@ import {
 } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { resolve } from 'node:path';
+import { genBuildConfigSource } from './gen-build-config.ts';
+import {
+  CONTROLLER_BUILD_STAMP_MODULES, controllerBuildDigest, stampControllerBuildSource,
+} from './controller-build-identity.ts';
 
 const SECURITY_GROUPS = {
   bun: 'bun-security-patches',
@@ -96,6 +100,7 @@ const GENERATED_RELEASE_PATHS = new Set([
   'CHANGELOG.md',
   'package.json',
   'extension/manifest.json',
+  ...CONTROLLER_BUILD_STAMP_MODULES.map((name) => `extension/shared/${name}`),
 ]);
 const CODEMIRROR_VENDOR_PATHS = new Set([
   'extension/vendor/codemirror/cm.js',
@@ -937,6 +942,7 @@ const prepare = (values: Record<string, string>): void => {
     run(repo, 'bun', ['packaging/check-vendor.ts', '--write']);
   }
   run(repo, 'bun', ['packaging/gen-manifest.ts', '--channel=dev', '--browser=chrome']);
+  run(repo, 'bun', ['packaging/gen-build-config.ts']);
   run(repo, 'bun', ['run', 'check:vendor']);
   run(repo, 'bun', ['install', '--frozen-lockfile']);
 
@@ -974,12 +980,21 @@ const prepare = (values: Record<string, string>): void => {
 const sha256 = (value: Buffer | Uint8Array): string =>
   createHash('sha256').update(value).digest('hex');
 
+const securityImportScanner = new Bun.Transpiler({ loader: 'js' });
+// why: parsing candidate source is necessary for the digest, but dependency
+// code must never execute on the privileged runner. Bun scans without loading
+// modules; re-exports are import-statements and lazy imports stay excluded.
+export const securityStaticImportSpecifiers = (source: string): string[] =>
+  securityImportScanner.scanImports(source)
+    .filter(({ kind }) => kind === 'import-statement')
+    .map(({ path }) => path);
+
 /**
  * Revalidate the untrusted generation artifact in a fresh privileged runner.
  * This command uses only the trusted base policy and Node/Bun built-ins. It
  * never installs or executes code from the candidate dependency graph.
  */
-export const validatePrepared = (values: Record<string, string>): void => {
+export const validatePrepared = async (values: Record<string, string>): Promise<void> => {
   const repo = resolve(required(values, 'repo'));
   const baseSha = required(values, 'base-sha');
   const headSha = required(values, 'head-sha');
@@ -1053,6 +1068,19 @@ export const validatePrepared = (values: Record<string, string>): void => {
     fail('prepared extension manifest differs from the authenticated head beyond the patch version');
   }
 
+  const digest = await controllerBuildDigest(resolve(repo, 'extension'), {
+    readStaticImports: securityStaticImportSpecifiers,
+  });
+  for (const name of CONTROLLER_BUILD_STAMP_MODULES) {
+    const path = `extension/shared/${name}`;
+    const expectedSource = name === 'build-config.js'
+      ? genBuildConfigSource(headManifest, { dwebEnabled: true, channel: 'preview', browser: 'chrome' })
+      : readAt(repo, headSha, path);
+    if (readFileSync(resolve(repo, path), 'utf8') !== stampControllerBuildSource(expectedSource, digest)) {
+      fail(`prepared ${path} is not the exact current build identity`);
+    }
+  }
+
   // The untrusted generator may alter only the two CodeMirror outputs and the
   // corresponding lock entries. It cannot use the lock rewrite to bless any
   // unrelated vendored byte.
@@ -1086,7 +1114,7 @@ if (import.meta.main) {
     else if (command === 'observe-bun') await observeBun(values);
     else if (command === 'verify-observations') await verifyObservationWindow(values);
     else if (command === 'prepare') prepare(values);
-    else if (command === 'validate-prepared') validatePrepared(values);
+    else if (command === 'validate-prepared') await validatePrepared(values);
     else fail('expected verify, observe-bun, verify-observations, prepare, or validate-prepared command');
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);

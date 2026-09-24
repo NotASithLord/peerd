@@ -1,7 +1,7 @@
 // @ts-check
 // Per-session tool exposure manifests — the surfaces that want the REAL
 // extension environment:
-//   - preset data validated against the REAL registered tool inventory
+//   - preset data validated against the real controller catalog
 //     (a tool rename that strands a preset entry fails here, not in prod);
 //   - the main-turn descriptor pipeline (mainAgentDescriptors ∘ manifest
 //     filter) over the real tool list;
@@ -19,12 +19,9 @@ import {
   makeToolsCommand,
   mainAgentDescriptors,
   MAIN_AGENT_HIDDEN_TOOLS,
-  BUILTIN_TOOLS,
-  CLOCK_TOOLS,
-  WEB_TOOLS,
-  loadSkillTool,
   createSessionStore,
 } from '/peerd-runtime/index.js';
+import { listToolAuthorities } from '/peerd-runtime/tools/metadata/authority.js';
 import { makeMockIdb } from '../../mocks/idb.js';
 
 /** @typedef {import('/peerd-runtime/sessions/types.js').Session} Session */
@@ -37,12 +34,11 @@ const present = (s) => /** @type {Session} */ (s);
 /** @param {string | undefined} v @returns {string} */
 const id = (v) => /** @type {string} */ (v);
 
-// The full registered inventory, exactly as the SW registers it
-// (BUILTIN + clock + web + load_skill).
-const registered = [...BUILTIN_TOOLS, ...CLOCK_TOOLS, ...WEB_TOOLS, loadSkillTool];
+// The full compact descriptor inventory, including controller-owned tools.
+const registered = listToolAuthorities();
 const registeredNames = new Set(registered.map((t) => t.name));
 
-describe('tool manifests — presets vs the real registry', () => {
+describe('tool manifests: presets vs the real catalog', () => {
   it('every preset entry names a REGISTERED tool (rename-drift guard)', () => {
     for (const [presetName, preset] of Object.entries(TOOL_MANIFEST_PRESETS)) {
       const stranded = preset.allow.filter((n) => !registeredNames.has(n));
@@ -82,7 +78,7 @@ describe('tool manifests — main-turn descriptor pipeline (real tool list)', ()
       expect(names).toContain(keep);
     }
     // the DOM tools go to the actor; execution/edit/spawn dropped by the preset.
-    for (const drop of ['snapshot', 'click', 'type', 'vm_boot', 'js_notebook', 'app_create', 'edit_file', 'actor_create', 'request_review', 'load_skill']) {
+    for (const drop of ['snapshot', 'click', 'type', 'vm_boot', 'js_notebook', 'app_create', 'edit_file', 'actor_create', 'load_skill']) {
       expect(names.indexOf(drop)).toBe(-1);
     }
   });

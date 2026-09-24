@@ -1,6 +1,4 @@
 // @ts-check
-// Give page-created child tabs the same tab-scoped network floor as their
-// peerd-owned source. Exact browser tab identity is the ownership signal.
 
 /**
  * @param {number} sourceTabId
@@ -13,12 +11,10 @@ export const popupSourceState = (sourceTabId, drivenTabIds, bootAuthoritative) =
   return bootAuthoritative ? 'user' : 'unknown';
 };
 
-/**
- * @typedef {{ allowed: boolean, reason?: string }} PopupTargetVerdict
- */
+/** @typedef {{allowed:boolean,reason?:string}} PopupTargetVerdict */
 
 /** @typedef {'closed'|'left_blank'|'uncontained'} PopupChildState */
-/** @typedef {{ sourceTabId: number, tabId: number, reason: string, child: PopupChildState, guarded: boolean }} PopupOutcomeEvent */
+/** @typedef {{ sourceTabId: number, tabId: number, reason: string, child: PopupChildState, guarded: boolean, flowToken?:symbol }} PopupOutcomeEvent */
 
 /**
  * @param {Object} deps
@@ -49,47 +45,37 @@ export const makeDrivenPopupGuard = ({
   onGuarded = () => {},
   blankDelayMs = 75,
 }) => {
-  /**
-   * @typedef {Object} PopupFlow
-   * @property {number} tabId
-   * @property {Set<number>} sourceTabIds
-   * @property {string} destination
-   * @property {boolean} started
-   * @property {boolean} ready
-   * @property {boolean} finishing
-   * @property {boolean} resolvingUnknown
-   * @property {Set<number>} unknownAttempted
-   * @property {number | null} sourceTabId
-   * @property {boolean} blocked
-   * @property {string} blockReason
-   * @property {boolean} neutralized
-   * @property {boolean} guarded
-   * @property {boolean} blankReported
-   * @property {ReturnType<typeof setTimeout> | null} blankTimer
-   */
+  /** @typedef {{tabId:number,sourceTabIds:Set<number>,destination:string,started:boolean,ready:boolean,finishing:boolean,resolvingUnknown:boolean,unknownAttempted:Set<number>,sourceTabId:number|null,flowToken:symbol|undefined,blocked:boolean,blockReason:string,neutralized:boolean,guarded:boolean,blankReported:boolean,blankTimer:ReturnType<typeof setTimeout>|null,done:Promise<void>,resolve:(value?:void)=>void}} PopupFlow */
   /** @type {Map<number, PopupFlow>} */
   const flows = new Map();
   /** @type {Set<number>} */
   const settled = new Set();
   const meaningfulDestination = (/** @type {unknown} */ url) =>
     typeof url === 'string' && url.length > 0 && url !== 'about:blank' ? url : '';
-  const forget = (/** @type {number} */ tabId) => {
+  const forget = (/** @type {number} */ tabId,
+    /** @type {PopupFlow|null} */ expected = null) => {
     const flow = flows.get(tabId);
+    if (expected && flow !== expected) {
+      expected.resolve();
+      return false;
+    }
     if (flow?.blankTimer != null) clearTimeout(flow.blankTimer);
     flows.delete(tabId);
+    flow?.resolve();
+    return true;
   };
-  const settle = (/** @type {number} */ tabId) => {
-    const flow = flows.get(tabId);
-    // The synchronous request marker stays only through the guarded resume or
-    // containment step. Releasing as soon as DNR installation returned left a
-    // race where DNR blocked an immediate child request but no source receipt
-    // could be attached to the creating action.
+  const settle = (/** @type {PopupFlow} */ flow) => {
+    const tabId = flow.tabId;
+    if (flows.get(tabId) !== flow) {
+      flow.resolve();
+      return;
+    }
     if (flow?.guarded && flow.sourceTabId != null) {
       try {
         Promise.resolve(onGuarded({ sourceTabId: flow.sourceTabId, tabId })).catch(() => {});
       } catch { /* release notification is best-effort; tab removal also cleans up */ }
     }
-    forget(tabId);
+    forget(tabId, flow);
     settled.add(tabId);
   };
 
@@ -110,26 +96,28 @@ export const makeDrivenPopupGuard = ({
           reason: 'child_destination_unverified',
           child,
           guarded: flow.guarded,
+          flowToken: flow.flowToken,
         })).catch(() => {});
-        settle(flow.tabId);
-      })().catch(() => { settle(flow.tabId); });
+        settle(flow);
+      })().catch(() => { settle(flow); });
     }, Math.max(0, blankDelayMs));
   };
 
   const closeOrBlank = async (/** @type {PopupFlow} */ flow) => {
+    if (flows.get(flow.tabId) !== flow) return /** @type {'closed'} */ ('closed');
     if (close) {
       try {
         await close(flow.tabId);
         return /** @type {'closed'} */ ('closed');
-      } catch { /* fall through to a verified blank */ }
+      } catch {
+        if (flows.get(flow.tabId) !== flow) return /** @type {'closed'} */ ('closed');
+      }
     }
+    if (flows.get(flow.tabId) !== flow) return /** @type {'closed'} */ ('closed');
     try {
       await neutralize(flow.tabId);
       return /** @type {'left_blank'} */ ('left_blank');
     } catch {
-      // why: never claim a child is blank when both browser control calls
-      // rejected. The tab-scoped network floor remains, but its visible state
-      // is unknown and the model must not infer successful containment.
       return /** @type {'uncontained'} */ ('uncontained');
     }
   };
@@ -146,6 +134,7 @@ export const makeDrivenPopupGuard = ({
       reason,
       child,
       guarded: flow.guarded,
+      flowToken: flow.flowToken,
     })).catch(() => {});
   };
 
@@ -161,6 +150,7 @@ export const makeDrivenPopupGuard = ({
       child,
       guarded: flow.guarded,
       outcome: flow.neutralized && child !== 'uncontained' ? 'not_run' : 'unverified',
+      flowToken: flow.flowToken,
     })).catch(() => {});
   };
 
@@ -181,18 +171,19 @@ export const makeDrivenPopupGuard = ({
       (async () => {
         const child = await closeOrBlank(flow);
         reportBlocked(flow, child);
-        settle(flow.tabId);
-      })().catch(() => { settle(flow.tabId); });
+        settle(flow);
+      })().catch(() => { settle(flow); });
       return;
     }
     flow.finishing = true;
     const destination = flow.destination;
+    if (flows.get(flow.tabId) !== flow) return;
     resume(flow.tabId, destination)
-      .then(() => { settle(flow.tabId); })
+      .then(() => { settle(flow); })
       .catch(async () => {
         const child = await closeOrBlank(flow);
         reportFailure(flow, 'child_resume_failed', child);
-        settle(flow.tabId);
+        settle(flow);
       });
   };
 
@@ -214,9 +205,6 @@ export const makeDrivenPopupGuard = ({
     flow.guarded = startupGuarded;
     (async () => {
       const protectedTarget = blockProtectedTarget(flow);
-      // webNavigation identifies the child before onBeforeNavigate. Replace its
-      // shell first, then resume only after exact source custody is rechecked
-      // and the child has its own durable tab-scoped DNR rules.
       try {
         await neutralize(flow.tabId);
         flow.neutralized = true;
@@ -230,7 +218,7 @@ export const makeDrivenPopupGuard = ({
         const child = await closeOrBlank(flow);
         if (protectedTarget) reportBlocked(flow, child);
         else reportFailure(flow, 'child_guard_failed', child);
-        settle(flow.tabId);
+        settle(flow);
         return;
       }
       flow.guarded = true;
@@ -239,7 +227,7 @@ export const makeDrivenPopupGuard = ({
         const child = await closeOrBlank(flow);
         if (protectedTarget) reportBlocked(flow, child);
         else reportFailure(flow, 'child_neutralize_failed', child);
-        settle(flow.tabId);
+        settle(flow);
         return;
       }
       flow.ready = true;
@@ -252,8 +240,8 @@ export const makeDrivenPopupGuard = ({
         const child = await closeOrBlank(flow);
         if (flow.blocked) reportBlocked(flow, child);
         else reportFailure(flow, 'child_guard_failed', child);
-        settle(flow.tabId);
-      })().catch(() => { settle(flow.tabId); });
+        settle(flow);
+      })().catch(() => { settle(flow); });
     });
   };
 
@@ -288,7 +276,9 @@ export const makeDrivenPopupGuard = ({
     const sourceTabId = drivenSource(flow);
     if (sourceTabId == null) {
       const states = [...flow.sourceTabIds].map(sourceState);
-      if (states.length > 0 && states.every((state) => state === 'user')) forget(flow.tabId);
+      if (states.length > 0 && states.every((state) => state === 'user')) {
+        forget(flow.tabId, flow);
+      }
       else resolveUnknownFlow(flow);
       return;
     }
@@ -299,9 +289,14 @@ export const makeDrivenPopupGuard = ({
     /** @type {number} */ tabId,
     /** @type {number} */ sourceTabId,
     /** @type {unknown} */ rawUrl,
+    /** @type {symbol|undefined} */ flowToken = undefined,
   ) => {
-    if (settled.has(tabId)) return;
-    const flow = flows.get(tabId) ?? {
+    if (settled.has(tabId)) return Promise.resolve();
+    let flow = flows.get(tabId);
+    if (!flow) {
+      /** @type {(value?:void)=>void} */ let resolve = () => {};
+      const done = new Promise((doneResolve) => { resolve = doneResolve; });
+      flow = {
       tabId,
       sourceTabIds: new Set(),
       destination: '',
@@ -311,13 +306,18 @@ export const makeDrivenPopupGuard = ({
       resolvingUnknown: false,
       unknownAttempted: new Set(),
       sourceTabId: null,
+      flowToken,
       blocked: false,
       blockReason: '',
       neutralized: false,
       guarded: false,
       blankReported: false,
       blankTimer: null,
-    };
+      done,
+      resolve,
+      };
+    }
+    if (flowToken && !flow.flowToken) flow.flowToken = flowToken;
     flow.sourceTabIds.add(sourceTabId);
     flow.destination = meaningfulDestination(rawUrl) || flow.destination;
     if (flow.destination && flow.blankTimer != null) {
@@ -326,19 +326,17 @@ export const makeDrivenPopupGuard = ({
     }
     flows.set(tabId, flow);
     advance(flow);
+    return flow.done;
   };
 
   return {
-    /** @param {{ id?: number, openerTabId?: number, pendingUrl?: string, url?: string }} tab */
+    /** @param {{ id?: number, openerTabId?: number, pendingUrl?: string, url?: string, flowToken?:symbol }} tab */
     onCreated(tab) {
       if (typeof tab.id !== 'number' || typeof tab.openerTabId !== 'number') return;
-      observe(tab.id, tab.openerTabId, tab.pendingUrl || tab.url);
+      return observe(tab.id, tab.openerTabId, tab.pendingUrl || tab.url, tab.flowToken);
     },
 
-    /**
-     * Firefox can expose about:blank at creation. Keep a later meaningful URL
-     * only for a child already tied to a browser source event.
-     * @param {number} tabId
+    /** @param {number} tabId
      * @param {{ url?: string }} changeInfo
      * @param {{ pendingUrl?: string, url?: string }} [tab]
      */
@@ -352,20 +350,15 @@ export const makeDrivenPopupGuard = ({
         flow.blankTimer = null;
       }
       finish(flow);
+      return flow.done;
     },
 
-    /**
-     * This event supplies exact source and destination identity before
-     * onBeforeNavigate, including a child opened by a cross-origin frame.
-     * @param {{ sourceTabId?: number, tabId?: number, url?: string }} details
-     */
+    /** @param {{sourceTabId?:number,tabId?:number,url?:string,flowToken?:symbol}} details */
     onNavigationTarget(details) {
       if (typeof details.sourceTabId !== 'number' || typeof details.tabId !== 'number') return;
-      observe(details.tabId, details.sourceTabId, details.url);
+      return observe(details.tabId, details.sourceTabId, details.url, details.flowToken);
     },
 
-    // Resolve only queued unknown-source events after session custody hydrates.
-    // Positively user-owned children were never blanked or changed.
     onBootReady() {
       for (const flow of flows.values()) advance(flow);
     },

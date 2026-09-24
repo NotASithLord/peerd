@@ -231,7 +231,10 @@ describe('transfer carries the §12 durability labels', () => {
     secrets: { anthropic: 'sk-1' },
     passphrase: 'a long passphrase',
     memory: { version: 1, docs: [{ id: 'user', body: 'x', updatedAt: 5 }] },
-    hooks: [{ id: 'h1', event: 'pre-tool-use' }],
+    hooks: [{
+      id: 'h1', event: 'pre-tool-use', kind: 'declarative',
+      rule: { matchArg: 'url', contains: 'blocked' },
+    }],
     skills: [{ id: 's1', name: 'review' }],
   };
 

@@ -1,7 +1,10 @@
 // @ts-check
 // Offscreen half of the targeted actor MessageChannel transport.
 
-import { ACTOR_CHANNEL_PROTOCOL } from '/shared/actor-channel-protocol.js';
+import {
+  ACTOR_CHANNEL_PROTOCOL,
+  actorRelayRouteClass,
+} from '/shared/actor-channel-protocol.js';
 
 /**
  * @param {Object} deps
@@ -19,23 +22,20 @@ export const bindActorChannel = ({ port, channelId, run, abort, workerUrl }) => 
   let committed = false;
   let completed = false;
   let abortRequested = false;
-  let abortDelivered = false;
+  let abortIssued = false;
   let relaySequence = 0;
+  const abortRun = () => {
+    if (!abortIssued && runId) {
+      abortIssued = true;
+      abort(runId);
+    }
+  };
   const post = (/** @type {Record<string, any>} */ message) => port.postMessage({
     protocol: ACTOR_CHANNEL_PROTOCOL, channelId, ...message,
   });
-  // The client may send actor/abort and then close its port while settling its
-  // own timeout. Those are two transport observations of one cancellation, not
-  // permission to abort the same actor run twice. Retain the request made
-  // before commit so commit can deliver it once a run id exists.
-  const requestAbort = () => {
-    abortRequested = true;
-    if (!runId || abortDelivered) return;
-    abortDelivered = true;
-    abort(runId);
-  };
   const sendToSW = (/** @type {string} */ type, /** @type {object} */ payload) => new Promise((resolve, reject) => {
     if (!committed || completed) { reject(new Error('actor channel is not active')); return; }
+    if (!actorRelayRouteClass(type)) { reject(new Error('actor relay route is invalid')); return; }
     const requestId = `relay-${++relaySequence}`;
     pendingRelays.set(requestId, { resolve, reject });
     try { post({ type: 'actor/relay', requestId, relayType: type, payload }); }
@@ -54,7 +54,8 @@ export const bindActorChannel = ({ port, channelId, run, abort, workerUrl }) => 
       return;
     }
     if (message.type === 'actor/abort') {
-      requestAbort();
+      abortRequested = true;
+      abortRun();
       if (!committed) {
         completed = true;
         job = null;
@@ -70,7 +71,7 @@ export const bindActorChannel = ({ port, channelId, run, abort, workerUrl }) => 
     }
     if (message.type !== 'actor/commit' || !job || committed) return;
     committed = true;
-    if (abortRequested) requestAbort();
+    if (abortRequested) abortRun();
     run(job, { workerUrl, sendToSW })
       .then((result) => {
         completed = true;
@@ -96,12 +97,12 @@ export const bindActorChannel = ({ port, channelId, run, abort, workerUrl }) => 
       });
   };
   port.onmessageerror = () => {
-    if (committed && !completed) requestAbort();
+    if (committed && !completed) abortRun();
     for (const pending of pendingRelays.values()) pending.reject(new Error('actor channel message error'));
     pendingRelays.clear();
   };
   port.addEventListener('close', () => {
-    if (committed && !completed) requestAbort();
+    if (committed && !completed) abortRun();
     for (const pending of pendingRelays.values()) pending.reject(new Error('actor channel closed'));
     pendingRelays.clear();
   }, { once: true });

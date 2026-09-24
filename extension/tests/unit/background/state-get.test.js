@@ -18,9 +18,8 @@
 // harness serves the runner over http with NO real SW behind it (Chrome
 // blocks top-level CDP navigation to extension pages), so a live
 // round-trip is only possible when the runner is opened from
-// chrome-extension://<id>/tests/runner.html. Elsewhere the suite
-// registers a single always-passing documentation test whose name says
-// the round-trips were skipped.
+// chrome-extension://<id>/tests/runner.html. The HTTP suite registers no
+// substitute assertion: an absent service worker must not inflate its pass count.
 
 import { describe, it, expect } from '../../framework.js';
 import browser from '/vendor/browser-polyfill.js';
@@ -79,14 +78,6 @@ const findLeaks = (node, path = '', out = []) => {
 };
 
 describe('background/state-get — one-shot snapshot route', () => {
-  it(HAVE_LIVE_SW
-    ? 'live service worker present — round-trip tests registered'
-    : 'no live service worker (http harness) — round-trips skipped (open chrome-extension://<id>/tests/runner.html)', () => {
-    // Documentation test: always passes; its NAME tells a human reading
-    // the runner page whether the round-trips below actually ran.
-    expect(true).toBe(true);
-  });
-
   if (!HAVE_LIVE_SW) return;
 
   it('replies ok with a state object (route exists, sender admitted)', async () => {

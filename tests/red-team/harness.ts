@@ -9,14 +9,15 @@
 // scenario here casts one adversary from the threat model as code that drives the
 // real defense function with hostile input and records whether the defense held.
 // The same catalog feeds two consumers:
-//   red-team.test.ts: a CI gate. Every scenario must block.
+//   red-team.test.ts: a CI gate. Every scoped probe must block; a scenario with
+//                     a documented platform residual is reported as partial.
 //   report.ts: writes docs/security/RED-TEAM-RESULTS.md.
 
 /** One individual hostile probe inside a scenario. A scenario bundles many. */
 export interface Probe {
   /** The specific attack vector, phrased from the adversary's point of view. */
   vector: string;
-  /** True when the defense stopped this probe. A scenario passes only if all probes are blocked. */
+  /** True when the defense stopped this scoped probe. */
   blocked: boolean;
   /** The observed result: the error thrown, the value refused, or the call that never happened. */
   evidence: string;
@@ -60,6 +61,10 @@ export interface Scenario {
 export interface ScenarioResult {
   /** True only if every probe was blocked, or, for an in-browser tier, verified elsewhere. */
   held: boolean;
+  /** Partial means the scoped probes held but a named platform residual remains. */
+  coverage?: 'complete' | 'partial';
+  /** Concrete limits that prevent a partial scenario from being reported globally blocked. */
+  residuals?: string[];
   /** The defense mechanisms that did the blocking, named for the report. */
   defenses: string[];
   /** Every probe attempted. */
@@ -73,9 +78,10 @@ export const blocked = (vector: string, evidence: string): Probe => ({ vector, b
 /** Record a probe that got through. This is a defense failure the CI gate will catch. */
 export const leaked = (vector: string, evidence: string): Probe => ({ vector, blocked: false, evidence });
 
-/** A scenario holds only if it recorded at least one probe and every probe was blocked. */
+/** A scenario's stated probe scope holds only when it is non-empty and entirely blocked. */
 export const summarize = (probes: Probe[], defenses: string[]): ScenarioResult => ({
   held: probes.length > 0 && probes.every((p) => p.blocked),
+  coverage: 'complete',
   defenses,
   probes,
 });
@@ -93,6 +99,7 @@ export const runScenario = async (s: Scenario): Promise<RanScenario> => ({
 // ---- report formatting -------------------------------------------------------
 
 const statusCell = (r: RanScenario): string => {
+  if (r.result.held && r.result.coverage === 'partial') return 'partial: platform residual';
   if (r.tier === 'in-browser') return r.result.held ? 'verified' : 'FAILED';
   return r.result.held ? 'blocked' : 'LEAKED';
 };
@@ -100,7 +107,8 @@ const statusCell = (r: RanScenario): string => {
 /** Render the full result matrix as Markdown for docs/security/RED-TEAM-RESULTS.md. */
 export const formatMarkdown = (ran: RanScenario[], generatedNote: string): string => {
   const total = ran.length;
-  const held = ran.filter((r) => r.result.held).length;
+  const partial = ran.filter((r) => r.result.held && r.result.coverage === 'partial').length;
+  const held = ran.filter((r) => r.result.held && r.result.coverage !== 'partial').length;
   const probeCount = ran.reduce((n, r) => n + r.result.probes.length, 0);
   const probesBlocked = ran.reduce((n, r) => n + r.result.probes.filter((p) => p.blocked).length, 0);
 
@@ -116,7 +124,7 @@ export const formatMarkdown = (ran: RanScenario[], generatedNote: string): strin
   lines.push('');
   lines.push(generatedNote);
   lines.push('');
-  lines.push(`${held} of ${total} scenarios held. ${probesBlocked} of ${probeCount} individual hostile probes blocked.`);
+  lines.push(`${held} of ${total} scenarios fully held; ${partial} partial with a named platform residual. ${probesBlocked} of ${probeCount} individual scoped hostile probes blocked.`);
   lines.push('');
   lines.push('| # | Attack | Adversary | Asset | Invariant | Result |');
   lines.push('|---|--------|-----------|-------|-----------|--------|');
@@ -132,6 +140,8 @@ export const formatMarkdown = (ran: RanScenario[], generatedNote: string): strin
     lines.push(`- Asset: ${r.asset}`);
     lines.push(`- Claim checked: ${r.claim}`);
     lines.push(`- Threat-model invariant: ${r.threatModelRef}`);
+    lines.push(`- Coverage: ${r.result.coverage === 'partial' ? 'partial: platform residual' : 'complete for the stated probes'}`);
+    if (r.result.residuals?.length) lines.push(`- Platform residuals: ${r.result.residuals.join('; ')}`);
     lines.push(`- Defenses exercised: ${r.result.defenses.join(', ')}`);
     if (r.mcpMapping) lines.push(`- MCP mapping: ${r.mcpMapping}`);
     if (r.result.verifiedBy) lines.push(`- Verified in the browser by: \`${r.result.verifiedBy}\``);
@@ -143,7 +153,7 @@ export const formatMarkdown = (ran: RanScenario[], generatedNote: string): strin
     }
     lines.push('');
   }
-  return lines.join('\n');
+  return lines.join('\n').trimEnd();
 };
 
 /** A compact console summary for the report CLI and CI logs. */
@@ -151,8 +161,11 @@ export const formatConsole = (ran: RanScenario[]): string => {
   const rows = ran.map((r) => {
     const p = r.result.probes;
     const b = p.filter((x) => x.blocked).length;
-    return `  ${r.result.held ? 'PASS' : 'FAIL'} ${r.id}  (${b}/${p.length} probes blocked)  ${r.title}`;
+    const status = !r.result.held ? 'FAIL'
+      : r.result.coverage === 'partial' ? 'PARTIAL' : 'PASS';
+    return `  ${status} ${r.id}  (${b}/${p.length} scoped probes blocked)  ${r.title}`;
   });
-  const held = ran.filter((r) => r.result.held).length;
-  return [`peerd red-team: ${held} of ${ran.length} scenarios held`, ...rows].join('\n');
+  const partial = ran.filter((r) => r.result.held && r.result.coverage === 'partial').length;
+  const held = ran.filter((r) => r.result.held && r.result.coverage !== 'partial').length;
+  return [`peerd red-team: ${held} fully held, ${partial} partial, ${ran.length - held - partial} failed`, ...rows].join('\n');
 };

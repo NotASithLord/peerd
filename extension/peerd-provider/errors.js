@@ -8,6 +8,8 @@ import { TypedError } from '/shared/errors.js';
 
 /** Generic provider failure (non-2xx, malformed body, parse error). */
 export class ProviderError extends TypedError {
+  static errorName = 'ProviderError';
+
   /**
    * @param {string} provider
    * @param {string} message
@@ -23,6 +25,8 @@ export class ProviderError extends TypedError {
  * a "set your API key" prompt when this fires.
  */
 export class ProviderKeyMissingError extends TypedError {
+  static errorName = 'ProviderKeyMissingError';
+
   /** @param {string} provider */
   constructor(provider) {
     super(`Provider '${provider}' has no API key in vault.`);
@@ -35,6 +39,8 @@ export class ProviderKeyMissingError extends TypedError {
  * so the UI can show the real failure mode without a separate fetch.
  */
 export class ProviderHttpError extends TypedError {
+  static errorName = 'ProviderHttpError';
+
   /**
    * @param {string} provider
    * @param {number} status
@@ -59,6 +65,8 @@ export class ProviderHttpError extends TypedError {
  * chat names the real cause even before the UI's mapError touches it.
  */
 export class ProviderUsageLimitError extends TypedError {
+  static errorName = 'ProviderUsageLimitError';
+
   /**
    * @param {string} provider
    * @param {{ status?: number, detail?: string }} [opts]
@@ -77,6 +85,8 @@ export class ProviderUsageLimitError extends TypedError {
 
 /** Provider name not registered in the registry. */
 export class UnknownProviderError extends TypedError {
+  static errorName = 'UnknownProviderError';
+
   /** @param {string} provider */
   constructor(provider) {
     super(`Unknown provider '${provider}' — register it first.`);
@@ -92,6 +102,8 @@ export class UnknownProviderError extends TypedError {
  * generic "Provider 'ollama':" prefix.
  */
 export class OllamaNotRunningError extends ProviderError {
+  static errorName = 'OllamaNotRunningError';
+
   constructor() {
     super('ollama', 'daemon unreachable');
     this.message = 'Ollama isn’t running — start it with `ollama serve` (or open the Ollama app), then try again.';

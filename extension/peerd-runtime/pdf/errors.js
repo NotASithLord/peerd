@@ -11,41 +11,45 @@ import { TypedError } from '/shared/errors.js';
 
 /** The PDF bytes could not be fetched (network / HTTP / unsupported scheme). */
 export class PdfFetchError extends TypedError {
+  static errorName = 'PdfFetchError';
+
   /**
    * @param {string} message
    * @param {{ status?: number }} [opts]
    */
   constructor(message, { status } = {}) {
     super(message);
-    this.name = 'PdfFetchError';
     this.status = status ?? null;
   }
 }
 
 /** pdf.js could not parse the bytes (corrupt, encrypted, not a PDF). */
 export class PdfParseError extends TypedError {
+  static errorName = 'PdfParseError';
+
   /** @param {string} message */
   constructor(message) {
     super(message);
-    this.name = 'PdfParseError';
   }
 }
 
 /** A scanned/image-only PDF was found but the OCR engine isn't installed. */
 export class OcrUnavailableError extends TypedError {
+  static errorName = 'OcrUnavailableError';
+
   /** @param {string} [message] */
   constructor(message) {
-    super(message ?? 'OCR engine is not installed. Enable it in Settings → Voice & OCR.');
-    this.name = 'OcrUnavailableError';
+    super(message ?? 'OCR is unavailable in this build. Use a searchable PDF or page images.');
   }
 }
 
 /** A requested engine name isn't one peerd knows. */
 export class UnknownPdfEngineError extends TypedError {
+  static errorName = 'UnknownPdfEngineError';
+
   /** @param {string} engine */
   constructor(engine) {
     super(`Unknown PDF engine: "${engine}". Known engines: pdfjs, ocr.`);
-    this.name = 'UnknownPdfEngineError';
     this.engine = engine;
   }
 }
@@ -57,23 +61,25 @@ export class UnknownPdfEngineError extends TypedError {
 
 /** OCR asset download failed (network / HTTP). */
 export class OcrDownloadError extends TypedError {
+  static errorName = 'OcrDownloadError';
+
   /**
    * @param {string} message
    * @param {{ status?: number }} [opts]
    */
   constructor(message, { status } = {}) {
     super(message);
-    this.name = 'OcrDownloadError';
     this.status = status ?? null;
   }
 }
 
 /** A downloaded OCR asset failed its pinned SRI check — dropped, not cached. */
 export class OcrSriMismatchError extends TypedError {
+  static errorName = 'OcrSriMismatchError';
+
   /** @param {{ url: string, expected: string|null, actual: string }} info */
   constructor({ url, expected, actual }) {
     super(`OCR asset integrity check failed for ${url}`);
-    this.name = 'OcrSriMismatchError';
     this.url = url;
     this.expected = expected;
     this.actual = actual;

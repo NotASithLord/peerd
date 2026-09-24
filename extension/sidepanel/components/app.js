@@ -14,6 +14,7 @@ import { ActorIsolationBanner } from './actor-isolation-banner.js';
 import { openOptions } from '/shared/open-options.js';
 import { openHome } from '/shared/open-home.js';
 import { CHANNEL } from '/shared/channel-config.js';
+import { settleUiEffect } from '/shared/ui-effects.js';
 
 /** @typedef {import('../chat-reducer.js').ChatState} ChatState */
 /** @typedef {(msg: object) => Promise<any>} Send */
@@ -28,16 +29,34 @@ const icon = (name, size = 16) =>
   m('svg.ic', { width: size, height: size, viewBox: '0 0 24 24', 'aria-hidden': 'true' },
     m('use', { href: `#ic-${name}` }));
 
+export const StateRuntimeFailure = {
+  /** @param {{attrs:{retry?:()=>void,lead?:any}}} vnode */
+  view: ({ attrs }) => [
+    attrs.lead ?? null,
+    m('h2', 'Peerd is taking longer to start'),
+    m('p', 'No action was run. Retry the secure background connection.'),
+    m('button.primary', { type: 'button', onclick: attrs.retry }, 'Retry'),
+  ],
+};
+
 export const App = {
   /**
    * @param {{ attrs: {
    *   state: ChatState, send: Send, voiceManager: any,
-   *   uiActions: UiActions, view: string, optionsActive: boolean,
+ *   uiActions: UiActions, view: string, optionsActive: boolean,
+ *   stateFailed?: boolean, retryState?: () => void,
    *   activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive',
    * } }} vnode
    */
   view: ({ attrs }) => {
-    const { state, send, voiceManager, uiActions, view, optionsActive, activeTabStatus } = attrs;
+    const {
+      state, send, voiceManager, uiActions, view, optionsActive, activeTabStatus,
+      stateFailed, retryState,
+    } = attrs;
+    if (stateFailed) return m('div.app-shell', [
+      null,
+      m('.body', m('.placeholder', m(StateRuntimeFailure, { retry: retryState }))),
+    ]);
     const unlocked = state.vault.initialized && !state.vault.locked;
     // First-run onboarding is a HOME-page blocker (home.js), not a side-panel
     // route — the panel is reached by popping it from an onboarded home.
@@ -169,7 +188,9 @@ const TopBar = {
             ? 'Watching the agent’s tab — click to stop following'
             : 'Watch the agent’s tab (bring it to the front and follow along)',
           'aria-pressed': state.settings?.watchAgentTab ? 'true' : 'false',
-          onclick: () => send({ type: 'settings/update', patch: { watchAgentTab: !state.settings?.watchAgentTab } }),
+          onclick: () => settleUiEffect(send({
+            type: 'settings/update', patch: { watchAgentTab: !state.settings?.watchAgentTab },
+          })),
         }, icon('target')),
         m('button.icon', {
           'aria-label': 'Chats',
@@ -180,9 +201,10 @@ const TopBar = {
         m('button.icon', {
           'aria-label': 'New chat',
           title: 'New chat',
-          onclick: async () => {
-            await send({ type: 'session/reset' });
-            m.route.set('/chat');
+          onclick: () => {
+            const effect = send({ type: 'session/reset' });
+            settleUiEffect(effect);
+            void effect.then((reply) => { if (reply?.ok) m.route.set('/chat'); }).catch(() => {});
           },
         }, icon('plus')),
         // Home — opens the full-tab HOME page (a primary surface, distinct from
@@ -204,7 +226,7 @@ const TopBar = {
         m('button.icon', {
           'aria-label': 'Lock the vault',
           title: 'Lock the vault',
-          onclick: () => send({ type: 'vault/lock' }),
+          onclick: () => settleUiEffect(send({ type: 'vault/lock' })),
         }, icon('lock')),
         m('button.icon', {
           'aria-label': 'Settings',
@@ -219,7 +241,7 @@ const TopBar = {
         m('button.icon', {
           'aria-label': 'Close panel',
           title: 'Close panel',
-          onclick: () => send({ type: 'sidepanel/close' }),
+          onclick: () => settleUiEffect(send({ type: 'sidepanel/close' })),
         }, icon('x')),
       ]) : null,
     ]);
@@ -264,7 +286,7 @@ export const NoticeBar = {
             }, n.action.label ?? 'Enable')
           : null,
         // open-url: the SW attaches an https link (e.g. the preview
-        // update's XPI - background/update-check.js). The click IS the user
+        // update's XPI - background/kernel-preview-addon.js). The click IS the user
         // gesture the target flow needs, so no SW round-trip: open the tab
         // from here. https only, checked again at render (defense in depth -
         // the SW already validates the feed's link).

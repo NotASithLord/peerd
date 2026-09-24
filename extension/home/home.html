@@ -28,7 +28,12 @@
     <symbol id="ic-set" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 8h7M16 8h3M12 16h7M5 16h3"></path><circle cx="14" cy="8" r="2.1"></circle><circle cx="10" cy="16" r="2.1"></circle></symbol>
   </defs></svg>
   <!-- Mithril mounts here (a single named slot, never document.body). -->
-  <div id="app"></div>
-  <script type="module" src="./home.js"></script>
+  <div id="app">
+    <main class="boot-shell" role="status" aria-live="polite" aria-label="Starting peerd">
+      <div class="boot-shell__wordmark" aria-hidden="true">peerd</div>
+      <p>Starting secure vault…</p>
+    </main>
+  </div>
+  <script type="module" src="./boot.js"></script>
 </body>
 </html>

@@ -50,13 +50,28 @@ const memoryRegistry = () => {
   };
 };
 
+/** @param {Record<string, any>} [overrides] */
+const testRepositories = (overrides = {}) => {
+  const tails = new Map();
+  return {
+    coordinate: async (/** @type {{kind:string,id:string}} */ ref, /** @type {() => Promise<any>} */ operation) => {
+      const key = `${ref.kind}:${ref.id}`;
+      const prior = tails.get(key) ?? Promise.resolve();
+      const current = prior.catch(() => {}).then(operation);
+      tails.set(key, current);
+      try { return await current; }
+      finally { if (tails.get(key) === current) tails.delete(key); }
+    },
+    ...overrides,
+  };
+};
+
 describe('App storage binary contract', () => {
   it('classifies a Git-imported working tree and keeps unknown binary assets byte-exact', async () => {
     const registry = memoryRegistry();
     /** @type {{ client: ReturnType<typeof createAppClient> | null }} */
     const holder = { client: null };
-    const repositories = {
-      coordinate: async (/** @type {any} */ _ref, /** @type {() => Promise<any>} */ operation) => operation(),
+    const repositories = testRepositories({
       clone: async (/** @type {any} */ ref, /** @type {any} */ options) => {
         const files = holder.client?.opfsForApp(ref.id);
         if (!files) throw new Error('App client is unavailable');
@@ -73,7 +88,7 @@ describe('App storage binary contract', () => {
         };
       },
       destroy: async () => {},
-    };
+    });
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
@@ -83,7 +98,7 @@ describe('App storage binary contract', () => {
     const result = await client.createFromGit({
       url: 'https://github.com/example/app.git', allowDweb: false,
     });
-    if (!result.record) throw new Error('Git import did not create an App record');
+    if (!result?.record) throw new Error('Git import did not create an App record');
     try {
       expect(result.record.fileKinds['peerd.json']).toBe('text');
       expect(result.record.fileKinds['index.html']).toBe('text');
@@ -101,7 +116,9 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
-      repositories: /** @type {any} */ ({ initApp: async (/** @type {string} */ _id, /** @type {any} */ opts) => { initializations.push(opts); } }),
+      repositories: /** @type {any} */ (testRepositories({
+        initApp: async (/** @type {string} */ _id, /** @type {any} */ opts) => { initializations.push(opts); },
+      })),
     });
     const record = await client.create({
       name: 'Binary storage',
@@ -138,7 +155,7 @@ describe('App storage binary contract', () => {
   it('preserves runtime data, checks the merged cap, and rolls back a failed verified update', async () => {
     const registry = memoryRegistry();
     /** @type {any[]} */ const replacements = [];
-    const repositories = {
+    const repositories = testRepositories({
       initApp: async () => 'base',
       statusApp: async () => ({ oid: 'base' }),
       replaceWorkingTree: async (/** @type {any} */ _ref, /** @type {any} */ options) => {
@@ -146,7 +163,7 @@ describe('App storage binary contract', () => {
         return { oid: 'next', created: true };
       },
       rollbackWorkingTree: async () => ({ oid: 'base' }),
-    };
+    });
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
@@ -159,6 +176,7 @@ describe('App storage binary contract', () => {
       appId: record.id,
       files: { 'index.html': 'new', 'peerd.json': '{}' },
       entryFile: 'index.html',
+      afterCommit: async () => {},
     });
     expect(new TextDecoder().decode(replacements[0].files['data/state.json'])).toBe('{"count":1}');
     expect(replacements[0].includeIgnored).toBe(true);
@@ -175,6 +193,7 @@ describe('App storage binary contract', () => {
         appId: capped.id,
         files: { 'index.html': 'new', 'peerd.json': '{}', 'new.js': 'x' },
         entryFile: 'index.html',
+        afterCommit: async () => {},
       });
     } catch (cause) { error = cause; }
     expect(error instanceof AppFileLimitError).toBe(true);
@@ -207,6 +226,7 @@ describe('App storage binary contract', () => {
         appId: rollbackRecord.id,
         files: { 'index.html': 'release', '.gitignore': '.env\n', '.env': 'TOKEN=publisher-value\n' },
         entryFile: 'index.html',
+        afterCommit: async () => {},
       });
     } catch { updateFailed = true; }
     expect(updateFailed).toBe(true);
@@ -228,6 +248,7 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     let failed = false;
     try {
@@ -249,9 +270,10 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     const record = await client.create({
-      name: 'Atomic', files: { 'index.html': 'old' }, entryFile: 'index.html',
+      name: 'Atomic', files: { 'index.html': 'old', 'app.js': 'old-js' }, entryFile: 'index.html',
     });
     let invalidFailed = false;
     try {
@@ -267,10 +289,177 @@ describe('App storage binary contract', () => {
       if (failOnce) { failOnce = false; throw new Error('catalog unavailable'); }
       return updateRecord(id, patch);
     };
-    let metadataFailed = false;
+    /** @type {any} */
+    let metadataFailure = null;
+    try {
+      await client.update({
+        appId: record.id, html: 'changed', path: 'app.js', content: 'changed-js',
+      });
+    }
+    catch (error) { metadataFailure = error; }
+    expect({
+      performed: metadataFailure?.performed,
+      outcomeKnown: metadataFailure?.outcomeKnown,
+      outcomeKind: metadataFailure?.outcomeKind,
+      retryable: metadataFailure?.retryable,
+    }).toEqual({
+      performed: false, outcomeKnown: true,
+      outcomeKind: 'pre-effect-failure', retryable: true,
+    });
+    expect(await client.readFile({ appId: record.id, path: 'index.html' })).toBe('old');
+    expect(await client.readFile({ appId: record.id, path: 'app.js' })).toBe('old-js');
+    await client.opfsForApp(record.id).nuke();
+  });
+
+  it('marks an unproven App metadata rollback unknown and nonretryable', async () => {
+    const registry = memoryRegistry();
+    const client = createAppClient({
+      registry: /** @type {any} */ (registry),
+      tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
+    });
+    const record = await client.create({
+      name: 'Rollback loss', files: { 'index.html': 'old' }, entryFile: 'index.html',
+    });
+    registry.update = async () => { throw new Error('catalog unavailable'); };
+    /** @type {any} */
+    let failure = null;
     try { await client.writeFile({ appId: record.id, path: 'index.html', content: 'changed' }); }
-    catch { metadataFailed = true; }
-    expect(metadataFailed).toBe(true);
+    catch (error) { failure = error; }
+    expect({
+      performed: failure?.performed,
+      outcomeKnown: failure?.outcomeKnown,
+      outcomeKind: failure?.outcomeKind,
+      retryable: failure?.retryable,
+    }).toEqual({
+      performed: true, outcomeKnown: false,
+      outcomeKind: 'host-lost', retryable: false,
+    });
+    expect(await client.readFile({ appId: record.id, path: 'index.html' })).toBe('old');
+    await client.opfsForApp(record.id).nuke();
+  });
+
+  it('marks a complete App-tree replacement rollback as proven no-effect', async () => {
+    const registry = memoryRegistry();
+    const client = createAppClient({
+      registry: /** @type {any} */ (registry),
+      tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
+    });
+    const record = await client.create({
+      name: 'Replace rollback', files: { 'index.html': 'old' }, entryFile: 'index.html',
+    });
+    const updateRecord = registry.update;
+    let failOnce = true;
+    registry.update = async (id, patch) => {
+      if (failOnce) { failOnce = false; throw new Error('catalog unavailable'); }
+      return updateRecord(id, patch);
+    };
+    /** @type {any} */
+    let failure = null;
+    try {
+      await client.replaceFiles({
+        appId: record.id, files: { 'index.html': 'changed' }, entryFile: 'index.html',
+      });
+    } catch (error) { failure = error; }
+    expect({
+      performed: failure?.performed,
+      outcomeKnown: failure?.outcomeKnown,
+      outcomeKind: failure?.outcomeKind,
+      retryable: failure?.retryable,
+    }).toEqual({
+      performed: false, outcomeKnown: true,
+      outcomeKind: 'pre-effect-failure', retryable: true,
+    });
+    expect(await client.readFile({ appId: record.id, path: 'index.html' })).toBe('old');
+    await client.opfsForApp(record.id).nuke();
+  });
+
+  it('distinguishes proven and unproven delete-file compensation', async () => {
+    const completedRegistry = memoryRegistry();
+    const completed = createAppClient({
+      registry: /** @type {any} */ (completedRegistry),
+      tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
+    });
+    const completedRecord = await completed.create({
+      name: 'Delete rollback',
+      files: { 'index.html': 'old', 'extra.txt': 'keep' }, entryFile: 'index.html',
+    });
+    const normalUpdate = completedRegistry.update;
+    let failOnce = true;
+    completedRegistry.update = async (id, patch) => {
+      if (failOnce) { failOnce = false; throw new Error('catalog unavailable'); }
+      return normalUpdate(id, patch);
+    };
+    /** @type {any} */ let completedFailure = null;
+    try { await completed.deleteFile({ appId: completedRecord.id, path: 'extra.txt' }); }
+    catch (error) { completedFailure = error; }
+    expect({
+      performed: completedFailure?.performed,
+      outcomeKnown: completedFailure?.outcomeKnown,
+      outcomeKind: completedFailure?.outcomeKind,
+      retryable: completedFailure?.retryable,
+    }).toEqual({
+      performed: false, outcomeKnown: true,
+      outcomeKind: 'pre-effect-failure', retryable: true,
+    });
+    expect(await completed.readFile({ appId: completedRecord.id, path: 'extra.txt' })).toBe('keep');
+    await completed.opfsForApp(completedRecord.id).nuke();
+
+    const incompleteRegistry = memoryRegistry();
+    const incomplete = createAppClient({
+      registry: /** @type {any} */ (incompleteRegistry),
+      tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
+    });
+    const incompleteRecord = await incomplete.create({
+      name: 'Delete rollback loss',
+      files: { 'index.html': 'old', 'extra.txt': 'keep' }, entryFile: 'index.html',
+    });
+    incompleteRegistry.update = async () => { throw new Error('catalog unavailable'); };
+    /** @type {any} */ let incompleteFailure = null;
+    try { await incomplete.deleteFile({ appId: incompleteRecord.id, path: 'extra.txt' }); }
+    catch (error) { incompleteFailure = error; }
+    expect({
+      performed: incompleteFailure?.performed,
+      outcomeKnown: incompleteFailure?.outcomeKnown,
+      outcomeKind: incompleteFailure?.outcomeKind,
+      retryable: incompleteFailure?.retryable,
+    }).toEqual({
+      performed: true, outcomeKnown: false,
+      outcomeKind: 'host-lost', retryable: false,
+    });
+    expect(await incomplete.readFile({ appId: incompleteRecord.id, path: 'extra.txt' })).toBe('keep');
+    await incomplete.opfsForApp(incompleteRecord.id).nuke();
+  });
+
+  it('marks an unproven complete-tree replacement rollback unknown', async () => {
+    const registry = memoryRegistry();
+    const client = createAppClient({
+      registry: /** @type {any} */ (registry),
+      tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
+    });
+    const record = await client.create({
+      name: 'Replace rollback loss', files: { 'index.html': 'old' }, entryFile: 'index.html',
+    });
+    registry.update = async () => { throw new Error('catalog unavailable'); };
+    /** @type {any} */ let failure = null;
+    try {
+      await client.replaceFiles({
+        appId: record.id, files: { 'index.html': 'changed' }, entryFile: 'index.html',
+      });
+    } catch (error) { failure = error; }
+    expect({
+      performed: failure?.performed,
+      outcomeKnown: failure?.outcomeKnown,
+      outcomeKind: failure?.outcomeKind,
+      retryable: failure?.retryable,
+    }).toEqual({
+      performed: true, outcomeKnown: false,
+      outcomeKind: 'host-lost', retryable: false,
+    });
     expect(await client.readFile({ appId: record.id, path: 'index.html' })).toBe('old');
     await client.opfsForApp(record.id).nuke();
   });
@@ -283,6 +472,7 @@ describe('App storage binary contract', () => {
       tracker: /** @type {any} */ ({
         invalidateDweb: async () => { invalidations += 1; }, reloadTab: async () => {},
       }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     const record = await client.create({
       name: 'Kinds',
@@ -303,6 +493,7 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     // Object.fromEntries creates own data properties, including this hostile
     // path, without invoking the legacy Object.prototype setter.
@@ -331,6 +522,7 @@ describe('App storage binary contract', () => {
     const client = createAppClient({
       registry: /** @type {any} */ (registry),
       tracker: /** @type {any} */ ({ reloadTab: async () => {} }),
+      repositories: /** @type {any} */ (testRepositories()),
     });
     const record = await client.create({
       name: 'Snapshot', files: { 'index.html': 'old' }, entryFile: 'index.html',

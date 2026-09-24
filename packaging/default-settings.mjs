@@ -54,7 +54,7 @@ export const defaults = {
   voiceSilenceMs: { store: 1500, preview: 1500 },
   voiceOnboardingDismissed: { store: false, preview: false },
 
-  // OCR for scanned PDFs (read_pdf's heavy path). Opt-in on BOTH channels for
+  // OCR for scanned PDFs (read_doc's heavy path). Opt-in on BOTH channels for
   // the same reason as voice: enabling triggers a multi-MB engine download.
   // The default reader (pdf.js text layer) needs no download and is always on;
   // this flag only governs the on-device OCR engine for image-only PDFs.
@@ -106,8 +106,8 @@ export const defaults = {
   // small built-in OpenRouter catalog until they curate. Same on both channels.
   openrouterModels: { store: [], preview: [] },
 
-  // Whether tool contexts get the CDP pool (snapshot refs, page_exec on
-  // Trusted-Types sites, page_keys, runner pre-seeding). The `debugger`
+  // Whether tool contexts get the CDP pool (snapshot refs, exact-tab vision,
+  // framework state, and site capture). The `debugger`
   // PERMISSION is required at install where it ships — Chrome refuses to
   // treat it as optional ("Permission 'debugger' cannot be listed as
   // optional") — so the user-facing control is this SETTING.
@@ -132,13 +132,6 @@ export const defaults = {
   // channels: watching is a per-moment choice, not a default posture.
   watchAgentTab: { store: false, preview: false },
 
-  // Which surface the toolbar icon opens — peerd's front door
-  // (background/panel-affordance.js). 'panel' (owner call, 2026-07-29): the
-  // chat pulls into the side panel / sidebar NEXT TO the page the user is on;
-  // the full-page home taking over a whole tab on first click (often straight
-  // into the vault gate) read as heavyweight. 'home' restores the original
-  // full-page-first model (DESIGN-12): home first, panel once home is open.
-  // A friction preference, not a safety posture — identical on both channels.
   frontDoorView: { store: 'panel', preview: 'panel' },
 
   // Web actor model override. '' is NO override — the web actor resolves to
@@ -253,7 +246,7 @@ export const defaults = {
   auditLogMaxEntries: { store: 20000, preview: 20000 },
 
   // ── preview-only keys ──────────────────────────────────────────────
-  // Self-update check at startup (background/update-check.js). Preview
+  // Self-update check at startup (background/kernel-preview-addon.js). Preview
   // installs are self-hosted (update_url → the peerd.ai feeds → GitHub
   // release artifacts), and peerd's offscreen keepalive holds the MV3 SW
   // alive - the exact state where Chrome parks a downloaded extension

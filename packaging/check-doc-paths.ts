@@ -19,9 +19,7 @@ import { REPO_ROOT } from './lib.ts';
 // against the code it names. (Caught a real one: the roadmap cited
 // peerd-runtime/tools/provider-call-api.js, which lives under actor/.)
 export const CHECKED_DOCS = [
-  // AGENTS.md is CLAUDE.md's twin for other harnesses. It was outside this
-  // gate, so its path claims could rot independently of the file everyone
-  // diffs - which is exactly how the two drifted apart.
+  // Both harness guides and the host/App guides make executable path claims.
   'README.md', 'CLAUDE.md', 'AGENTS.md', 'SECURITY.md', 'CONTRIBUTING.md',
   'docs/EXTENSION-HOSTS.md', 'docs/APP-ACTORS.md',
   'docs/DWAPP-BUNDLE.md', 'docs/BROWSER-COMPATIBILITY.md',

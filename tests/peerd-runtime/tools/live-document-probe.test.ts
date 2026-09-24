@@ -14,7 +14,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   passwordFieldSignalFromProbe,
   resolveTargetTab,
-} from '../../../extension/peerd-runtime/tools/defs/dom-helpers.js';
+} from '../../../extension/peerd-runtime/browser-authority/dom-helpers.js';
 
 const tabsApi = (byId: Record<number, any>) => ({
   get: async (id: number) => { if (!byId[id]) throw new Error('no tab'); return byId[id]; },
@@ -102,6 +102,24 @@ describe('issue 267 — every DOM tool teaches the classifier, not just snapshot
 });
 
 describe('issue 276 — the live origin is re-judged when the document moved', () => {
+  test.each(['blocked', 'unavailable'])('live policy becoming %s during the document probe refuses the target', async (change) => {
+    let probed = false;
+    const scripting = scriptingSaying({ origin: 'https://example.com', href: 'https://example.com/' });
+    const ctx: any = baseCtx({
+      denylist: [],
+      readAuthorityDenylist: () => {
+        if (probed && change === 'unavailable') throw new Error('policy unavailable');
+        return probed ? ['example.com'] : [];
+      },
+      scripting: { executeScript: async (request: any) => {
+        const result = await scripting.executeScript(request);
+        probed = true;
+        return result;
+      } },
+    });
+    expect(await resolveTargetTab({}, ctx)).toBeNull();
+  });
+
   test('a document that navigated onto the denylist is refused', async () => {
     const ctx: any = baseCtx({
       denylist: ['chase.com', '*.chase.com'],

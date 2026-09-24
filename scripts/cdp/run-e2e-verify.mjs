@@ -61,12 +61,17 @@ const selected = (s) => {
 
 const makeRecorder = (ctx, state) => {
   const checks = [];
+  const observations = [];
   const screenshots = [];
   const visuals = [];
   return {
     check(name, pass, detail = '') {
       checks.push({ name, pass: !!pass, detail: String(detail ?? '') });
       log(`  ${pass ? 'PASS' : 'FAIL'}  [${state.name}] ${name}${detail ? ` — ${detail}` : ''}`);
+    },
+    observe(name, value) {
+      observations.push({ name, value });
+      log(`  NOTE  [${state.name}] ${name}: ${JSON.stringify(value)}`);
     },
     async shot(label) {
       const png = await ctx.screenshot();
@@ -138,7 +143,7 @@ const makeRecorder = (ctx, state) => {
     },
     result() {
       const ok = checks.every((c) => c.pass) && visuals.every((v) => v.pass);
-      return { name: state.name, kind: state.kind, ok, checks, screenshots, visuals };
+      return { name: state.name, kind: state.kind, ok, checks, observations, screenshots, visuals };
     },
   };
 };
@@ -165,7 +170,13 @@ async function main() {
 
   const states = STATES.filter(selected);
   const preUnlock = states.filter((s) => s.phase === 'pre-unlock');
-  const postUnlock = states.filter((s) => s.phase === 'post-unlock');
+  const postUnlockPriority = (state) => state.name === 'first-turn'
+    ? -1
+    : state.name === 'browser-network-floor' ? 1 : 0;
+  // why: `first-turn` is only meaningful before any reset or prior post-unlock
+  // state; the network-floor probe remains last because it mutates live rules.
+  const postUnlock = states.filter((s) => s.phase === 'post-unlock').sort((a, b) =>
+    postUnlockPriority(a) - postUnlockPriority(b));
   const results = [];
   const ctx = await launchPeerd({ extensionDir: EXTENSION_DIR });
   try {
@@ -175,7 +186,15 @@ async function main() {
       await unlockAndReady(ctx.page);
       await freezeAnimations(ctx);
       for (const s of postUnlock) {
-        await resetSession(ctx);
+        if (s.preserveFreshSession !== true) {
+          try { await resetSession(ctx); }
+          catch (error) {
+            const rec = makeRecorder(ctx, s);
+            rec.check('state reset ran without throwing', false, error?.message || String(error));
+            results.push(rec.result());
+            break;
+          }
+        }
         await runState(ctx, s, results);
       }
     }

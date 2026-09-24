@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // dweb_discovery — the sovereign on/off switch for receiving discovery metadata.
 //
 // "I don't want to see shit": turn discovery OFF and we stop asking peers for
@@ -16,31 +18,17 @@
 /** @typedef {Omit<Tool, 'primitive' | 'execute'> & { primitive: 'dweb', execute: (args: any, ctx: ToolContext) => Promise<DwebToolResult> }} DwebTool */
 
 /** @type {DwebTool} */
-export const dwebDiscoveryTool = {
-  name: 'dweb_discovery',
-  primitive: 'dweb',
-  dweb: true,
-  description: [
-    'Turn dweb discovery on or off (the sovereign switch). Off: stop asking peers',
-    'for their app feeds and tell current upstreams to stop sending — nothing new',
-    'reaches my Library. On: re-subscribe to my peers. Pass { enabled: true|false }.',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: { enabled: { type: 'boolean', description: 'true to receive discovery metadata, false to stop.' } },
-    required: ['enabled'],
-  },
-  sideEffect: 'write',
-  origins: () => [],
+export const dwebDiscoveryTool = composeTool("dweb_discovery", {
 
   execute: async (args, ctx) => {
     // why: narrow the SW-injected ctx.dweb slot to the one op this tool uses.
-    const dweb = /** @type {{ setDiscovery: (o: { enabled: boolean }) => Promise<{ ok?: boolean, error?: string }> } | null | undefined} */ (
-      /** @type {{ dweb?: unknown }} */ (ctx).dweb);
-    if (!dweb) return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
+    const authority = /** @type {{setDiscoveryEnabled?:(enabled:boolean)=>Promise<any>}|undefined} */ (
+      /** @type {{dwebAuthority?:unknown}} */ (ctx).dwebAuthority);
+    if (typeof authority?.setDiscoveryEnabled !== 'function') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
     if (typeof args?.enabled !== 'boolean') return { ok: false, error: 'enabled_required', content: 'Pass { enabled: true|false }.' };
-    const r = await dweb.setDiscovery({ enabled: args.enabled });
+    const r = await authority.setDiscoveryEnabled(args.enabled);
+    if (r?.error === 'dweb_unavailable') return { ok: false, error: 'dweb_unavailable', content: 'The dweb is not enabled in this build.' };
     if (!r?.ok) return { ok: false, error: r?.error ?? 'set_discovery_failed' };
     return { ok: true, content: JSON.stringify({ discovery: args.enabled ? 'on' : 'off' }, null, 2) };
   },
-};
+});

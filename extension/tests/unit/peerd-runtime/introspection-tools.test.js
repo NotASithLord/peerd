@@ -5,18 +5,18 @@
 // _denylist/_provider_config) collapsed into ONE `inspect({ kind })` — this
 // verifies each facet's output shape and the §02 demonstration property
 // (e.g. kind:'provider_config' does NOT return the API key; kind:'storage'
-// truncates encrypted blobs), plus the dispatch itself (unknown kind → error).
+// renders the authority-projected proof), plus dispatch (unknown kind → error).
 
 import { describe, it, expect } from '../../framework.js';
-// why: the individual tool defs are not part of peerd-runtime's public
-// index (only BUILTIN_TOOLS is) — importing them from there fails at
-// module instantiation, which took the WHOLE runner.html import graph
-// down with it (the page sat on "Loading…" forever). Tests are exempt
-// from the public-API import rule, so reach into tools/defs directly.
+// Tests are exempt from the public-API import rule and exercise the concrete
+// implementation directly; the catalog itself comes from the sealed semantic
+// surface used by the production controller.
+import { inspectTool } from '/peerd-runtime/tools/defs/inspect.js';
 import {
-  inspectTool,
-  BUILTIN_TOOLS,
-} from '/peerd-runtime/tools/defs/index.js';
+  getToolMetadata, listToolMetadata, TOOL_METADATA_ORDER,
+} from '/peerd-runtime/semantic.js';
+
+const inspectMetadata = getToolMetadata(inspectTool.name);
 
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @param {import('/shared/tool-types.js').ToolResult} r @returns {any} */
@@ -26,25 +26,42 @@ const okContent = (r) => /** @type {import('/shared/tool-types.js').ToolResultOk
  * @param {Record<string, any>} [overrides]
  * @returns {ToolContext}
  */
-const baseCtx = (overrides = {}) => /** @type {ToolContext} */ (/** @type {unknown} */ ({
-  session: { sessionId: 's1' },
-  tabs: { query: async () => [] },
-  getSecret: async () => null,
-  audit: async () => {},
-  confirm: async () => 'no_once',
-  kv: { list: async () => ({}) },
-  idb: { getAll: async () => [] },
-  denylist: ['chase.com', '*.chase.com', '*.proton.me'],
-  provider: { name: 'anthropic', model: 'claude-sonnet-4-6', hasKey: true },
-  vault: { isLocked: false },
-  ...overrides,
-}));
+const baseCtx = (overrides = {}) => {
+  const source = {
+    tabs: { query: async (/** @type {Record<string,unknown>} */ _query = {}) => [] },
+    kv: { list: async (/** @type {string|undefined} */ _prefix = undefined) => ({}) },
+    idb: { getAll: async (/** @type {string} */ _store = '') => [] },
+    denylist: ['chase.com', '*.chase.com', '*.proton.me'],
+    provider: { name: 'anthropic', model: 'claude-sonnet-4-6', hasKey: true },
+    vault: { isLocked: false },
+    ...overrides,
+  };
+  return /** @type {ToolContext} */ (/** @type {unknown} */ ({
+    session: { sessionId: 's1' },
+    getSecret: async () => null,
+    audit: async () => {},
+    confirm: async () => 'no_once',
+    ...overrides,
+    introspectionAuthority: {
+      readProviderPosture: async () => ({
+        provider: source.provider.name,
+        model: source.provider.model,
+        hasKey: source.provider.hasKey,
+        vaultLocked: source.vault.isLocked,
+      }),
+      readStorageSnapshot: (/** @type {string|undefined} */ prefix) => source.kv.list(prefix),
+      readAutomatableTabs: () => source.tabs.query({}),
+      readDenylistPatterns: async () => source.denylist,
+      readAuditEntries: () => source.idb.getAll('audit_log'),
+    },
+  }));
+};
 
 /** @param {string} kind @param {Record<string, any>} args @param {ToolContext} ctx */
 const inspect = (kind, args, ctx) => inspectTool.execute({ kind, ...args }, ctx);
 
 describe('inspect kind:storage', () => {
-  it('returns the kv contents as a JSON string', async () => {
+  it('returns the authority proof as a JSON string', async () => {
     const ctx = baseCtx({ kv: { list: async () => ({ 'foo': 'bar', 'baz': 42 }) } });
     const r = await inspect('storage', {}, ctx);
     expect(r.ok).toBe(true);
@@ -53,13 +70,12 @@ describe('inspect kind:storage', () => {
     expect(parsed.baz).toBe(42);
   });
 
-  it('truncates very long base64 strings while preserving head/tail', async () => {
-    const longBlob = 'A'.repeat(500);
-    const ctx = baseCtx({ kv: { list: async () => ({ 'secret:k': longBlob }) } });
+  it('renders the authority-produced ciphertext preview without reshaping it', async () => {
+    const preview = `${'A'.repeat(32)}…${'A'.repeat(16)} (500 chars, base64)`;
+    const ctx = baseCtx({ kv: { list: async () => ({ 'secret:k': preview }) } });
     const r = await inspect('storage', {}, ctx);
     const parsed = JSON.parse(okContent(r));
-    expect(parsed['secret:k'].includes('…')).toBe(true);
-    expect(parsed['secret:k'].includes('500 chars')).toBe(true);
+    expect(parsed['secret:k']).toBe(preview);
   });
 
   it('passes the prefix arg through to kv.list', async () => {
@@ -218,6 +234,16 @@ describe('inspect kind:provider_config', () => {
     const r = await inspect('provider_config', {}, ctx);
     expect(okContent(r).includes('sk-ant-this-must-not-leak-1234')).toBe(false);
   });
+
+  it('describes the sealed vault custody path instead of the retired SW-only contract', async () => {
+    const r = await inspect('provider_config', {}, baseCtx());
+    const contract = JSON.parse(okContent(r)).contract;
+    expect(contract.includes('Argon2id')).toBe(true);
+    expect(contract.includes('sealed offscreen Worker')).toBe(true);
+    expect(contract.includes('semantic controller')).toBe(true);
+    expect(contract.includes('PBKDF2')).toBe(false);
+    expect(contract.includes('never leaves the service worker')).toBe(false);
+  });
 });
 
 describe('inspect dispatch', () => {
@@ -235,16 +261,16 @@ describe('inspect dispatch', () => {
   });
 
   it('the schema enumerates all five kinds and requires kind', () => {
-    const props = /** @type {any} */ (inspectTool.schema).properties;
-    expect(props.kind.enum.sort()).toEqual(
+    const props = /** @type {any} */ (inspectMetadata.schema).properties;
+    expect([...props.kind.enum].sort()).toEqual(
       ['audit_log', 'denylist', 'provider_config', 'session_access', 'storage']);
-    expect(/** @type {any} */ (inspectTool.schema).required).toEqual(['kind']);
+    expect(/** @type {any} */ (inspectMetadata.schema).required).toEqual(['kind']);
   });
 });
 
-describe('BUILTIN_TOOLS registry', () => {
-  it('registers the merged inspect tool and none of the old five names', () => {
-    const names = BUILTIN_TOOLS.map((t) => t.name);
+describe('controller tool catalog', () => {
+  it('contains the merged inspect tool and none of the old five names', () => {
+    const names = TOOL_METADATA_ORDER;
     expect(names).toContain('inspect');
     for (const gone of ['inspect_storage', 'inspect_audit_log', 'inspect_session_access',
       'inspect_denylist', 'inspect_provider_config']) {
@@ -252,21 +278,21 @@ describe('BUILTIN_TOOLS registry', () => {
     }
   });
 
-  it('every built-in declares a primitive', () => {
-    for (const t of BUILTIN_TOOLS) {
-      expect(typeof t.primitive).toBe('string');
-      expect(t.primitive.length > 0).toBe(true);
+  it('every catalog entry declares a primitive', () => {
+    for (const metadata of listToolMetadata()) {
+      expect(typeof metadata.primitive).toBe('string');
+      expect(metadata.primitive.length > 0).toBe(true);
     }
   });
 
-  it('every built-in declares a valid sideEffect', () => {
+  it('every catalog entry declares a valid sideEffect', () => {
     // The V1 "everything is read-only" invariant ended when the DOM /
     // engine tool families landed. The durable invariant: every tool
     // self-classifies with one of the SideEffect union members (see
     // shared/tool-types.js) so the dispatcher gates can reason about it.
     const valid = ['read', 'write', 'mutate_external', 'destructive'];
-    for (const t of BUILTIN_TOOLS) {
-      expect(valid.includes(/** @type {string} */ (t.sideEffect))).toBe(true);
+    for (const metadata of listToolMetadata()) {
+      expect(valid.includes(/** @type {string} */ (metadata.sideEffect))).toBe(true);
     }
   });
 });

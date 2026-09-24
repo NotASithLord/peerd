@@ -61,8 +61,8 @@ const safeActor = (actor) => {
     ...(name ? { name } : {}),
     ...(task ? { task } : {}),
     depth: actor?.depth,
-    grantedTools: Array.isArray(actor?.grantedTools)
-      ? actor.grantedTools.filter((/** @type {unknown} */ tool) => typeof tool === 'string') : [],
+    visibleTools: Array.isArray(actor?.visibleTools)
+      ? actor.visibleTools.filter((/** @type {unknown} */ tool) => typeof tool === 'string') : [],
     streaming: actor?.streaming === true,
     running: actor?.running === true,
     cost: typeof actor?.cost?.cost === 'number' ? { cost: actor.cost.cost } : null,
@@ -89,8 +89,8 @@ const safeTopology = (snapshot) => ({
           childSessionId: task?.childSessionId,
           ...(taskLabel ? { task: taskLabel } : {}),
           status: task?.status,
-          grantedTools: Array.isArray(task?.grantedTools)
-            ? task.grantedTools.filter((/** @type {unknown} */ tool) => typeof tool === 'string') : [],
+          visibleTools: Array.isArray(task?.visibleTools)
+            ? task.visibleTools.filter((/** @type {unknown} */ tool) => typeof tool === 'string') : [],
         };
       })])),
 });
@@ -122,7 +122,10 @@ export const makeActorOverviewRoutes = (deps) => {
       if (!busy && !activeTopology) continue;
       // Reverse-read one real user message. No poll assembles a transcript or
       // scans inactive chats merely to label the current work.
-      const latestRequest = await sessions.getLatestNonSyntheticUserMessage(sessionId);
+      const liveActivity = turnSlots.activityFor?.(sessionId);
+      const latestRequest = typeof liveActivity === 'string' && liveActivity
+        ? { content: liveActivity }
+        : await sessions.getLatestNonSyntheticUserMessage(sessionId);
       const title = optionalText(metadata.title, DISPLAY_TEXT_MAX);
       const provider = optionalText(metadata.provider, DISPLAY_TEXT_MAX);
       const model = optionalText(metadata.model, DISPLAY_TEXT_MAX);

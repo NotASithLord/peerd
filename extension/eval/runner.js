@@ -11,7 +11,7 @@
 // provider key). Don't touch the side panel while a run is in flight — this
 // page takes over the 'sidepanel' port for the duration.
 
-import browser from '/vendor/browser-polyfill.js';
+import browser from '/shared/browser-api.js';
 import { TASKS, SUITES } from './tasks.js';
 import { aggregate, compare } from './score.js';
 import { makeOm2wRecorder } from './om2w-recorder.js';
@@ -138,11 +138,11 @@ port.onMessage.addListener((/** @type {any} */ msg) => {
     // activity signal for the settle window.
     case 'turn/tool-result': om2w?.onToolResult(msg); bumpSettle(); break;
     // The CODE surface's real page actions: each settled page.* op inside a
-    // page_code call, announced by the SW page/call route ('page/op'). Without
+    // page_code call, reported as 'page/op'. Without
     // these a code-arm trajectory records as [navigate, answer] — no work for
     // the judge to see.
     case 'page/op': om2w?.onPageOp(msg); bumpSettle(); break;
-    // The OFFSCREEN actor heap's tool dispatches (actor/tool-dispatch) — the
+    // The OFFSCREEN actor heap's exact tool executions: the
     // analog of turn/tool-use for actor turns, which emit no turn/* events.
     case 'actor/op': om2w?.onActorOp(msg); bumpSettle(); break;
     case 'turn/cost': if (msg.turn) { turn.tokens = tally(msg.turn); turn.cost = msg.turn; } bumpSettle(); break;

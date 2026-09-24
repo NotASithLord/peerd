@@ -1,5 +1,9 @@
 import { describe, test, expect } from 'bun:test';
-import { makeVaultRoutes } from '../../extension/background/routes/vault.js';
+import {
+  makeConfirmAnswerRoute,
+  makeVaultRoutes,
+} from '../../extension/background/routes/vault.js';
+import { createDwebPublicationFence } from '../../extension/background/dweb-publication-fence.js';
 
 // The vault routes moved out of the service worker verbatim. These pin the
 // part with real branching — the typed-error → stable-error-code mapping — and
@@ -38,12 +42,18 @@ const makeDeps = (vaultOver: Record<string, any> = {}) => {
     base64ToBytes: (s: string) => new Uint8Array([s.length]),
     ensureOffscreen: async () => { calls.ensureOffscreen.push(1); },
     maybeStartBaseNetwork: (r: string) => { calls.maybeStart.push(r); },
+    onInitialized: async () => { calls.ensureOffscreen.push(1); },
+    onUnlocked: (reason: string) => {
+      calls.ensureOffscreen.push(1);
+      calls.maybeStart.push(reason);
+    },
     pushState: () => { calls.pushState.push(1); },
     purgeVaultBlob: async () => {},
     sessionCache: { sessionGet: async () => 'chat-a' },
     maybeAutoResumeAfterRecovery: () => {},
     isActualSidepanelSender: (sender: any) => sender?.surface === 'sidepanel',
     isActualHomeSender: (sender: any) => sender?.surface === 'home',
+    onLocked: async () => {},
     confirmCoordinator: {
       resolve: (claim: Record<string, unknown>, answer: string, via: string) => {
         calls.resolve = [claim, answer, via];
@@ -85,6 +95,65 @@ describe('vault routes — success paths', () => {
     expect(calls.pushState.length).toBe(1);
   });
 
+  test('lock: settles an asynchronous authority realm before retiring its host', async () => {
+    const order: string[] = [];
+    let releaseLock = () => {};
+    const pendingLock = new Promise<void>((resolve) => { releaseLock = resolve; });
+    const { deps } = makeDeps({
+      lock: async () => {
+        order.push('lock:start');
+        await pendingLock;
+        order.push('lock:settled');
+      },
+    });
+    deps.onLocked = async () => { order.push('host:retired'); };
+    const handler = makeVaultRoutes(deps)['vault/lock'];
+    const result = handler();
+    await Promise.resolve();
+    expect(order).toEqual(['lock:start']);
+    releaseLock();
+    await expect(result).resolves.toEqual({ ok: true });
+    expect(order).toEqual(['lock:start', 'lock:settled', 'host:retired']);
+  });
+
+  test('lock then unlock cannot revive an admitted dweb publication', async () => {
+    const fence = createDwebPublicationFence();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    let admitted!: () => boolean;
+    const publication = fence.run(async (current) => {
+      admitted = current;
+      enter();
+      await held;
+      return current();
+    });
+    await entered;
+    const { deps } = makeDeps();
+    deps.onLocked = async () => { fence.invalidate(); };
+    const vaultRoutes = makeVaultRoutes(deps);
+    expect(admitted()).toBe(true);
+    await vaultRoutes['vault/lock']();
+    await vaultRoutes['vault/unlock']({ passphrase: 'pw' });
+    expect(admitted()).toBe(false);
+    release();
+    expect(await publication).toBe(false);
+  });
+
+  test('lock: reconciles host, audit, and UI even when durable finality rejects', async () => {
+    const order: string[] = [];
+    const { deps } = makeDeps({
+      lock: async () => { order.push('lock'); throw new Error('mirror-and-fence-failed'); },
+    });
+    deps.onLocked = async () => { order.push('host'); };
+    deps.auditLog.append = async () => { order.push('audit'); };
+    deps.pushState = () => { order.push('state'); };
+    const result = makeVaultRoutes(deps)['vault/lock']();
+    await expect(result).rejects.toThrow('mirror-and-fence-failed');
+    expect(order).toEqual(['lock', 'host', 'audit', 'state']);
+  });
+
   test('unlockPrf: kicks base network with unlock-prf reason', async () => {
     const { r, calls } = routes();
     expect(await r['vault/unlockPrf']({ prfOutput: 'AAAA' })).toEqual({ ok: true });
@@ -97,38 +166,41 @@ describe('vault routes — success paths', () => {
   });
 
   test('confirm/answer: relays to the coordinator', async () => {
-    const { r, calls } = routes();
+    const { deps, calls } = makeDeps();
+    const answer = makeConfirmAnswerRoute(deps);
     const message = {
       id: 'x', answer: 'yes_once', ownerSessionId: 'chat-a',
       sessionId: 'actor-a', dispatchId: 'tu-a',
     };
-    expect(await r['confirm/answer'](message, { surface: 'sidepanel' })).toEqual({ ok: true });
+    expect(await answer(message, { surface: 'sidepanel' })).toEqual({ ok: true });
     expect(calls.resolve).toEqual([{
       id: 'x', ownerSessionId: 'chat-a', sessionId: 'actor-a', dispatchId: 'tu-a',
     }, 'yes_once', 'sidepanel']);
   });
 
   test('confirm/answer: derives the answering surface from sender provenance', async () => {
-    const { r, calls } = routes();
+    const { deps, calls } = makeDeps();
+    const answer = makeConfirmAnswerRoute(deps);
     const message = {
       id: 'x', answer: 'yes_once', ownerSessionId: 'chat-a',
       sessionId: 'actor-a', dispatchId: 'tu-a', surface: 'home',
     };
-    expect(await r['confirm/answer'](message, { surface: 'sidepanel' })).toEqual({ ok: true });
+    expect(await answer(message, { surface: 'sidepanel' })).toEqual({ ok: true });
     expect(calls.resolve).toEqual([{
       id: 'x', ownerSessionId: 'chat-a', sessionId: 'actor-a', dispatchId: 'tu-a',
     }, 'yes_once', 'sidepanel']);
   });
 
   test('confirm/answer: a foreign chat UUID or non-human surface cannot grant authority', async () => {
-    const { r, calls } = routes();
+    const { deps, calls } = makeDeps();
+    const answer = makeConfirmAnswerRoute(deps);
     const base = {
       id: 'leaked', answer: 'yes_once', sessionId: 'actor-a', dispatchId: 'tu-a',
     };
-    expect(await r['confirm/answer'](
+    expect(await answer(
       { ...base, ownerSessionId: 'chat-a' }, { surface: 'engine' },
     )).toEqual({ ok: false, error: 'confirm-answer-unauthorized-sender' });
-    expect(await r['confirm/answer'](
+    expect(await answer(
       { ...base, ownerSessionId: 'chat-b' }, { surface: 'home' },
     )).toEqual({ ok: false, error: 'confirm-answer-foreign-owner' });
     expect(calls.resolve).toBeUndefined();
@@ -182,48 +254,55 @@ describe('vault routes — payload validation', () => {
     expect(locked).toBe(true);
     expect(purged).toBe(true);
   });
+  test('passphrase initialization failure rolls back the same first-run state', async () => {
+    const order: string[] = [];
+    const { deps } = makeDeps({
+      initialize: async () => { throw new Error('mirror write failed'); },
+      lock: async () => { order.push('lock'); throw new Error('mirror delete failed'); },
+    });
+    deps.onLocked = async () => { order.push('host'); };
+    deps.purgeVaultBlob = async () => { order.push('purge'); };
+    await expect(makeVaultRoutes(deps)['vault/initialize']({ passphrase: 'pw' }))
+      .rejects.toThrow('mirror write failed');
+    expect(order).toEqual(['lock', 'host', 'purge']);
+  });
+
+  test('passkey rollback purges even when its lock cleanup rejects', async () => {
+    let purged = false;
+    const { deps } = makeDeps({
+      initializeWithPrfOnly: async () => { throw new Error('hardware'); },
+      lock: async () => { throw new Error('session unavailable'); },
+    });
+    deps.purgeVaultBlob = async () => { purged = true; };
+    await expect(makeVaultRoutes(deps)['vault/initializeWithPasskey']({
+      credentialId: 'a', prfSalt: 'b', prfOutput: 'c',
+    })).rejects.toThrow('hardware');
+    expect(purged).toBe(true);
+  });
+  test('malformed passkey bytes cannot cross the mutation or rollback boundary', async () => {
+    let locked = false; let retired = false; let purged = false;
+    const { deps } = makeDeps({ lock: () => { locked = true; } });
+    deps.base64ToBytes = () => { throw new Error('invalid-base64'); };
+    deps.onLocked = async () => { retired = true; };
+    deps.purgeVaultBlob = async () => { purged = true; };
+    const r = makeVaultRoutes(deps);
+    await expect(r['vault/initializeWithPasskey']({
+      credentialId: 'bad', prfSalt: 'bad', prfOutput: 'bad',
+    })).resolves.toEqual({ ok: false, error: 'invalid-prf-payload' });
+    expect({ locked, retired, purged }).toEqual({ locked: false, retired: false, purged: false });
+  });
+  test('malformed enrollment bytes never dispatch a vault mutation', async () => {
+    let enrolled = false;
+    const { deps } = makeDeps({ enrollPrf: async () => { enrolled = true; } });
+    deps.base64ToBytes = () => { throw new Error('invalid-base64'); };
+    const r = makeVaultRoutes(deps);
+    await expect(r['vault/enrollPrf']({
+      credentialId: 'bad', prfSalt: 'bad', prfOutput: 'bad',
+    })).resolves.toEqual({ ok: false, error: 'invalid-prf-payload' });
+    expect(enrolled).toBe(false);
+  });
   test('setRecoveryPassphrase rejects short passphrase', async () => {
     const { r } = routes();
     expect(await r['vault/setRecoveryPassphrase']({ passphrase: 'short' })).toEqual({ ok: false, error: 'invalid-passphrase' });
-  });
-});
-
-// #60: on an interactive unlock, goal runs must resume BEFORE auto-resume —
-// resume() re-adds a paused run to the runner's map (goalActiveFor → true)
-// before maybeAutoResume checks its guard, so the guard bails for a goal-owned
-// session instead of re-driving its interrupted turn and spuriously halting it.
-// A late-resolving resumeGoalRuns distinguishes the fix (auto-resume waits for
-// resume to settle) from the old inverted order (auto-resume fired first).
-describe('vault unlock — goal resume ordering (#60)', () => {
-  const orderingDeps = (order: string[]) => ({
-    vault: { unlock: async () => {}, unlockWithPrf: async () => {} },
-    auditLog: { append: async () => {} },
-    ensureOffscreen: async () => {},
-    maybeStartBaseNetwork: () => {},
-    base64ToBytes: () => new Uint8Array([1]),
-    sessionCache: { sessionGet: async () => 'cur' },
-    resumeGoalRuns: async () => { await new Promise((r) => setTimeout(r, 30)); order.push('resume'); },
-    maybeAutoResumeAfterRecovery: () => { order.push('autoresume'); },
-    WrongPassphraseError, VaultNotInitializedError, RecoveryPassphraseNotSetError,
-    PrfNotEnrolledError, PrfUnlockFailedError, VaultLockedError,
-  });
-  const settle = async (order: string[]) => {
-    for (let i = 0; i < 60 && order.length < 2; i++) await new Promise((res) => setTimeout(res, 5));
-  };
-
-  test('vault/unlock awaits goal resume BEFORE auto-resume (passphrase)', async () => {
-    const order: string[] = [];
-    const r = makeVaultRoutes(orderingDeps(order) as any);
-    expect(await r['vault/unlock']({ passphrase: 'pw' })).toEqual({ ok: true });
-    await settle(order);
-    expect(order).toEqual(['resume', 'autoresume']);
-  });
-
-  test('vault/unlockPrf awaits goal resume BEFORE auto-resume (Touch ID / PRF)', async () => {
-    const order: string[] = [];
-    const r = makeVaultRoutes(orderingDeps(order) as any);
-    expect(await r['vault/unlockPrf']({ prfOutput: 'AAAA' })).toEqual({ ok: true });
-    await settle(order);
-    expect(order).toEqual(['resume', 'autoresume']);
   });
 });

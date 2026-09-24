@@ -1,4 +1,6 @@
 // @ts-check
+
+import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // inspect — the single introspection tool (kind-discriminated).
 //
 // why one tool, not five: `inspect_provider_config / _storage / _session_access
@@ -11,10 +13,9 @@
 // unchanged in behavior — each still proves its §02 "sovereignty" property.
 
 import { serializeListResult } from './columnar.js';
-import { executeByKind, kindEnum } from './kind-dispatch.js';
-import { isDenylistedTab, originOfUrl } from './dom-helpers.js';
+import { executeByKind } from './kind-dispatch.js';
+import { originOfUrl } from '../../tool-origin-policy.js';
 import { wrapUntrusted, safeTitle } from '../prompt-wrap.js';
-import { classifyBrowserAutomationTarget } from '../browser-automation-policy.js';
 import { clamp } from '/shared/util.js';
 // why the DEEP path (not the /peerd-egress/index.js barrel): the barrel pulls
 // the vault/storage surface, which loads browser-polyfill and throws under Bun.
@@ -26,23 +27,33 @@ import { findDenylistMatch } from '../../../peerd-egress/denylist/denylist.js';
 /** @typedef {import('/shared/tool-types.js').ToolContext} ToolContext */
 /** @typedef {import('/shared/tool-types.js').ToolResult} ToolResult */
 
+/** @param {ToolContext} ctx */
+const introspectionAuthority = (ctx) => /** @type {{
+ * readProviderPosture:()=>Promise<{provider:string,model:string,hasKey:boolean,vaultLocked:boolean}>,
+ * readStorageSnapshot:(prefix?:string)=>Promise<Record<string,unknown>>,
+ * readAutomatableTabs:()=>Promise<BrowserTab[]>,
+ * readDenylistPatterns:()=>Promise<string[]>,
+ * readAuditEntries:()=>Promise<AuditEntry[]>,
+ * }} */ (/** @type {{introspectionAuthority?:unknown}} */ (ctx).introspectionAuthority);
+
 // ── provider_config — proves BYOK without leaking the key ──────────────────
-/** @param {any} _args @param {ToolContext} ctx @returns {ToolResult} */
-const inspectProviderConfig = (_args, ctx) => {
-  const provider = ctx.provider ?? { name: 'unknown', model: 'unknown', hasKey: false };
-  const vault = ctx.vault ?? { isLocked: true };
+/** @param {any} _args @param {ToolContext} ctx @returns {Promise<ToolResult>} */
+const inspectProviderConfig = async (_args, ctx) => {
+  const posture = await introspectionAuthority(ctx).readProviderPosture();
   return {
     ok: true,
     content: JSON.stringify({
-      provider: provider.name,
-      model: provider.model,
-      hasKey: provider.hasKey,
-      vaultLocked: vault.isLocked,
+      provider: posture.provider,
+      model: posture.model,
+      hasKey: posture.hasKey,
+      vaultLocked: posture.vaultLocked,
       contract: [
-        'The API key is encrypted in the vault under a passphrase-derived',
-        'KEK (PBKDF2-SHA256 600k iter → AES-KW). It is decrypted into SW',
-        'memory only when a request is about to fire; the plaintext never',
-        'lands in chrome.storage and never leaves the service worker.',
+        'The API key is encrypted in the vault under a non-extractable AES-KW',
+        'key derived by Argon2id from the passphrase or by WebAuthn PRF.',
+        'Vault cryptography and data-key custody run in a sealed offscreen Worker.',
+        'A requested provider secret crosses only its private bounded channel into',
+        'service-worker egress immediately before the request; plaintext never lands',
+        'in chrome.storage, the semantic controller, or the model context.',
         'This tool intentionally cannot retrieve the key value — it would',
         'be a bug in the contract if it could.',
       ].join(' '),
@@ -51,30 +62,12 @@ const inspectProviderConfig = (_args, ctx) => {
 };
 
 // ── storage — proves encryption-at-rest ────────────────────────────────────
-/** @param {any} v @returns {unknown} */
-const truncateForDisplay = (v) => {
-  if (typeof v === 'string' && v.length > 80) {
-    return `${v.slice(0, 32)}…${v.slice(-16)} (${v.length} chars, base64)`;
-  }
-  if (v && typeof v === 'object' && !Array.isArray(v)) {
-    /** @type {Record<string, unknown>} */
-    const out = {};
-    for (const [k, vv] of Object.entries(v)) out[k] = truncateForDisplay(vv);
-    return out;
-  }
-  return v;
-};
-
 /** @param {any} args @param {ToolContext} ctx @returns {Promise<ToolResult>} */
 const inspectStorage = async (args, ctx) => {
-  // why: ctx.kv is typed as the opaque `Object` contract slot; narrow it to the
-  // one method this tool exercises (the egress KV `list`).
-  const kv = /** @type {{ list: (prefix?: string) => Promise<Record<string, unknown>> }} */ (ctx.kv);
-  const all = await kv.list(args?.prefix);
-  /** @type {Record<string, unknown>} */
-  const display = {};
-  for (const [k, v] of Object.entries(all)) display[k] = truncateForDisplay(v);
-  return { ok: true, content: JSON.stringify(display, null, 2) };
+  // The authority returns the final bounded display proof. Raw storage values
+  // never enter this semantic heap, even if its tool dispatcher is bypassed.
+  const proof = await introspectionAuthority(ctx).readStorageSnapshot(args?.prefix);
+  return { ok: true, content: JSON.stringify(proof, null, 2) };
 };
 
 // ── session_access — proves "your sessions are already there" ──────────────
@@ -86,23 +79,15 @@ const inspectStorage = async (args, ctx) => {
  * @property {boolean} [active]
  */
 
-/** @param {string | undefined} s @param {number} n @returns {string} */
-const truncate = (s, n) => {
-  if (!s) return '';
-  return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
-};
 /** @param {any} _args @param {ToolContext} ctx @returns {Promise<ToolResult>} */
 const inspectSessionAccess = async (_args, ctx) => {
   /** @type {Array<Record<string, unknown>>} */
   let tabs = [];
   try {
-    // why: ctx.tabs is the opaque `Object` contract slot; narrow it to the
-    // one method this tool uses (browser.tabs.query).
-    const tabsApi = /** @type {{ query: (q: Record<string, unknown>) => Promise<BrowserTab[]> }} */ (ctx.tabs);
-    const raw = await tabsApi.query({});
+    // Browser scope is authority policy. The controller receives only tabs the
+    // SW already admitted, then owns result shaping and hostile-title handling.
+    const raw = await introspectionAuthority(ctx).readAutomatableTabs();
     tabs = raw.flatMap((t) => {
-      const target = classifyBrowserAutomationTarget(t.url);
-      if (!target.allowed || isDenylistedTab(t.url, ctx.denylist)) return [];
       return [{
         id: t.id,
         // originOfUrl (dom-helpers) so the internal-page rendering (chrome://,
@@ -130,9 +115,9 @@ const inspectSessionAccess = async (_args, ctx) => {
 };
 
 // ── denylist — proves the egress policy floor ──────────────────────────────
-/** @param {any} args @param {ToolContext} ctx @returns {ToolResult} */
-const inspectDenylist = (args, ctx) => {
-  const patterns = ctx.denylist ?? [];
+/** @param {any} args @param {ToolContext} ctx @returns {Promise<ToolResult>} */
+const inspectDenylist = async (args, ctx) => {
+  const patterns = await introspectionAuthority(ctx).readDenylistPatterns();
   if (args?.domain) {
     const match = findDenylistMatch(String(args.domain).toLowerCase(), patterns);
     return {
@@ -178,10 +163,7 @@ const inspectAuditLog = async (args, ctx) => {
   const limit = clamp(args?.limit ?? 50, 1, 500);
   /** @type {Set<string> | null} */
   const types = Array.isArray(args?.types) && args.types.length > 0 ? new Set(args.types) : null;
-  // why: ctx.idb is the opaque `Object` contract slot; narrow it to the getAll
-  // seam this tool uses.
-  const idb = /** @type {{ getAll: (store: string) => Promise<AuditEntry[]> }} */ (ctx.idb);
-  const all = await idb.getAll('audit_log');
+  const all = await introspectionAuthority(ctx).readAuditEntries();
   const filtered = types ? all.filter((e) => types.has(e.type)) : all;
   const sorted = filtered.sort((a, b) => b.when - a.when).slice(0, limit);
   // FENCE the entries. redactActorError above closes ONE laundering path (an
@@ -219,36 +201,6 @@ export const INSPECT_HANDLERS = Object.freeze({
 });
 
 /** @type {import('/shared/tool-types.js').Tool} */
-export const inspectTool = {
-  name: 'inspect',
-  primitive: 'inspect',
-  description: [
-    'Introspect peerd itself — read-only proof of its sovereignty contract.',
-    'Pick a `kind`:',
-    '"provider_config" (current provider/model + that a key is stored, never the',
-    'key itself — BYOK); "storage" (persistent KV; vault blobs show as base64',
-    'ciphertext — encryption-at-rest; optional prefix="vault"|"secret:");',
-    '"session_access" (tabs/origins the agent can see — it inherits your logged-in',
-    'browser sessions); "denylist" (the always-off-limits origin floor; optional',
-    'domain="chase.com" to test one host); "audit_log" (the append-only security',
-    'trail, newest first; optional limit and types[]).',
-  ].join(' '),
-  schema: {
-    type: 'object',
-    properties: {
-      kind: {
-        type: 'string',
-        enum: kindEnum(INSPECT_HANDLERS),
-        description: 'Which facet to inspect.',
-      },
-      prefix: { type: 'string', description: 'storage only: key prefix filter, e.g. "vault" or "secret:".' },
-      domain: { type: 'string', description: 'denylist only: hostname to check, e.g. "chase.com".' },
-      limit: { type: 'integer', description: 'audit_log only: max entries (default 50, max 500).' },
-      types: { type: 'array', items: { type: 'string' }, description: 'audit_log only: event types to filter to.' },
-    },
-    required: ['kind'],
-  },
-  sideEffect: 'read',
-  origins: () => [],
+export const inspectTool = composeTool("inspect", {
   execute: executeByKind('inspect', /** @type {any} */ (INSPECT_HANDLERS)),
-};
+});

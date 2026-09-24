@@ -6,8 +6,7 @@
 // VALUES, no IO — the full recovery plan: per-operation terminal
 // transitions (via the retry-class decision), released ownership records,
 // refused stale authority, parent-session notifications carrying the §5.4
-// structured recovery record, and the audit entries for all of it. The
-// shell (service-worker.js) applies the plan; this module only decides it.
+// structured recovery record, and the audit entries for all of it.
 //
 // A model turn is never resumed from the middle of a stream by this path —
 // reconciliation lands interrupted/outcome_unknown states and recovery

@@ -7,12 +7,10 @@
 // rule, shorten a deadline, or make an unreadable record read as "no limits".
 //
 // WHAT THIS SCENARIO DOES NOT CLAIM. Pacing meters the ACTIONS peerd takes, never
-// the requests those actions cause a page to make. `page_exec` and `page_eval`
-// run arbitrary JavaScript in the page's own world, and any fetch that code
-// issues is the page's credentialed request: invisible to the egress choke
-// point, to the audit, and to any counter here. The enclosing dispatch is metered
-// as one action and the fan-out is unbounded. That is irreducible while
-// page-world execution exists, and it is stated rather than probed.
+// the requests those actions cause a page to make. Each exact page operation,
+// including operations nested in a page program, crosses the host authority.
+// The site's own reaction to an admitted click can still fan out into many
+// requests; this scenario does not claim to meter that autonomous site traffic.
 
 import {
   type Probe, type Scenario, blocked, leaked, summarize,
@@ -23,6 +21,10 @@ import {
 import {
   createOriginPacingStore, normalizePacingState, PACING_KEY,
 } from '../../../extension/peerd-runtime/pacing/origin-pacing-store.js';
+import { createPageToolAuthority } from '../../../extension/background/page-tool-authority.js';
+import { makePacedOriginRoutes } from '../../../extension/background/routes/paced-origins.js';
+import { makeKernelRouteProvenance, makeVaultKernelMessageHandler } from '../../../extension/background/vault-kernel-core.js';
+import { normalizeApiOrigin } from '../../../extension/shared/api-origin.js';
 
 const T0 = 1_700_000_000_000;
 const ORIGIN = 'https://target.test';
@@ -71,22 +73,61 @@ export const scenario: Scenario = {
         'only an error STATUS from a real Response is a signal; a header on a success status is polling guidance, and a status string is not a status')
       : leaked('[classifier] page-authored Retry-After text creates a pacing rule', 'page text was accepted as a limit'));
 
-    // 2. The model cannot reach a mutator. The dispatcher is handed exactly two
-    //    closures, and neither can weaken a rule however often it is called.
+    // 2. Exact page authority enforces the kernel's durable record; an actor
+    //    cannot call the separate human-settings route to forget it.
     {
       const { store } = pacedStore();
       await store.observe({ origin: ORIGIN, responseAtMs: T0, status: 429, retryAfter: '600' });
       const before = (await store.list())[0];
+      let effects = 0;
+      const ctx = {
+        actorType: 'web', backing: 'tab', activeTab: { id: 7, url: `${ORIGIN}/` },
+        permission: { mode: 'act', confirmActions: false },
+        tabs: { get: async () => ({ id: 7, url: `${ORIGIN}/` }) },
+        pacing: {
+          engaged: store.engaged,
+          peek: async (origin: string | null, options: { isWrite: boolean }) => {
+            await store.hydrate();
+            return store.peek(origin, options);
+          },
+          reserve: store.reserve,
+        },
+        scripting: { executeScript: async (request: any) => {
+          if (!request.target.documentIds) return [{ documentId: 'document-one',
+            result: { origin: ORIGIN, href: `${ORIGIN}/`, timeOrigin: 1 } }];
+          if (!request.args) return [{ documentId: 'document-one', result: { has: false, capped: false } }];
+          effects += 1;
+          return [{ documentId: 'document-one', result: { ok: true, clicked: true } }];
+        } },
+      };
+      let refused = true;
       for (let i = 0; i < 20; i += 1) {
-        store.peek(ORIGIN, { isWrite: true });
-        await store.reserve(ORIGIN, { isWrite: true });
+        const result = await createPageToolAuthority({
+          binding: { operation: 'turn.page.click', args: { selector: '#send' } }, ctx,
+        }).clickOwnedTarget();
+        refused &&= result.ok === false && result.endTurn === true
+          && result.code === 'origin_pacing_ceiling';
       }
+      const routes = makePacedOriginRoutes({ originPacing: store, normalizeApiOrigin });
+      const routeProvenance = makeKernelRouteProvenance({
+        humanUi: () => false, homeUi: () => false, sidepanelUi: () => false,
+        optionsUi: (sender: any) => sender.surface === 'options', appUi: () => false,
+        voiceUi: () => false, vaultRoutes: [],
+      });
+      const handler = makeVaultKernelMessageHandler({ routes, trusted: () => true,
+        humanUi: () => false, humanRoutes: new Set(), routeProvenance });
+      const forget: any = await new Promise((resolve) => handler(
+        { type: 'paced/clear' }, { surface: 'actor' }, resolve,
+      ));
       const after = (await store.list())[0];
       const worn = !after || after.minIntervalMs < before.minIntervalMs || after.notBeforeMs < before.notBeforeMs;
-      probes.push(!worn
-        ? blocked('[dispatcher surface] a turn wears a rule down by retrying it',
-          'peek and reserve are read-shaped; twenty attempts left the deadline and the interval unchanged')
-        : leaked('[dispatcher surface] a turn wears a rule down by retrying it', 'retrying weakened the rule'));
+      const held = !worn && refused && effects === 0
+        && forget.error === 'vault-route-unauthorized-sender';
+      probes.push(held
+        ? blocked('[kernel surface] a turn wears a rule down by retrying or clearing it',
+          'twenty exact page calls ended before effects; actor forget was denied and the durable rule stayed unchanged')
+        : leaked('[kernel surface] a turn wears a rule down by retrying or clearing it',
+          `refused=${refused} effects=${effects} changed=${worn} forget=${forget.error}`));
     }
 
     // 3. No exported symbol lowers a rule. A setter would be reachable the day
@@ -206,7 +247,7 @@ export const scenario: Scenario = {
 
     return summarize(probes, [
       'the egress choke point is the only rule-creating observer, and only an error status counts',
-      'the tool context gets two read-shaped closures; the policy core exports no setter',
+      'exact host page calls cannot weaken a rule, and the kernel rejects actor access to settings-only forget',
       'deadlines are absolute, anchored to the response, and only ever move later',
       'no adjustment may release an action inside a stated window',
       'the ceiling ends the turn, and durable origin-keyed state makes a retry or a fresh actor meet it again',
