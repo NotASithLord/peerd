@@ -4,6 +4,7 @@ import {
   createAppClient,
 } from '../../extension/background/app-client.js';
 import { makeWriteGuard, StoreReadOnlyError } from '../../extension/peerd-runtime/lifecycle/write-guard.js';
+import { createAppDwebAuthority } from '../../extension/background/app-dweb-authority.js';
 
 const blockedAppGuard = (reason: string) => {
   const guard = makeWriteGuard();
@@ -324,7 +325,7 @@ describe('App OPFS lifecycle posture', () => {
 });
 
 describe('App executable identity mutations', () => {
-  const fixture = () => {
+  const fixture = (trackerOverrides: Record<string, any> = {}) => {
     const events: string[] = [];
     let record: any = { id: 'app-1', entryFile: 'index.html', fileKinds: {
       'index.html': 'text', 'data/state.json': 'text',
@@ -339,7 +340,7 @@ describe('App executable identity mutations', () => {
       } } as any,
       tracker: { withDwebAuthority: async (_id: string, op: () => Promise<any>, opts: any) => {
         events.push(opts.invalidate ? 'rotate' : 'hold'); return op();
-      }, reloadTab: async () => true } as any,
+      }, reloadTab: async () => true, ...trackerOverrides } as any,
       repositories: testRepositories({
         coordinate: async (_ref: any, op: () => Promise<any>) => { events.push('repository'); return op(); },
         replaceWorkingTree: async (_ref: any, opts: any) => {
@@ -365,6 +366,75 @@ describe('App executable identity mutations', () => {
     });
     return { client, events, files };
   };
+
+  test.each(['write', 'compare-and-write'] as const)(
+    '%s settles its requested reload before the next sequential mutation rotates consent', async (method) => {
+      const started = Promise.withResolvers<void>();
+      const ready = Promise.withResolvers<void>();
+      let reloading = false;
+      let closes = 0;
+      let heldAuthority = false;
+      const authority = createAppDwebAuthority({
+        storage: { get: async () => ({}), set: async () => {} },
+        tabIds: async () => [7],
+        stopTab: async () => {
+          if (reloading) throw new Error('Receiving end does not exist.');
+        },
+        closeTab: async () => { closes += 1; },
+        purgeOwners: async () => {},
+      });
+      const { client, files } = fixture({
+        withDwebAuthority: (id: string, operation: () => Promise<any>, options: any) =>
+          authority.run(id, async () => {
+            heldAuthority = true;
+            try { return await operation(); }
+            finally { heldAuthority = false; }
+          }, options),
+        reloadTab: async () => {
+          expect(heldAuthority).toBe(false);
+          reloading = true;
+          started.resolve();
+          await ready.promise;
+          reloading = false;
+          return true;
+        },
+      });
+      let settled: any;
+      const first = method === 'write'
+        ? client.writeFile({ appId: 'app-1', path: 'index.html', content: 'first' })
+        : client.compareAndWriteFile({ appId: 'app-1', path: 'index.html', content: 'first',
+          expectedExists: true, expectedContent: 'old' });
+      const sequential = first.then(() => client.writeFile({
+        appId: 'app-1', path: 'index.html', content: 'second',
+      })).then((value) => { settled = { value }; }, (cause) => { settled = { cause }; });
+      await started.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      try {
+        expect(settled).toBeUndefined();
+        expect(closes).toBe(0);
+        expect(new TextDecoder().decode(files.get('index.html'))).toBe('first');
+      } finally {
+        ready.resolve();
+        await sequential;
+      }
+      expect(settled).toEqual({ value: { bytesWritten: 6, kind: 'text' } });
+      expect(new TextDecoder().decode(files.get('index.html'))).toBe('second');
+      expect(closes).toBe(0);
+    },
+  );
+
+  test.each(['write', 'compare-and-write'] as const)(
+    '%s retains a committed byte receipt if the subsequent reload fails', async (method) => {
+      const { client, files } = fixture({ reloadTab: async () => { throw new Error('tab closed'); } });
+      const result = method === 'write'
+        ? await client.writeFile({ appId: 'app-1', path: 'index.html', content: 'written' })
+        : await client.compareAndWriteFile({ appId: 'app-1', path: 'index.html', content: 'written',
+          expectedExists: true, expectedContent: 'old' });
+      expect(result).toEqual(method === 'write'
+        ? { bytesWritten: 7, kind: 'text' } : { ok: true, value: { bytesWritten: 7, kind: 'text' } });
+      expect(new TextDecoder().decode(files.get('index.html'))).toBe('written');
+    },
+  );
 
   test('executable writes rotate before acquiring the repository lane', async () => {
     const { client, events } = fixture();

@@ -117,9 +117,19 @@ jobs:
         id: app-egress-cft
         run: echo "chrome-path=$(bun scripts/cdp/ensure-chrome-for-testing.mjs | tail -1)" >> "$GITHUB_OUTPUT"
       - name: Prove an agent-authored App has no raw network edge
+        id: app-egress
         env:
           CHROME_PATH: ${{ steps.app-egress-cft.outputs.chrome-path }}
         run: bun run test:e2e:app-egress
+      # why: retain the real failure report and screenshots on fork PRs too.
+      - name: Upload failed App egress evidence
+        if: always() && steps.app-egress.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: app-egress-diagnostics-run${{ github.run_number }}.${{ github.run_attempt }}
+          path: scripts/cdp/artifacts/
+          if-no-files-found: warn
+          retention-days: 14
 
   checks:
     name: lint + boundary + drift

@@ -127,8 +127,8 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 413, graphBytes: 4_145_141 }),
-  target: Object.freeze({ modules: 416, graphBytes: 4_236_526 }),
+  shared: Object.freeze({ modules: 413, graphBytes: 4_145_386 }),
+  target: Object.freeze({ modules: 416, graphBytes: 4_236_771 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_585 }),
@@ -171,7 +171,7 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // Exact Settings/Home/Lab admission and chat-scoped integration metadata
   // repair existing leaves without new modules. Pin their measured closure
   // without reserve; Lab requests retain their narrow payload validators.
-  kernel: Object.freeze({ modules: 413, graphBytes: 4_145_141, entryBytes: 200, directImports: 2 }),
+  kernel: Object.freeze({ modules: 413, graphBytes: 4_145_386, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -203,7 +203,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // authored graph in the disposable, module-preserving release staging tree.
     // Pin the measured pacing/consent/revocation closure with no reserve.
     serviceWorker: Object.freeze({
-      modules: 410, graphBytes: 2_095_472, entryBytes: 173,
+      modules: 410, graphBytes: 2_095_484, entryBytes: 173,
       inputSha256: '6bee21da2c36e5f9cea49a207b4728d07a49318a507295eb167c5021277c5aab',
     }),
     // One shared read-only authority schema/provenance validator rejects
@@ -235,7 +235,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
   preview: Object.freeze({
     chrome: Object.freeze({
       serviceWorker: Object.freeze({
-        modules: 416, graphBytes: 2_213_766, entryBytes: 207,
+        modules: 416, graphBytes: 2_213_778, entryBytes: 207,
         inputSha256: 'd48f59bf3c02c2e1c798a789127209f8ca58eecef79f63233515f554e141ab66',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),

@@ -645,7 +645,9 @@ export const createAppClient = ({
     const id = await resolveId({ sessionId, appId });
     const result = await withMutation(id, () => writeFileUnlocked(id, path, content, signal), invalidateDweb);
     if (path === 'peerd.json') await onManifestMutation(id);
-    if (reload) tracker.reloadTab(id).catch(() => {});
+    // why: a following actor write must not invalidate a document still
+    // reloading. Wait outside the consent/repository lanes so attach can finish.
+    if (reload) await tracker.reloadTab(id).catch(() => {});
     return result;
   };
 
@@ -687,7 +689,8 @@ export const createAppClient = ({
     });
     if (result.ok) {
       if (path === 'peerd.json') await onManifestMutation(id);
-      if (reload) tracker.reloadTab(id).catch(() => {});
+      // why: preserve the same settled reload boundary as an ordinary write.
+      if (reload) await tracker.reloadTab(id).catch(() => {});
     }
     return result;
   };
