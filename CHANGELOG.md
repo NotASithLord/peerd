@@ -20,8 +20,9 @@ and storage formats may move until the surface stabilizes.
   Interrupted work with an uncertain outcome is not automatically replayed.
 - Live actor conversations expose their work and hierarchy more clearly, while
   Settings groups decentralized-web and memory controls with their status.
-- Generated Apps prefer native browser APIs and share the existing Mithril
-  runtime instead of carrying duplicate copies.
+- Generated Apps prefer native HTML, CSS, and JavaScript. Extension pages and
+  Apps use one packaged Mithril source; Apps retain `./mithril.js`, while the
+  unsupported `m.request` helper is no longer bundled.
 - `read_doc` replaces `read_pdf` and handles office documents as well as PDFs.
   `read_result` replaces `read_web_cache` and `read_run_cache` for oversized
   results.
@@ -64,6 +65,8 @@ and storage formats may move until the surface stabilizes.
   of reporting success or replaying a possibly completed action.
 - Stop remains effective across goal recovery and local-model startup;
   scheduled work and asynchronous actor results survive durable-write races.
+- Fast agent-to-agent replies settle correctly even when they arrive before
+  the original send finishes.
 - App edits rotate decentralized-web consent, and sequential file writes wait
   for the preceding reload without holding repository or consent locks.
 - Keyless providers can become active, and Settings, Home, model-evaluation,
