@@ -10,8 +10,24 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-26
+
+### Changed
+
+- The service worker is now a fixed authority kernel. Model reasoning and
+  feature execution run in separate, demand-started hosts, with exact operation
+  grants, build identities, and explicit recovery when a host disappears.
+  Interrupted work with an uncertain outcome is not automatically replayed.
+- Live actor conversations expose their work and hierarchy more clearly, while
+  Settings groups decentralized-web and memory controls with their status.
+- Generated Apps prefer native browser APIs and share the existing Mithril
+  runtime instead of carrying duplicate copies.
+
 ### Removed
 
+- Retired the legacy `page_eval`, `page_exec`, `page_keys`, `toolbox`,
+  `wait_until`, `dweb_guide`, and `review` tool surfaces. Custom skills and saved
+  instructions that name them need to use the current actor and code tools.
 - Removed the unreachable pre-Git edit snapshot store and its retired
   `peerd-checkpoints` database. Live App history remains in its browser-native
   Git repository; workspace files are unaffected.
@@ -34,9 +50,27 @@ and storage formats may move until the surface stabilizes.
 
 ### Fixed
 
+- Browser actions are serialized, clicks activate once, and navigation reports
+  the final landed URL. Lost page execution retains an unknown outcome instead
+  of reporting success or replaying a possibly completed action.
+- Stop remains effective across goal recovery and local-model startup;
+  scheduled work and asynchronous actor results survive durable-write races.
+- App edits rotate decentralized-web consent, and sequential file writes wait
+  for the preceding reload without holding repository or consent locks.
+- Keyless providers can become active, and Settings, Home, model-evaluation,
+  and Notebook flows retain their intended access across the kernel change.
+- Untrusted-content escaping, module boundaries, and dependency-update
+  eligibility checks are tightened; reviewed development and packaging
+  dependencies are updated.
 - A site helper stopped for leaving its approved site no longer keeps a stale
   handle, so retrying it starts a fresh helper instead of reopening an
   abandoned tab.
+
+### Security notes
+
+- Private-address HTTP request blocking remains enforced for managed browser
+  work. Chrome can still make a speculative TCP connection during navigation;
+  this release does not promise zero-contact protection against port probing.
 
 ## [0.7.3] - 2026-08-18
 
@@ -1164,7 +1198,8 @@ Initial **experimental preview**. The core buildout, integrated:
   CI gates (bun tests, strict typecheck, lint, dweb boundary, drift,
   in-browser CDP job, artifact matrix).
 
-[Unreleased]: https://github.com/NotASithLord/peerd/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/NotASithLord/peerd/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/NotASithLord/peerd/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/NotASithLord/peerd/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/NotASithLord/peerd/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/NotASithLord/peerd/compare/v0.7.0...v0.7.1
