@@ -22,18 +22,27 @@ and storage formats may move until the surface stabilizes.
   Settings groups decentralized-web and memory controls with their status.
 - Generated Apps prefer native browser APIs and share the existing Mithril
   runtime instead of carrying duplicate copies.
+- `read_doc` replaces `read_pdf` and handles office documents as well as PDFs.
+  `read_result` replaces `read_web_cache` and `read_run_cache` for oversized
+  results.
+- Custom hooks now use declarative rules with literal `contains` matching.
+  JavaScript hooks, regex `pattern` rules, and user hooks using built-in IDs
+  are retired but remain visible. Enabled retired pre-tool hooks continue
+  blocking matching actions until replaced or removed in Settings.
 
 ### Removed
 
-- Retired the legacy `page_eval`, `page_exec`, `page_keys`, `toolbox`,
-  `wait_until`, `dweb_guide`, and `review` tool surfaces. Custom skills and saved
-  instructions that name them need to use the current actor and code tools.
+- Retired the legacy `page_eval`, `page_exec`, `page_keys`, `wait_until`,
+  `dweb_guide`, and `request_review` tool surfaces, along with `toolbox_write`,
+  `toolbox_list`, `toolbox_delete`, and `peerd:toolbox/...` imports. Custom
+  skills and saved instructions that name them need to use the current actor
+  and code tools.
 - Removed the unreachable pre-Git edit snapshot store and its retired
   `peerd-checkpoints` database. Live App history remains in its browser-native
   Git repository; workspace files are unaffected.
 - Removed the transitional `actors.ask`, `mesh.ask`, and `mesh.send` worker
-  aliases. Generated code uses the single `actors.call` and `mesh.call`/`cast`
-  vocabulary.
+  aliases. Update calls to `actors.call`, `mesh.call`, and `mesh.cast`,
+  respectively.
 
 ### Added
 
