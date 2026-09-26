@@ -10,14 +10,40 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-26
+
+### Changed
+
+- The service worker is now a fixed authority kernel. Model reasoning and
+  feature execution run in separate, demand-started hosts, with exact operation
+  grants, build identities, and explicit recovery when a host disappears.
+  Interrupted work with an uncertain outcome is not automatically replayed.
+- Live actor conversations expose their work and hierarchy more clearly, while
+  Settings groups decentralized-web and memory controls with their status.
+- Generated Apps prefer native HTML, CSS, and JavaScript. Extension pages and
+  Apps use one packaged Mithril source; Apps retain `./mithril.js`, while the
+  unsupported `m.request` helper is no longer bundled.
+- `read_doc` replaces `read_pdf` and handles office documents as well as PDFs.
+  `read_result` replaces `read_web_cache` and `read_run_cache` for oversized
+  results.
+- Custom hooks now use declarative rules with literal `contains` matching.
+  JavaScript hooks, regex `pattern` rules, and user hooks using built-in IDs
+  are retired but remain visible. Enabled retired pre-tool hooks continue
+  blocking matching actions until replaced or removed in Settings.
+
 ### Removed
 
+- Retired the legacy `page_eval`, `page_exec`, `page_keys`, `wait_until`,
+  `dweb_guide`, and `request_review` tool surfaces, along with `toolbox_write`,
+  `toolbox_list`, `toolbox_delete`, and `peerd:toolbox/...` imports. Custom
+  skills and saved instructions that name them need to use the current actor
+  and code tools.
 - Removed the unreachable pre-Git edit snapshot store and its retired
   `peerd-checkpoints` database. Live App history remains in its browser-native
   Git repository; workspace files are unaffected.
 - Removed the transitional `actors.ask`, `mesh.ask`, and `mesh.send` worker
-  aliases. Generated code uses the single `actors.call` and `mesh.call`/`cast`
-  vocabulary.
+  aliases. Update calls to `actors.call`, `mesh.call`, and `mesh.cast`,
+  respectively.
 
 ### Added
 
@@ -34,9 +60,29 @@ and storage formats may move until the surface stabilizes.
 
 ### Fixed
 
+- Browser actions are serialized, clicks activate once, and navigation reports
+  the final landed URL. Lost page execution retains an unknown outcome instead
+  of reporting success or replaying a possibly completed action.
+- Stop remains effective across goal recovery and local-model startup;
+  scheduled work and asynchronous actor results survive durable-write races.
+- Fast agent-to-agent replies settle correctly even when they arrive before
+  the original send finishes.
+- App edits rotate decentralized-web consent, and sequential file writes wait
+  for the preceding reload without holding repository or consent locks.
+- Keyless providers can become active, and Settings, Home, model-evaluation,
+  and Notebook flows retain their intended access across the kernel change.
+- Untrusted-content escaping, module boundaries, and dependency-update
+  eligibility checks are tightened; reviewed development and packaging
+  dependencies are updated.
 - A site helper stopped for leaving its approved site no longer keeps a stale
   handle, so retrying it starts a fresh helper instead of reopening an
   abandoned tab.
+
+### Security notes
+
+- Private-address HTTP request blocking remains enforced for managed browser
+  work. Chrome can still make a speculative TCP connection during navigation;
+  this release does not promise zero-contact protection against port probing.
 
 ## [0.7.3] - 2026-08-18
 
@@ -1164,7 +1210,8 @@ Initial **experimental preview**. The core buildout, integrated:
   CI gates (bun tests, strict typecheck, lint, dweb boundary, drift,
   in-browser CDP job, artifact matrix).
 
-[Unreleased]: https://github.com/NotASithLord/peerd/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/NotASithLord/peerd/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/NotASithLord/peerd/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/NotASithLord/peerd/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/NotASithLord/peerd/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/NotASithLord/peerd/compare/v0.7.0...v0.7.1
