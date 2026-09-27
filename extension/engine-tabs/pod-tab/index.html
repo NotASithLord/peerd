@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <!-- The Worker seal is the first fence. This page CSP is the independent
-       backstop: neither the host nor a job Worker can open a native connection. -->
-  <meta http-equiv="Content-Security-Policy" content="connect-src 'none'">
+  <!-- why: the host loads the packaged Wasmer binary. Remote connections stay
+       blocked. Every job worker also blocks native fetch before guest code loads. -->
+  <meta http-equiv="Content-Security-Policy" content="connect-src 'self'">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>peerd · Pod</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='3' width='12' height='10' rx='1.5' fill='%2300B7EB'/%3E%3Cpath d='M4.5 6l2 2-2 2M8 10h3' fill='none' stroke='%230d1117' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
@@ -22,6 +22,7 @@
       <span class="peerd-brand" aria-hidden="true"><span class="b-p">p</span><span class="b-e">e</span><span class="b-e2">e</span><span class="b-r">r</span><span class="b-d">d</span></span>
       <span class="sep">·</span><span class="kind">pod</span>
       <span id="pod-id"></span><span id="pod-lifecycle" hidden></span><span class="spacer"></span>
+      <button id="run-file-button" type="button" title="Run the open file (Ctrl+Enter or Cmd+Enter)">Run file</button>
       <span id="pod-status">ready</span>
     </header>
     <section id="workspace-pane" aria-label="Pod workspace"><div id="editor-mount"></div></section>

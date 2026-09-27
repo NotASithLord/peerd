@@ -14,6 +14,7 @@ import { isServiceWorkerSender } from '/shared/messaging.js';
 import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from '../notebook-tab/worker-source.js';
 import { createExternalWorkspaceLockManager } from './external-workspace-lock.js';
 import { createPodJobOperationTracker, podJobState, podJobStatusMessage } from './job-state.js';
+import { runPodWasmer } from './wasmer-host.js';
 
 const podId = location.hash.slice(1).split(/[?&]/)[0];
 const validPodId = /^pod-[a-z0-9-]+$/i.test(podId);
@@ -51,6 +52,7 @@ const promptLabel = element('prompt-label');
 const input = /** @type {HTMLInputElement} */ (element('terminal-input'));
 const form = /** @type {HTMLFormElement} */ (element('terminal-form'));
 const runButton = /** @type {HTMLButtonElement} */ (element('run-button'));
+const runFileButton = /** @type {HTMLButtonElement} */ (element('run-file-button'));
 const stopButton = /** @type {HTMLButtonElement} */ (element('stop-button'));
 
 /** @param {string} className @param {string} text */
@@ -81,6 +83,7 @@ const publicJob = (/** @type {any} */ job, { includeOutput = true } = {}) => ({
 const updateForegroundControls = () => {
   const running = activeForegroundJobId && jobs.get(activeForegroundJobId)?.state === 'running';
   input.disabled = !!running;
+  runFileButton.disabled = !!running;
   runButton.hidden = !!running;
   stopButton.hidden = !running;
   status.textContent = [...jobs.values()].some((entry) => entry.state === 'running') ? 'running' : 'ready';
@@ -139,13 +142,14 @@ const withWorkspace = (worker, operation) => {
  * it, which prevents queued writes from landing after cancellation.
  * @template T @param {PodJob} job @param {Worker|null} worker @param {()=>Promise<T>} operation
  */
-const withJobWorkspace = (job, worker, operation) => job.workspaceOps.track(() => {
-  const guarded = () => {
+const withJobWorkspace = (job, worker, operation) => {
+  // why: Stop drains active work. It must not wait for another job's queue slot.
+  const guarded = () => job.workspaceOps.track(() => {
     job.workspaceOps.assertAccepting();
     return operation();
-  };
+  });
   return worker ? withWorkspace(worker, guarded) : enqueueWorkspace(guarded);
-});
+};
 
 const externalWorkspaceLocks = createExternalWorkspaceLockManager({
   appendHold: () => {
@@ -341,6 +345,7 @@ const answerWorkerRequest = async (worker, message, job) => {
         reply(response.result); return;
       }
       case 'js-run': reply(await runPodJavaScript(job, args)); return;
+      case 'wasmer-run': reply(await withJobWorkspace(job, null, () => runPodWasmer(job, args, workspace))); return;
       case 'jobs': reply([...jobs.values()].map((entry) => publicJob(entry, { includeOutput: false }))); return;
       case 'cancel-job': reply(await cancelJob(String(args.jobId ?? ''))); return;
       default: throw new Error(`unknown Pod host operation: ${message.op}`);
@@ -575,6 +580,26 @@ stopButton.addEventListener('click', () => {
   if (activeForegroundJobId) cancelJob(activeForegroundJobId).catch(() => {});
 });
 
+const runFile = async () => {
+  if (!editor || runFileButton.disabled) return;
+  try {
+    const firstLine = String(editor.getActiveContent()).split(/\r?\n/, 1)[0];
+    const directive = firstLine.match(/^#!wasmer[ \t]+(\/[A-Za-z0-9_./-]+\.(?:wasm|webc))((?:[ \t]+[A-Za-z0-9_.-]+)*)[ \t]*$/);
+    if (!directive || directive[1].slice(1).split('/').some((part) => !part || part === '.' || part === '..')) {
+      throw new TypeError('Start this file with #!wasmer /runtime.wasm and optional word or flag arguments.');
+    }
+    // why: source paths can contain shell operators. Keep the path one argument.
+    const path = `/workspace/${editor.getActiveFile().replace(/^\/+/, '')}`;
+    const quotedPath = `'${path.replaceAll("'", "'\\''")}'`;
+    await startJob(`${directive[0].slice(2).trim()} ${quotedPath}`, { render: true, source: 'user' });
+  } catch (error) {
+    const message = /** @type {{message?:string}} */ (error)?.message ?? String(error);
+    append('entry-stderr', `${message}\n`);
+    jobStatus.textContent = message;
+  }
+};
+runFileButton.addEventListener('click', runFile);
+
 (async () => {
   const bootStarted = performance.now();
   if (!validPodId) throw new Error('No valid podId in URL hash');
@@ -585,7 +610,9 @@ stopButton.addEventListener('click', () => {
   podRecord = meta.record;
   editor = await createEditor({
     mountEl: element('editor-mount'), opfsBase: [POD_OPFS_ROOT, podId],
-    pinnedFile: 'README.md', onRun: () => { input.focus(); },
+    pinnedFile: 'README.md', onRun: runFile,
+    isReadOnlyFile: (path) => /\.(wasm|webc)$/i.test(path),
+    onReadOnlyFile: (path) => append('entry-meta', `${path} is a binary runtime. Open a source file to edit or run it.\n`),
     fileSystem: {
       read: (path) => enqueueWorkspace(() => workspace.read(path)),
       write: (path, content) => enqueueWorkspace(() => workspace.write(path, checkedFileContent({ content }))),

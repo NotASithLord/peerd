@@ -37,6 +37,7 @@ import {
 import { startWebFixtureServer } from './fixtures/web-suite.mjs';
 import { recordNetworkFloorVector } from './network-floor-oracle.mjs';
 import { NOTEBOOK_FETCH_STATE } from './notebook-fetch-state.mjs';
+import { WASMER_STATE } from './wasmer-state.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -499,6 +500,7 @@ let pacingDelegated = false;
 let pacingActorCalled = false;
 
 export const STATES = [
+  WASMER_STATE,
   {
     name: 'pacing-wait-stop', kind: 'functional', phase: 'post-unlock',
     responder: (_index, request) => {

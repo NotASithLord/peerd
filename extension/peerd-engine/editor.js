@@ -181,8 +181,8 @@ const injectStyle = () => {
  * @param {(path: string) => void} [config.onReadOnlyFile]
  * @param {{read:(path:string)=>Promise<string>,write:(path:string,content:string)=>Promise<void>,delete:(path:string)=>Promise<void>,list:()=>Promise<Array<{path:string,size:number}>>}} [config.fileSystem]
  *
- * Language is auto-picked per file by extension (.html → html,
- * .css → css, anything else → javascript).
+ * Language follows the file extension: HTML, CSS, plain text for Lua/Python,
+ * or JavaScript for all other files.
  */
 export const createEditor = async (config) => {
   const {
@@ -248,14 +248,14 @@ export const createEditor = async (config) => {
     if (u.docChanged && !applyingProgrammaticValue && onChangeCb) onChangeCb();
   });
 
-  // Per-file language: html/css/javascript picked from extension; the
-  // Compartment lets us reconfigure when the active file changes.
+  // The Compartment lets us change the language when the active file changes.
   const langCompartment = new Compartment();
   /** @param {string} path */
   const langForPath = (path) => {
     const p = (path || '').toLowerCase();
     if (p.endsWith('.css')) return css();
     if (p.endsWith('.html') || p.endsWith('.htm')) return html();
+    if (/\.(lua|py)$/.test(p)) return [];
     // .js/.mjs/.ts/.json/.txt and unknown extensions fall through to
     // JS — fine for JSON (a subset), and a reasonable default.
     return javascript();

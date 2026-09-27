@@ -554,6 +554,7 @@ export async function launchPeerd({
   interceptModel = true, captureBootTimeline = false, beforePanelNavigate,
   panelPath = 'sidepanel/sidepanel.html', expectedBackgroundEntry, proxyServer,
   webRtcLoopbackAcceptance = false,
+  enforceWebSecurity = false, headless = true,
 } = {}) {
   const launchStartedAt = hostMonotonicMs();
   const acceptanceProxy = normalizeAcceptanceProxyServer(proxyServer);
@@ -571,7 +572,7 @@ export async function launchPeerd({
   const downloadDir = mkdtempSync(join(tmpdir(), 'peerd-dl-'));
 
   const chrome = spawn(CHROME, [
-    '--headless=new', '--no-first-run', '--no-default-browser-check',
+    ...(headless ? ['--headless=new'] : []), '--no-first-run', '--no-default-browser-check',
     // Browser-policy fixtures need public-looking names while their local HTTP
     // servers stay deterministic and offline. Reserved .test names preserve the
     // documented DNS-resolution residual without weakening localhost coverage.
@@ -592,7 +593,7 @@ export async function launchPeerd({
       'LocalNetworkAccessForWorkers',
       ...(webRtcLoopbackAcceptance ? ['WebRtcHideLocalIpsWithMdns'] : []),
     ].join(',')}`,
-    '--disable-web-security',
+    ...(enforceWebSecurity ? [] : ['--disable-web-security']),
     '--ip-address-space-overrides=127.0.0.0/8=public',
     `--unsafely-treat-insecure-origin-as-secure=${[
       `http://${NETWORK_GUARD_OWNED_HOST}:${NETWORK_GUARD_CONTROLLER_PORT}`,
