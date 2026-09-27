@@ -962,7 +962,7 @@ export const TOOL_METADATA_RECORDS = {
   "pod_exec": {
     "name": "pod_exec",
     "primitive": "pod",
-    "description": "Run one command in this Pod shell. Supports files, pipelines/redirection, Web-standard JS (`js`, Chromium), WASI tools, browser Git, and audited HTTPS curl. This is not Linux: no Node/npm/native binaries/sockets/PTY. `background:true` returns a running job; inspect with pod_status and stop with pod_cancel. Foreground results preview 8000 characters per stream; follow the returned pod_status args to page retained output. grep uses JS regex; pass -F for literals. Timeout default 30s, maximum 300s. Ambiguous interrupted commands are never replayed.",
+    "description": "Run one command in this Pod shell. Supports files, pipelines/redirection, Web-standard JS (`js`, Chromium), WASI tools, browser Git, and audited HTTPS curl. `wasmer [--command name] file.wasm|file.webc [args...]` runs local WASI/WASIX. Its workspace is /workspace. Use absolute guest paths for Preview 1 programs. `wasmer-demo` tests Wasmer. Wasmer has no network, Node, EdgeJS, or eval. This is not Linux: no Node/npm/native binaries/sockets/PTY. `background:true` returns a running job; inspect with pod_status and stop with pod_cancel. Foreground results preview 8000 characters per stream; follow the returned pod_status args to page retained output. grep uses JS regex; pass -F for literals. Timeout default 30s, maximum 300s. Ambiguous interrupted commands are never replayed.",
     "schema": {
       "type": "object",
       "properties": {

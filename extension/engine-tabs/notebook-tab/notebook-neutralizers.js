@@ -42,7 +42,7 @@
  * @param {any} global the worker (or mock) global scope to seal. why any: this
  *   reaches into arbitrary realm globals (fetch, Worker, navigator, …) and
  *   deletes/redefines them — the operation is type-erased by design.
- * @param {{ environment?: string, exposeGlobalFetch?: boolean, blockHostStorage?: boolean, blockExtensionApis?: boolean }} [options]
+ * @param {{ environment?: string, exposeGlobalFetch?: boolean, blockHostStorage?: boolean, blockExtensionApis?: boolean, workerConstructor?: Function }} [options]
  * @returns {{ fetch: (input:any, init?:any)=>Promise<any> }} the audited fetch
  *   capability, allowing stricter hosts such as Pod to expose it only through
  *   a named interface while keeping global fetch blocked.
@@ -196,13 +196,16 @@ export function applyRealmSeal(global, options = {}) {
     'WebTransport',
     'Worker',        // a nested worker would be a fresh, un-sealed realm
     'SharedWorker',  // not exposed in workers today; sealed for symmetry
+    'BroadcastChannel', // same-origin messages can reach other sandbox workers
   ]) {
     // why function, not arrow: these stand in for constructors (Worker,
     // SharedWorker, …). An arrow has no [[Construct]], so `new Worker()`
     // would throw "not a constructor" instead of OUR actionable error
     // (see the call-and-construct note above). prefer-arrow-callback is
     // off for this file in eslint.config.js for exactly this reason.
-    seal(global, name, function () { fail(name); });
+    // why: Wasmer uses a host relay that can create only sealed SDK threads.
+    seal(global, name, name === 'Worker' && options.workerConstructor
+      ? options.workerConstructor : function () { fail(name); });
   }
   // importScripts already throws in module workers, but it lives on
   // WorkerGlobalScope.prototype — seal it so a future classic-worker
