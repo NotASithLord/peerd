@@ -106,11 +106,11 @@
     "codemirror": "^6.0.2",
     "crx3": "2.0.0",
     "es-module-lexer": "^2.3.2",
-    "eslint": "10.9.0",
+    "eslint": "10.9.1",
     "fake-indexeddb": "^6.2.5",
     "globals": "^17.11.0",
-    "puppeteer-core": "^25.8.0",
-    "typescript": "^6.0.3",
+    "puppeteer-core": "^25.9.0",
+    "typescript": "^7.0.2",
     "web-ext": "10.6.0"
   },
   "overrides": {
