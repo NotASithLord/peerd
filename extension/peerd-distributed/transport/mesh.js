@@ -50,6 +50,12 @@ const newId = () =>
 // why 16: matches the reducer's ROOM_CAP — a full-mesh room never needs
 // more links than members (NORTH-STAR D-9).
 const DEFAULT_BUDGET = 16;
+// Local, temporary penalties; rotating a DID is cheap, so this is not a
+// substitute for admission diversity or aggregate resource budgets.
+const ABUSE_WINDOW_MS = 60_000;
+const ABUSE_STRIKES = 3;
+const COOLDOWN_MS = 5 * 60_000;
+const MAX_COOLDOWNS = 1_024;
 
 /** @typedef {{ did: string, sign: (bytes: Uint8Array) => Promise<Uint8Array> }} Identity */
 /** @typedef {((type: string, detail?: any) => void) | null} AuditFn */
@@ -60,6 +66,7 @@ const DEFAULT_BUDGET = 16;
  *   channel: Channel,
  *   lastSeen: number,
  *   ctrl: { windowStart: number, count: number },
+ *   abuse: { windowStart: number, count: number },
  *   info?: any,
  *   offClose?: () => void,
  * }} Link
@@ -114,6 +121,13 @@ export const createRoomMesh = ({
   /** @type {ReturnType<typeof setInterval> | null} */
   let pingTimer = null;
   let closed = false;
+  /** @type {Map<string, number>} */
+  const cooldowns = new Map();
+
+  const pruneCooldowns = () => {
+    const t = now();
+    for (const [did, until] of cooldowns) if (until <= t) cooldowns.delete(did);
+  };
 
   /**
    * @template T
@@ -160,10 +174,29 @@ export const createRoomMesh = ({
     emit(goneCbs, { did, why });
   };
 
+  /** @param {Link} link @param {string} reason @param {boolean} [immediate] */
+  const penalize = (link, reason, immediate = false) => {
+    if (closed || links.get(link.did) !== link) return;
+    const t = now();
+    if (t - link.abuse.windowStart >= ABUSE_WINDOW_MS) {
+      link.abuse.windowStart = t;
+      link.abuse.count = 0;
+    }
+    if (++link.abuse.count < ABUSE_STRIKES && !immediate) return;
+    pruneCooldowns();
+    if (cooldowns.size >= MAX_COOLDOWNS) {
+      const oldest = cooldowns.keys().next().value;
+      if (oldest !== undefined) cooldowns.delete(oldest);
+    }
+    cooldowns.set(link.did, t + COOLDOWN_MS);
+    audit?.('peer_cooldown', { did: link.did, reason, until: t + COOLDOWN_MS });
+    removeLink(link.did, reason);
+  };
+
   /** @param {Link} link */
   const ctrlAllowed = (link) => {
     const t = now();
-    if (t - link.ctrl.windowStart > 10_000) {
+    if (t - link.ctrl.windowStart >= 10_000) {
       link.ctrl.windowStart = t;
       link.ctrl.count = 0;
     }
@@ -172,10 +205,6 @@ export const createRoomMesh = ({
 
   /** @param {Link} link @param {any} env */
   const handleControl = async (link, env) => {
-    if (!ctrlAllowed(link)) {
-      audit?.('peer_ctrl_rate_limited', { did: link.did });
-      return;
-    }
     const linkLocal = env.from === link.did; // signer IS the neighbor
     switch (env.typ) {
       case CTRL.PING:
@@ -220,7 +249,8 @@ export const createRoomMesh = ({
 
   /** @param {Link} link @param {any} msg */
   const handle = async (link, msg) => {
-    if (closed || !msg) return;
+    if (closed || links.get(link.did) !== link) return;
+    if (!msg) { penalize(link, 'malformed-frame'); return; }
     // Phase 0 content-transfer frames multiplex on mesh links.
     if (typeof msg.t === 'string' && CONTENT_REQ.has(msg.t)) {
       respondContent?.(msg, (out) => link.channel.send(out));
@@ -231,11 +261,20 @@ export const createRoomMesh = ({
       return;
     }
     if (msg.__t === 'HELLO') return; // stale handshake frame
-    if (msg.v !== 1 || !msg.sig) return; // not an envelope — drop
-    if (!(await verifyEnvelope(msg))) {
-      audit?.('peer_envelope_invalid', { via: link.did });
+    if (msg.v !== 1 || !msg.sig) { penalize(link, 'malformed-frame'); return; }
+    // Charge before crypto: an invalid signature must not bypass this budget.
+    // Only charge the authenticated immediate neighbor, never the claimed signer.
+    if (msg.ch === 0 && !ctrlAllowed(link)) {
+      audit?.('peer_ctrl_rate_limited', { did: link.did });
+      penalize(link, 'control-rate', true);
       return;
     }
+    if (!(await verifyEnvelope(msg))) {
+      audit?.('peer_envelope_invalid', { via: link.did });
+      penalize(link, 'invalid-envelope');
+      return;
+    }
+    if (closed || links.get(link.did) !== link) return;
     link.lastSeen = now();
     if (msg.ch === 0) return handleControl(link, msg);
     // Link-authenticity rule for non-control: flooded frames (ch=4) carry
@@ -243,6 +282,7 @@ export const createRoomMesh = ({
     // link-local and must be signed by the neighbor itself.
     if (msg.ch !== 4 && msg.from !== link.did) {
       audit?.('peer_envelope_misattributed', { via: link.did, claimed: msg.from });
+      penalize(link, 'misattributed-envelope');
       return;
     }
     emit(envelopeCbs, { env: msg, via: link.did });
@@ -270,7 +310,13 @@ export const createRoomMesh = ({
     // Admit an AUTHENTICATED link (HELLO already done — did is proven).
     /** @param {Channel} channel @param {string} did @param {any} [info] */
     addLink(channel, did, info = {}) {
-      if (closed) return false;
+      if (closed) { channel.close(); return false; }
+      pruneCooldowns();
+      if (cooldowns.has(did)) {
+        audit?.('peer_cooldown_refused', { did });
+        channel.close();
+        return false;
+      }
       if (did === identity.did) { channel.close(); return false; }
       if (links.size >= budget && !links.has(did)) {
         audit?.('peer_budget_refused', { did });
@@ -282,7 +328,7 @@ export const createRoomMesh = ({
       // both sides converge on without a tiebreak protocol.
       if (links.has(did)) removeLink(did, 'replaced');
       /** @type {Link} */
-      const link = { did, channel, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, info };
+      const link = { did, channel, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
       link.offClose = channel.onClose(() => {
         if (links.get(did) === link) {
           links.delete(did);
@@ -384,6 +430,7 @@ export const createRoomMesh = ({
       closed = true;
       stopTimers();
       for (const did of [...links.keys()]) removeLink(did, 'mesh-closed');
+      cooldowns.clear();
     },
   });
 };
