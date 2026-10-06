@@ -100,6 +100,8 @@ jobs:
       # mutable container tag that GitHub pulls before the first job step. Use
       # the official release binary only after Harden Runner starts, and verify
       # the exact asset digest published by the v2.3.8 GitHub Release.
+      - name: Enforce scoped OSV exception expiry and dependency graph
+        run: node packaging/check-osv-exception.mjs
       - name: Run checksum-pinned OSV-Scanner v2.3.8
         env:
           OSV_SCANNER_SHA256: bc98e15319ed0d515e3f9235287ba53cdc5535d576d24fd573978ecfe9ab92dc
