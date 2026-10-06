@@ -1,0 +1,234 @@
+#!/usr/bin/env bun
+// A fresh profile, real vault and Home onboarding. Observe every future host
+// before its scripts run; status/lease records are corroboration, never the
+// zero-network oracle. Restart means physical MV3 worker retirement + unlock,
+// not a claim about a complete browser-process restart.
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { attach, evalIn, launchPeerd, PASSPHRASE, rpc, waitFor } from './e2e-harness.mjs';
+
+export const REPORT = resolve('artifacts/e2e/network-consent-cold.json');
+const BINDING = '__peerdConsentTransportObserved';
+// Transparent native constructor observers: no application API is stubbed,
+// no connection is prevented, and successful construction still uses Chrome.
+export const OBSERVER_SOURCE = `(() => {
+  if (globalThis.__peerdConsentObserverInstalled) return;
+  globalThis.__peerdConsentObserverInstalled = true;
+  const emit = (kind, details = {}) => globalThis.${BINDING}(JSON.stringify({
+    kind, href: globalThis.location?.href ?? '', ...details,
+  }));
+  for (const name of ['WebSocket', 'RTCPeerConnection']) {
+    const native = globalThis[name];
+    if (typeof native !== 'function') continue;
+    globalThis[name] = new Proxy(native, { construct(target, args, newTarget) {
+      const instance = Reflect.construct(target, args, newTarget);
+      emit(name, name === 'WebSocket' ? { url: String(args[0]) } : {});
+      return instance;
+    } });
+  }
+  emit('observer-ready', { rtc: typeof RTCPeerConnection === 'function', socket: typeof WebSocket === 'function' });
+})()`;
+
+export const assertNoTransport = (events, label) => {
+  const traffic = events.filter(event => ['WebSocket', 'RTCPeerConnection', 'native-websocket'].includes(event.kind));
+  if (traffic.length) throw new Error(`${label}: transport before consent: ${JSON.stringify(traffic)}`);
+};
+
+const requireResult = (condition, message) => { if (!condition) throw new Error(message); };
+
+async function observeHosts(ctx, evidence) {
+  const version = await fetch(`http://127.0.0.1:${ctx.port}/json/version`).then(r => r.json());
+  const connection = await attach(version.webSocketDebuggerUrl);
+  const sessions = new Map();
+  const installing = new Set();
+  let closing = false;
+  const origin = `chrome-extension://${ctx.sw.id}/`;
+  const ownedUrl = url => String(url ?? '').startsWith(origin) || String(url ?? '').startsWith(`blob:${origin}`);
+  const failed = error => { if (!closing) evidence.observerErrors.push(String(error?.stack ?? error)); };
+  const install = async ({ sessionId, targetInfo, waitingForDebugger }) => {
+    sessions.set(sessionId, targetInfo);
+    const send = (method, params = {}) => connection.send(method, params, sessionId);
+    try {
+      await send('Runtime.enable');
+      await send('Runtime.addBinding', { name: BINDING });
+      await send('Network.enable');
+      // Pages need reinstrumentation on navigation; workers have no Page domain.
+      if (['page', 'iframe', 'other'].includes(targetInfo.type)) {
+        await send('Page.addScriptToEvaluateOnNewDocument', { source: OBSERVER_SOURCE });
+      }
+      const result = await send('Runtime.evaluate', { expression: OBSERVER_SOURCE, returnByValue: true });
+      if (result.exceptionDetails) throw new Error(`observer injection failed: ${JSON.stringify(result.exceptionDetails)}`);
+      // New worker descendants must also wait until their observer is installed.
+      await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
+    } catch (error) { failed(error); }
+    finally { if (waitingForDebugger) await send('Runtime.runIfWaitingForDebugger').catch(failed); }
+  };
+  const listener = (method, params, message) => {
+    if (method === 'Target.attachedToTarget') {
+      const pending = install(params);
+      installing.add(pending);
+      pending.finally(() => installing.delete(pending));
+    } else if (method === 'Target.detachedFromTarget') sessions.delete(params.sessionId);
+    else if (method === 'Runtime.bindingCalled' && params.name === BINDING) {
+      try {
+        const event = JSON.parse(params.payload);
+        if (ownedUrl(event.href)) {
+          const target = sessions.get(message.sessionId);
+          if (target) target.url = event.href;
+          evidence.events.push({ ...event, sessionId: message.sessionId, phase: evidence.phase });
+        }
+      } catch (error) { failed(error); }
+    } else if (method === 'Network.webSocketCreated') {
+      const target = sessions.get(message.sessionId);
+      if (ownedUrl(target?.url)) evidence.events.push({
+        kind: 'native-websocket', url: params.url, targetId: target.targetId, phase: evidence.phase,
+      });
+    }
+  };
+  connection.on(listener);
+  await connection.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
+  await Promise.all([...installing]);
+  requireResult(await waitFor(() => evidence.events.some(event => event.kind === 'observer-ready'
+    && event.href.includes('/home/home.html')), { budgetMs: 10_000, pollMs: 25 }), 'Home observer never armed');
+  return {
+    async barrier() {
+      await Promise.all([...installing]);
+      // Drain CDP events already emitted by each live extension realm.
+      for (const [sessionId, target] of sessions) {
+        if (ownedUrl(target.url)) await connection.send('Runtime.evaluate', { expression: '0' }, sessionId);
+      }
+      requireResult(evidence.observerErrors.length === 0, `Observer failed: ${evidence.observerErrors.join('\n')}`);
+    },
+    async releaseWorker(targetId) {
+      for (const [sessionId, target] of sessions) {
+        if (target.targetId === targetId) {
+          await connection.send('Target.detachFromTarget', { sessionId });
+          sessions.delete(sessionId);
+        }
+      }
+    },
+    async nativeRtcCanary() {
+      const match = [...sessions].find(([, target]) => ownedUrl(target.url) && target.url.includes('/offscreen/offscreen.html'));
+      requireResult(match, 'No observed real offscreen realm for native RTC canary');
+      const result = await connection.send('Runtime.evaluate', {
+        expression: '(() => { const pc = new RTCPeerConnection({iceServers: []}); pc.close(); return true; })()', returnByValue: true,
+      }, match[0]);
+      requireResult(!result.exceptionDetails && result.result?.value === true, 'Native RTC canary failed');
+    },
+    async close() {
+      closing = true;
+      await connection.send('Target.setAutoAttach', { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }).catch(() => {});
+      connection.off(listener); connection.close();
+    },
+  };
+}
+
+const click = async (page, selector) => {
+  const ready = await waitFor(() => evalIn(page, `(() => {
+    const button = document.querySelector(${JSON.stringify(selector)});
+    return !!button && !button.disabled;
+  })()`), { budgetMs: 20_000, pollMs: 50 });
+  requireResult(ready, `Missing enabled button ${selector}`);
+  await evalIn(page, `document.querySelector(${JSON.stringify(selector)}).click()`);
+};
+
+export async function runColdConsent({ reportPath = REPORT } = {}) {
+  const evidence = { schema: 1, ok: false, phase: 'fresh-locked', checks: [], events: [], observerErrors: [], restart: 'physical-mv3-worker' };
+  let ctx, observer;
+  const check = (name, condition, details) => {
+    evidence.checks.push({ name, pass: !!condition, ...(details === undefined ? {} : { details }) });
+    requireResult(condition, name);
+  };
+  try {
+    ctx = await launchPeerd({ panelPath: 'home/home.html', interceptModel: false, enforceWebSecurity: true });
+    const fresh = await rpc(ctx.page, { type: 'state/get' });
+    check('real fresh profile has no vault', fresh?.state?.vault?.initialized === false);
+    const hosts = await evalIn(ctx.page, 'chrome.runtime.getContexts({contextTypes:["OFFSCREEN_DOCUMENT"]})', true);
+    check('no preexisting offscreen transport realm before observer installation', Array.isArray(hosts) && hosts.length === 0, hosts);
+    observer = await observeHosts(ctx, evidence);
+    evidence.phase = 'before-choice';
+    const initialized = await rpc(ctx.page, { type: 'vault/initialize', passphrase: PASSPHRASE }, { timeoutMs: 120_000 });
+    check('vault created and unlocked without completing onboarding', initialized?.ok === true);
+    await click(ctx.page, '.onboarding-skip'); // Provider skip: no network choice yet.
+    const prompt = await waitFor(() => evalIn(ctx.page, '!!document.querySelector("[data-network-choice=skip]")'), { budgetMs: 20_000, pollMs: 50 });
+    check('fresh onboarding presents explicit network choice', !!prompt);
+    const undecided = await rpc(ctx.page, { type: 'state/get' });
+    check('no inherited network or agent consent', undecided?.state?.settings?.dwebChoiceMade === false
+      && undecided.state.settings.dwebEnabled === false && undecided.state.settings.dwebAgentEnabled === false);
+    await observer.barrier(); assertNoTransport(evidence.events, 'unlocked before choice');
+    check('zero native WebSocket or RTC construction before choice', true);
+
+    await click(ctx.page, '[data-network-choice=skip]');
+    const skipped = await waitFor(async () => {
+      const state = (await rpc(ctx.page, { type: 'state/get' }))?.state;
+      return state?.settings?.dwebChoiceMade === true && state.settings.dwebEnabled === false ? state : null;
+    }, { budgetMs: 20_000, pollMs: 50 });
+    check('Not now is an explicit persisted off decision', !!skipped);
+    // Finish the remaining real personal-setup screens without route shortcuts.
+    for (const field of ['.peer-name-input', '#onb-call', '#onb-notes']) {
+      check(`personal setup screen ${field} appears`, !!await waitFor(() => evalIn(ctx.page,
+        `!!document.querySelector(${JSON.stringify(field)})`), { budgetMs: 20_000, pollMs: 50 }));
+      await click(ctx.page, '.onboarding-skip');
+    }
+    check('personal setup completes', !!await waitFor(async () =>
+      (await rpc(ctx.page, { type: 'state/get' }))?.state?.profile?.onboardingComplete === true,
+    { budgetMs: 20_000, pollMs: 50 }));
+    await observer.barrier(); assertNoTransport(evidence.events, 'Not now');
+    evidence.phase = 'reload-off';
+    await ctx.page.send('Page.reload', { ignoreCache: true });
+    check('Home reload finishes without repeating network onboarding', !!await waitFor(() => evalIn(ctx.page,
+      '!!document.querySelector(".home-rail") && !document.querySelector("[data-network-choice=skip]")'),
+    { budgetMs: 20_000, pollMs: 50 }));
+    const reloaded = await rpc(ctx.page, { type: 'state/get' });
+    check('explicit off survives real Home reload', reloaded?.state?.settings?.dwebChoiceMade === true
+      && reloaded.state.settings.dwebEnabled === false);
+    await observer.barrier(); assertNoTransport(evidence.events, 'Home reload after Not now');
+    evidence.phase = 'restart-off';
+    check('vault locks before physical restart', (await rpc(ctx.page, { type: 'vault/lock' }))?.ok === true);
+    await observer.releaseWorker(ctx.sw.targetId);
+    const stopped = await ctx.stopServiceWorker();
+    const next = await ctx.restartServiceWorker(stopped);
+    check('physical worker identity changes', next.targetId !== stopped.targetId, { before: stopped.targetId, after: next.targetId });
+    check('vault unlock after restart', (await rpc(ctx.page, { type: 'vault/unlock', passphrase: PASSPHRASE }, { timeoutMs: 120_000 }))?.ok === true);
+    const restarted = await rpc(ctx.page, { type: 'state/get' });
+    check('explicit off and separate agent setting survive worker restart', restarted?.state?.settings?.dwebChoiceMade === true
+      && restarted.state.settings.dwebEnabled === false && restarted.state.settings.dwebAgentEnabled === false);
+    await observer.barrier(); assertNoTransport(evidence.events, 'restart after Not now');
+    check('zero native transports through Not now and physical restart', true);
+
+    // Positive control on the same observers: actual user opt-in must produce
+    // native signaling construction in the real host. Network reachability is
+    // not required; WebSocket creation itself is the observable side effect.
+    evidence.phase = 'explicit-enable';
+    await evalIn(ctx.page, 'location.hash = "discover"');
+    await click(ctx.page, '[data-network-choice=enable]');
+    const started = await waitFor(() => evidence.events.find(event => event.kind === 'WebSocket'
+      && event.href.includes('/offscreen/offscreen.html') && event.phase === 'explicit-enable'), { budgetMs: 60_000, pollMs: 100 });
+    check('explicit Discover enable constructs native host signaling', !!started, started);
+    await observer.barrier();
+    check('native CDP confirms signaling positive control', evidence.events.some(event => event.kind === 'native-websocket'
+      && event.phase === 'explicit-enable'));
+    await observer.nativeRtcCanary();
+    await observer.barrier();
+    check('real host RTC observer positive control', evidence.events.some(event => event.kind === 'RTCPeerConnection' && event.phase === 'explicit-enable'));
+    // Stop via the ordinary preference route; no host API shim or forced close.
+    check('final network disable acknowledged', (await rpc(ctx.page, { type: 'settings/update', patch: { dwebEnabled: false } }, { timeoutMs: 30_000 }))?.ok === true);
+    evidence.ok = true;
+  } catch (error) {
+    evidence.error = String(error?.stack ?? error);
+  } finally {
+    await observer?.close().catch(() => {});
+    await ctx?.close().catch(() => {});
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, `${JSON.stringify(evidence, null, 2)}\n`);
+  }
+  if (!evidence.ok) throw new Error(`Cold consent failed; see ${reportPath}: ${evidence.error}`);
+  return evidence;
+}
+
+if (import.meta.url === pathToFileURL(resolve(process.argv[1] ?? '')).href) {
+  runColdConsent().then(report => console.log(JSON.stringify(report, null, 2))).catch(error => {
+    console.error(error); process.exitCode = 1;
+  });
+}

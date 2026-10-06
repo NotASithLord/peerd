@@ -460,6 +460,8 @@ const stateSnapshot = async () => {
   if (authority.initialized || indexed?.initialized !== false) {
     await vaultPosture.write(authority);
   }
+  // This is a read-only projection, never a writable preference. Defaults
+  // are not consent; settings-store persists only explicit user overrides.
   const settings = settingsStore.get();
   let session = {
     sessionId: null, messages: [], cost: null,
@@ -501,16 +503,12 @@ const stateSnapshot = async () => {
       ?? pendingProviderView(settings, currentSession);
   return buildVaultKernelState({
     kernel: generation.identity,
-    status: {
-      initialized: authority.initialized,
-      prfEnrolled: authority.prfEnrolled,
-      hasRecovery: authority.hasRecovery,
-    },
+    status: authority,
     locked: authority.locked,
     unlockedAt: authority.unlockedAt,
     lockReason: authority.lockReason,
     autoLockMs,
-    settings,
+    settings: { ...settings, dwebChoiceMade: typeof settingsStore.stored().dwebEnabled === 'boolean' },
     session,
     providers: providerView.providers,
     composer: providerView.composer,

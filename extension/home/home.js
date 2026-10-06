@@ -35,7 +35,6 @@ import { ChatView } from '../sidepanel/components/chat-view.js';
 import { ConfirmModal, NoticeBar, StateRuntimeFailure } from '../sidepanel/components/app.js';
 import { ActorIsolationBanner } from '../sidepanel/components/actor-isolation-banner.js';
 import { VaultGate } from '../sidepanel/components/vault-gate.js';
-import { OnboardingView, needsOnboarding } from '../sidepanel/components/onboarding-view.js';
 import { peerNotifications } from '/shared/peer-notifications.js';
 
 /** @typedef {import('./library-section.js').Send} Send */
@@ -83,6 +82,23 @@ const loadEvalSection = () => {
   import('./eval-section.js')
     .then((mod) => { EvalSection = mod.EvalSection; evalLoadState = 'ready'; m.redraw(); })
     .catch(() => { evalLoadState = 'unavailable'; m.redraw(); });
+};
+
+// why: established profiles do not need the provider setup and onboarding
+// component graph on every Home visit. Load it only after state requires it.
+/** @type {any} */
+let OnboardingGate = null;
+/** @type {any} */ let NetworkChoice = null;
+let onboardingLoading = false;
+let onboardingFailed = false;
+const loadOnboarding = () => {
+  if (OnboardingGate || onboardingLoading) return;
+  onboardingLoading = true;
+  onboardingFailed = false;
+  import('../sidepanel/components/onboarding-view.js')
+    .then((mod) => { OnboardingGate = mod.OnboardingGate; NetworkChoice = mod.PeerNetworkStep; })
+    .catch(() => { onboardingFailed = true; })
+    .finally(() => { onboardingLoading = false; m.redraw(); });
 };
 
 const ALL_VIEWS = new Set(['chat', 'chats', 'actors', 'library', 'eval', 'discover', 'contacts', 'network']);
@@ -444,8 +460,8 @@ const navItems = (showDweb) => [
   { id: 'actors', label: 'Actors', group: 'agent' },
   { id: 'library', label: 'Library', group: 'create' },
   { id: 'eval', label: 'Lab', group: 'create' },
+  ...(DWEB_ENABLED ? [{ id: 'discover', label: 'Discover', group: 'network' }] : []),
   ...(showDweb ? [
-    { id: 'discover', label: 'Discover', group: 'network' },
     { id: 'contacts', label: 'Contacts', group: 'network' },
     { id: 'network', label: 'Network', group: 'network' },
   ] : []),
@@ -748,7 +764,16 @@ const content = (showDweb) => {
     return m('div', { style: 'padding:24px;color:var(--fg-muted)' },
       evalLoadState === 'unavailable' ? 'The Lab is not available in this build.' : 'Loading the Lab…');
   }
-  if (activeView === 'discover' && showDweb) return m(DiscoverSection, { send });
+  if (activeView === 'discover' && DWEB_ENABLED) {
+    loadOnboarding();
+    if (!NetworkChoice) return onboardingFailed
+      ? m('button', { onclick: loadOnboarding }, 'Retry loading network controls')
+      : m('p', { role: 'status' }, 'Loading network controls…');
+    return m('div', [
+      m(NetworkChoice, { enabled: !!showDweb, send, reconcileState }),
+      showDweb ? m(DiscoverSection, { send }) : null,
+    ]);
+  }
   if (activeView === 'contacts' && showDweb) return m(ContactsSection, { send });
   if (activeView === 'network' && showDweb) return m(NetworkSection, { send });
   return null;
@@ -776,11 +801,16 @@ const HomeApp = {
     // the latch for any install that already has chat history
     // (background/vault-kernel-core.js). Net: the funnel only ever greets a
     // genuinely fresh install; a panel-first user who clicks Home mid-use lands
-    // on home, never on a surprise re-onboarding.
-    if (needsOnboarding(currentState)) {
-      return m('.options-gate', m(OnboardingView, {
-        state: currentState, send, reconcileState,
-      }));
+    // on home without replaying personal setup. A missing explicit network
+    // choice adds only that decision for existing profiles.
+    const setupNeeded = currentState.profile?.onboardingComplete === false
+      || DWEB_ENABLED && currentState.settings?.dwebChoiceMade === false;
+    if (setupNeeded) {
+      if (OnboardingGate) return m('.options-gate', m(OnboardingGate, { state: currentState, send, reconcileState }));
+      if (!onboardingFailed) loadOnboarding();
+      return m('.options-gate', onboardingFailed
+        ? m('button', { onclick: loadOnboarding }, 'Retry loading setup')
+        : m('p', { role: 'status' }, 'Loading setup…'));
     }
 
     const showDweb = DWEB_ENABLED && currentState.settings?.dwebEnabled;

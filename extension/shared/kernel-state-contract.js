@@ -49,9 +49,7 @@ export const validKernelSettings = (value) => {
   const s = value;
   if (!Number.isFinite(s.vaultAutoLockMs) || s.vaultAutoLockMs < 0) return false;
   for (const [key, item] of Object.entries(s)) {
-    const boolean = key.endsWith('Enabled')
-      || ['voiceOnboardingDismissed', 'devMode', 'watchAgentTab',
-        'confirmWebWrites', 'schemaValidatedReplies', 'autoResumeInterruptedTurns'].includes(key);
+    const boolean = /Enabled$|^(voiceOnboardingDismissed|dwebChoiceMade|devMode|watchAgentTab|confirmWebWrites|schemaValidatedReplies|autoResumeInterruptedTurns)$/.test(key);
     if (boolean && typeof item !== 'boolean') return false;
     if (/(?:Variant|Engine|Effort|ActionSurface|Name|Model|Host|View)$/.test(key)
         && typeof item !== 'string') return false;

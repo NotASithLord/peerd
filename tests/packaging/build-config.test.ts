@@ -31,7 +31,7 @@ describe('generated build identity', () => {
     expect(source).toContain('export const CHANNEL = "preview";');
     expect(source).toContain('export const DWEB_ENABLED = true;');
     expect(source).toContain('export const CHANNEL_DEFAULTS = Object.freeze(');
-    expect(source).toContain('"dwebEnabled":true');
+    expect(source).toContain('"dwebEnabled":false');
     expect(genBuildConfigSource({
       version: '0.7.3',
       background: { service_worker: 'background/vault-kernel.js' },

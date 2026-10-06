@@ -51,6 +51,18 @@ const projected = (generation = 1, authorityEpoch = 'kernel-epoch-0001') => ({
 });
 
 describe('cold shell state contract', () => {
+  test('network consent projection must be a boolean before the shell can adopt it', () => {
+    for (const choice of [true, false]) {
+      const state = { ...projected(), settings: { ...settings, dwebChoiceMade: choice } };
+      expect(normalizeColdStateSnapshot(state)).toEqual(state);
+    }
+    for (const choice of ['true', 1, null, {}]) {
+      expect(normalizeColdStateSnapshot({
+        ...projected(), settings: { ...settings, dwebChoiceMade: choice },
+      })).toBeNull();
+    }
+  });
+
   test('rejects provenance-less legacy snapshots', () => {
     const legacy = { vault, settings, capabilities: { actorExecution } };
     expect(normalizeColdStateSnapshot(legacy)).toBeNull();

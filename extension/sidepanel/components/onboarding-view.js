@@ -18,8 +18,8 @@
 //      into memory's 'user' scope (editable later from the options
 //      page). Skipping everything writes nothing.
 //
-// SHAPE (owner call 2026-06-12): a SEQUENTIAL four-step funnel: provider,
-// name your peer, "what should I call you", then "anything else about you". One
+// SHAPE: provider, explicit network choice on supported hosts, name your
+// peer, then optional personalization. One
 // question on screen at a time, each with its own Skip, prompts TYPING
 // themselves in terminal-style before the input appears. Game-feel
 // without breaking the brand: motion is monochrome; the peer name's
@@ -47,6 +47,9 @@
 import m from '/vendor/mithril/mithril.js';
 import { PEER_NAME_MAX } from '/peerd-runtime/ui.js';
 import { ProviderStep } from './onboarding-provider-step.js';
+import { PeerNetworkStep } from './onboarding-network-step.js';
+export { PeerNetworkStep, PeerNetworkStatus } from './onboarding-network-step.js';
+import { DWEB_ENABLED } from '/shared/channel-config.js';
 
 /** @typedef {import('../chat-reducer.js').ChatState} ChatState */
 /** @typedef {(msg: object) => Promise<any>} Send */
@@ -68,6 +71,7 @@ import { ProviderStep } from './onboarding-provider-step.js';
  * @property {string} callMe
  * @property {string} notes
  * @property {boolean} busy
+ * @property {boolean} networkChoice
  * @property {string|null} error
  * @property {TeaseState|null} tease
  * @property {number} step
@@ -227,9 +231,10 @@ export const OnboardingView = {
     vnode.state.callMe = '';
     vnode.state.notes = '';
     vnode.state.busy = false;
+    vnode.state.networkChoice = DWEB_ENABLED && vnode.attrs.state?.settings?.dwebChoiceMade !== true;
     vnode.state.error = null;
     vnode.state.tease = null;
-    vnode.state.step = 0;       // 0 provider (§5h) · 1 name · 2 call-me · 3 notes
+    vnode.state.step = 0;       // Stable step ids; the network choice follows provider setup.
     vnode.state.anim = '';      // ''|'out'|'in' — step transition class
     vnode.state.prompt = null;  // typed question state for steps 2/3
     vnode.state.stepTimer = null;
@@ -403,8 +408,13 @@ export const OnboardingView = {
       ] : null,
     ];
 
+    const steps = ui.networkChoice ? [0, 4, 1, 2, 3] : [0, 1, 2, 3];
+    const position = steps.indexOf(ui.step);
     const body = ui.step === 0
-      ? m(ProviderStep, { send, onDone: () => goToStep(ui, 1) })
+      ? m(ProviderStep, { send, onDone: () => goToStep(ui, ui.networkChoice ? 4 : 1) })
+      : ui.step === 4 ? m(PeerNetworkStep, {
+          send, reconcileState, onDone: () => goToStep(ui, 1),
+        })
       : ui.step === 1 ? stepName
       : ui.step === 2 ? askStep({
           id: 'onb-call', value: ui.callMe,
@@ -428,15 +438,25 @@ export const OnboardingView = {
           }
         },
       }, body),
-      // Monochrome progress: where you are in the four steps (§5h made it
-      // four). The active dot carries aria-current so the step is
+      // Monochrome progress follows the steps available on this host.
+      // The active dot carries aria-current so the step is
       // announced, not just painted (§5e - the treatment 3h gave the nav).
-      m('.onb-dots', { 'aria-label': `Step ${ui.step + 1} of 4` },
-        [0, 1, 2, 3].map((i) => m('span.onb-dot', {
-          class: i === ui.step ? 'is-on' : i < ui.step ? 'is-done' : '',
+      m('.onb-dots', { 'aria-label': `Step ${position + 1} of ${steps.length}` },
+        steps.map((i, index) => m('span.onb-dot', {
+          class: i === ui.step ? 'is-on' : index < position ? 'is-done' : '',
           'aria-current': i === ui.step ? 'step' : undefined,
         }))),
       ui.error ? m('p.error', ui.error) : null,
     ]));
+  },
+};
+
+
+// why: upgrades need only the unrecorded network choice, not personal setup.
+export const OnboardingGate = {
+  /** @param {{attrs: any}} vnode */
+  view({ attrs }) {
+    return needsOnboarding(attrs.state) ? m(OnboardingView, attrs)
+      : m('.onboarding-view', m('.card.onboarding-card', m(PeerNetworkStep, attrs)));
   },
 };

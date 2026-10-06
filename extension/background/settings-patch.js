@@ -41,8 +41,14 @@ export const normalizeSettingsPatch = (patch, {
 }) => {
   /** @type {Record<string, unknown>} */
   const next = {};
-  if (typeof patch.voiceEnabled === 'boolean') {
-    next.voiceEnabled = patch.voiceEnabled;
+  for (const key of [
+    'voiceEnabled', 'voiceOnboardingDismissed', 'ocrEnabled', 'devMode',
+    'reasoningEnabled', 'advancedAutomationEnabled', 'autoMemoryEnabled',
+    'watchAgentTab', 'confirmWebWrites', 'schemaValidatedReplies',
+    'autoResumeInterruptedTurns', 'providerFailoverEnabled',
+    'prewalkEnabled', 'enginePrewalkEnabled',
+  ]) {
+    if (typeof patch[key] === 'boolean') next[key] = patch[key];
   }
   if (typeof patch.voiceVariant === 'string') {
     next.voiceVariant = normalizeVariant(patch.voiceVariant);
@@ -52,18 +58,6 @@ export const normalizeSettingsPatch = (patch, {
   }
   if (typeof patch.voiceSilenceMs === 'number' && Number.isFinite(patch.voiceSilenceMs)) {
     next.voiceSilenceMs = Math.max(250, Math.min(30_000, Math.round(patch.voiceSilenceMs)));
-  }
-  if (typeof patch.voiceOnboardingDismissed === 'boolean') {
-    next.voiceOnboardingDismissed = patch.voiceOnboardingDismissed;
-  }
-  if (typeof patch.ocrEnabled === 'boolean') {
-    next.ocrEnabled = patch.ocrEnabled;
-  }
-  if (typeof patch.devMode === 'boolean') {
-    next.devMode = patch.devMode;
-  }
-  if (typeof patch.reasoningEnabled === 'boolean') {
-    next.reasoningEnabled = patch.reasoningEnabled;
   }
   if (typeof patch.reasoningEffort === 'string'
       && reasoningEffortLevels.includes(patch.reasoningEffort)) {
@@ -92,29 +86,8 @@ export const normalizeSettingsPatch = (patch, {
     }
     next.openrouterModels = cleaned;
   }
-  if (typeof patch.advancedAutomationEnabled === 'boolean') {
-    next.advancedAutomationEnabled = patch.advancedAutomationEnabled;
-  }
-  if (typeof patch.autoMemoryEnabled === 'boolean') {
-    next.autoMemoryEnabled = patch.autoMemoryEnabled;
-  }
-  if (typeof patch.watchAgentTab === 'boolean') {
-    next.watchAgentTab = patch.watchAgentTab;
-  }
   if (patch.frontDoorView === 'panel' || patch.frontDoorView === 'home') {
     next.frontDoorView = patch.frontDoorView;
-  }
-  if (typeof patch.confirmWebWrites === 'boolean') {
-    next.confirmWebWrites = patch.confirmWebWrites;
-  }
-  if (typeof patch.schemaValidatedReplies === 'boolean') {
-    next.schemaValidatedReplies = patch.schemaValidatedReplies;
-  }
-  if (typeof patch.autoResumeInterruptedTurns === 'boolean') {
-    next.autoResumeInterruptedTurns = patch.autoResumeInterruptedTurns;
-  }
-  if (typeof patch.providerFailoverEnabled === 'boolean') {
-    next.providerFailoverEnabled = patch.providerFailoverEnabled;
   }
   if (Array.isArray(patch.providerFallbacks)) {
     const valid = new Set(knownProviderNames);
@@ -124,12 +97,6 @@ export const normalizeSettingsPatch = (patch, {
   }
   if (typeof patch.runnerModel === 'string') {
     next.runnerModel = patch.runnerModel.trim().slice(0, 200);
-  }
-  if (typeof patch.prewalkEnabled === 'boolean') {
-    next.prewalkEnabled = patch.prewalkEnabled;
-  }
-  if (typeof patch.enginePrewalkEnabled === 'boolean') {
-    next.enginePrewalkEnabled = patch.enginePrewalkEnabled;
   }
   if (typeof patch.prewalkExecutorModel === 'string') {
     next.prewalkExecutorModel = patch.prewalkExecutorModel.trim().slice(0, 200);

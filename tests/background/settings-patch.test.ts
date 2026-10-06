@@ -24,7 +24,7 @@ const norm = (patch: Record<string, unknown>, over: Partial<typeof deps> = {}) =
 
 describe('normalizeSettingsPatch — whitelist', () => {
   test('drops unknown keys entirely', () => {
-    expect(norm({ hackerKey: 1, providerModel: 'x' })).toEqual({ providerModel: 'x' });
+    expect(norm({ hackerKey: 1, providerModel: 'x', dwebChoiceMade: true })).toEqual({ providerModel: 'x' });
   });
   test('a JSON-parsed __proto__ payload cannot pollute Object.prototype', () => {
     // JSON.parse puts __proto__ as a real own key (unlike an object literal),

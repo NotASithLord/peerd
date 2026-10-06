@@ -258,19 +258,10 @@ export const defaults = {
   // no update_url, so the check is a structural no-op there.
   autoUpdateEnabled: { preview: true },
 
-  // Dweb participation is ON BY DEFAULT on the dev/preview package (owner
-  // call, 2026-06-13 — supersedes the earlier "opt-in even on preview",
-  // spec §12). Preview ships to contributors and early testers; making
-  // them toggle dweb on before the demo is pure friction, and the channel
-  // boundary IS friction tolerance, not a safety floor (see the file
-  // header) — same posture as `advancedAutomationEnabled: { preview: true }`. NOT a safety
-  // relaxation: the dweb module ships only where the preview target has a mesh
-  // host. Other packages prune it and omit this key from CHANNEL_DEFAULTS.
-  // Identity needs an unlocked vault, and
-  // NOTHING connects until the user explicitly joins a room (the bridge's
-  // consent gate). On = the dweb UI is live and the commons opens without
-  // a pre-step; it does not auto-connect anywhere.
-  dwebEnabled: { preview: true },
+  // Network participation starts only after an explicit user choice in
+  // onboarding or Settings. Stored overrides remain authoritative; an inherited
+  // preview default is not consent. Unsupported targets omit these keys.
+  dwebEnabled: { preview: false },
 
   // The DWEB AGENT — the mesh-operator actor (a persistent, keyless envoy that
   // absorbs the dweb tools and monitors inbound mesh traffic). OPT-IN even on

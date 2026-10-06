@@ -35,16 +35,10 @@ const normalizePeerName = (/** @type {unknown} */ value) => {
 const normalizeFacts = (/** @type {unknown} */ value) => {
   if (value == null) return { ok: true, callMe: '', notes: '' };
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false };
-  const facts = /** @type {{callMe?:unknown,notes?:unknown}} */ (value);
-  if ((facts.callMe !== undefined && typeof facts.callMe !== 'string')
-      || (facts.notes !== undefined && typeof facts.notes !== 'string')
-      || String(facts.callMe ?? '').length > MAX_DOC_CHARS
-      || String(facts.notes ?? '').length > MAX_DOC_CHARS) return { ok: false };
-  return {
-    ok: true,
-    callMe: String(facts.callMe ?? '').replace(/\s+/g, ' ').trim(),
-    notes: String(facts.notes ?? '').trim(),
-  };
+  const { callMe = '', notes = '' } = /** @type {{callMe?:unknown,notes?:unknown}} */ (value);
+  if (typeof callMe !== 'string' || typeof notes !== 'string'
+      || callMe.length > MAX_DOC_CHARS || notes.length > MAX_DOC_CHARS) return { ok: false };
+  return { ok: true, callMe: callMe.replace(/\s+/g, ' ').trim(), notes: notes.trim() };
 };
 const validProfile = (/** @type {any} */ value) => value?.id === PROFILE_ID
   && typeof value.peerName === 'string' && value.peerName.length > 0 && value.peerName.length <= 32
