@@ -86,7 +86,8 @@
     "verify:store": "bun packaging/verify-store-artifact.ts",
     "feeds": "bun packaging/gen-update-feeds.ts",
     "vendor:pako": "node scripts/vendor-pako-esm.mjs",
-    "vendor:codemirror": "bun run scripts/vendor-codemirror.ts"
+    "vendor:codemirror": "bun run scripts/vendor-codemirror.ts",
+    "gtm": "bun gtm/run.ts"
   },
   "devDependencies": {
     "@codemirror/autocomplete": "^6.20.3",
@@ -115,8 +116,9 @@
   },
   "overrides": {
     "adm-zip": "0.6.1",
-    "fast-uri": "3.1.7",
+    "fast-uri": "3.1.8",
     "image-size": "2.0.4",
-    "js-yaml": "4.3.2"
+    "js-yaml": "4.3.2",
+    "shell-quote": "1.11.0"
   }
 }

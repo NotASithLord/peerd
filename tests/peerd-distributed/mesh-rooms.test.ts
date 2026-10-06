@@ -144,6 +144,26 @@ describe('rooms over the rendezvous (fake node, real reducer)', () => {
     ra.leave(); rb.leave(); rc.leave();
   });
 
+  test('a channel closing during HELLO cannot keep the initial room join pending', async () => {
+    const node = createFakeNode();
+    const ether = createFakeEther();
+    const [a, b] = await Promise.all([generateIdentity(), generateIdentity()]);
+    const first = await join('closed-hello', a, node, ether);
+    const transport = {
+      ...ether.makeTransport(),
+      async connect() {
+        const [local, remote] = memoryPair();
+        const send = local.send;
+        local.send = (message) => { send(message); remote.close(); };
+        return local;
+      },
+    };
+    const second = await joinRoom({ roomId: 'closed-hello', identity: b,
+      url: URL_FAKE, WebSocket: node.WebSocket, transport });
+    expect(second.peers()).toHaveLength(0);
+    second.leave(); first.leave();
+  });
+
   test('roster request answers with the asker excluded', async () => {
     const node = createFakeNode();
     const ether = createFakeEther();
@@ -311,4 +331,31 @@ describe('mesh boundary rules', () => {
     expect(ma.peers()).toHaveLength(1);
     ma.close();
   });
+});
+
+test('cancelled relay dials propagate abort and reject late channels before admission', async () => {
+  const identity = await generateIdentity();
+  const remote = await generateIdentity();
+  let finish!: (channel: any) => void;
+  let transportSignal: AbortSignal | undefined;
+  const room = await joinRoom({
+    roomId: 'cancel-provider', identity, url: '',
+    transport: { connect: (_peer: any, opts: any) => {
+      transportSignal = opts.signal;
+      return new Promise((resolve) => { finish = resolve; });
+    } },
+  });
+  const ac = new AbortController();
+  let closed = 0;
+  try {
+    const dial = room.dialVia(remote.did, remote.did, { signal: ac.signal }).catch((error) => error);
+    ac.abort();
+    expect(await dial).toBeInstanceOf(Error);
+    expect(transportSignal?.aborted).toBe(true);
+    finish({ close: () => closed++ });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(closed).toBe(1);
+    expect(room.mesh.hasLink(remote.did)).toBe(false);
+  } finally { room.leave(); }
 });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { recordNetworkFloorVector } from '../../scripts/cdp/network-floor-oracle.mjs';
+import { recordNetworkFloorVector, recordPrivateChildFloor, ordinaryProbeReached } from '../../scripts/cdp/network-floor-oracle.mjs';
 
 const record = (vector: string, observed: { attempted: boolean; connections: number; requests: string[] }) => {
   const checks: { name: string; pass: boolean; detail: string }[] = [];
@@ -31,5 +31,51 @@ describe('Chrome private-network floor evidence', () => {
     expect(record(vector, { attempted: true, connections: 0, requests: [] })[1]?.pass).toBe(true);
     expect(record(vector, { attempted: true, connections: 1, requests: [] })[1]?.pass).toBe(false);
     expect(record(vector, { attempted: true, connections: 0, requests: ['/probe'] })[1]?.pass).toBe(false);
+  });
+});
+
+
+describe('isolated private-child probes', () => {
+  const observe = (overrides: Partial<Parameters<typeof recordPrivateChildFloor>[1]> = {}) => {
+    const checks: boolean[] = [];
+    const observations: unknown[] = [];
+    recordPrivateChildFloor({
+      check: (_name, pass) => { checks.push(pass); },
+      observe: (_name, value) => { observations.push(value); },
+    }, {
+      navigation: { connections: 1, requests: [] },
+      childFetch: { attempted: true, connections: 0, requests: [] },
+      sensitiveRequests: 0,
+      ...overrides,
+    });
+    return { checks, observations };
+  };
+
+  test('records navigation-only TCP explicitly while requiring a blocked child fetch', () => {
+    const result = observe();
+    expect(result.checks).toEqual([true]);
+    expect(result.observations).toEqual([{
+      connections: 1, requests: [], mode: 'connected-without-request',
+    }]);
+  });
+
+  test.each([
+    { attempted: true, connections: 1, requests: [] },
+    { attempted: true, connections: 0, requests: ['/probe?vector=trusted-private-child-fetch'] },
+    { attempted: false, connections: 0, requests: [] },
+  ])('child fetch fails for transport, HTTP, or missing attempt: %j', (childFetch) => {
+    expect(observe({ childFetch: { ...childFetch, requests: [...childFetch.requests] } }).checks).toEqual([false]);
+  });
+
+  test('navigation HTTP and sensitive requests still fail', () => {
+    expect(observe({ navigation: { connections: 1, requests: ['/probe'] } }).checks).toEqual([false]);
+    expect(observe({ sensitiveRequests: 1 }).checks).toEqual([false]);
+  });
+
+  test('fresh positive control requires both connection and its actual HTTP request', () => {
+    expect(ordinaryProbeReached({ connections: 1, requests: [] })).toBe(false);
+    expect(ordinaryProbeReached({ connections: 1, requests: ['/unrelated'] })).toBe(false);
+    expect(ordinaryProbeReached({ connections: 0, requests: ['/probe?vector=user-tab'] })).toBe(false);
+    expect(ordinaryProbeReached({ connections: 1, requests: ['/probe?vector=user-tab'] })).toBe(true);
   });
 });

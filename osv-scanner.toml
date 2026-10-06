@@ -107,3 +107,12 @@ reason = "undici, via web-ext's AMO client. Build-time only; talks only to addon
 id = "GHSA-vxpw-j846-p89q"
 ignoreUntil = 2026-11-01
 reason = "undici, via web-ext's AMO client. Build-time only; talks only to addons.mozilla.org."
+
+# Exception approved by the repository owner on 2026-10-06 for this exact scope.
+# Reviewed only for web-ext 10.6.0 -> adbkit 3.3.9 -> node-forge 1.4.0.
+# Desktop lint/sign/test paths do not create adbkit's TCP-USB bridge.
+# Re-triage before changing these coordinates or enabling Android/bridge use.
+[[IgnoredVulns]]
+id = "GHSA-86w9-cpqp-85rv"
+ignoreUntil = 2026-10-20T00:00:00Z
+reason = "No upstream fix. Current web-ext desktop lint/sign/test commands do not invoke adbkit TCP-USB RSA authentication; reviewed for web-ext 10.6.0 / adbkit 3.3.9 / node-forge 1.4.0. Not a general node-forge safety claim."

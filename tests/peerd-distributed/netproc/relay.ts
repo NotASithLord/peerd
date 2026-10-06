@@ -6,11 +6,13 @@
 // form REAL authenticated mesh links to the others and run its real logic.
 //   bun tests/peerd-distributed/netproc/relay.ts [port]
 
-type WsData = { did?: string; label?: string };
+// Trusted test control plane supplies per-connection binding tokens. This
+// fixture is not evidence of DTLS identity binding; the browser lane owns that.
+type WsData = { did?: string; label?: string; fingerprint: string };
 const PORT = Number(process.argv[2] ?? 8810);
 const conns = new Map<string, any>(); // did -> ws
 
-const roster = () => [...conns.values()].map((ws) => ({ did: ws.data.did, label: ws.data.label }));
+const roster = () => [...conns.values()].map((ws) => ({ did: ws.data.did, label: ws.data.label, fingerprint: ws.data.fingerprint }));
 const sendRoster = () => {
   const msg = JSON.stringify({ t: 'roster', peers: roster() });
   for (const ws of conns.values()) ws.send(msg);
@@ -18,8 +20,9 @@ const sendRoster = () => {
 
 const server = Bun.serve<WsData>({
   port: PORT,
+  hostname: '127.0.0.1',
   fetch(req, server) {
-    return server.upgrade(req, { data: {} }) ? undefined : new Response('peerd netproc relay');
+    return server.upgrade(req, { data: { fingerprint: [...crypto.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, '0')).join('') } }) ? undefined : new Response('peerd netproc relay');
   },
   websocket: {
     message(ws, raw) {

@@ -27,14 +27,9 @@
 //      Channel changes vs. a hand-wired pair).
 //
 // 2. SAME BROWSER PROFILE      transports/broadcast.js
-//    Different tab/window, same origin+profile, over a shared
-//    BroadcastChannel bus (logical link isolated by sessionId + did).
-//    canReach(): probes with a hello/ack on a short timeout, so a stale
-//    advert naming bcast still falls through if no same-profile peer answers.
-//    TESTED: browser-validated (open the demo in two tabs). BroadcastChannel
-//      is a browser/worker API ABSENT in Bun, where this transport degrades
-//      to canReach()===0 — so the Bun suite simply skips it rather than
-//      failing. It is exercised live, not in unit tests, by design.
+//    Disabled for session v2: a shared BroadcastChannel bus does not supply an
+//    authenticated carrier binding. The rung returns canReach()===0 so the
+//    selector proceeds to WebRTC. There is no legacy/unbound fallback.
 //
 // 3. SAME MACHINE / LAN / REMOTE   transports/webrtc.js
 //    RTCPeerConnection + ICE. STUN and TURN are SUB-tiers inside this one

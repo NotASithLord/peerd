@@ -51,6 +51,46 @@ const nextMessage = (worker, type, timeoutMs = 10000) => new Promise((resolve, r
 });
 
 describe('notebook-tab realm seal (real worker realm)', () => {
+  it('keeps the Wasmer SDK and its captured N-API globals sealed', async () => {
+    const worker = spawnFixture('wasmer-seal-probe-worker.js');
+    /** @type {Array<any>} */ const requests = [];
+    worker.addEventListener('message', (event) => {
+      if (event.data?.type?.startsWith('wasmer-thread-')) requests.push(event.data);
+    });
+    try {
+      await nextMessage(worker, 'fixture-ready');
+      const reply = nextMessage(worker, 'wasmer-seal-result');
+      worker.postMessage({ type: 'run-probes' });
+      const result = await reply;
+      expect(result.sdkImported).toBe(true);
+      for (const channel of ['fetch', 'rawOpfs', 'caches', 'indexedDB', 'BroadcastChannel', 'napiFetch', 'napiStorage', 'napiCaches', 'napiIndexedDB', 'napiBroadcastChannel']) {
+        expect(result.probes[channel].threw).toBe(true);
+        expect(result.probes[channel].name).toBe('WasmerPodEgressBlockedError');
+      }
+      for (const channel of ['Worker', 'inheritedWorker', 'napiWorker']) {
+        expect(result.probes[channel].threw).toBe(true);
+        expect(result.probes[channel].name).toBe('TypeError');
+      }
+      for (const value of [...Object.values(result.inspection), result.storageInspection]) {
+        expect(value.prototypeCopy).toBe(false);
+        expect(value.writable).toBe(false);
+        expect(value.configurable).toBe(false);
+      }
+      expect(result.chromeAbsent).toBe(true);
+      expect(result.browserAbsent).toBe(true);
+      expect(result.inheritedWorkerIsRelay).toBe(true);
+      expect(result.workerParentIsEventTarget).toBe(true);
+      expect(result.napiWorkerIsRelay).toBe(true);
+      expect(requests.length).toBe(2);
+      expect(requests[0].type).toBe('wasmer-thread-create');
+      expect(requests[0].id).toBe(1);
+      expect(requests[0].url).toBe(new URL('/vendor/wasmer/dist/browser-worker.js', location.href).href);
+      expect(requests[0].options.type).toBe('module');
+      expect(requests[1].type).toBe('wasmer-thread-terminate');
+      expect(requests[1].id).toBe(1);
+    } finally { worker.terminate(); }
+  });
+
   it('gives Pod no ambient fetch, raw OPFS root, or extension API namespace', async () => {
     const worker = spawnFixture('pod-seal-probe-worker.js');
     try {

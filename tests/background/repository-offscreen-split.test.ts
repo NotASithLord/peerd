@@ -1258,14 +1258,27 @@ describe('operation-lazy offscreen repository split', () => {
 
   test('expires abandoned sibling reads before dispatch so a later mutation is not starved', async () => {
     const messages: any[] = [];
+    let clock = 1_000;
+    let timerId = 0;
+    const timers = new Map<number, { due: number; fire: () => void }>();
+    let dispatched!: () => void;
+    const firstReadDispatched = new Promise<void>((resolve) => { dispatched = resolve; });
     const client = makePrivateClient(async (message: any) => {
       messages.push(message);
       if (message.type === 'repository/host-cancel') return { ok: true };
       if (message.method === 'commit') return { ok: true, result: { oid: 'after-reads' } };
+      dispatched();
       return new Promise(() => {});
     }, {
       readTimeoutMs: 5,
       effectTimeoutMs: 50,
+      now: () => clock,
+      setTimeoutFn: (fire: () => void, delay: number) => {
+        const id = ++timerId;
+        timers.set(id, { due: clock + delay, fire });
+        return id;
+      },
+      clearTimeoutFn: (id: number) => { timers.delete(id); },
       newId: (() => { let id = 0; return () => `call-queue-deadline-${++id}`; })(),
     });
     const reads = Promise.allSettled([
@@ -1275,14 +1288,30 @@ describe('operation-lazy offscreen repository split', () => {
       client.getRemote(ref),
     ]);
     const mutation = client.commit(ref, { message: 'after abandoned overview' });
+    // Host proof and MessageChannel delivery use the real event loop. Start
+    // elapsed-time measurement only after observing the first read dispatched,
+    // so a loaded runner cannot expire every read before this scenario begins.
+    await firstReadDispatched;
+    expect(messages.filter((entry) => entry.type === 'repository/host-call')
+      .map((entry) => entry.method)).toEqual(['status']);
+    expect(timers.size).toBe(1);
+    // Reads have two attempts' total budget. Expire that budget while the first
+    // read owns the lane; queued siblings must never reach the host afterward.
+    clock += 10;
+    for (const [id, timer] of [...timers]) {
+      if (timer.due <= clock) { timers.delete(id); timer.fire(); }
+    }
     const [readResults, commit] = await Promise.all([reads, mutation]);
     expect(commit).toEqual({ oid: 'after-reads' });
-    expect(readResults.every((entry) => entry.status === 'rejected')).toBe(true);
-    const calls = messages.filter((entry) => entry.type === 'repository/host-call');
-    const readCalls = calls.filter((entry) => entry.method !== 'commit');
-    expect(readCalls.length).toBeGreaterThanOrEqual(1);
-    expect(readCalls.length).toBeLessThanOrEqual(2);
-    expect(calls.filter((entry) => entry.method === 'commit')).toHaveLength(1);
+    expect(readResults[0]).toMatchObject({ status: 'rejected', reason: {
+      code: 'repository-host-timeout', outcomeKnown: true, repositoryHostDispatched: true,
+    } });
+    for (const result of readResults.slice(1)) expect(result).toMatchObject({ status: 'rejected', reason: {
+      code: 'repository-read-deadline', outcomeKnown: true, repositoryHostDispatched: false,
+    } });
+    expect(messages.filter((entry) => entry.type === 'repository/host-call')
+      .map((entry) => entry.method)).toEqual(['status', 'commit']);
+    expect(timers.size).toBe(0);
   });
 
   test('never replays a timed-out mutation and reports unknown custody', async () => {

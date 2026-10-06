@@ -2,12 +2,9 @@ import { describe, test, expect } from 'bun:test';
 import { abortClosesPc, createWebrtcTransport } from '../../extension/peerd-distributed/transport/transports/webrtc.js';
 import { createInprocTransport } from '../../extension/peerd-distributed/transport/transports/inproc.js';
 
-// A capturing mock RTCPeerConnection (injectable) lets us drive the REAL webrtc
-// transport's connect() to prove the WIRED late-completion guard: once the
-// channel opens, `opened` flips true before the caller's finally-abort runs, so
-// abort must leave the live pc alone. (We only assert the open-then-abort path:
-// a never-opening dial leaves channelReady pending forever, which the bun runner
-// waits on; that direction is covered by the abortClosesPc unit tests above.)
+// Drive the real transport through both unopened cancellation and the live-link
+// guard. Like native RTCPeerConnection.close(), this mock emits no state events;
+// promise settlement must come from the peer owner's explicit release path.
 const instances: any[] = [];
 class MockDataChannel {
   readyState = 'connecting';
@@ -158,6 +155,49 @@ describe('webrtc transport — the wired late-completion guard (D2)', () => {
     await remoteReady;
   });
 
+  test('abort settles an unopened dial without native close events', async () => {
+    const t = createWebrtcTransport({ RTCPeerConnection: MockPC as any });
+    const ac = new AbortController();
+    let unsubscribed = 0;
+    const outcome = t.connect({ did: 'x' }, {
+      signaling: { send() {}, onRemote: () => () => { unsubscribed++; } }, signal: ac.signal,
+    }).catch((error: Error) => error);
+    const pc = instances.at(-1);
+    ac.abort();
+    expect(await outcome).toBeInstanceOf(Error);
+    expect(pc.closed).toBe(true);
+    expect(unsubscribed).toBe(1);
+  });
+
+  test('already-aborted dial releases immediately and settles', async () => {
+    const t = createWebrtcTransport({ RTCPeerConnection: MockPC as any });
+    const ac = new AbortController();
+    ac.abort();
+    let unsubscribed = 0;
+    const outcome = t.connect({ did: 'x' }, {
+      signaling: { send() {}, onRemote: () => () => { unsubscribed++; } }, signal: ac.signal,
+    }).catch((error: Error) => error);
+    expect(await outcome).toBeInstanceOf(Error);
+    expect(instances.at(-1).closed).toBe(true);
+    expect(unsubscribed).toBe(1);
+  });
+
+  test('abort settles responder channel before any datachannel arrives', async () => {
+    const t = createWebrtcTransport({ RTCPeerConnection: MockPC as any });
+    const ac = new AbortController();
+    let unsubscribed = 0;
+    const accepted = await t.accept({
+      offer: { sdp: 'mock' },
+      signaling: { send() {}, onRemote: () => () => { unsubscribed++; } }, signal: ac.signal,
+    });
+    const outcome = accepted.channel.catch((error: Error) => error);
+    const pc = instances.at(-1);
+    ac.abort();
+    expect(await outcome).toBeInstanceOf(Error);
+    expect(pc.closed).toBe(true);
+    expect(unsubscribed).toBe(1);
+  });
+
   test('a channel that opens before abort keeps its live pc', async () => {
     instances.length = 0;
     const t = createWebrtcTransport({ RTCPeerConnection: MockPC as any });
@@ -192,7 +232,9 @@ describe('rooms.js + webrtc wire the AbortController at every abandonment site (
     const src = await Bun.file('extension/peerd-distributed/transport/rooms.js').text();
     expect((src.match(/new AbortController\(\)/g) ?? []).length).toBe(4);
     expect((src.match(/signal: ac\.signal/g) ?? []).length).toBe(4);
-    expect((src.match(/ac\.abort\(\)/g) ?? []).length).toBe(4);
+    // Every dial/accept still aborts in finally. Additional caller-cancel and
+    // room-shutdown abort sites must not invalidate this cleanup invariant.
+    expect((src.match(/finally\s*\{[^}]*\bac\.abort\(\)/g) ?? []).length).toBe(4);
   });
 
   test('the webrtc transport threads signal into connect + accept and guards the helper', async () => {

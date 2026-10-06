@@ -70,8 +70,15 @@ const render = () => {
   ].filter(Boolean).join('\n');
 };
 
+/** @param {string} stage */
+const bootStage = (stage) => {
+  /** @type {any} */ (window).__DWEB_BOOT__ = { stage, at: Date.now(), did: myDid, error };
+};
+bootStage('module-loaded');
+
 const boot = async () => {
   try {
+    bootStage('generating-identity');
     const identity = await generateIdentity();
     myDid = identity.did;
     render();
@@ -81,7 +88,9 @@ const boot = async () => {
     // waiting for an outbound packet that never leaves. The driver also disables
     // mDNS candidate obfuscation so these host candidates carry real loopback
     // IPs Chrome can actually pair.
+    bootStage('joining-room');
     const room = await joinRoom({ roomId, identity, url, iceServers: [] });
+    bootStage('creating-base-network');
     base = await createBaseNetwork({ identity, mesh: room.mesh, meta: () => ({ name }) });
 
     // Subscribe BEFORE we start beaconing — gossip is fire-and-flood, so a
@@ -181,9 +190,11 @@ const boot = async () => {
       },
       stop: () => { clearInterval(beat); if (askBeat) clearInterval(askBeat); base.close(); room.leave(); },
     };
+    bootStage('ready');
   } catch (e) {
     error = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
     render();
+    bootStage('failed');
     /** @type {any} */ (window).__DWEB__ = { ready: true, did: myDid, report: () => ({ did: myDid, error, linked: 0, present: 0, heard: 0, peers: [] }) };
   }
 };

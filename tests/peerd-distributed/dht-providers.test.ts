@@ -75,3 +75,17 @@ describe('dht node — provider sets', () => {
     expect(await nodes[9].node.findProviders(KEY)).toContain(nodes[5].identity.did);
   });
 });
+
+test('parallel provider referrals cannot race past the contact cap', async () => {
+  const identity = await generateIdentity();
+  const brokers = await Promise.all(Array.from({ length: 3 }, () => generateIdentity()));
+  const referred = await Promise.all(Array.from({ length: 192 }, () => generateIdentity()));
+  const node = createDhtNode({
+    identity, selfId: await nodeIdOf(identity.did), store: createDhtStore(),
+    rpc: async (contact) => ({ providers: referred.slice(brokers.findIndex((peer) => peer.did === contact.did) * 64).map((peer) => peer.did) }),
+  });
+  for (const broker of brokers) await node.learn(broker.did);
+  const contacts = await node.findProviderContacts(KEY);
+  expect(contacts).toHaveLength(64);
+  expect(contacts.every((contact) => brokers.some((broker) => broker.did === contact.hints.broker))).toBe(true);
+});

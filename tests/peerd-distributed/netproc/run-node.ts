@@ -40,7 +40,15 @@ const main = async () => {
   const linkTo = (peerDid: string) => {
     let ch = links.get(peerDid);
     if (!ch) {
-      ch = createBufferedChannel({ send: (obj: any) => ws.send(JSON.stringify({ t: 'msg', to: peerDid, payload: obj })), close: () => {} });
+      ch = createBufferedChannel({
+        send: (obj: any) => ws.send(JSON.stringify({ t: 'msg', to: peerDid, payload: obj })), close: () => {},
+        // The fixture relay is trusted infrastructure, unlike a production
+        // signaling broker. Its roster tokens stand in for transport bindings.
+        getSessionBinding: () => ({ kind: 'trusted-local',
+          localFingerprint: roster.find((peer) => peer.did === myDid)?.fingerprint,
+          remoteFingerprint: roster.find((peer) => peer.did === peerDid)?.fingerprint,
+          streamId: 0 }),
+      });
       links.set(peerDid, ch);
     }
     return ch;
@@ -49,7 +57,11 @@ const main = async () => {
     if (peerDid === myDid || mesh.hasLink(peerDid) || linking.has(peerDid)) return;
     linking.add(peerDid);
     const ch = linkTo(peerDid);
-    try { await createSession({ channel: ch, identity }); mesh.addLink(ch, peerDid); await node.dht.learn(peerDid); }
+    try {
+      const { remoteDid } = await createSession({ channel: ch, identity });
+      if (remoteDid !== peerDid) { ch.close(); throw new Error('fixture peer identity mismatch'); }
+      mesh.addLink(ch, peerDid); await node.dht.learn(peerDid);
+    }
     catch (e: any) { /* a crossed/duplicate link can lose the race — fine */ }
     finally { linking.delete(peerDid); }
   };

@@ -94,11 +94,11 @@ describe('red-team: Pod jobs receive named capabilities, never extension authori
     } finally { worker.terminate(); }
   });
 
-  it('the Pod host page independently denies native connections with CSP', async () => {
+  it('the Pod host page permits only packaged asset connections with CSP', async () => {
     // eslint-disable-next-line no-restricted-globals
     const html = await (await fetch('/engine-tabs/pod-tab/index.html')).text();
     const meta = html.match(/http-equiv="Content-Security-Policy"\s+content="([^"]*)"/i);
-    expect(meta?.[1]).toBe("connect-src 'none'");
+    expect(meta?.[1]).toBe("connect-src 'self'");
   });
 });
 

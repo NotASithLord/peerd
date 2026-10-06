@@ -11,8 +11,11 @@ const podNote = (persistent) => [
   'files, pipelines, Web-standard JavaScript (`js` on Chromium), WASI Preview 1 commands,',
   'browser Git, and audited HTTPS (`curl`). WASI tools can be installed with',
   '`install-tool name file.wasm`; `wasi-demo` is the built-in smoke test.',
+  '`wasmer [--command name] file.wasm|file.webc [args...]` runs local WASI/WASIX on Chromium with shared-memory isolation.',
+  'Its workspace is /workspace. Use absolute guest paths for Preview 1 programs.',
+  '`wasmer-demo` tests Wasmer. Wasmer has no network, Node, EdgeJS, or eval.',
   'There is no Node, npm, native binary, socket, PTY, or package-manager claim.',
-  'Use a WebVM when a workload needs Linux, Node/npm, Python/Ruby, native tools,',
+  'Use a WebVM when a workload needs Linux, Node/npm, native tools,',
   'or broad POSIX compatibility. Commands run in fresh sealed Workers; files',
   persistent
     ? 'persist in this named Pod, while cwd/environment/live jobs are process state.'

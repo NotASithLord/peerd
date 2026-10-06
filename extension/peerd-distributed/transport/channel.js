@@ -17,19 +17,23 @@
 // the underlying transport via the injected `close`). Both settle the
 // channel exactly once and fire onClose subscribers.
 
+import { localSessionBindings } from './channel-binding.js';
+
 /**
- * @param {{ send: (msg: any) => void, close?: () => void }} io
+ * @param {{ send: (msg: any) => void, close?: () => void, getSessionBinding?: () => Readonly<import('./channel-binding.js').SessionBinding> }} io
  */
-export const createBufferedChannel = ({ send, close } = /** @type {{ send: (msg: any) => void }} */ ({})) => {
+export const createBufferedChannel = ({ send, close, getSessionBinding } = /** @type {{ send: (msg: any) => void }} */ ({})) => {
   /** @type {((msg: any) => void) | null} */
   let handler = null;
   let closed = false;
+  let transportReleased = false;
   /** @type {any[]} */
   const backlog = [];
   /** @type {Set<() => void>} */
   const closeCbs = new Set();
 
   const chan = {
+    getSessionBinding: () => closed ? null : getSessionBinding?.() ?? null,
     /** @param {any} msg */
     send: (msg) => {
       if (!closed) send(msg);
@@ -39,13 +43,16 @@ export const createBufferedChannel = ({ send, close } = /** @type {{ send: (msg:
     deliver(msg) {
       if (closed) return;
       if (handler) handler(msg);
-      else backlog.push(msg);
+      else if (backlog.length < 16) backlog.push(msg);
+      // why: a stalled handshake/consumer cannot retain an unbounded stream.
+      else chan.close();
     },
     // Install (or clear, with null) the handler. Flushes the backlog.
     /** @param {((msg: any) => void) | null} fn */
     setHandler(fn) {
       handler = fn;
-      if (fn) while (backlog.length) fn(backlog.shift());
+      if (closed) return;
+      if (fn) while (backlog.length && handler) handler(backlog.shift());
     },
     isClosed: () => closed,
     // Fires once, immediately if already closed. Returns unsubscribe.
@@ -63,13 +70,19 @@ export const createBufferedChannel = ({ send, close } = /** @type {{ send: (msg:
     signalClose() {
       if (closed) return;
       closed = true;
+      backlog.length = 0;
+      handler = null;
       for (const cb of [...closeCbs]) cb();
       closeCbs.clear();
     },
     // Local hang-up: tear down the underlying transport too.
     close() {
-      if (closed) return;
-      try { close?.(); } catch { /* transport already gone */ }
+      // A transport notification can precede its owner's cleanup. Release the
+      // underlying resource once even when signalClose already notified users.
+      if (!transportReleased) {
+        transportReleased = true;
+        try { close?.(); } catch { /* transport already gone */ }
+      }
       chan.signalClose();
     },
   };
@@ -81,10 +94,11 @@ export const createBufferedChannel = ({ send, close } = /** @type {{ send: (msg:
 // everything except the actual WebRTC bytes (which peer.js owns). Closing
 // either end signals the other, like a real pipe.
 export const memoryPair = () => {
+  const [bindingA, bindingB] = localSessionBindings();
   // Mutually wired: each channel's `send`/`close` reaches the other. `a`
   // names `b` before `b` exists, which is fine — neither closure fires during
   // construction, only once a message is actually delivered/closed.
-  const a = createBufferedChannel({ send: (m) => b.deliver(m), close: () => b.signalClose() });
-  const b = createBufferedChannel({ send: (m) => a.deliver(m), close: () => a.signalClose() });
+  const a = createBufferedChannel({ send: (m) => b.deliver(m), close: () => b.signalClose(), getSessionBinding: () => bindingA });
+  const b = createBufferedChannel({ send: (m) => a.deliver(m), close: () => a.signalClose(), getSessionBinding: () => bindingB });
   return [a, b];
 };

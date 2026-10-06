@@ -35,8 +35,9 @@ import {
   NETWORK_GUARD_UNRELATED_HOST, SITE_CLIENT_FIXTURE_TLS_PORT,
 } from './e2e-harness.mjs';
 import { startWebFixtureServer } from './fixtures/web-suite.mjs';
-import { recordNetworkFloorVector } from './network-floor-oracle.mjs';
+import { recordNetworkFloorVector, recordPrivateChildFloor, ordinaryProbeReached } from './network-floor-oracle.mjs';
 import { NOTEBOOK_FETCH_STATE } from './notebook-fetch-state.mjs';
+import { WASMER_STATE } from './wasmer-state.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -499,6 +500,7 @@ let pacingDelegated = false;
 let pacingActorCalled = false;
 
 export const STATES = [
+  WASMER_STATE,
   {
     name: 'pacing-wait-stop', kind: 'functional', phase: 'post-unlock',
     responder: (_index, request) => {
@@ -705,6 +707,33 @@ export const STATES = [
       let ordinaryControllerRequests = 0;
       let sensitiveChildRequests = 0;
       const controllerAttempts = new Set();
+      const isolatedProbes = [];
+      // Never reset these counters: separate listeners attribute speculative
+      // navigation and child-fetch connections without cross-vector reuse.
+      const startIsolatedProbe = async () => {
+        let connections = 0;
+        const requests = [];
+        const sockets = new Set();
+        const server = createServer((req, res) => {
+          requests.push(req.url ?? '/');
+          res.writeHead(204, { connection: 'close' });
+          res.end();
+        });
+        server.on('connection', (socket) => {
+          connections += 1; sockets.add(socket);
+          socket.once('close', () => sockets.delete(socket));
+        });
+        const close = () => {
+          for (const socket of sockets) socket.destroy();
+          server.close(() => {});
+        };
+        isolatedProbes.push({ close });
+        await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+        return { port: server.address().port, snapshot: () => ({ connections, requests: [...requests] }) };
+      };
+      let privateNavigationProbe;
+      let privateFetchProbe;
+      let privateChildObserved;
       const probeServer = createServer((req, res) => {
         probeRequests.push(req.url ?? '/');
         res.writeHead(204, { connection: 'close' });
@@ -848,7 +877,8 @@ export const STATES = [
           <\/script>`);
           return;
         }
-        const trustedTarget = `http://127.0.0.1:${probePort}/probe?vector=trusted-private-child`;
+        const trustedTarget = `http://127.0.0.1:${privateNavigationProbe.port}/probe?vector=trusted-private-child`;
+        const trustedFetchTarget = `http://127.0.0.1:${privateFetchProbe.port}/probe?vector=trusted-private-child-fetch`;
         const sensitiveTarget = `http://chase.com:${NETWORK_GUARD_CONTROLLER_PORT}/sensitive-child`;
         const dataTarget = `data:text/html,${encodeURIComponent(`<script>fetch(${JSON.stringify(
           `http://127.0.0.1:${probePort}/probe?vector=data-child`,
@@ -864,7 +894,8 @@ export const STATES = [
               const child = window.open(${JSON.stringify(trustedTarget)}, 'trusted-private-child');
               if (child) {
                 navigator.sendBeacon('/attempt?vector=trusted-private-child');
-                child.fetch(${JSON.stringify(trustedTarget)}, { mode: 'no-cors' }).catch(() => {});
+                child.fetch(${JSON.stringify(trustedFetchTarget)}, { mode: 'no-cors' }).catch(() => {});
+                navigator.sendBeacon('/attempt?vector=trusted-private-child-fetch');
               }
             });
             document.querySelector('#trusted-sensitive-child').addEventListener('click', () => {
@@ -907,6 +938,8 @@ export const STATES = [
       let releaseMonitorHold = null;
       let diagnosticWorkerRuleInstalled = false;
       try {
+        privateNavigationProbe = await startIsolatedProbe();
+        privateFetchProbe = await startIsolatedProbe();
         const fixtureTab = await evalIn(ctx.page, `(async () => {
           const tab = await chrome.tabs.create({ active: false });
           try {
@@ -1014,12 +1047,18 @@ export const STATES = [
             connections: probeConnections,
             requests: [...probeRequests],
             sensitiveRequests: sensitiveChildRequests - sensitiveBefore,
+            ...(label === 'private' ? {
+              navigation: privateNavigationProbe.snapshot(),
+              childFetch: { ...privateFetchProbe.snapshot(),
+                attempted: controllerAttempts.has('trusted-private-child-fetch') },
+            } : {}),
             children,
             actorResult: networkGuardActorResult.slice(0, 2000),
           };
           rec.check(`${label} trusted click exercised the requested child path`,
             observed.completed && observed.attempted, JSON.stringify(observed));
-          rec.check(`${label} child causes no protected network side effect`,
+          if (label === 'private') privateChildObserved = observed;
+          else rec.check(`${label} child causes no protected network side effect`,
             observed.connections === 0 && observed.requests.length === 0
               && observed.sensitiveRequests === 0,
             JSON.stringify(observed));
@@ -1027,7 +1066,8 @@ export const STATES = [
             JSON.stringify(observed));
           const hasReceipt = networkGuardActorResult.includes('protected_child_navigation');
           rec.check(`${label} child policy receipt is target-free when Chrome reports one`,
-            !hasReceipt || (!networkGuardActorResult.includes(`127.0.0.1:${probePort}`)
+            !hasReceipt || (![probePort, privateNavigationProbe.port, privateFetchProbe.port]
+              .some((port) => networkGuardActorResult.includes(`127.0.0.1:${port}`))
               && !networkGuardActorResult.includes('chase.com')),
             networkGuardActorResult.slice(0, 2000));
           rec.observe(`${label} child policy outcome`, {
@@ -1045,13 +1085,14 @@ export const STATES = [
         ]) {
           await runTrustedChild(child);
         }
-        // why: measure protected children before user navigation can leave a late TCP connection.
-        const baselineUrl = `http://127.0.0.1:${probePort}/probe?vector=user-tab`;
+        // The positive control owns a fresh endpoint, so its HTTP request cannot
+        // reuse an idle socket counted before another vector reset its counters.
+        const userProbe = await startIsolatedProbe();
+        const baselineUrl = `http://127.0.0.1:${userProbe.port}/probe?vector=user-tab`;
         const userTab = await evalIn(ctx.page, `chrome.tabs.create({ url: ${JSON.stringify(baselineUrl)}, active: false })`, true);
-        await waitFor(() => probeRequests.includes('/probe?vector=user-tab'), { budgetMs: 5_000, pollMs: 25 });
+        await waitFor(() => ordinaryProbeReached(userProbe.snapshot()), { budgetMs: 5_000, pollMs: 25 });
         rec.check('an ordinary user tab can still reach the private probe',
-          probeRequests.includes('/probe?vector=user-tab') && probeConnections > 0,
-          JSON.stringify({ probeConnections, probeRequests }));
+          ordinaryProbeReached(userProbe.snapshot()), JSON.stringify(userProbe.snapshot()));
         if (typeof userTab?.id === 'number') {
           await evalIn(ctx.page, `chrome.tabs.remove(${userTab.id})`, true).catch(() => {});
         }
@@ -1644,10 +1685,20 @@ export const STATES = [
           })`, true).catch(() => {});
         }
         ordersWorkerMonitor?.connection.close();
+        for (const isolated of isolatedProbes) isolated.close();
         probeServer.closeAllConnections?.();
         controllerServer.closeAllConnections?.();
         probeServer.close();
         controllerServer.close();
+        // Keep the endpoints alive throughout the state and include delayed
+        // connections/requests in the one private-child verdict. Report after
+        // closing all sockets so a reporter error cannot strand a listener.
+        if (privateChildObserved) recordPrivateChildFloor(rec, {
+          ...privateChildObserved,
+          navigation: privateNavigationProbe.snapshot(),
+          childFetch: { ...privateFetchProbe.snapshot(),
+            attempted: controllerAttempts.has('trusted-private-child-fetch') },
+        });
       }
     },
   },
@@ -3415,12 +3466,17 @@ export const STATES = [
     name: 'vault-lock', kind: 'functional', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) {
+      const lockStartedAt = Date.now();
       const lock = await rpc(ctx.page, { type: 'vault/lock' });
+      const lockReplyMs = Date.now() - lockStartedAt;
       const locked = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.vault-brand') && !document.querySelector('form.input-bar')`), { budgetMs: 8_000 });
       rec.check('locking flips the panel to the vault gate', !!locked && lock?.ok === true, JSON.stringify(lock));
       if (!locked || lock?.ok !== true) {
         await rec.shot('lock-failed');
         rec.observe('lock failure', {
+          lockReplyMs,
+          elapsedMs: Date.now() - lockStartedAt,
+          kernel: await rpc(ctx.page, { type: 'bootstrap/ready' }),
           state: await rpc(ctx.page, { type: 'state/get' }),
           pageEvents: ctx.page.events.slice(-12),
           targetEvents: ctx.extensionTargetEvents().map(({ targetId, events }) => ({ targetId, events: events.slice(-12) })),

@@ -21,6 +21,7 @@ import {
 } from './manifest.js';
 import { sha256hex } from './chunk.js';
 import { parsePeerdUri } from './uri.js';
+import { createChannelClient } from './transfer.js';
 import { concat } from '/shared/bundle/bytes.js';
 
 const ALPHA = 3;
@@ -29,44 +30,8 @@ const ALPHA = 3;
  * A wire message in the content protocol — JSON-framed, every field is
  * wire-decoded and validated at runtime (hash + signature checks below).
  * @typedef {{ t: string, hash: string, manifest?: any, bytes?: string }} ContentMsg
- * @typedef {{ send: (m: ContentMsg) => void, setHandler: (h: ((msg: ContentMsg) => void) | null) => void }} ContentChannel
+ * @typedef {{ send: (m: ContentMsg) => void, setHandler: (h: ((msg: ContentMsg) => void) | null) => void, onClose?: (cb: () => void) => (() => void) }} ContentChannel
  */
-
-// A thin request/response client over one content channel (the correlation layer
-// fetchBundle keeps private, factored out so the swarm can run N of them).
-/**
- * @param {ContentChannel} channel
- * @param {number} timeoutMs
- */
-const createChannelClient = (channel, timeoutMs) => {
-  /** @type {Map<string, (msg: ContentMsg) => void>} */
-  const pending = new Map(); // `${t}:${hash}` -> settle
-  channel.setHandler((msg) => {
-    if (!msg || typeof msg.t !== 'string') return;
-    const settle = pending.get(`${msg.t}:${msg.hash}`);
-    if (settle) settle(msg);
-  });
-  /**
-   * @param {string} reqType
-   * @param {string[]} respTypes
-   * @param {string} h
-   * @returns {Promise<ContentMsg>}
-   */
-  const req = (reqType, respTypes, h) => new Promise((resolve, reject) => {
-    /** @param {ContentMsg} msg */
-    const settle = (msg) => { clearTimeout(timer); for (const rt of respTypes) pending.delete(`${rt}:${h}`); resolve(msg); };
-    for (const rt of respTypes) pending.set(`${rt}:${h}`, settle);
-    const timer = setTimeout(() => { for (const rt of respTypes) pending.delete(`${rt}:${h}`); reject(new Error('timeout')); }, timeoutMs);
-    channel.send({ t: reqType, hash: h });
-  });
-  return {
-    /** @param {string} h */
-    manifest: (h) => req('MANIFEST_REQ', ['MANIFEST', 'NOMANIFEST'], h),
-    /** @param {string} h */
-    chunk: (h) => req('CHUNK_REQ', ['CHUNK', 'NOCHUNK'], h),
-    close: () => channel.setHandler(null),
-  };
-};
 
 /** @typedef {ReturnType<typeof createChannelClient>} ChannelClient */
 
@@ -92,23 +57,34 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
   if (!clients.length) throw new Error(`swarm: no reachable provider for ${hash}`);
 
   try {
-    // 1. Manifest — from whichever provider answers; failover past NOMANIFEST.
-    // why typed shape: the manifest is wire-decoded JSON re-verified at
-    // runtime (hash + signature below); chunks is what verifyManifest commits to.
-    /** @type {({ chunks: Array<{ hash: string, size: number }>, size: number } & Record<string, any>) | null} */
-    let manifest = null;
-    for (const { client } of clients) {
-      try { const m = await client.manifest(hash); if (m.t === 'MANIFEST') { manifest = m.manifest; break; } }
-      catch { /* try the next provider */ }
-    }
-    if (!manifest) throw new Error(`no reachable provider holds ${hash}`);
-
-    // 2. Bound shape before canonicalization/signature work.
-    assertBundleWithinLimits(manifest);
-    if (await manifestHash(manifest) !== hash) throw new Error('manifest hash mismatch — address does not match payload');
-    const v = await verifyManifest(manifest);
-    if (!v.ok) throw new Error(`manifest signature invalid: ${v.reason}`);
-    onProgress?.({ phase: 'manifest', publisher: v.publisher, total: manifest.chunks.length, providers: clients.length });
+    // why: a silent early provider must not suppress a healthy neighbor.
+    // Bound concurrent requests, verify each candidate before winning, and
+    // cancel only losing manifest requests so clients remain usable for chunks.
+    const selection = new AbortController();
+    let nextProvider = 0;
+    /** @returns {Promise<{ chunks: Array<{ hash: string, size: number }>, size: number } & Record<string, any>>} */
+    const candidate = async () => {
+      while (!selection.signal.aborted && nextProvider < clients.length) {
+        const { client } = clients[nextProvider++];
+        try {
+          const response = await client.manifest(hash, selection.signal);
+          if (response.t !== 'MANIFEST') continue;
+          const manifest = response.manifest;
+          assertBundleWithinLimits(manifest);
+          if (await manifestHash(manifest) !== hash) continue;
+          if (!(await verifyManifest(manifest)).ok) continue;
+          return manifest;
+        } catch { /* try the next provider until selection completes */ }
+      }
+      throw new Error('no valid manifest from candidate providers');
+    };
+    let manifest;
+    try {
+      manifest = await Promise.any(Array.from({ length: Math.min(ALPHA, clients.length) }, candidate));
+    } catch {
+      throw new Error(`no reachable provider holds ${hash}`);
+    } finally { selection.abort(); }
+    onProgress?.({ phase: 'manifest', publisher: manifest.publisher, total: manifest.chunks.length, providers: clients.length });
 
     // 3. Stripe unique chunks across providers — α concurrent, per-chunk failover.
     const uniqueHashes = [...new Set(manifest.chunks.map((c) => c.hash))];

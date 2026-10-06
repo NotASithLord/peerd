@@ -1,0 +1,46 @@
+Wasmer SDK
+==========
+
+Package: @wasmer/sdk 0.18.0
+Source: https://github.com/wasmerio/wasmer-sdk/tree/wasmer-sdk-js-v0.18.0
+Tarball: https://registry.npmjs.org/@wasmer/sdk/-/sdk-0.18.0.tgz
+SHA-256: edb2faded9c529f16df80be7e4a368ae4bac23bc24c6a22843f8778c2c7bf8e4
+SHA-512: umeaf9asTL5xS6Sp6D3tDiO4v/B3Z7gLsLWra0BDKkThX0+XTZWhb5nl77sqlfTUjTSxOLpBN7xQivNSsBLQBQ==
+License: Modified MIT. See LICENSE for the Wasmer credit requirement.
+
+The browser entry, thread, and bridge modules in dist are copied verbatim.
+The pkg tree is copied from the verified tarball with one CSP patch below.
+The package includes Acorn and its license in pkg/snippets.
+The vendor lock records each file hash.
+
+Audit
+-----
+The SDK can use fetch, browser storage, native Workers, eval, and Function.
+Its N-API context can reach browser globals. Network policy alone does not
+isolate those operations. Each peerd Wasmer worker applies the Pod realm
+seal before it imports SDK code. The supervisor uses a Worker relay. The
+trusted Pod host creates all native workers and stops them together.
+Thread initialization accepts only the packaged SDK URL.
+
+peerd supplies local module bytes, a compiled runtime, and a workspace copy.
+It disables SDK cache and networking. It does not use registry names, WISP,
+host filesystem bridges, service worker hosts, or browser port exposure.
+Node, WISP, and service worker modules are omitted. Their imports are not reached.
+WEBC dependencies that need network access fail in the sealed realm.
+Edge.js needs JavaScript evaluation and is not supported under MV3 CSP.
+
+CSP patch
+---------
+pkg/wasmer_sdk_js.js replaces its new Function binding with a static function.
+It accepts exactly parameter "f" and body
+"return f(Array.prototype.slice.call(arguments, 1))".
+All other parameter or body strings throw EvalError. No eval is added.
+The static adapter passes the remaining arguments as one array to f.
+Upstream creates this fixed callback in its synchronous and JSPI host adapters:
+https://github.com/wasmerio/wasmer/blob/cc07dc0b35b55a48d1995b9df2ded8d3aa82b06f/lib/api/src/backend/js/entities/function/mod.rs
+The Wasmer SDK Cargo.toml pins that source revision.
+Original JS SHA-256: 9a74f58bcf5c8693e95219656b68ab85ba72981ff5a0629c9cd77bfd13c7cdbc
+Patched JS SHA-256: c58218fd48f215c91875b1125b99bf3fb38c4a14c2e386f8174095d1088776ab
+
+To update, verify the registry tarball integrity, review all changed SDK code,
+replace these trees and notices, and run the vendor lock generator.
