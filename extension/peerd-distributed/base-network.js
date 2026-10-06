@@ -12,6 +12,7 @@
 // simulator. Verbose by design (dlog) — every join/announce/sub-protocol step
 // is logged so a real-network bug is visible in the console immediately.
 
+import { PROVIDER_TTL_MS } from './dht/provider-store.js';
 import { createPeerNode } from './peer-node.js';
 import { createPresence } from './gossip/presence.js';
 import { mutableKey, signProvider } from './dht/records.js';
@@ -57,6 +58,12 @@ export const createBaseNetwork = async ({
 }) => {
   dlog('base', `assembling base network for ${(identity.did || '').slice(-8)} on lobby "${BASE_TOPIC}"`);
   const node = await createPeerNode({ identity, mesh, meta, dial, audit, now });
+  let closed = false;
+  /** @type {ReturnType<typeof setInterval> | null} */
+  let providerTimer = null;
+  /** @type {Map<string, number>} */
+  const providerRenewals = new Map();
+  let renewingProviders = false;
 
   // --- discovery: the metadata plane (PROPAGATION.md) -----------------------
   // Sovereign + event-driven: no node receives a card it didn't subscribe for.
@@ -145,9 +152,35 @@ export const createBaseNetwork = async ({
   const announceProvider = async (contentAddr) => {
     const key = await contentKey(contentAddr);
     const entry = await signProvider({ key, ts: now() }, identity);
-    try { return await node.dht.announceProvider(key, entry); }
+    try {
+      if (closed) return { key, stored: 0 };
+      const result = await node.dht.announceProvider(key, entry);
+      const { hash } = parsePeerdUri(contentAddr);
+      // why: a cold network needs a prompt retry when no remote index accepted
+      // the claim. Live claims renew halfway through their lease.
+      if (!closed) providerRenewals.set(hash, now() + (result.stored ? PROVIDER_TTL_MS / 2 : 30_000));
+      return result;
+    }
     catch (e) { dlog('base', `announceProvider ${key.slice(0, 8)}… failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`); return { key, stored: 0 }; }
   };
+  const refreshProviders = async () => {
+    if (closed || renewingProviders) return;
+    renewingProviders = true;
+    try {
+      const hashes = node.content.announcedHashes();
+      const live = new Set(hashes);
+      for (const hash of providerRenewals.keys()) if (!live.has(hash)) providerRenewals.delete(hash);
+      // Bounded maintenance traffic; later ticks pick up the remaining due apps.
+      const due = hashes.filter((hash) => (providerRenewals.get(hash) ?? 0) <= now()).slice(0, 8);
+      for (const hash of due) {
+        if (closed) break;
+        const manifest = node.content.getManifest(hash);
+        if (!manifest) continue;
+        await announceProvider(formatPeerdUri({ did: manifest.publisher, hash }));
+      }
+    } finally { renewingProviders = false; }
+  };
+
   /** @param {string} contentAddr */
   const findProviders = async (contentAddr) => {
     const key = await contentKey(contentAddr);
@@ -321,16 +354,35 @@ export const createBaseNetwork = async ({
       try { return await swarmFetch({ uri, providers: others, channelFor, timeoutMs, onProgress }); }
       catch (e) { dlog('base', `seeder fetch failed (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}); trying DHT providers (bounded)`); }
     }
-    // 3. Bounded DHT provider lookup: with the per-hop dialer unwired it can't reach
-    // unlinked providers anyway, and an unbounded walk would STALL — cap it so a
-    // genuine "nobody is serving this" fails FAST and the user can retry.
+    // Retain the DHT responder as the signaling broker for each provider.
+    // Bound both lookup and dialing; unavailable referrals must not hang an install.
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     let dhtTimer;
-    const provided = await Promise.race([
-      findProviders(uri).catch(() => []),
-      /** @type {Promise<string[]>} */ (new Promise((res) => { dhtTimer = setTimeout(() => res([]), 5_000); })),
+    const contacts = await Promise.race([
+      contentKey(uri).then((key) => node.dht.findProviderContacts(key)).catch(() => []),
+      /** @type {Promise<any[]>} */ (new Promise((res) => { dhtTimer = setTimeout(() => res([]), 5_000); })),
     ]);
     clearTimeout(dhtTimer);
+    const candidates = contacts.filter((/** @type {any} */ contact) => contact.did !== identity.did).slice(0, 8);
+    let next = 0;
+    const connectProvider = async () => {
+      while (next < candidates.length && !closed) {
+        const contact = candidates[next++];
+        if (node.mesh.hasLink(contact.did) || !dial) continue;
+        /** @type {ReturnType<typeof setTimeout> | undefined} */
+        let timer;
+        try {
+          await Promise.race([
+            Promise.resolve().then(() => closed ? false : dial(contact)),
+            new Promise((resolve) => { timer = setTimeout(() => resolve(false), 5_000); }),
+          ]);
+        } catch { /* another provider may be reachable */ }
+        finally { clearTimeout(timer); }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, candidates.length) }, connectProvider));
+    if (closed) throw new Error('base network closed');
+    const provided = candidates.map((/** @type {any} */ contact) => contact.did);
     const providers = [...new Set([...provided, ...linked])];
     if (!providers.length) throw new Error(`no peer is serving ${uri} right now — the peer may have dropped; try again`);
     return swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress });
@@ -461,6 +513,7 @@ export const createBaseNetwork = async ({
     unserveContent,
     // Plane 2: the content provider set + "install → seeder" re-seed.
     announceProvider,
+    refreshProviders,
     findProviders,
     seedApp,
 
@@ -507,6 +560,9 @@ export const createBaseNetwork = async ({
     },
 
     start: () => {
+      if (closed) return;
+      if (!providerTimer) providerTimer = setInterval(() => { refreshProviders().catch(() => {}); }, 30_000);
+      refreshProviders().catch(() => {});
       dlog('base', 'base network ONLINE (presence + liveness started)');
       node.start();
       node.presence.announce();
@@ -515,6 +571,6 @@ export const createBaseNetwork = async ({
       // subscribe to current peers too, or a late starter's Library stays empty.
       discovery.subscribeAll();
     },
-    close: () => { dlog('base', 'base network closing'); discovery.close(); node.close(); },
+    close: () => { closed = true; if (providerTimer) clearInterval(providerTimer); providerRenewals.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
   });
 };

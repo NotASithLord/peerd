@@ -145,6 +145,49 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
     return { value, closest: shortlist() };
   };
 
+  /** @param {string} key */
+  const findProviderContacts = async (key) => {
+      const keyBytes = fromHex(key);
+      /** @type {Map<string, Contact>} */
+      const found = new Map();
+      for (const did of providers ? providers.list(key) : []) {
+        found.set(did, { did, id: await nodeIdOf(did) });
+      }
+      /** @type {Map<string, Contact>} */
+      const known = new Map();
+      for (const c of rt.closest(keyBytes, k)) known.set(c.did, c);
+      /** @type {Set<string>} */
+      const queried = new Set();
+      const shortlist = () => byDistanceTo(keyBytes, [...known.values()]).slice(0, k);
+      for (;;) {
+        const batch = shortlist().filter((c) => !queried.has(c.did)).slice(0, alpha);
+        if (!batch.length || queried.size >= 64) break;
+        await Promise.all(batch.map(async (c) => {
+          queried.add(c.did);
+          let resp;
+          try { resp = await rpc(c, { t: 'GET_PROVIDERS', key }); }
+          catch { rt.remove(c.did); return; }
+          await learn(c.did, c.hints);
+          // why: a provider identity alone is not a route. Retain the peer
+          // that supplied it as a local signaling broker, without trusting it
+          // enough to insert the provider into the reachable routing table.
+          for (const did of (Array.isArray(resp?.providers) ? resp.providers.slice(0, 64) : [])) {
+            if (typeof did !== 'string' || did.length > 128 || did === identity.did || found.size >= 64) continue;
+            try {
+              if (!found.get(did)?.hints) found.set(did, { did, id: await nodeIdOf(did), hints: { broker: c.did } });
+            } catch { /* malformed identity is not a referral */ }
+          }
+          for (const n of (Array.isArray(resp?.nodes) ? resp.nodes.slice(0, k) : [])) {
+            if (typeof n?.did === 'string' && n.did.length <= 128 && n.did !== identity.did && !known.has(n.did) && known.size < 64) {
+              try { known.set(n.did, { did: n.did, id: await nodeIdOf(n.did), hints: { broker: c.did } }); }
+              catch { /* malformed contact */ }
+            }
+          }
+        }));
+      }
+      return [...found.values()];
+  };
+
   return {
     routingTable: rt,
     handle,
@@ -186,37 +229,9 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
       return { key, stored: results.filter((r) => r.status === 'fulfilled' && r.value?.ok).length };
     },
 
-    // Find the dids serving `key`. Iterative GET_PROVIDERS walk toward the key,
-    // accumulating providers from every node along the path (local set seeds it).
-    /** @param {string} key — hex H(content_addr) */
-    async findProviders(key) {
-      const keyBytes = fromHex(key);
-      /** @type {Set<string>} */
-      const found = new Set(providers ? providers.list(key) : []);
-      /** @type {Map<string, Contact>} */
-      const known = new Map();
-      for (const c of rt.closest(keyBytes, k)) known.set(c.did, c);
-      /** @type {Set<string>} */
-      const queried = new Set();
-      const shortlist = () => byDistanceTo(keyBytes, [...known.values()]).slice(0, k);
-      for (;;) {
-        const batch = shortlist().filter((c) => !queried.has(c.did)).slice(0, alpha);
-        if (!batch.length) break;
-        await Promise.all(batch.map(async (c) => {
-          queried.add(c.did);
-          let resp;
-          try { resp = await rpc(c, { t: 'GET_PROVIDERS', key }); }
-          catch { rt.remove(c.did); return; }
-          await learn(c.did, c.hints);
-          for (const did of (resp?.providers ?? [])) if (did && did !== identity.did) found.add(did);
-          for (const n of (resp?.nodes ?? [])) {
-            if (n?.did && n.did !== identity.did && !known.has(n.did)) {
-              known.set(n.did, { did: n.did, id: await nodeIdOf(n.did), hints: { ...(n.hints ?? {}), broker: c.did } });
-            }
-          }
-        }));
-      }
-      return [...found];
-    },
+    // Preserve the public DID list while content fetchers retain dial hints.
+    /** @param {string} key */
+    findProviders: async (key) => (await findProviderContacts(key)).map((contact) => contact.did),
+    findProviderContacts,
   };
 };

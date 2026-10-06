@@ -23,10 +23,10 @@ const link = async (a: any, b: any) => {
   await b.base.node.dht.learn(a.identity.did);
 };
 
-const spawn = async (label: string) => {
+const spawn = async (label: string, options: Record<string, any> = {}) => {
   const identity = await generateIdentity();
   const mesh = createRoomMesh({ roomId: 'base', identity });
-  const base = await createBaseNetwork({ identity, mesh, meta: () => ({ name: label }) });
+  const base = await createBaseNetwork({ identity, mesh, meta: () => ({ name: label }), ...options });
   return { identity, mesh, base, label };
 };
 
@@ -125,5 +125,54 @@ describe('base network — the always-on lobby + sub-protocols', () => {
     b.base.ban(a.identity.did, 'spam');
     expect(b.base.heardDwapps().some((r: any) => r.dwapp_id === dwapp_id)).toBe(false);
     [a, b].forEach((p) => p.base.close());
+  });
+});
+
+
+describe('provider reachability and leases', () => {
+  test('dials a discovered provider through the peer supplying its referral', async () => {
+    const publisher = await spawn('publisher');
+    const broker = await spawn('broker');
+    const calls: any[] = [];
+    let reader: Awaited<ReturnType<typeof spawn>>;
+    reader = await spawn('reader', { dial: async (contact: any) => {
+      calls.push(contact);
+      if (contact.did !== publisher.identity.did || contact.hints?.broker !== broker.identity.did) return false;
+      await link(reader, publisher);
+      return true;
+    } });
+    try {
+      await link(publisher, broker);
+      await link(reader, broker);
+      const { uri } = await publisher.base.publishApp({ name: 'remote', entry: 'index.html', files: { 'index.html': 'hello' } });
+      await publisher.base.announceProvider(uri);
+      // Keep the provider out of FIND_NODE referrals: GET_PROVIDERS must itself
+      // preserve the broker, rather than depending on incidental DHT dialing.
+      broker.base.node.dht.routingTable.remove(publisher.identity.did);
+      const result = await reader.base.fetchApp(uri, { timeoutMs: 500 });
+      expect(result.manifest.publisher).toBe(publisher.identity.did);
+      expect(calls.some((contact) => contact.did === publisher.identity.did && contact.hints?.broker === broker.identity.did)).toBe(true);
+    } finally { publisher.base.close(); broker.base.close(); reader.base.close(); }
+  });
+
+  test('renews shared content before expiry and stops after unshare or close', async () => {
+    let clock = 1000;
+    const publisher = await spawn('publisher', { now: () => clock });
+    const index = await spawn('index', { now: () => clock });
+    try {
+      await link(publisher, index);
+      const { uri, hash } = await publisher.base.publishApp({ name: 'lease', entry: 'index.html', files: { 'index.html': 'hello' } });
+      await publisher.base.announceProvider(uri);
+      clock += 31 * 60_000;
+      await publisher.base.refreshProviders();
+      clock += 31 * 60_000;
+      expect(await index.base.findProviders(uri)).toContain(publisher.identity.did);
+      publisher.base.unserveContent(hash);
+      await publisher.base.refreshProviders();
+      clock += 61 * 60_000;
+      expect(await index.base.findProviders(uri)).not.toContain(publisher.identity.did);
+      publisher.base.close();
+      await publisher.base.refreshProviders();
+    } finally { publisher.base.close(); index.base.close(); }
   });
 });
