@@ -414,8 +414,11 @@ outside this client-side lexical boundary. An isolated live Chrome probe also
 shows that a blocked direct top-level private navigation sends no HTTP bytes but
 can still open a TCP connection/preconnect to the target. The browser floor is
 therefore not an absolute zero-transport or port-oracle defense. The live lane
-requires proof of probe execution and reports this accepted platform residual;
-all other transport-blocking assertions remain unchanged. With native local-network checks
+requires proof of probe execution and reports navigation TCP separately,
+including child-window navigation on an isolated listener. Child fetch uses a
+different listener and retains strict zero-TCP and zero-HTTP assertions; the
+original combined child probe could not attribute a TCP connection to either
+operation. With native local-network checks
 disabled, Chrome can also start an inherited about:blank child's immediate
 private request before the extension receives enough child identity to close it.
 Code: `shared/private-network.js`, `peerd-egress/fetch/web-fetch.js`,
