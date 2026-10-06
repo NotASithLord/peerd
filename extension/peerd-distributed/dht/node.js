@@ -37,7 +37,7 @@ const isDhtKeyHex = (h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h);
  *   selfId: Uint8Array,
  *   store: ReturnType<typeof import('./store.js').createDhtStore>,
  *   providers?: ReturnType<typeof import('./provider-store.js').createProviderStore> | null,
- *   rpc: (contact: any, msg: any) => Promise<any>,
+ *   rpc: (contact: any, msg: any, opts?: {signal?: AbortSignal}) => Promise<any>,
  *   k?: number, alpha?: number, now?: () => number,
  * }} opts
  */
@@ -106,9 +106,9 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
   // holder returned it; `closest` is the k nearest contacts we ended up knowing.
   /**
    * @param {Uint8Array} targetKey
-   * @param {{ wantValue?: boolean }} [opts]
+   * @param {{ wantValue?: boolean, signal?: AbortSignal }} [opts]
    */
-  const lookup = async (targetKey, { wantValue = false } = {}) => {
+  const lookup = async (targetKey, { wantValue = false, signal } = {}) => {
     const targetHex = toHex(targetKey);
     /** @type {Map<string, Contact>} */
     const known = new Map(); // did -> { did, id, hints }
@@ -122,14 +122,15 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
 
     // Converges when the α closest unqueried set is empty (everyone near the
     // target has answered) or no contacts remain.
-    while (!value) {
+    while (!value && !signal?.aborted) {
       const batch = shortlist().filter((c) => !queried.has(c.did)).slice(0, alpha);
       if (!batch.length) break;
       await Promise.all(batch.map(async (c) => {
         queried.add(c.did);
         let resp;
-        try { resp = await rpc(c, wantValue ? { t: 'FIND_VALUE', key: targetHex } : { t: 'FIND_NODE', target: targetHex }); }
-        catch { rt.remove(c.did); return; } // unreachable → drop (reachable-only)
+        try { resp = await rpc(c, wantValue ? { t: 'FIND_VALUE', key: targetHex } : { t: 'FIND_NODE', target: targetHex }, { signal }); }
+        catch { if (!signal?.aborted) rt.remove(c.did); return; } // unreachable → drop (reachable-only)
+        if (signal?.aborted) return;
         await learn(c.did, c.hints); // it answered → reachable
         if (wantValue && resp?.t === 'VALUE') { value = resp.item; return; }
         for (const n of (resp?.nodes ?? [])) {
@@ -143,6 +144,56 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
       }));
     }
     return { value, closest: shortlist() };
+  };
+
+  /** @param {string} key @param {{signal?: AbortSignal}} [opts] */
+  const findProviderContacts = async (key, { signal } = {}) => {
+      const keyBytes = fromHex(key);
+      /** @type {Map<string, Contact>} */
+      const found = new Map();
+      for (const did of providers ? providers.list(key) : []) {
+        found.set(did, { did, id: await nodeIdOf(did) });
+      }
+      /** @type {Map<string, Contact>} */
+      const known = new Map();
+      for (const c of rt.closest(keyBytes, k)) known.set(c.did, c);
+      /** @type {Set<string>} */
+      const queried = new Set();
+      const shortlist = () => byDistanceTo(keyBytes, [...known.values()]).slice(0, k);
+      while (!signal?.aborted) {
+        const batch = shortlist().filter((c) => !queried.has(c.did)).slice(0, alpha);
+        if (!batch.length || queried.size >= 64) break;
+        await Promise.all(batch.map(async (c) => {
+          queried.add(c.did);
+          let resp;
+          try { resp = await rpc(c, { t: 'GET_PROVIDERS', key }, { signal }); }
+          catch { if (!signal?.aborted) rt.remove(c.did); return; }
+          if (signal?.aborted) return;
+          await learn(c.did, c.hints);
+          // why: a provider identity alone is not a route. Retain the peer
+          // that supplied it as a local signaling broker, without trusting it
+          // enough to insert the provider into the reachable routing table.
+          for (const did of (Array.isArray(resp?.providers) ? resp.providers.slice(0, 64) : [])) {
+            if (signal?.aborted || typeof did !== 'string' || did.length > 128 || did === identity.did) continue;
+            try {
+              if (!found.get(did)?.hints && (found.has(did) || found.size < 64)) {
+                const id = await nodeIdOf(did);
+                if (!signal?.aborted && (found.has(did) || found.size < 64)) found.set(did, { did, id, hints: { broker: c.did } });
+              }
+            } catch { /* malformed identity is not a referral */ }
+          }
+          for (const n of (Array.isArray(resp?.nodes) ? resp.nodes.slice(0, k) : [])) {
+            if (typeof n?.did === 'string' && n.did.length <= 128 && n.did !== identity.did && !known.has(n.did) && known.size < 64) {
+              try {
+                const id = await nodeIdOf(n.did);
+                if (!signal?.aborted && known.size < 64) known.set(n.did, { did: n.did, id, hints: { broker: c.did } });
+              }
+              catch { /* malformed contact */ }
+            }
+          }
+        }));
+      }
+      return [...found.values()];
   };
 
   return {
@@ -178,45 +229,20 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
     /**
      * @param {string} key — hex H(content_addr)
      * @param {import('./records.js').ProviderEntry} entry
+     * @param {{signal?: AbortSignal}} [opts]
      */
-    async announceProvider(key, entry) {
+    async announceProvider(key, entry, { signal } = {}) {
+      signal?.throwIfAborted();
       if (providers) await providers.add(entry);
-      const { closest } = await lookup(fromHex(key));
-      const results = await Promise.allSettled(closest.map((c) => rpc(c, { t: 'ADD_PROVIDER', entry })));
+      const { closest } = await lookup(fromHex(key), { signal });
+      signal?.throwIfAborted();
+      const results = await Promise.allSettled(closest.map((c) => rpc(c, { t: 'ADD_PROVIDER', entry }, { signal })));
       return { key, stored: results.filter((r) => r.status === 'fulfilled' && r.value?.ok).length };
     },
 
-    // Find the dids serving `key`. Iterative GET_PROVIDERS walk toward the key,
-    // accumulating providers from every node along the path (local set seeds it).
-    /** @param {string} key — hex H(content_addr) */
-    async findProviders(key) {
-      const keyBytes = fromHex(key);
-      /** @type {Set<string>} */
-      const found = new Set(providers ? providers.list(key) : []);
-      /** @type {Map<string, Contact>} */
-      const known = new Map();
-      for (const c of rt.closest(keyBytes, k)) known.set(c.did, c);
-      /** @type {Set<string>} */
-      const queried = new Set();
-      const shortlist = () => byDistanceTo(keyBytes, [...known.values()]).slice(0, k);
-      for (;;) {
-        const batch = shortlist().filter((c) => !queried.has(c.did)).slice(0, alpha);
-        if (!batch.length) break;
-        await Promise.all(batch.map(async (c) => {
-          queried.add(c.did);
-          let resp;
-          try { resp = await rpc(c, { t: 'GET_PROVIDERS', key }); }
-          catch { rt.remove(c.did); return; }
-          await learn(c.did, c.hints);
-          for (const did of (resp?.providers ?? [])) if (did && did !== identity.did) found.add(did);
-          for (const n of (resp?.nodes ?? [])) {
-            if (n?.did && n.did !== identity.did && !known.has(n.did)) {
-              known.set(n.did, { did: n.did, id: await nodeIdOf(n.did), hints: { ...(n.hints ?? {}), broker: c.did } });
-            }
-          }
-        }));
-      }
-      return [...found];
-    },
+    // Preserve the public DID list while content fetchers retain dial hints.
+    /** @param {string} key */
+    findProviders: async (key) => (await findProviderContacts(key)).map((contact) => contact.did),
+    findProviderContacts,
   };
 };

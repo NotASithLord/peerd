@@ -71,6 +71,7 @@ export const PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES = Object.freeze([
   'vendor/tesseract/tesseract.esm.min.js',
   'vendor/transformers/transformers.js',
   'vendor/turndown/turndown.browser.es.js',
+  'vendor/wasmer/dist/browser-worker.js',
 
   // Rich UI loaded only after the minimal vault shell is actionable.
   'sidepanel/sidepanel.js',
@@ -79,6 +80,8 @@ export const PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES = Object.freeze([
   // Fixed module Workers spawned by their owning engine tabs.
   'engine-tabs/notebook-tab/linker-worker.js',
   'engine-tabs/pod-tab/pod-job-worker.js',
+  'engine-tabs/pod-tab/wasmer-worker.js',
+  'engine-tabs/pod-tab/wasmer-thread-worker.js',
   // worker-source.js emits these URLs into generated module Worker source.
   'engine-tabs/notebook-tab/realm-seal.js',
   'engine-tabs/notebook-tab/notebook-std.js',
@@ -155,6 +158,8 @@ export const PACKAGED_LAZY_ASSET_ENTRIES = Object.freeze([
   'vendor/mithril/mithril.js',
   // Rollup resolves its WASM binding relative to the lazily imported module.
   'vendor/rollup/bindings_wasm_bg.wasm',
+  // The Pod host compiles this fixed asset before it starts sealed workers.
+  'vendor/wasmer/pkg/wasmer_sdk_js_bg.wasm',
   // The local-model host points the embedded ORT loader at this directory.
   'vendor/transformers/ort-wasm-simd-threaded.asyncify.mjs',
   'vendor/transformers/ort-wasm-simd-threaded.asyncify.wasm',

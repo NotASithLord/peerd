@@ -39,13 +39,16 @@ export const createBufferedChannel = ({ send, close } = /** @type {{ send: (msg:
     deliver(msg) {
       if (closed) return;
       if (handler) handler(msg);
-      else backlog.push(msg);
+      else if (backlog.length < 16) backlog.push(msg);
+      // why: a stalled handshake/consumer cannot retain an unbounded stream.
+      else chan.close();
     },
     // Install (or clear, with null) the handler. Flushes the backlog.
     /** @param {((msg: any) => void) | null} fn */
     setHandler(fn) {
       handler = fn;
-      if (fn) while (backlog.length) fn(backlog.shift());
+      if (closed) return;
+      if (fn) while (backlog.length && handler) handler(backlog.shift());
     },
     isClosed: () => closed,
     // Fires once, immediately if already closed. Returns unsubscribe.
@@ -63,6 +66,8 @@ export const createBufferedChannel = ({ send, close } = /** @type {{ send: (msg:
     signalClose() {
       if (closed) return;
       closed = true;
+      backlog.length = 0;
+      handler = null;
       for (const cb of [...closeCbs]) cb();
       closeCbs.clear();
     },

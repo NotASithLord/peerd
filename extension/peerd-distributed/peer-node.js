@@ -34,7 +34,7 @@ import { nodeIdOf } from './dht/distance.js';
  *   identity: import('./transport/mesh.js').Identity,
  *   mesh: any,                       // a createRoomMesh — its links come from any transport
  *   meta?: () => any,                // presence metadata (e.g. { name })
- *   dial?: ((contact: any) => Promise<boolean>) | null, // DHT per-hop dialer (prod/sim)
+ *   dial?: ((contact: any, opts?: {signal?: AbortSignal}) => Promise<boolean>) | null, // DHT per-hop dialer (prod/sim)
  *   audit?: import('./transport/mesh.js').AuditFn,
  *   now?: () => number,
  * }} opts

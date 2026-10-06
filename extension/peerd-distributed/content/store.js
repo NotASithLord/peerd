@@ -88,6 +88,7 @@ export const createContentStore = () => {
     publish,
     announce,
     unannounce,
+    announcedHashes: () => [...announced],
     /** @param {string} hash */
     isAnnounced: (hash) => announced.has(hash),
     // Serve-path getters: gated on the announce set.

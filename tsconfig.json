@@ -58,6 +58,6 @@
   // already leaves them untouched. packaging/templates/web-shell (the web
   // target's smoke
   // shell) rides the same opt-in ratchet as the extension.
-  "include": ["tests/**/*.ts", "extension/**/*.js", "packaging/templates/web-shell/**/*.js"],
+  "include": ["tests/**/*.ts", "gtm/**/*.ts", "extension/**/*.js", "packaging/templates/web-shell/**/*.js"],
   "exclude": ["extension/vendor/**"]
 }

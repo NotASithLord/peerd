@@ -23,10 +23,10 @@ const link = async (a: any, b: any) => {
   await b.base.node.dht.learn(a.identity.did);
 };
 
-const spawn = async (label: string) => {
+const spawn = async (label: string, options: Record<string, any> = {}) => {
   const identity = await generateIdentity();
   const mesh = createRoomMesh({ roomId: 'base', identity });
-  const base = await createBaseNetwork({ identity, mesh, meta: () => ({ name: label }) });
+  const base = await createBaseNetwork({ identity, mesh, meta: () => ({ name: label }), ...options });
   return { identity, mesh, base, label };
 };
 
@@ -126,4 +126,147 @@ describe('base network — the always-on lobby + sub-protocols', () => {
     expect(b.base.heardDwapps().some((r: any) => r.dwapp_id === dwapp_id)).toBe(false);
     [a, b].forEach((p) => p.base.close());
   });
+});
+
+
+describe('provider reachability and leases', () => {
+  test('dials a discovered provider through the peer supplying its referral', async () => {
+    const publisher = await spawn('publisher');
+    const broker = await spawn('broker');
+    const calls: any[] = [];
+    let reader: Awaited<ReturnType<typeof spawn>>;
+    reader = await spawn('reader', { dial: async (contact: any) => {
+      calls.push(contact);
+      if (contact.did !== publisher.identity.did || contact.hints?.broker !== broker.identity.did) return false;
+      await link(reader, publisher);
+      return true;
+    } });
+    try {
+      await link(publisher, broker);
+      await link(reader, broker);
+      const { uri } = await publisher.base.publishApp({ name: 'remote', entry: 'index.html', files: { 'index.html': 'hello' } });
+      await publisher.base.announceProvider(uri);
+      // Keep the provider out of FIND_NODE referrals: GET_PROVIDERS must itself
+      // preserve the broker, rather than depending on incidental DHT dialing.
+      broker.base.node.dht.routingTable.remove(publisher.identity.did);
+      const result = await reader.base.fetchApp(uri, { timeoutMs: 500 });
+      expect(result.manifest.publisher).toBe(publisher.identity.did);
+      expect(calls.some((contact) => contact.did === publisher.identity.did && contact.hints?.broker === broker.identity.did)).toBe(true);
+    } finally { publisher.base.close(); broker.base.close(); reader.base.close(); }
+  });
+
+  test('renews shared content before expiry and stops after unshare or close', async () => {
+    let clock = 1000;
+    const publisher = await spawn('publisher', { now: () => clock });
+    const index = await spawn('index', { now: () => clock });
+    try {
+      await link(publisher, index);
+      const { uri, hash } = await publisher.base.publishApp({ name: 'lease', entry: 'index.html', files: { 'index.html': 'hello' } });
+      await publisher.base.announceProvider(uri);
+      clock += 31 * 60_000;
+      await publisher.base.refreshProviders();
+      clock += 31 * 60_000;
+      expect(await index.base.findProviders(uri)).toContain(publisher.identity.did);
+      publisher.base.unserveContent(hash);
+      await publisher.base.refreshProviders();
+      clock += 61 * 60_000;
+      expect(await index.base.findProviders(uri)).not.toContain(publisher.identity.did);
+      publisher.base.close();
+      await publisher.base.refreshProviders();
+    } finally { publisher.base.close(); index.base.close(); }
+  });
+});
+
+  test('retrying unavailable indexes cannot starve later shared apps', async () => {
+    let clock = 1000;
+    const publisher = await spawn('publisher', { now: () => clock });
+    const attempted: string[] = [];
+    publisher.base.node.dht.announceProvider = async (key: string) => {
+      attempted.push(key);
+      return { key, stored: 0 };
+    };
+    try {
+      for (let i = 0; i < 9; i++) {
+        publisher.base.node.content.publish({
+          hash: i.toString(16).padStart(64, '0'),
+          manifest: { publisher: publisher.identity.did, chunks: [] }, chunks: [],
+        });
+      }
+      await publisher.base.refreshProviders();
+      expect(new Set(attempted).size).toBe(8);
+      clock += 30_000;
+      await publisher.base.refreshProviders();
+      expect(new Set(attempted).size).toBe(9);
+    } finally { publisher.base.close(); }
+  });
+
+  test('unshare aborts an in-flight provider announcement', async () => {
+    const publisher = await spawn('publisher');
+    let started!: () => void;
+    const pending = new Promise<void>((resolve) => { started = resolve; });
+    let signal: AbortSignal | undefined;
+    publisher.base.node.dht.announceProvider = async (key: string, _entry: unknown, opts: { signal: AbortSignal }) => {
+      signal = opts.signal;
+      started();
+      await new Promise<void>((resolve) => signal!.addEventListener('abort', () => resolve(), { once: true }));
+      return { key, stored: 0 };
+    };
+    try {
+      const { hash } = await publisher.base.publishApp({ name: 'revoke', entry: 'index.html', files: { 'index.html': 'hello' } });
+      await pending;
+      publisher.base.unserveContent(hash);
+      expect(signal?.aborted).toBe(true);
+      await publisher.base.refreshProviders();
+    } finally { publisher.base.close(); }
+  });
+
+  test('close cancels every provider dial before another candidate starts', async () => {
+    const contacts = await Promise.all(Array.from({ length: 8 }, () => generateIdentity()));
+    const signals: AbortSignal[] = [];
+    let started!: () => void;
+    const dialing = new Promise<void>((resolve) => { started = resolve; });
+    const reader = await spawn('reader', {
+      dial: async (_contact: unknown, { signal }: { signal: AbortSignal }) => {
+        signals.push(signal);
+        if (signals.length === 3) started();
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+        return false;
+      },
+    });
+    reader.base.node.dht.findProviderContacts = async () => contacts;
+    try {
+      const result = reader.base.fetchApp(`peerd://${contacts[0].did}/${'0'.repeat(64)}`).catch((error: Error) => error);
+      await dialing;
+      reader.base.close();
+      expect(await result).toBeInstanceOf(Error);
+      expect(signals).toHaveLength(3);
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+    } finally { reader.base.close(); }
+  });
+
+test('provider deadlines abort transports before reusing a dial slot', async () => {
+  const contacts = await Promise.all(Array.from({ length: 8 }, () => generateIdentity()));
+  let active = 0;
+  let peak = 0;
+  let attempts = 0;
+  const reader = await spawn('reader', {
+    dial: async (_contact: unknown, { signal }: { signal: AbortSignal }) => {
+      attempts++;
+      peak = Math.max(peak, ++active);
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => { active--; resolve(); }, { once: true }));
+      return false;
+    },
+  });
+  reader.base.node.dht.findProviderContacts = async () => contacts;
+  const original = globalThis.setTimeout;
+  // Compress only the fixed provider deadline; the production cancellation
+  // path, worker accounting and transport abort callbacks remain unchanged.
+  globalThis.setTimeout = ((fn: (...args: any[]) => void, delay?: number, ...args: any[]) =>
+    original(fn, delay === 5_000 ? 5 : delay, ...args)) as typeof setTimeout;
+  try {
+    await expect(reader.base.fetchApp(`peerd://${contacts[0].did}/${'0'.repeat(64)}`)).rejects.toThrow();
+    expect(attempts).toBe(8);
+    expect(peak).toBe(3);
+    expect(active).toBe(0);
+  } finally { globalThis.setTimeout = original; reader.base.close(); }
 });

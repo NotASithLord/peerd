@@ -147,6 +147,9 @@ const runCommand = async ({ argv, stdin, cwd, env }) => {
     '  head tail wc grep [-F] pattern [file] sort uniq env export unset sleep',
     '  js [-e code|file]   local Web-standard JavaScript on Chromium; no Node/network',
     '  wasi file.wasm ...  run a WASI Preview 1 command',
+    '  wasmer [--command name] file.wasm|file.webc ...  local WASI/WASIX',
+    '    guest files: /workspace; use absolute paths with WASI Preview 1',
+    '  wasmer-demo        test Wasmer; no network, Node, EdgeJS, or eval',
     '  install-tool name file.wasm; installed tools run by name',
     '  git <init|status|add|commit|log|branch|checkout|clone|fetch|push|remote>',
     '  curl <https-url>    audited, brokered HTTPS',
@@ -300,6 +303,26 @@ const runCommand = async ({ argv, stdin, cwd, env }) => {
   }
   if (command === 'true' || command === 'false') return { stdout: '', stderr: '', exitCode: command === 'true' ? 0 : 1 };
   if (command === 'js') return runJavaScript(args, stdin, cwd, env);
+  if (command === 'wasmer' || command === 'wasmer-demo') {
+    try {
+      const namedCommand = command === 'wasmer' && args[0] === '--command';
+      const selectedCommand = namedCommand ? args.splice(0, 2)[1] : undefined;
+      const path = command === 'wasmer' ? args.shift() : undefined;
+      if (command === 'wasmer' && (!path || !/\.(wasm|webc)$/i.test(path) || (namedCommand && !selectedCommand))) {
+        return { stdout: '', stderr: 'wasmer: pass [--command name] file.wasm|file.webc [args...]\n', exitCode: 2 };
+      }
+      const module = path ? await fs.readBytes(resolvePodPath(path, cwd)) : demoModule();
+      // why: the host owns the workspace transaction and all Wasmer Workers.
+      const result = /** @type {{stdout:string,stderr:string,exitCode:number,stdoutTruncated?:boolean,stderrTruncated?:boolean}} */ (await hostCall('wasmer-run', {
+        module, args, stdin, cwd, env,
+        ...(selectedCommand ? { command: selectedCommand } : {}),
+      }));
+      return {
+        stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode,
+        stdoutTruncated: result.stdoutTruncated, stderrTruncated: result.stderrTruncated,
+      };
+    } catch (error) { return { stdout: '', stderr: `wasmer: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}\n`, exitCode: 1 }; }
+  }
   if (command === 'wasi' || command === 'wasi-demo') {
     try {
       const module = command === 'wasi-demo' ? demoModule() : /** @type {Uint8Array} */ (await fs.readBytes(resolvePodPath(args.shift() ?? '', cwd)));

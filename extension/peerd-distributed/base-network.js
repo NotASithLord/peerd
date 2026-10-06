@@ -12,6 +12,7 @@
 // simulator. Verbose by design (dlog) — every join/announce/sub-protocol step
 // is logged so a real-network bug is visible in the console immediately.
 
+import { PROVIDER_TTL_MS } from './dht/provider-store.js';
 import { createPeerNode } from './peer-node.js';
 import { createPresence } from './gossip/presence.js';
 import { mutableKey, signProvider } from './dht/records.js';
@@ -57,6 +58,46 @@ export const createBaseNetwork = async ({
 }) => {
   dlog('base', `assembling base network for ${(identity.did || '').slice(-8)} on lobby "${BASE_TOPIC}"`);
   const node = await createPeerNode({ identity, mesh, meta, dial, audit, now });
+  let closed = false;
+  /** @type {ReturnType<typeof setInterval> | null} */
+  let providerTimer = null;
+  /** @type {Map<string, number>} */
+  const providerRenewals = new Map();
+  let renewingProviders = false;
+  /** @type {Set<AbortController>} */
+  const operations = new Set();
+  /** @type {Map<string, Set<AbortController>>} */
+  const providerAttempts = new Map();
+  // The injected dialer must honor cancellation by closing pending transports.
+  // Production propagates it through the room dial and HELLO admission fence.
+  /** @template T @param {(signal: AbortSignal) => Promise<T>} run @param {string} [hash] */
+  const withNetworkBudget = async (run, hash) => {
+    if (closed) throw new Error('base network closed');
+    const ac = new AbortController();
+    operations.add(ac);
+    if (hash) {
+      if (!providerAttempts.has(hash)) providerAttempts.set(hash, new Set());
+      providerAttempts.get(hash)?.add(ac);
+    }
+    const timer = setTimeout(() => ac.abort(), 5_000);
+    try { return await run(ac.signal); }
+    finally {
+      clearTimeout(timer);
+      operations.delete(ac);
+      if (hash) {
+        const attempts = providerAttempts.get(hash);
+        attempts?.delete(ac);
+        if (!attempts?.size) providerAttempts.delete(hash);
+      }
+      ac.abort();
+    }
+  };
+  /** @param {string} hash */
+  const revokeProvider = (hash) => {
+    for (const ac of providerAttempts.get(hash) ?? []) ac.abort();
+    providerRenewals.delete(hash);
+    return node.content.unannounce(hash);
+  };
 
   // --- discovery: the metadata plane (PROPAGATION.md) -----------------------
   // Sovereign + event-driven: no node receives a card it didn't subscribe for.
@@ -143,11 +184,42 @@ export const createBaseNetwork = async ({
   // locally, which is enough for a linked peer to find us via the mesh fallback.
   /** @param {string} contentAddr */
   const announceProvider = async (contentAddr) => {
+    const { hash } = parsePeerdUri(contentAddr);
     const key = await contentKey(contentAddr);
-    const entry = await signProvider({ key, ts: now() }, identity);
-    try { return await node.dht.announceProvider(key, entry); }
-    catch (e) { dlog('base', `announceProvider ${key.slice(0, 8)}… failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`); return { key, stored: 0 }; }
+    if (closed || !node.content.isAnnounced(hash)) return { key, stored: 0 };
+    try {
+      const result = await withNetworkBudget(async (signal) => {
+        const entry = await signProvider({ key, ts: now() }, identity);
+        signal.throwIfAborted();
+        return node.dht.announceProvider(key, entry, { signal });
+      }, hash);
+      if (!closed && node.content.isAnnounced(hash)) providerRenewals.set(hash, now() + (result.stored ? PROVIDER_TTL_MS / 2 : 30_000));
+      return result;
+    } catch (e) {
+      if (!closed && node.content.isAnnounced(hash)) providerRenewals.set(hash, now() + 30_000);
+      dlog('base', `announceProvider ${key.slice(0, 8)} failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
+      return { key, stored: 0 };
+    }
   };
+  const refreshProviders = async () => {
+    if (closed || renewingProviders) return;
+    renewingProviders = true;
+    try {
+      const hashes = node.content.announcedHashes();
+      const live = new Set(hashes);
+      for (const hash of providerRenewals.keys()) if (!live.has(hash)) providerRenewals.delete(hash);
+      // Bounded maintenance traffic; later ticks pick up the remaining due apps.
+      const due = hashes.filter((hash) => (providerRenewals.get(hash) ?? 0) <= now())
+        .sort((a, b) => (providerRenewals.get(a) ?? 0) - (providerRenewals.get(b) ?? 0)).slice(0, 8);
+      for (const hash of due) {
+        if (closed) break;
+        const manifest = node.content.getManifest(hash);
+        if (!manifest) continue;
+        await announceProvider(formatPeerdUri({ did: manifest.publisher, hash }));
+      }
+    } finally { renewingProviders = false; }
+  };
+
   /** @param {string} contentAddr */
   const findProviders = async (contentAddr) => {
     const key = await contentKey(contentAddr);
@@ -246,7 +318,7 @@ export const createBaseNetwork = async ({
     if (!h && id) { const card = library.get(id); h = card?.value?.head?.version_id ?? null; }
     const releaseHashes = [...new Set([h, ...hashes].filter((value) => typeof value === 'string'))];
     let unserved = 0;
-    for (const releaseHash of releaseHashes) if (node.content.unannounce(releaseHash)) unserved += 1;
+    for (const releaseHash of releaseHashes) if (revokeProvider(releaseHash)) unserved += 1;
     // tombstone (not a bare remove): also blocks a peer's cached copy from
     // re-infecting our Library on the next snapshot. Lifted if we re-share.
     await unpublishMeta({ slug, publisher });
@@ -258,7 +330,7 @@ export const createBaseNetwork = async ({
   // update transactions use this after a replacement succeeds, and while
   // rolling back bytes whose public metadata failed to publish.
   /** @param {string} hash */
-  const unserveContent = (hash) => node.content.unannounce(hash);
+  const unserveContent = revokeProvider;
 
   // Fetch a bundle. The uri NAMES its publisher (peerd://<publisher>/<hash>), who
   // is the canonical server — so try THEM ALONE first. why: swarming across every
@@ -321,16 +393,26 @@ export const createBaseNetwork = async ({
       try { return await swarmFetch({ uri, providers: others, channelFor, timeoutMs, onProgress }); }
       catch (e) { dlog('base', `seeder fetch failed (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}); trying DHT providers (bounded)`); }
     }
-    // 3. Bounded DHT provider lookup: with the per-hop dialer unwired it can't reach
-    // unlinked providers anyway, and an unbounded walk would STALL — cap it so a
-    // genuine "nobody is serving this" fails FAST and the user can retry.
-    /** @type {ReturnType<typeof setTimeout> | undefined} */
-    let dhtTimer;
-    const provided = await Promise.race([
-      findProviders(uri).catch(() => []),
-      /** @type {Promise<string[]>} */ (new Promise((res) => { dhtTimer = setTimeout(() => res([]), 5_000); })),
-    ]);
-    clearTimeout(dhtTimer);
+    // Retain the DHT responder as the signaling broker for each provider.
+    // Bound both lookup and dialing; unavailable referrals must not hang an install.
+    const contacts = await withNetworkBudget(async (signal) => {
+      const key = await contentKey(uri);
+      signal.throwIfAborted();
+      return node.dht.findProviderContacts(key, { signal });
+    }).catch(() => []);
+    const candidates = contacts.filter((/** @type {any} */ contact) => contact.did !== identity.did).slice(0, 8);
+    let next = 0;
+    const connectProvider = async () => {
+      while (next < candidates.length && !closed) {
+        const contact = candidates[next++];
+        if (node.mesh.hasLink(contact.did) || !dial) continue;
+        try { await withNetworkBudget((signal) => dial(contact, { signal })); }
+        catch { /* another provider may be reachable */ }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, candidates.length) }, connectProvider));
+    if (closed) throw new Error('base network closed');
+    const provided = candidates.map((/** @type {any} */ contact) => contact.did);
     const providers = [...new Set([...provided, ...linked])];
     if (!providers.length) throw new Error(`no peer is serving ${uri} right now — the peer may have dropped; try again`);
     return swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress });
@@ -461,6 +543,7 @@ export const createBaseNetwork = async ({
     unserveContent,
     // Plane 2: the content provider set + "install → seeder" re-seed.
     announceProvider,
+    refreshProviders,
     findProviders,
     seedApp,
 
@@ -507,6 +590,9 @@ export const createBaseNetwork = async ({
     },
 
     start: () => {
+      if (closed) return;
+      if (!providerTimer) providerTimer = setInterval(() => { refreshProviders().catch(() => {}); }, 30_000);
+      refreshProviders().catch(() => {});
       dlog('base', 'base network ONLINE (presence + liveness started)');
       node.start();
       node.presence.announce();
@@ -515,6 +601,6 @@ export const createBaseNetwork = async ({
       // subscribe to current peers too, or a late starter's Library stays empty.
       discovery.subscribeAll();
     },
-    close: () => { dlog('base', 'base network closing'); discovery.close(); node.close(); },
+    close: () => { closed = true; for (const ac of operations) ac.abort(); if (providerTimer) clearInterval(providerTimer); providerRenewals.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
   });
 };

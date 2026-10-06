@@ -6,6 +6,7 @@ const event = () => {
   const listeners: Function[] = [];
   return {
     addListener: (listener: Function) => { listeners.push(listener); },
+    removeListener: (listener: Function) => { const index = listeners.indexOf(listener); if (index >= 0) listeners.splice(index, 1); },
     emit: (value?: any) => { for (const listener of listeners) listener(value); },
   };
 };
@@ -13,11 +14,12 @@ const event = () => {
 const port = () => {
   const onMessage = event();
   const onDisconnect = event();
+  const onPosted = event();
   let disconnected = 0;
   const sent: any[] = [];
   return {
-    name: 'dweb-custody', sender: {}, onMessage, onDisconnect, sent,
-    postMessage: (message: any) => { sent.push(message); },
+    name: 'dweb-custody', sender: {}, onMessage, onDisconnect, onPosted, sent,
+    postMessage: (message: any) => { sent.push(message); onPosted.emit(message); },
     disconnect: () => { disconnected += 1; onDisconnect.emit(); },
     get disconnected() { return disconnected; },
   };
@@ -33,10 +35,24 @@ const identityFixture = (marker = 7) => {
     }),
   };
 };
-const waitForPacket = async (live: ReturnType<typeof port>, type: string) => {
-  for (let attempt = 0; attempt < 30
-    && !live.sent.some((message) => message.type === type); attempt += 1) await nextTask();
-  return live.sent.find((message) => message.type === type);
+// why: polling with real task delays can consume a deliberately short custody
+// deadline before the test delivers its next receipt. Follow the packet event.
+const waitForPacket = (live: ReturnType<typeof port>, type: string): Promise<any> => {
+  const existing = live.sent.find((message) => message.type === type);
+  if (existing) return Promise.resolve(existing);
+  return new Promise((resolve, reject) => {
+    const listener = (message: any) => {
+      if (message.type !== type) return;
+      clearTimeout(timer);
+      live.onPosted.removeListener(listener);
+      resolve(message);
+    };
+    const timer = setTimeout(() => {
+      live.onPosted.removeListener(listener);
+      reject(new Error(`missing custody packet: ${type}`));
+    }, 1000);
+    live.onPosted.addListener(listener);
+  });
 };
 
 const owner = (overrides: Record<string, any> = {}) => {

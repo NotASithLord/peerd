@@ -65,7 +65,7 @@ const respond = (listeners: Array<(ev: any) => void>, data: any) => {
 describe('realm seal — raw channels are hard-blocked', () => {
   const CHANNELS = [
     'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'EventSource',
-    'WebTransport', 'Worker', 'SharedWorker',
+    'WebTransport', 'Worker', 'SharedWorker', 'BroadcastChannel',
   ];
 
   test('every constructor channel throws NotebookEgressBlockedError under new', () => {
@@ -86,6 +86,18 @@ describe('realm seal — raw channels are hard-blocked', () => {
     applyRealmSeal(g);
     expect(() => new g.WebSocketStream('wss://evil.example/')).toThrow('peerd.egress.fetch');
     expect(() => new g.SharedWorker('x.js')).toThrow('peerd.egress.fetch');
+  });
+
+  test('a Wasmer worker relay replaces every native Worker reference', () => {
+    const { g, proto } = freshGlobal();
+    proto.Worker = g.Worker;
+    class SealedThreadRelay {}
+    applyRealmSeal(g, { workerConstructor: SealedThreadRelay, exposeGlobalFetch: false });
+    expect(new g.Worker()).toBeInstanceOf(SealedThreadRelay);
+    expect(Object.getOwnPropertyDescriptor(proto, 'Worker')).toBeUndefined();
+    expect(Object.getOwnPropertyDescriptor(g, 'Worker')).toMatchObject({ configurable: false, writable: false });
+    expect(() => new g.SharedWorker('x.js')).toThrow();
+    expect(() => g.fetch('https://example.com/')).toThrow();
   });
 
   test('importScripts throws ours AND the prototype copy is gone', () => {

@@ -47,11 +47,11 @@ export const PHASE = 1;
 // linked, so this never fires — it's the scale-out path beyond the mesh budget.)
 /** @typedef {Awaited<ReturnType<typeof joinRoom>>} Room */
 /** @param {Room} room */
-const makeDhtDialer = (room) => /** @param {{ did: string, hints?: { broker?: string } }} contact */ async (contact) => {
+const makeDhtDialer = (room) => /** @param {{ did: string, hints?: { broker?: string } }} contact */ async (contact, { signal } = /** @type {{signal?: AbortSignal}} */ ({})) => {
   if (room.mesh.hasLink(contact.did)) return true;
   const broker = contact?.hints?.broker;
   if (!broker || !room.mesh.hasLink(broker)) return false;
-  try { await room.dialVia(broker, contact.did); }
+  try { await room.dialVia(broker, contact.did, { signal }); }
   catch (e) { dlog('dht', `relay-dial of ${contact.did.slice(-8)} via ${broker.slice(-8)} failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`); return false; }
   return room.mesh.hasLink(contact.did);
 };

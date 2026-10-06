@@ -106,6 +106,18 @@ export const createLibrary = ({ cap = DEFAULT_CAP, isBlocked = () => false, now 
     // The cards a fresh subscriber gets, newest-announced first (so a capped
     // snapshot carries the most-relevant tail). Returns the raw signed items.
     list: () => [...entries.values()].sort((a, b) => b.lastSeen - a.lastSeen).map((e) => e.item),
+    // Stable key order keeps a cursor valid when announcements update recency.
+    // New entries before the cursor arrive through the live feed or next sweep.
+    /** @param {string} after @param {number} limit */
+    page(after, limit) {
+      const rows = [...entries.values()].filter((entry) => entry.id > after)
+        .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+      const selected = rows.slice(0, limit);
+      return {
+        items: selected.map((entry) => entry.item),
+        next: rows.length > selected.length ? selected.at(-1)?.id ?? null : null,
+      };
+    },
     // Discovery view rows (what the Library UI lists) — id + card + liveness.
     rows: () => [...entries.values()].map((e) => ({
       dwapp_id: e.id,

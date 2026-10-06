@@ -87,6 +87,8 @@ export const joinRoom = async ({
   /** @type {import('./signaling-client.js').RendezvousSession | null} */
   let session = null;
   let left = false;
+  /** @type {Set<AbortController>} */
+  const relayDials = new Set();
 
   /** @param {string} s */
   const setStatus = (s) => {
@@ -103,9 +105,12 @@ export const joinRoom = async ({
    * @param {any} channel
    * @param {string | null} [expectedDid]
    * @param {string | null} [via]
+   * @param {AbortSignal} [signal]
    */
-  const admit = async (channel, expectedDid = null, via = null) => {
+  const admit = async (channel, expectedDid = null, via = null, signal) => {
+    if (left || signal?.aborted) { channel.close(); throw new Error('room dial cancelled'); }
     const { remoteDid } = await createSession({ channel, identity, caps, now });
+    if (left || signal?.aborted) { channel.close(); throw new Error('room dial cancelled'); }
     if (expectedDid && remoteDid !== expectedDid) {
       channel.close();
       audit?.('peer_did_mismatch', { expected: expectedDid, got: remoteDid });
@@ -284,22 +289,39 @@ export const joinRoom = async ({
     relayRouters.get(sid)?.(payload);
   });
 
-  /** @param {string} via @param {string} targetDid */
-  const dialViaRelay = async (via, targetDid) => {
+  /** @param {string} via @param {string} targetDid @param {{signal?: AbortSignal}} [opts] */
+  const dialViaRelay = async (via, targetDid, { signal } = {}) => {
+    if (left || signal?.aborted) throw new Error('room dial cancelled');
     const sid = newId();
     dlog('room', `📞 relay-dialing ${short(targetDid)} via ${short(via)}…`);
     const { route, signaling } = makeSignaling((p) =>
       mesh.relay(via, targetDid, p.type === 'offer' ? 'offer' : 'ice', sid, p));
     relayRouters.set(sid, route);
-    // why ac: close the abandoned pc on the give-up timeout (D2).
     const ac = new AbortController();
-    try {
-      const channel = await withConnectTimeout(
-        t.connect({ did: targetDid }, { iceServers, signaling, signal: ac.signal }),
-        `relay dial ${short(targetDid)}`,
-      );
-      await admit(channel, targetDid, via);
-    } finally {
+    relayDials.add(ac);
+    /** @type {any} */
+    let opened = null;
+    let admitted = false;
+    const cancel = () => ac.abort();
+    signal?.addEventListener('abort', cancel, { once: true });
+    const timer = setTimeout(cancel, ANSWER_TIMEOUT_MS);
+    const aborted = new Promise((_, reject) => {
+      ac.signal.addEventListener('abort', () => {
+        if (!admitted) opened?.close();
+        reject(new Error('relay dial cancelled or timed out'));
+      }, { once: true });
+    });
+    const connect = async () => {
+      const channel = await t.connect({ did: targetDid }, { iceServers, signaling, signal: ac.signal });
+      opened = channel;
+      await admit(channel, targetDid, via, ac.signal);
+      admitted = true;
+    };
+    try { await Promise.race([aborted, connect()]); }
+    finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
+      relayDials.delete(ac);
       ac.abort();
       relayRouters.delete(sid);
     }
@@ -423,11 +445,12 @@ export const joinRoom = async ({
     // (`brokerDid` forwards the signaling). The DHT dialer uses this to connect
     // to a lookup contact it doesn't link yet. Resolves once linked, throws on
     // timeout. One hop only — `brokerDid` must be directly linked.
-    /** @param {string} brokerDid @param {string} targetDid */
-    dialVia: (brokerDid, targetDid) => dialViaRelay(brokerDid, targetDid),
+    /** @param {string} brokerDid @param {string} targetDid @param {{signal?: AbortSignal}} [opts] */
+    dialVia: (brokerDid, targetDid, opts) => dialViaRelay(brokerDid, targetDid, opts),
     leave() {
       if (left) return;
       left = true;
+      for (const ac of relayDials) ac.abort();
       clearTimeout(reconnectTimer ?? undefined);
       try { session?.close(); } catch { /* already closed */ }
       mesh.close();

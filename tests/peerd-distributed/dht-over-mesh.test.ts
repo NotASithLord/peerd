@@ -68,3 +68,50 @@ describe('DHT over the real mesh (ch=1 RPCs)', () => {
     close(peers);
   });
 });
+
+test('an RPC response must come from its requested authenticated peer', async () => {
+  const identity = await generateIdentity();
+  const intended = await generateIdentity();
+  const attacker = await generateIdentity();
+  let receive!: (event: any) => Promise<void>;
+  let request: any;
+  const mesh = {
+    hasLink: () => true,
+    sign: async (_ch: number, _typ: number, body: any) => ({ body }),
+    send: (_did: string, env: any) => { request = env; return true; },
+    onEnvelope: (fn: typeof receive) => { receive = fn; return () => {}; },
+  };
+  const { node, detach } = attachDht({ mesh, identity, selfId: await nodeIdOf(identity.did), store: createDhtStore() });
+  try {
+    await node.learn(intended.did);
+    let done = false;
+    const lookup = node.findProviderContacts('0'.repeat(64)).then((value: any) => { done = true; return value; });
+    while (!request) await tick(1);
+    await receive({ env: { ch: 1, typ: 1, from: attacker.did, body: { reqId: request.body.reqId, resp: { providers: [attacker.did] } } } });
+    await tick(1);
+    expect(done).toBe(false);
+    await receive({ env: { ch: 1, typ: 1, from: intended.did, body: { reqId: request.body.reqId, resp: { providers: [intended.did] } } } });
+    expect((await lookup).map((contact: any) => contact.did)).toEqual([intended.did]);
+  } finally { detach(); }
+});
+
+test('detaching DHT aborts a pending dial and settles its lookup', async () => {
+  const identity = await generateIdentity();
+  const other = await generateIdentity();
+  let signal: AbortSignal | undefined;
+  const mesh = { hasLink: () => false, onEnvelope: () => () => {}, sign: async () => { throw new Error('must not send'); } };
+  const { node, detach } = attachDht({
+    mesh, identity, selfId: await nodeIdOf(identity.did), store: createDhtStore(),
+    dial: async (_contact, opts) => {
+      signal = opts!.signal;
+      await new Promise<void>((resolve) => signal!.addEventListener('abort', () => resolve(), { once: true }));
+      return false;
+    },
+  });
+  await node.learn(other.did);
+  const lookup = node.findProviderContacts('0'.repeat(64));
+  while (!signal) await tick(1);
+  detach();
+  expect(signal.aborted).toBe(true);
+  expect(await lookup).toEqual([]);
+});

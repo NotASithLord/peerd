@@ -192,7 +192,9 @@ describe('rooms.js + webrtc wire the AbortController at every abandonment site (
     const src = await Bun.file('extension/peerd-distributed/transport/rooms.js').text();
     expect((src.match(/new AbortController\(\)/g) ?? []).length).toBe(4);
     expect((src.match(/signal: ac\.signal/g) ?? []).length).toBe(4);
-    expect((src.match(/ac\.abort\(\)/g) ?? []).length).toBe(4);
+    // Every dial/accept still aborts in finally. Additional caller-cancel and
+    // room-shutdown abort sites must not invalidate this cleanup invariant.
+    expect((src.match(/finally\s*\{[^}]*\bac\.abort\(\)/g) ?? []).length).toBe(4);
   });
 
   test('the webrtc transport threads signal into connect + accept and guards the helper', async () => {

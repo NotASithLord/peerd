@@ -312,3 +312,30 @@ describe('mesh boundary rules', () => {
     ma.close();
   });
 });
+
+test('cancelled relay dials propagate abort and reject late channels before admission', async () => {
+  const identity = await generateIdentity();
+  const remote = await generateIdentity();
+  let finish!: (channel: any) => void;
+  let transportSignal: AbortSignal | undefined;
+  const room = await joinRoom({
+    roomId: 'cancel-provider', identity, url: '',
+    transport: { connect: (_peer: any, opts: any) => {
+      transportSignal = opts.signal;
+      return new Promise((resolve) => { finish = resolve; });
+    } },
+  });
+  const ac = new AbortController();
+  let closed = 0;
+  try {
+    const dial = room.dialVia(remote.did, remote.did, { signal: ac.signal }).catch((error) => error);
+    ac.abort();
+    expect(await dial).toBeInstanceOf(Error);
+    expect(transportSignal?.aborted).toBe(true);
+    finish({ close: () => closed++ });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(closed).toBe(1);
+    expect(room.mesh.hasLink(remote.did)).toBe(false);
+  } finally { room.leave(); }
+});
