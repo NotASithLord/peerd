@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { generateIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
+import { createBufferedChannel } from '../../extension/peerd-distributed/transport/channel.js';
 import { createRoomMesh, CTRL } from '../../extension/peerd-distributed/transport/mesh.js';
 import { buildEnvelope, signEnvelope } from '../../extension/peerd-distributed/transport/envelope.js';
 
@@ -95,5 +96,57 @@ describe('mesh local abuse cooldowns', () => {
     await settle();
     expect(received).toHaveLength(1);
     mesh.close();
+  });
+});
+
+
+describe('aggregate ingress bounds', () => {
+  test('all signed channels share a pre-verification rate limit', async () => {
+    const identity = await generateIdentity();
+    const remote = await generateIdentity();
+    const mesh = createRoomMesh({ roomId: 'r', identity });
+    const c = channel();
+    mesh.addLink(c, remote.did);
+    const env = await signEnvelope(buildEnvelope({ ch: 5, typ: 0, from: remote.did,
+      body: {}, id: 'bounded', ts: 0 }), remote);
+    for (let i = 0; i < 257; i++) c.receive(env);
+    expect(mesh.hasLink(remote.did)).toBe(false);
+    expect(mesh.addLink(channel(), remote.did)).toBe(false);
+    await settle();
+    mesh.close();
+  });
+
+  test('aggregate verification saturation sheds work without banning a different peer', async () => {
+    const identity = await generateIdentity();
+    const remote = await generateIdentity();
+    const audits: string[] = [];
+    const mesh = createRoomMesh({ roomId: 'r', identity, audit: (name) => audits.push(name) });
+    const env = await signEnvelope(buildEnvelope({ ch: 4, typ: 0, from: remote.did,
+      body: {}, id: 'bounded', ts: 0 }), remote);
+    const carriers = Array.from({ length: 5 }, (_, i) => {
+      const c = channel(); mesh.addLink(c, `carrier-${i}`); return c;
+    });
+    for (const c of carriers.slice(0, 4)) for (let i = 0; i < 32; i++) c.receive(env);
+    carriers[4].receive(env);
+    expect(audits).toContain('peer_verification_busy');
+    expect(mesh.hasLink('carrier-4')).toBe(true);
+    await settle();
+    let received = 0;
+    mesh.onEnvelope(() => { received++; });
+    carriers[4].receive(env);
+    await settle();
+    expect(received).toBe(1);
+    mesh.close();
+  });
+
+  test('a stalled channel consumer has a bounded backlog and releases it on close', () => {
+    let closes = 0;
+    const c = createBufferedChannel({ send: () => {}, close: () => { closes++; } });
+    for (let i = 0; i < 17; i++) c.deliver({ i });
+    expect(c.isClosed()).toBe(true);
+    expect(closes).toBe(1);
+    let delivered = 0;
+    c.setHandler(() => { delivered++; });
+    expect(delivered).toBe(0);
   });
 });

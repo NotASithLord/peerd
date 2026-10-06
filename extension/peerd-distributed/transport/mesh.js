@@ -56,6 +56,21 @@ const ABUSE_WINDOW_MS = 60_000;
 const ABUSE_STRIKES = 3;
 const COOLDOWN_MS = 5 * 60_000;
 const MAX_COOLDOWNS = 1_024;
+// why: per-peer discipline is insufficient when many identities share a host.
+// Global exhaustion sheds work without blaming the next honest peer to arrive.
+const ENVELOPE_WINDOW_MS = 10_000;
+const ENVELOPES_PER_PEER = 256;
+const ENVELOPES_PER_MESH = 4_096;
+const VERIFY_PER_PEER = 32;
+const VERIFY_PER_MESH = 128;
+/** @typedef {{ start: number, count: number }} RateWindow */
+/** @param {RateWindow} window @param {number} limit @param {number} duration @param {number} time */
+const consume = (window, limit, duration, time) => {
+  if (time - window.start >= duration) { window.start = time; window.count = 0; }
+  if (window.count >= limit) return false;
+  window.count++;
+  return true;
+};
 
 /** @typedef {{ did: string, sign: (bytes: Uint8Array) => Promise<Uint8Array> }} Identity */
 /** @typedef {((type: string, detail?: any) => void) | null} AuditFn */
@@ -65,6 +80,8 @@ const MAX_COOLDOWNS = 1_024;
  *   did: string,
  *   channel: Channel,
  *   lastSeen: number,
+ *   envelopes: RateWindow,
+ *   verifying: number,
  *   ctrl: { windowStart: number, count: number },
  *   abuse: { windowStart: number, count: number },
  *   info?: any,
@@ -121,6 +138,8 @@ export const createRoomMesh = ({
   /** @type {ReturnType<typeof setInterval> | null} */
   let pingTimer = null;
   let closed = false;
+  const envelopeWindow = { start: now(), count: 0 };
+  let verifying = 0;
   /** @type {Map<string, number>} */
   const cooldowns = new Map();
 
@@ -253,6 +272,9 @@ export const createRoomMesh = ({
     if (!msg) { penalize(link, 'malformed-frame'); return; }
     // Phase 0 content-transfer frames multiplex on mesh links.
     if (typeof msg.t === 'string' && CONTENT_REQ.has(msg.t)) {
+      if (typeof msg.hash !== 'string' || !/^[0-9a-f]{64}$/.test(msg.hash)) {
+        penalize(link, 'malformed-content-request'); return;
+      }
       respondContent?.(msg, (out) => link.channel.send(out));
       return;
     }
@@ -269,7 +291,20 @@ export const createRoomMesh = ({
       penalize(link, 'control-rate', true);
       return;
     }
-    if (!(await verifyEnvelope(msg))) {
+    if (!consume(link.envelopes, ENVELOPES_PER_PEER, ENVELOPE_WINDOW_MS, now())) {
+      penalize(link, 'envelope-rate', true); return;
+    }
+    if (verifying >= VERIFY_PER_MESH || link.verifying >= VERIFY_PER_PEER
+        || !consume(envelopeWindow, ENVELOPES_PER_MESH, ENVELOPE_WINDOW_MS, now())) {
+      audit?.('peer_verification_busy', { did: link.did });
+      return;
+    }
+    verifying++;
+    link.verifying++;
+    let valid = false;
+    try { valid = await verifyEnvelope(msg); }
+    finally { verifying--; link.verifying--; }
+    if (!valid) {
       audit?.('peer_envelope_invalid', { via: link.did });
       penalize(link, 'invalid-envelope');
       return;
@@ -328,7 +363,7 @@ export const createRoomMesh = ({
       // both sides converge on without a tiebreak protocol.
       if (links.has(did)) removeLink(did, 'replaced');
       /** @type {Link} */
-      const link = { did, channel, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
+      const link = { did, channel, verifying: 0, envelopes: { start: now(), count: 0 }, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
       link.offClose = channel.onClose(() => {
         if (links.get(did) === link) {
           links.delete(did);
