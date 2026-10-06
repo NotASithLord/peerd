@@ -4,7 +4,7 @@ import { memoryPair } from '../../extension/peerd-distributed/transport/channel.
 import { createSession } from '../../extension/peerd-distributed/transport/session.js';
 import { createRoomMesh } from '../../extension/peerd-distributed/transport/mesh.js';
 import { createLibrary } from '../../extension/peerd-distributed/apps/library.js';
-import { createDiscovery } from '../../extension/peerd-distributed/apps/discovery.js';
+import { createDiscovery, DISCOVERY } from '../../extension/peerd-distributed/apps/discovery.js';
 import { buildMeta } from '../../extension/peerd-distributed/apps/meta.js';
 import { createDwebRollbackGuard } from '../../extension/background/dweb-rollback-guard.js';
 
@@ -29,11 +29,12 @@ const spawn = async (over: any = {}) => {
       ? false : rawMesh.send(did, envelope),
   }) : rawMesh;
   const blocked = new Set<string>();
-  const library = createLibrary({ isBlocked: (d: string) => blocked.has(d) });
+  const library = createLibrary({ isBlocked: (d: string) => blocked.has(d), ...(over.now ? { now: over.now } : {}) });
   const discovery = createDiscovery({
     mesh, identity, library,
     isBlocked: (d: string) => blocked.has(d),
     block: (d: string) => blocked.add(d),
+    ...(over.now ? { now: over.now } : {}),
     ...(over.admitMeta ? { admitMeta: over.admitMeta } : {}),
   });
   return {
@@ -160,6 +161,154 @@ describe('dwapp discovery — sovereign subscription plane', () => {
     // a re-announce can't get back in (blocklist-gated ingest)
     expect(await b.discovery.ingest(await ownCard(a, 'roulette', 2))).toBe(false);
     [a, b].forEach((p) => p.discovery.close());
+  });
+
+  test('disabled discovery refuses reconciliation and unsolicited signed cards', async () => {
+    const a = await spawn();
+    const b = await spawn();
+    await link(a, b);
+    await waitFor(() => a.discovery.subscriberCount() === 1);
+    b.discovery.setEnabled(false);
+    b.discovery.subscribeAll(); // the production host calls this periodically
+    expect(await b.discovery.subscribeTo(a.identity.did)).toBe(false);
+    await waitFor(() => a.discovery.subscriberCount() === 0);
+    const item = await ownCard(a, 'unsolicited');
+    for (const typ of [DISCOVERY.ITEM, DISCOVERY.SNAPSHOT]) {
+      a.mesh.send(b.identity.did, await a.mesh.sign(DISCOVERY.CH, typ,
+        typ === DISCOVERY.ITEM ? { item } : { items: [item] }));
+    }
+    await tick();
+    expect(b.library.size()).toBe(0);
+    expect(a.discovery.subscriberCount()).toBe(0);
+    // Pausing globally does not permanently opt out of every neighbor.
+    b.discovery.setEnabled(true);
+    await waitFor(() => a.discovery.subscriberCount() === 1);
+    await a.discovery.announce(item);
+    await waitFor(() => b.library.size() === 1);
+    expect(b.library.size()).toBe(1);
+    [a, b].forEach((p) => { p.discovery.close(); p.mesh.close(); });
+  });
+
+  test('an individual unsubscribe survives reconcile and reconnect until explicitly restored', async () => {
+    const a = await spawn();
+    const b = await spawn();
+    await link(a, b);
+    await waitFor(() => a.discovery.subscriberCount() === 1);
+    await b.discovery.unsubscribeFrom(a.identity.did);
+    b.discovery.subscribeAll();
+    b.mesh.removeLink(a.identity.did);
+    await link(a, b);
+    b.discovery.subscribeAll();
+    await tick();
+    expect(a.discovery.subscriberCount()).toBe(0);
+    const item = await ownCard(a, 'after-opt-out');
+    a.mesh.send(b.identity.did, await a.mesh.sign(DISCOVERY.CH, DISCOVERY.ITEM, { item }));
+    await tick();
+    expect(b.library.size()).toBe(0);
+    await b.discovery.subscribeTo(a.identity.did);
+    await waitFor(() => a.discovery.subscriberCount() === 1);
+    await a.discovery.announce(item);
+    await waitFor(() => b.library.size() === 1);
+    expect(b.library.size()).toBe(1);
+    [a, b].forEach((p) => { p.discovery.close(); p.mesh.close(); });
+  });
+
+  test('revocation fences an in-flight durable admission across disable and re-enable', async () => {
+    let entered = false;
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const a = await spawn();
+    const b = await spawn({ admitMeta: async () => { entered = true; await pending; return true; } });
+    await link(a, b);
+    await waitFor(() => a.discovery.subscriberCount() === 1);
+    const item = await ownCard(a, 'revoked-in-flight');
+    a.mesh.send(b.identity.did, await a.mesh.sign(DISCOVERY.CH, DISCOVERY.ITEM, { item }));
+    await waitFor(() => entered);
+    expect(entered).toBe(true);
+    b.discovery.setEnabled(false);
+    b.discovery.setEnabled(true);
+    release();
+    await tick();
+    expect(b.library.size()).toBe(0);
+    a.mesh.send(b.identity.did, await a.mesh.sign(DISCOVERY.CH, DISCOVERY.ITEM, { item }));
+    await waitFor(() => b.library.size() === 1);
+    expect(b.library.size()).toBe(1);
+    [a, b].forEach((p) => { p.discovery.close(); p.mesh.close(); });
+  });
+
+  test('a banned neighbor cannot launder another publisher card after reconnect', async () => {
+    const a = await spawn();
+    const b = await spawn();
+    const publisher = await spawn();
+    await link(a, b);
+    await waitFor(() => a.discovery.subscriberCount() === 1);
+    b.discovery.ban(a.identity.did);
+    await link(a, b);
+    b.discovery.subscribeAll();
+    expect(await b.discovery.subscribeTo(a.identity.did)).toBe(false);
+    const item = await ownCard(publisher, 'forwarded');
+    a.mesh.send(b.identity.did, await a.mesh.sign(DISCOVERY.CH, DISCOVERY.ITEM, { item }));
+    await tick();
+    expect(b.library.size()).toBe(0);
+    expect(a.discovery.subscriberCount()).toBe(0);
+    [a, b, publisher].forEach((p) => { p.discovery.close(); p.mesh.close(); });
+  });
+
+  test('retired links remove subscriber state and a closed discovery cannot resume', async () => {
+    const a = await spawn();
+    const b = await spawn();
+    await link(a, b);
+    await waitFor(() => a.discovery.subscriberCount() === 1);
+    b.mesh.removeLink(a.identity.did);
+    expect(a.discovery.subscriberCount()).toBe(0);
+    expect(b.discovery.subscriberCount()).toBe(0);
+    b.discovery.close();
+    b.discovery.setEnabled(true);
+    expect(await b.discovery.subscribeTo(a.identity.did)).toBe(false);
+    expect(await b.discovery.ingest(await ownCard(a, 'after-close'))).toBe(false);
+    a.discovery.close(); a.mesh.close(); b.mesh.close();
+  });
+
+  test('revoking while a subscription is signing prevents the delayed send', async () => {
+    let finish!: () => void;
+    const signing = new Promise<void>((resolve) => { finish = resolve; });
+    const sent: number[] = [];
+    const mesh = {
+      peers: () => [{ did: 'neighbor' }],
+      onPeer: () => () => {},
+      onEnvelope: () => () => {},
+      sign: async (_ch: number, typ: number) => {
+        if (typ === DISCOVERY.SUB) await signing;
+        return { typ };
+      },
+      send: (_did: string, env: { typ: number }) => { sent.push(env.typ); return true; },
+    };
+    const discovery = createDiscovery({ mesh, identity: { did: 'self' }, library: createLibrary() });
+    const subscribe = discovery.subscribeTo('neighbor');
+    discovery.setEnabled(false);
+    finish();
+    expect(await subscribe).toBe(false);
+    expect(sent).not.toContain(DISCOVERY.SUB);
+    discovery.close();
+  });
+
+  test('replayed snapshot prefixes cannot starve unseen cards in the next budget window', async () => {
+    let now = 1_000;
+    const a = await spawn();
+    const b = await spawn({ now: () => now });
+    for (let i = 0; i < 100; i++) await a.discovery.announce(await ownCard(a, `catalog-${i}`));
+    await link(a, b);
+    await waitFor(() => b.library.size() === 60);
+    expect(b.library.size()).toBe(60);
+    // Same window still has a hard ceiling despite repeated snapshots.
+    b.discovery.subscribeAll();
+    await tick();
+    expect(b.library.size()).toBe(60);
+    now += 61_000;
+    b.discovery.subscribeAll();
+    await waitFor(() => b.library.size() === 100);
+    expect(b.library.size()).toBe(100);
+    [a, b].forEach((p) => { p.discovery.close(); p.mesh.close(); });
   });
 
   test('an offscreen restart cannot make a replayed lower sequence fresh', async () => {
