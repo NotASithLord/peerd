@@ -17,6 +17,7 @@ import { generateIdentity } from '../../extension/peerd-distributed/identity/key
 import { createRoomMesh } from '../../extension/peerd-distributed/transport/mesh.js';
 import { createSession } from '../../extension/peerd-distributed/transport/session.js';
 import { createBufferedChannel } from '../../extension/peerd-distributed/transport/channel.js';
+import { localSessionBindings } from '../../extension/peerd-distributed/transport/channel-binding.js';
 import { createPeerNode } from '../../extension/peerd-distributed/peer-node.js';
 
 export const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
@@ -24,12 +25,13 @@ export const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
 // A controllable bidirectional link: like memoryPair, but it can be severed
 // (partition) or made lossy. Delivery is synchronous (deterministic).
 const simLink = () => {
+  const [bindingA, bindingB] = localSessionBindings();
   let severed = false;
   let dropRate = 0;
   let a: any, b: any;
   const pass = (to: any, m: any) => { if (severed) return; if (dropRate && hash(m) < dropRate) return; to.deliver(m); };
-  a = createBufferedChannel({ send: (m: any) => pass(b, m), close: () => b.signalClose() });
-  b = createBufferedChannel({ send: (m: any) => pass(a, m), close: () => a.signalClose() });
+  a = createBufferedChannel({ send: (m: any) => pass(b, m), close: () => b.signalClose(), getSessionBinding: () => bindingA });
+  b = createBufferedChannel({ send: (m: any) => pass(a, m), close: () => a.signalClose(), getSessionBinding: () => bindingB });
   return { a, b, sever() { severed = true; }, heal() { severed = false; }, setDrop(r: number) { dropRate = r; }, get severed() { return severed; } };
 };
 // a stable [0,1) from a message, so "drop" is deterministic per-message

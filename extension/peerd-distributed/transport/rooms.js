@@ -108,9 +108,9 @@ export const joinRoom = async ({
    * @param {AbortSignal} [signal]
    */
   const admit = async (channel, expectedDid = null, via = null, signal) => {
-    if (left || signal?.aborted) { channel.close(); throw new Error('room dial cancelled'); }
-    const { remoteDid } = await createSession({ channel, identity, caps, now });
-    if (left || signal?.aborted) { channel.close(); throw new Error('room dial cancelled'); }
+    if (left || signal?.aborted || channel.isClosed?.()) { channel.close(); throw new Error('room dial cancelled or channel closed'); }
+    const { remoteDid } = await createSession({ channel, identity, caps, now, signal });
+    if (left || signal?.aborted || channel.isClosed?.()) { channel.close(); throw new Error('room dial cancelled or channel closed'); }
     if (expectedDid && remoteDid !== expectedDid) {
       channel.close();
       audit?.('peer_did_mismatch', { expected: expectedDid, got: remoteDid });
@@ -121,7 +121,7 @@ export const joinRoom = async ({
       channel.close();
       return remoteDid;
     }
-    mesh.addLink(channel, remoteDid);
+    if (!mesh.addLink(channel, remoteDid)) throw new Error('room peer admission refused');
     if (via) mesh.tagLink(remoteDid, { via });
     dlog('room', `✅ CONNECTED to peer ${short(remoteDid)} — data channel open, in the mesh`);
     // Path telemetry for the HUD (D-5): best-effort, after stats settle.
@@ -208,7 +208,7 @@ export const joinRoom = async ({
       const ac = new AbortController();
       try {
         const { channel } = await t.accept({ offer: payload, iceServers, signaling, signal: ac.signal });
-        await admit(await withConnectTimeout(channel, `accept ${from}`), null, 'rendezvous');
+        await admit(await withConnectTimeout(channel, `accept ${from}`), null, 'rendezvous', ac.signal);
       } catch (e) {
         logConnectFail('accept from', from, e);
         audit?.('room_accept_failed', { member: from, error: /** @type {{ message?: string }} */ (e)?.message });
@@ -243,7 +243,7 @@ export const joinRoom = async ({
           t.connect({ did: `${roomId}/${member}` }, { iceServers, signaling, signal: ac.signal }),
           `dial ${member}`,
         );
-        await admit(channel, null, 'rendezvous');
+        await admit(channel, null, 'rendezvous', ac.signal);
       } catch (e) {
         logConnectFail('dial to', member, e);
         audit?.('room_dial_failed', { member, error: /** @type {{ message?: string }} */ (e)?.message });
@@ -274,7 +274,7 @@ export const joinRoom = async ({
       const ac = new AbortController();
       try {
         const { channel } = await t.accept({ offer: payload, iceServers, signaling, signal: ac.signal });
-        await admit(await withConnectTimeout(channel, `relay accept ${short(env.from)}`), env.from, via);
+        await admit(await withConnectTimeout(channel, `relay accept ${short(env.from)}`), env.from, via, ac.signal);
         audit?.('relay_join_accepted', { did: env.from, via });
       } catch (e) {
         logConnectFail('relay accept', env.from, e);

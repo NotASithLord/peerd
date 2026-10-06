@@ -65,15 +65,19 @@ const orderedCandidates = (signaling) => {
 // one-shot) — nothing else imports it; the module's public surface is the transport.
 /**
  * @param {AbortSignal | undefined} signal
- * @param {{ pc: RTCPeerConnection }} p
+ * @param {{ pc: RTCPeerConnection, close?: () => void }} p
  * @param {() => boolean} isOpen
  */
 export const abortClosesPc = (signal, p, isOpen) => {
   if (!signal) return;
-  signal.addEventListener('abort', () => {
+  const close = () => {
     if (isOpen()) return;
-    try { p.pc.close(); } catch { /* already closed */ }
-  }, { once: true });
+    // Native pc.close() emits no state-change event. Release through the peer
+    // owner so a pre-open channelReady rejects and signaling unsubscribes too.
+    try { if (p.close) p.close(); else p.pc.close(); } catch { /* already closed */ }
+  };
+  if (signal.aborted) close();
+  else signal.addEventListener('abort', close, { once: true });
 };
 
 /**

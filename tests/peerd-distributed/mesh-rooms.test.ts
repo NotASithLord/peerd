@@ -144,6 +144,26 @@ describe('rooms over the rendezvous (fake node, real reducer)', () => {
     ra.leave(); rb.leave(); rc.leave();
   });
 
+  test('a channel closing during HELLO cannot keep the initial room join pending', async () => {
+    const node = createFakeNode();
+    const ether = createFakeEther();
+    const [a, b] = await Promise.all([generateIdentity(), generateIdentity()]);
+    const first = await join('closed-hello', a, node, ether);
+    const transport = {
+      ...ether.makeTransport(),
+      async connect() {
+        const [local, remote] = memoryPair();
+        const send = local.send;
+        local.send = (message) => { send(message); remote.close(); };
+        return local;
+      },
+    };
+    const second = await joinRoom({ roomId: 'closed-hello', identity: b,
+      url: URL_FAKE, WebSocket: node.WebSocket, transport });
+    expect(second.peers()).toHaveLength(0);
+    second.leave(); first.leave();
+  });
+
   test('roster request answers with the asker excluded', async () => {
     const node = createFakeNode();
     const ether = createFakeEther();

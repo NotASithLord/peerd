@@ -1,66 +1,172 @@
 // @ts-check
-// peerd-distributed/transport/session.js — the HELLO handshake.
-//
-// On channel open, both peers exchange signed HELLO envelopes (control
-// channel, PROTOCOL §3.4). Each verifies the other's signature, learning
-// the peer's authenticated did:key. After the handshake the channel is
-// handed back clean for the application protocol (content transfer in
-// Phase 0). why: this is where a raw DTLS pipe becomes an *identified*
-// peer link — the foundation every trust-tier decision builds on.
+// Authenticated, channel-bound HELLO exchange. Protocol 2 intentionally rejects
+// legacy peers: a recorded signature is not fresh proof of the carrier's key.
 
 import { buildEnvelope, signEnvelope, verifyEnvelope } from './envelope.js';
 
 const newId = () => crypto.randomUUID();
+const NONCE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const HASH = /^[0-9a-f]{64}$/;
+/** @typedef {{kind:string,localFingerprint:string,remoteFingerprint:string,streamId:number}} SessionBinding */
+/** @param {any} value @param {string[]} keys */
+const exactKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+/** @param {any} value */
+const validBinding = (value) => exactKeys(value, ['kind', 'localFingerprint', 'remoteFingerprint', 'streamId'])
+  && ['webrtc-dtls-sha256', 'trusted-local'].includes(value.kind)
+  && typeof value.localFingerprint === 'string' && HASH.test(value.localFingerprint)
+  && typeof value.remoteFingerprint === 'string' && HASH.test(value.remoteFingerprint)
+  && Number.isInteger(value.streamId) && value.streamId >= 0 && value.streamId < 65535;
+/** @param {any} env @param {number} typ */
+const validEnvelope = (env, typ) => exactKeys(env, ['v', 'ch', 'typ', 'from', 'body', 'id', 'ts', 'sig'])
+  && env.v === 1 && env.ch === 0 && env.typ === typ
+  && typeof env.from === 'string' && env.from.length <= 128
+  && typeof env.sig === 'string' && env.sig.length <= 128
+  && typeof env.id === 'string' && NONCE.test(env.id) && Number.isSafeInteger(env.ts);
 
-// Returns { remoteDid }. Throws if the peer's HELLO fails verification or
-// speaks an unsupported protocol version.
 /**
  * @param {{
- *   channel: { send: (msg: any) => void, setHandler: (h: any) => void, deliver: (msg: any) => void },
- *   identity: { did: string, sign: (bytes: Uint8Array) => Promise<Uint8Array> },
- *   caps?: string[],
- *   now?: () => number,
+ *   channel: { send:(msg:any)=>void, setHandler:(h:any)=>void, deliver:(msg:any)=>void,
+ *     onClose?:(cb:()=>void)=>(()=>void), close?:()=>void, isClosed?:()=>boolean, getSessionBinding?:()=>(SessionBinding|null) },
+ *   identity: {did:string,sign:(bytes:Uint8Array)=>Promise<Uint8Array>},
+ *   caps?:string[], now?:()=>number, timeoutMs?:number, signal?:AbortSignal,
  * }} opts
- * @returns {Promise<{ remoteDid: string }>}
+ * @returns {Promise<{remoteDid:string}>}
  */
-export const createSession = async ({ channel, identity, caps = ['content'], now = Date.now }) => {
-  /** @type {(did: string) => void} */
-  let resolveHello;
-  /** @type {(err: Error) => void} */
-  let rejectHello;
-  /** @type {Promise<string>} */
-  const helloReceived = new Promise((res, rej) => {
-    resolveHello = res;
-    rejectHello = rej;
-  });
-
-  // While handshaking, only HELLO is expected. Any non-HELLO frame that
-  // races in is stashed and re-delivered after we hand the channel back,
-  // so an eager content request is never dropped.
-  /** @type {any[]} */
-  const stashed = [];
-  channel.setHandler(async (/** @type {any} */ msg) => {
-    if (msg && msg.__t === 'HELLO') {
-      const ok = await verifyEnvelope(msg.env);
-      if (!ok) return rejectHello(new Error('peer HELLO signature invalid'));
-      if (msg.env.body?.proto !== 1) {
-        return rejectHello(new Error(`unsupported protocol version: ${msg.env.body?.proto}`));
-      }
-      return resolveHello(msg.env.from);
+export const createSession = ({ channel, identity, caps = ['content'], now = Date.now,
+  timeoutMs = 10_000, signal,
+}) => new Promise((resolve, reject) => {
+  let settled = false;
+  let helloStarted = false;
+  let helloSent = false;
+  let proofStarted = false;
+  let proofSent = false;
+  let proofReceived = false;
+  let verifyingProof = false;
+  /** @type {any} */ let remoteHello = null;
+  /** @type {any} */ let remoteProof = null;
+  /** @type {SessionBinding} */ let binding;
+  const helloId = newId();
+  let offClose = () => {};
+  /** @type {any[]} */ const stashed = [];
+  let stashedBytes = 0;
+  /** @param {Error|null} error */
+  const finish = (error) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+    offClose();
+    channel.setHandler(null);
+    if (error) {
+      stashed.length = 0;
+      try { channel.close?.(); } catch { /* already closed */ }
+      reject(error);
+    } else {
+      for (const msg of stashed) channel.deliver(msg);
+      stashed.length = 0;
+      resolve({ remoteDid: remoteHello.from });
     }
+  };
+  const complete = () => { if (helloSent && proofSent && proofReceived) finish(null); };
+  const abort = () => finish(new Error('peer HELLO cancelled'));
+  const timer = setTimeout(() => finish(new Error('peer HELLO timed out')), timeoutMs);
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) { abort(); return; }
+  if (channel.isClosed?.()) { finish(new Error('peer closed during HELLO')); return; }
+  // why: this binding is supplied by the local transport, never by a peer frame.
+  // DTLS fingerprints plus stream ID stop proof forwarding across attacker pipes.
+  try {
+    const local = channel.getSessionBinding?.();
+    if (!validBinding(local)) throw new Error('peer HELLO requires an authenticated transport binding');
+    binding = { .../** @type {SessionBinding} */ (local) };
+  } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); return; }
+
+  const verifyProof = async () => {
+    if (settled || !remoteHello || !remoteProof || verifyingProof) return;
+    verifyingProof = true;
+    const env = remoteProof;
+    const b = env.body;
+    if (env.from !== remoteHello.from || b.to !== identity.did
+        || b.hello !== remoteHello.id || b.challenge !== helloId
+        || b.binding.kind !== binding.kind || b.binding.streamId !== binding.streamId
+        || b.binding.localFingerprint !== binding.remoteFingerprint
+        || b.binding.remoteFingerprint !== binding.localFingerprint) {
+      finish(new Error('peer HELLO proof does not match this channel')); return;
+    }
+    if (!(await verifyEnvelope(env))) { if (!settled) finish(new Error('peer HELLO proof signature invalid')); return; }
+    if (settled) return;
+    proofReceived = true;
+    complete();
+  };
+  const sendProof = async () => {
+    if (settled || !remoteHello || !helloSent || proofStarted) return;
+    proofStarted = true;
+    const env = await signEnvelope(buildEnvelope({ ch: 0, typ: 1, from: identity.did,
+      body: { proto: 2, to: remoteHello.from, hello: helloId, challenge: remoteHello.id, binding: { ...binding } },
+      id: newId(), ts: now(),
+    }), identity);
+    if (settled) return;
+    channel.send({ __t: 'HELLO_PROOF', env });
+    proofSent = true;
+    complete();
+  };
+  /** @param {unknown} error */
+  const fail = (error) => finish(error instanceof Error ? error : new Error(String(error)));
+  /** @param {any} msg */
+  const receive = async (msg) => {
+    if (settled) return;
+    if (msg?.__t === 'HELLO') {
+      if (helloStarted) return;
+      helloStarted = true;
+      const env = msg.env;
+      if (env?.body?.proto !== 2) { finish(new Error('unsupported peer protocol: upgrade required (protocol 2)')); return; }
+      if (!validEnvelope(env, 0) || !exactKeys(env.body, ['proto', 'caps'])
+          || !Array.isArray(env.body.caps) || env.body.caps.length > 32
+          || !env.body.caps.every((/** @type {any} */ cap) => typeof cap === 'string' && cap.length <= 64)) {
+        finish(new Error('invalid peer HELLO envelope')); return;
+      }
+      if (env.id === helloId) { finish(new Error('peer HELLO reflected local challenge')); return; }
+      // why: local/in-process transports can share object references. Verify
+      // and retain an owned snapshot so later mutation cannot change identity.
+      const owned = { ...env, body: { ...env.body, caps: [...env.body.caps] } };
+      if (!(await verifyEnvelope(owned))) { if (!settled) finish(new Error('peer HELLO signature invalid')); return; }
+      if (settled) return;
+      remoteHello = owned;
+      await Promise.all([sendProof(), verifyProof()]);
+      return;
+    }
+    if (msg?.__t === 'HELLO_PROOF') {
+      if (remoteProof) return;
+      const env = msg.env;
+      if (!validEnvelope(env, 1) || !exactKeys(env.body, ['proto', 'to', 'hello', 'challenge', 'binding'])
+          || env.body.proto !== 2 || typeof env.body.to !== 'string' || env.body.to.length > 128
+          || typeof env.body.hello !== 'string' || !NONCE.test(env.body.hello)
+          || typeof env.body.challenge !== 'string' || !NONCE.test(env.body.challenge)
+          || !validBinding(env.body.binding)) {
+        finish(new Error('invalid peer HELLO proof')); return;
+      }
+      remoteProof = { ...env, body: { ...env.body, binding: { ...env.body.binding } } };
+      await verifyProof();
+      return;
+    }
+    // why: eager authenticated peers may start traffic while our crypto finishes,
+    // but an unauthenticated sender cannot retain unlimited frames or bytes.
+    if (stashed.length >= 16) { finish(new Error('peer HELLO backlog exceeded')); return; }
+    const encoded = JSON.stringify(msg);
+    stashedBytes += typeof encoded === 'string' ? new TextEncoder().encode(encoded).length : 0;
+    if (stashedBytes > 1_048_576) { finish(new Error('peer HELLO backlog exceeded')); return; }
     stashed.push(msg);
-  });
-
-  const hello = await signEnvelope(
-    buildEnvelope({ ch: 0, typ: 0, from: identity.did, body: { proto: 1, caps }, id: newId(), ts: now() }),
-    identity,
-  );
-  channel.send({ __t: 'HELLO', env: hello });
-
-  const remoteDid = await helloReceived;
-  channel.setHandler(null);
-  // Re-queue anything that arrived during the handshake so the next
-  // handler (the content responder) sees it in order.
-  for (const m of stashed) channel.deliver(m);
-  return { remoteDid };
-};
+  };
+  channel.setHandler((/** @type {any} */ msg) => { receive(msg).catch(fail); });
+  offClose = channel.onClose?.(() => finish(new Error('peer closed during HELLO'))) ?? offClose;
+  if (settled) { offClose(); return; }
+  signEnvelope(buildEnvelope({ ch: 0, typ: 0, from: identity.did,
+    body: { proto: 2, caps }, id: helloId, ts: now(),
+  }), identity).then(async (hello) => {
+    if (settled) return;
+    channel.send({ __t: 'HELLO', env: hello });
+    helloSent = true;
+    await sendProof();
+  }).catch(fail);
+});

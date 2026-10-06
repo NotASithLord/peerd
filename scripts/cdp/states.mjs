@@ -3466,12 +3466,17 @@ export const STATES = [
     name: 'vault-lock', kind: 'functional', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) {
+      const lockStartedAt = Date.now();
       const lock = await rpc(ctx.page, { type: 'vault/lock' });
+      const lockReplyMs = Date.now() - lockStartedAt;
       const locked = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.vault-brand') && !document.querySelector('form.input-bar')`), { budgetMs: 8_000 });
       rec.check('locking flips the panel to the vault gate', !!locked && lock?.ok === true, JSON.stringify(lock));
       if (!locked || lock?.ok !== true) {
         await rec.shot('lock-failed');
         rec.observe('lock failure', {
+          lockReplyMs,
+          elapsedMs: Date.now() - lockStartedAt,
+          kernel: await rpc(ctx.page, { type: 'bootstrap/ready' }),
           state: await rpc(ctx.page, { type: 'state/get' }),
           pageEvents: ctx.page.events.slice(-12),
           targetEvents: ctx.extensionTargetEvents().map(({ targetId, events }) => ({ targetId, events: events.slice(-12) })),

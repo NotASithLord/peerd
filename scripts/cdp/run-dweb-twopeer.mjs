@@ -35,8 +35,8 @@ const CHROME = process.env.CHROME_PATH || process.env.CHROME
 
 // A healthy loopback connect is ~1-2s; two contexts spinning up + the rendezvous
 // + a couple gossip rounds still finish well inside 30s. If the peers haven't
-// paired by then it's a hard transient, not slowness — so fail fast and let the
-// CI retry re-run it (a longer budget only burns wall-clock before the retry).
+// paired by then, preserve the failure and its diagnostics for investigation.
+// A later passing attempt does not establish that the failure has been fixed.
 const RESULT_BUDGET_MS = 30_000;
 const POLL_INTERVAL_MS = 500;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -57,6 +57,10 @@ const server = createServer((req, res) => {
 });
 
 let chrome, profile, signaling;
+let chromeStderr = '';
+const chromeDiagnostics = () => {
+  if (chromeStderr) console.error('[twopeer] Chrome stderr tail:\n' + chromeStderr);
+};
 const cleanup = () => {
   try { chrome?.kill('SIGKILL'); } catch { /* */ }
   try { signaling?.kill('SIGKILL'); } catch { /* */ }
@@ -85,18 +89,42 @@ const attach = async (wsUrl) => {
   const ws = new WebSocket(wsUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   let id = 0; const pending = new Map(); const events = [];
+  const requests = new Map();
+  const record = (event) => { events.push(event); if (events.length > 64) events.shift(); };
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); return; }
-    if (m.method === 'Runtime.exceptionThrown') events.push('EXC ' + (m.params?.exceptionDetails?.exception?.description || m.params?.exceptionDetails?.text));
-    if (m.method === 'Runtime.consoleAPICalled' && m.params?.type === 'error') events.push('ERR ' + (m.params.args || []).map((a) => a.value || a.description || a.type).join(' '));
+    if (m.method === 'Runtime.exceptionThrown') record('EXC ' + (m.params?.exceptionDetails?.exception?.description || m.params?.exceptionDetails?.text));
+    if (m.method === 'Runtime.consoleAPICalled') record('CONSOLE ' + m.params?.type + ' ' + (m.params.args || []).map((a) => a.value || a.description || a.type).join(' ').slice(0, 2000));
+    if (m.method === 'Network.requestWillBeSent') {
+      if (requests.size >= 128) requests.delete(requests.keys().next().value);
+      requests.set(m.params.requestId, { url: m.params.request.url, type: m.params.type });
+    }
+    if (m.method === 'Network.responseReceived' && m.params.response.status >= 400) {
+      record('HTTP ' + m.params.response.status + ' ' + m.params.response.url);
+    }
+    if (m.method === 'Network.loadingFailed') record('REQUEST FAILED ' + JSON.stringify({
+      ...requests.get(m.params.requestId), error: m.params.errorText, blockedReason: m.params.blockedReason,
+    }));
+    if (m.method === 'Network.loadingFailed' || m.method === 'Network.loadingFinished') requests.delete(m.params.requestId);
+    if (m.method === 'Page.frameNavigated') record('NAVIGATED ' + m.params.frame.url);
+    if (m.method === 'Inspector.targetCrashed') record('TARGET CRASHED');
+    if (m.method === 'Network.webSocketCreated') record('WEBSOCKET ' + m.params.url);
+    if (m.method === 'Network.webSocketHandshakeResponseReceived') record('WEBSOCKET HANDSHAKE ' + m.params.response.status);
+    if (m.method === 'Network.webSocketFrameError') record('WEBSOCKET ERROR ' + m.params.errorMessage);
+    if (m.method === 'Network.webSocketClosed') record('WEBSOCKET CLOSED ' + m.params.requestId);
   };
   const send = (method, params = {}) => new Promise((res) => { const i = ++id; pending.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
   const evaluate = async (expression) => {
     const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
     return r.result?.result?.value;
   };
-  return { send, evaluate, close: () => ws.close(), events };
+  const diagnostics = async () => ({
+    page: await evaluate(`({ url: location.href, readyState: document.readyState,
+      boot: window.__DWEB_BOOT__ ?? null, title: document.title })`),
+    requests: [...requests.values()], events,
+  });
+  return { send, evaluate, close: () => ws.close(), events, diagnostics };
 };
 
 // Open a fresh tab pointed at `url`, with Runtime/Page enabled before nav so
@@ -106,7 +134,15 @@ const openPeer = async (cdpPort, url) => {
   const peer = await attach(created.webSocketDebuggerUrl);
   await peer.send('Runtime.enable');
   await peer.send('Page.enable');
-  await peer.send('Page.navigate', { url });
+  await peer.send('Network.enable');
+  await peer.send('Inspector.enable');
+  await peer.send('Page.addScriptToEvaluateOnNewDocument', {
+    source: '"use strict"; window.__DWEB_BOOT__ = { stage: "document-created", at: Date.now() };',
+  });
+  const navigation = await peer.send('Page.navigate', { url });
+  if (navigation.error || navigation.result?.errorText) {
+    throw new Error('peer navigation failed: ' + JSON.stringify(navigation.error ?? navigation.result));
+  }
   return peer;
 };
 
@@ -148,7 +184,8 @@ const main = async () => {
     '--disable-gpu', '--no-sandbox',
     '--disable-features=WebRtcHideLocalIpsWithMdns',
     `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank',
-  ], { stdio: 'ignore' });
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  chrome.stderr.on('data', (data) => { chromeStderr = (chromeStderr + String(data)).slice(-16_384); });
   const cdpPort = await waitForCdpPort();
 
   // 4. two peers in the same room. A2A=1 adds the live ask/reply round-trip on
@@ -190,10 +227,13 @@ const main = async () => {
   console.error('  alice:', JSON.stringify(a));
   console.error('  bob:  ', JSON.stringify(b));
   for (const [who, peer] of [['alice', alice], ['bob', bob]]) {
-    if (peer.events.length) console.error(`  ${who} page errors:\n   ` + peer.events.slice(0, 8).join('\n   '));
+    const timeout = Symbol('diagnostic-timeout');
+    const details = await Promise.race([peer.diagnostics(), sleep(1000).then(() => timeout)]);
+    console.error(`  ${who} diagnostics:`, details === timeout ? 'CDP diagnostic timed out' : JSON.stringify(details));
   }
+  chromeDiagnostics();
   cleanup();
   process.exit(1);
 };
 
-main().catch((e) => { console.error('[twopeer] FATAL', e); cleanup(); process.exit(1); });
+main().catch((e) => { console.error('[twopeer] FATAL', e); chromeDiagnostics(); cleanup(); process.exit(1); });
