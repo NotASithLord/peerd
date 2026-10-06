@@ -35,6 +35,7 @@ const spawn = async (over: any = {}) => {
     isBlocked: (d: string) => blocked.has(d),
     block: (d: string) => blocked.add(d),
     ...(over.now ? { now: over.now } : {}),
+    ...(over.caps ? { caps: over.caps } : {}),
     ...(over.admitMeta ? { admitMeta: over.admitMeta } : {}),
   });
   return {
@@ -309,6 +310,76 @@ describe('dwapp discovery — sovereign subscription plane', () => {
     await waitFor(() => b.library.size() === 100);
     expect(b.library.size()).toBe(100);
     [a, b].forEach((p) => { p.discovery.close(); p.mesh.close(); });
+  });
+
+  test('cursor pages converge past the old snapshot ceiling without lifting receive quotas', async () => {
+    let time = 0;
+    const source = await spawn({ now: () => time });
+    const sink = await spawn({ now: () => time });
+    for (let i = 0; i < 275; i += 1) {
+      await source.discovery.announce(await ownCard(source, `catalog-${i}`));
+    }
+    await link(source, sink);
+    await waitFor(() => sink.library.size() === 60);
+    expect(sink.library.size()).toBe(60);
+    // Same-window reconciliation cannot burn through the new-card allowance.
+    sink.discovery.subscribeAll(); await tick();
+    expect(sink.library.size()).toBe(60);
+    for (let page = 2; page <= 5; page += 1) {
+      time += 60_000;
+      sink.discovery.subscribeAll();
+      const expected = Math.min(275, page * 60);
+      await waitFor(() => sink.library.size() === expected);
+      expect(sink.library.size()).toBe(expected);
+    }
+    expect(sink.library.rows().map((row: any) => row.name).sort())
+      .toEqual(source.library.rows().map((row: any) => row.name).sort());
+    source.discovery.close(); sink.discovery.close();
+    source.mesh.close(); sink.mesh.close();
+  });
+
+  test('an unsolicited page cannot advance a subscribed catalog cursor', async () => {
+    const source = await spawn();
+    const sink = await spawn();
+    await link(source, sink); await tick();
+    const card = await ownCard(source, 'unsolicited-page');
+    source.mesh.send(sink.identity.did, await source.mesh.sign(DISCOVERY.CH, DISCOVERY.SNAPSHOT, {
+      items: [card], page: { id: 'never-requested', after: '', next: 'f'.repeat(64) },
+    }));
+    await tick();
+    expect(sink.library.size()).toBe(0);
+    // A subsequent legitimate live publication is unaffected.
+    await source.discovery.announce(card);
+    await waitFor(() => sink.library.size() === 1);
+    expect(sink.library.size()).toBe(1);
+    source.discovery.close(); sink.discovery.close();
+    source.mesh.close(); sink.mesh.close();
+  });
+
+  test('duplicate-only snapshots still have a bounded processing rate', async () => {
+    let handled = 0;
+    const mesh = {
+      peers: () => [{ did: 'remote' }],
+      sign: async (_ch: number, _typ: number, body: any) => ({ body }),
+      send: () => true,
+      onPeer: () => () => {},
+      onEnvelope: (callback: any) => { receive = callback; return () => {}; },
+    };
+    let receive: any;
+    const library = createLibrary();
+    const discovery = createDiscovery({ mesh, identity: { did: 'local' }, library,
+      caps: { snapshotsPerMin: 2 } });
+    await discovery.subscribeTo('remote');
+    const items = new Proxy([], { get(target, key, receiver) {
+      if (key === 'slice') handled += 1;
+      return Reflect.get(target, key, receiver);
+    } });
+    for (let i = 0; i < 10; i += 1) {
+      await receive({ via: 'remote', env: { ch: DISCOVERY.CH, typ: DISCOVERY.SNAPSHOT,
+        from: 'remote', body: { items } } });
+    }
+    expect(handled).toBe(2);
+    discovery.close();
   });
 
   test('an offscreen restart cannot make a replayed lower sequence fresh', async () => {

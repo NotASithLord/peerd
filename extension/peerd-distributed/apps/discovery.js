@@ -28,7 +28,8 @@ export const DISCOVERY = Object.freeze({ CH: 5, SUB: 0, SNAPSHOT: 1, ITEM: 2, UN
 // Reasoned defaults (PROPAGATION.md caps table) — validate under load.
 const DEFAULTS = Object.freeze({
   relayPerMin: 60,    // distinct new cards accepted from one peer per minute
-  snapshotMax: 200,   // cards served in a snapshot (the most-recent tail)
+  snapshotMax: 200,   // cards per page, not the total catalog
+  snapshotsPerMin: 6, // bound page generation and parsing even for duplicates
 });
 
 /**
@@ -40,7 +41,7 @@ const DEFAULTS = Object.freeze({
  *   block?: ((did: string, reason?: string) => void) | null,
  *   audit?: ((type: string, detail?: any) => void) | null,
  *   now?: () => number,
- *   caps?: { relayPerMin?: number, snapshotMax?: number },
+ *   caps?: { relayPerMin?: number, snapshotMax?: number, snapshotsPerMin?: number },
  *   onCard?: ((card: any) => void) | null,
  *   admitMeta?: ((candidate: { dwappId: string, publisher: string, seq: number, versionId: string }) => Promise<boolean>) | null,
  * }} opts
@@ -51,6 +52,32 @@ export const createDiscovery = ({
 } = /** @type {{ mesh: any, identity: { did: string }, library: any }} */ ({})) => {
   const relayPerMin = caps.relayPerMin ?? DEFAULTS.relayPerMin;
   const snapshotMax = caps.snapshotMax ?? DEFAULTS.snapshotMax;
+  const snapshotsPerMin = caps.snapshotsPerMin ?? DEFAULTS.snapshotsPerMin;
+  /** @type {Map<string, string>} */
+  const cursors = new Map();
+  /** @type {Map<string, {id:string, after:string, limit:number, sentAt:number}>} */
+  const requests = new Map();
+  /** @type {Map<string, object>} */
+  const processing = new Map();
+  /** @type {Map<string, {start:number, sent:number, received:number}>} */
+  const snapshotWindows = new Map();
+  let requestId = 0;
+
+  /** @param {string} did @param {'sent'|'received'} direction */
+  const allowSnapshot = (did, direction) => {
+    const t = now();
+    let window = snapshotWindows.get(did);
+    if (!window || t - window.start >= 60_000) {
+      window = { start: t, sent: 0, received: 0 }; snapshotWindows.set(did, window);
+    }
+    if (window[direction] >= snapshotsPerMin) return false;
+    window[direction] += 1;
+    return true;
+  };
+  /** @param {string} did */
+  const forgetPages = (did) => {
+    cursors.delete(did); requests.delete(did); processing.delete(did); snapshotWindows.delete(did);
+  };
 
   /** @type {Set<string>} */
   const subscribers = new Set();     // dids who subscribed to OUR feed (we serve them)
@@ -75,7 +102,7 @@ export const createDiscovery = ({
   const allow = (did) => {
     const t = now();
     let b = buckets.get(did);
-    if (!b || t - b.windowStart > 60_000) { b = { count: 0, windowStart: t }; buckets.set(did, b); }
+    if (!b || t - b.windowStart >= 60_000) { b = { count: 0, windowStart: t }; buckets.set(did, b); }
     if (b.count >= relayPerMin) return false;
     b.count += 1;
     return true;
@@ -110,8 +137,10 @@ export const createDiscovery = ({
 
   // Verify → blocklist → no-downgrade store → (if fresh) relay to our subscribers.
   // Returns whether the card was newly stored/upgraded.
-  /** @param {any} item @param {string | null} [via] @param {object | undefined} [subscription] */
-  const ingest = async (item, via = null, subscription = via ? upstreams.get(via) : undefined) => {
+  /** @param {any} item @param {string | null} [via] @param {object | undefined} [subscription]
+   * @param {()=>void} [onRateLimited] */
+  const ingest = async (item, via = null, subscription = via ? upstreams.get(via) : undefined,
+    onRateLimited = () => {}) => {
     const current = () => !closed && (via === null || receiving(via, subscription));
     if (!current()) return false;
     if (!metaWellFormed(item)) return false;
@@ -123,6 +152,7 @@ export const createDiscovery = ({
     const known = library.get(id);
     if (known && item.seq <= known.seq) return false;
     if (via !== null && !allow(via)) {
+      onRateLimited();
       audit?.('discovery_rate_limited', { did: via });
       return false;
     }
@@ -148,10 +178,19 @@ export const createDiscovery = ({
     return fresh;
   };
 
-  /** @param {string} did */
-  const sendSnapshot = async (did) => {
-    const items = library.list().slice(0, snapshotMax); // newest-announced tail, capped
-    const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.SNAPSHOT, { items });
+  /** @param {string} did @param {any} request */
+  const sendSnapshot = async (did, request) => {
+    if (!allowSnapshot(did, 'sent')) return;
+    const paged = request?.catalog === 1
+      && typeof request.id === 'string' && request.id.length > 0 && request.id.length <= 64
+      && typeof request.after === 'string' && /^(|[a-f0-9]{64})$/.test(request.after)
+      && Number.isInteger(request.limit) && request.limit > 0;
+    const page = paged ? library.page(request.after, Math.min(snapshotMax, request.limit)) : null;
+    const items = page?.items ?? library.list().slice(0, snapshotMax);
+    const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.SNAPSHOT, {
+      items,
+      ...(page ? { page: { id: request.id, after: request.after, next: page.next } } : {}),
+    });
     if (!closed && subscribers.has(did) && !isBlocked(did)) mesh.send(did, env);
   };
 
@@ -163,18 +202,38 @@ export const createDiscovery = ({
         if (isBlocked(via)) return;
         subscribers.add(via);
         audit?.('discovery_subscriber_added', { did: via });
-        await sendSnapshot(via);
+        await sendSnapshot(via, env.body);
         return;
       case DISCOVERY.UNSUB:
         subscribers.delete(via);
         return;
       case DISCOVERY.SNAPSHOT: {
         const subscription = upstreams.get(via);
-        if (!receiving(via, subscription)) return;
-        const items = Array.isArray(env.body?.items) ? env.body.items.slice(0, snapshotMax) : [];
-        for (const it of items) {
-          if (!receiving(via, subscription)) break;
-          await ingest(it, via, subscription);
+        if (!receiving(via, subscription) || processing.has(via)) return;
+        const request = requests.get(via);
+        const page = env.body?.page;
+        if (page && (!request || page.id !== request.id || page.after !== request.after
+          || !(page.next === null || typeof page.next === 'string'
+            && /^[a-f0-9]{64}$/.test(page.next) && page.next > request.after))) return;
+        if (!allowSnapshot(via, 'received')) return;
+        const token = {};
+        processing.set(via, token);
+        let rateLimited = false;
+        try {
+          const limit = page ? Math.min(snapshotMax, request?.limit ?? 0) : snapshotMax;
+          const items = Array.isArray(env.body?.items) ? env.body.items.slice(0, limit) : [];
+          for (const it of items) {
+            if (!receiving(via, subscription)) return;
+            await ingest(it, via, subscription, () => { rateLimited = true; });
+          }
+          // Never advance past a page whose tail lost a race to live-card quota.
+          // Retrying the same page is cheap because known versions are skipped.
+          if (page && !rateLimited && receiving(via, subscription)) {
+            cursors.set(via, page.next ?? '');
+          }
+        } finally {
+          if (processing.get(via) === token) processing.delete(via);
+          if (requests.get(via) === request) requests.delete(via);
         }
         return;
       }
@@ -197,22 +256,37 @@ export const createDiscovery = ({
     upstreams.delete(did);
     subscribers.delete(did);
     buckets.delete(did);
+    forgetPages(did);
   }) ?? (() => {});
 
   /** @param {string} did */
   async function subscribeTo(did) {
     if (closed || !autoSubscribe || isBlocked(did)) return false;
     unsubscribed.delete(did);
+    if (processing.has(did)) return false;
+    const outstanding = requests.get(did);
+    if (outstanding && now() - outstanding.sentAt < 12_000) return false;
+    const bucket = buckets.get(did);
+    const remaining = !bucket || now() - bucket.windowStart >= 60_000
+      ? relayPerMin : Math.max(0, relayPerMin - bucket.count);
+    if (remaining < 1) return false;
+    const request = { id: String(++requestId), after: cursors.get(did) ?? '',
+      limit: Math.min(snapshotMax, remaining), sentAt: now() };
+    requests.set(did, request);
     const previous = upstreams.get(did);
     const subscription = previous ?? {};
     upstreams.set(did, subscription);
     try {
-      const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.SUB, {});
-      if (!receiving(did, subscription)) return false;
+      const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.SUB, { catalog: 1, ...request });
+      if (!receiving(did, subscription) || requests.get(did) !== request) return false;
       const sent = mesh.send(did, env);
-      if (!sent && !previous && upstreams.get(did) === subscription) upstreams.delete(did);
+      if (!sent) {
+        if (!previous && upstreams.get(did) === subscription) upstreams.delete(did);
+        if (requests.get(did) === request) requests.delete(did);
+      }
       return sent;
     } catch (error) {
+      if (requests.get(did) === request) requests.delete(did);
       if (!previous && upstreams.get(did) === subscription) upstreams.delete(did);
       throw error;
     }
@@ -220,6 +294,7 @@ export const createDiscovery = ({
   /** @param {string} did */
   async function unsubscribeFrom(did) {
     upstreams.delete(did);
+    forgetPages(did);
     unsubscribed.add(did);
     if (closed) return false;
     const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.UNSUB, {});
@@ -268,6 +343,7 @@ export const createDiscovery = ({
         // Global pause must not turn every neighbor into an individual opt-out.
         const dids = [...upstreams.keys()];
         upstreams.clear();
+        cursors.clear(); requests.clear(); processing.clear(); snapshotWindows.clear();
         for (const did of dids) {
           mesh.sign(DISCOVERY.CH, DISCOVERY.UNSUB, {}).then((/** @type {any} */ env) => {
             if (!closed && !upstreams.has(did)) mesh.send(did, env);
@@ -280,6 +356,7 @@ export const createDiscovery = ({
     /** @param {string} did @param {string} [reason] */
     ban(did, reason = 'user') {
       upstreams.delete(did);
+      forgetPages(did);
       subscribers.delete(did);
       block?.(did, reason);
       library.purgePublisher(did);
@@ -300,6 +377,7 @@ export const createDiscovery = ({
       closed = true;
       offEnvelope(); offPeer(); offGone();
       upstreams.clear(); subscribers.clear(); buckets.clear(); unsubscribed.clear();
+      cursors.clear(); requests.clear(); processing.clear(); snapshotWindows.clear();
     },
   });
 };
