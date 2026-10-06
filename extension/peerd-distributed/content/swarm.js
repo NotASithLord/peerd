@@ -21,6 +21,7 @@ import {
 } from './manifest.js';
 import { sha256hex } from './chunk.js';
 import { parsePeerdUri } from './uri.js';
+import { createChannelClient } from './transfer.js';
 import { concat } from '/shared/bundle/bytes.js';
 
 const ALPHA = 3;
@@ -31,42 +32,6 @@ const ALPHA = 3;
  * @typedef {{ t: string, hash: string, manifest?: any, bytes?: string }} ContentMsg
  * @typedef {{ send: (m: ContentMsg) => void, setHandler: (h: ((msg: ContentMsg) => void) | null) => void }} ContentChannel
  */
-
-// A thin request/response client over one content channel (the correlation layer
-// fetchBundle keeps private, factored out so the swarm can run N of them).
-/**
- * @param {ContentChannel} channel
- * @param {number} timeoutMs
- */
-const createChannelClient = (channel, timeoutMs) => {
-  /** @type {Map<string, (msg: ContentMsg) => void>} */
-  const pending = new Map(); // `${t}:${hash}` -> settle
-  channel.setHandler((msg) => {
-    if (!msg || typeof msg.t !== 'string') return;
-    const settle = pending.get(`${msg.t}:${msg.hash}`);
-    if (settle) settle(msg);
-  });
-  /**
-   * @param {string} reqType
-   * @param {string[]} respTypes
-   * @param {string} h
-   * @returns {Promise<ContentMsg>}
-   */
-  const req = (reqType, respTypes, h) => new Promise((resolve, reject) => {
-    /** @param {ContentMsg} msg */
-    const settle = (msg) => { clearTimeout(timer); for (const rt of respTypes) pending.delete(`${rt}:${h}`); resolve(msg); };
-    for (const rt of respTypes) pending.set(`${rt}:${h}`, settle);
-    const timer = setTimeout(() => { for (const rt of respTypes) pending.delete(`${rt}:${h}`); reject(new Error('timeout')); }, timeoutMs);
-    channel.send({ t: reqType, hash: h });
-  });
-  return {
-    /** @param {string} h */
-    manifest: (h) => req('MANIFEST_REQ', ['MANIFEST', 'NOMANIFEST'], h),
-    /** @param {string} h */
-    chunk: (h) => req('CHUNK_REQ', ['CHUNK', 'NOCHUNK'], h),
-    close: () => channel.setHandler(null),
-  };
-};
 
 /** @typedef {ReturnType<typeof createChannelClient>} ChannelClient */
 
@@ -96,19 +61,24 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
     // why typed shape: the manifest is wire-decoded JSON re-verified at
     // runtime (hash + signature below); chunks is what verifyManifest commits to.
     /** @type {({ chunks: Array<{ hash: string, size: number }>, size: number } & Record<string, any>) | null} */
-    let manifest = null;
+    let selected = null;
     for (const { client } of clients) {
-      try { const m = await client.manifest(hash); if (m.t === 'MANIFEST') { manifest = m.manifest; break; } }
-      catch { /* try the next provider */ }
+      try {
+        const response = await client.manifest(hash);
+        if (response.t !== 'MANIFEST') continue;
+        const manifest = response.manifest;
+        // why: a reachable peer can return garbage; validate each candidate
+        // before choosing it so one bad provider cannot suppress good ones.
+        assertBundleWithinLimits(manifest);
+        if (await manifestHash(manifest) !== hash) continue;
+        if (!(await verifyManifest(manifest)).ok) continue;
+        selected = manifest;
+        break;
+      } catch { /* try the next provider */ }
     }
+    const manifest = selected;
     if (!manifest) throw new Error(`no reachable provider holds ${hash}`);
-
-    // 2. Bound shape before canonicalization/signature work.
-    assertBundleWithinLimits(manifest);
-    if (await manifestHash(manifest) !== hash) throw new Error('manifest hash mismatch — address does not match payload');
-    const v = await verifyManifest(manifest);
-    if (!v.ok) throw new Error(`manifest signature invalid: ${v.reason}`);
-    onProgress?.({ phase: 'manifest', publisher: v.publisher, total: manifest.chunks.length, providers: clients.length });
+    onProgress?.({ phase: 'manifest', publisher: manifest.publisher, total: manifest.chunks.length, providers: clients.length });
 
     // 3. Stripe unique chunks across providers — α concurrent, per-chunk failover.
     const uniqueHashes = [...new Set(manifest.chunks.map((c) => c.hash))];

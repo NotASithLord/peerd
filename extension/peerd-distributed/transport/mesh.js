@@ -65,6 +65,7 @@ const MAX_COOLDOWNS = 1_024;
  *   did: string,
  *   channel: Channel,
  *   lastSeen: number,
+ *   contentHandlers: Set<(msg: any) => void>,
  *   ctrl: { windowStart: number, count: number },
  *   abuse: { windowStart: number, count: number },
  *   info?: any,
@@ -114,8 +115,6 @@ export const createRoomMesh = ({
   const relayCbs = new Set();
   /** @type {Map<string, Set<(members: any) => void>>} */
   const rosterWaiters = new Map(); // did -> Set<resolve>
-  /** @type {Map<string, (msg: any) => void>} */
-  const contentClients = new Map(); // did -> handler for transfer responses
   /** @type {((msg: any, send: (m: any) => void) => void) | null} */
   let respondContent = null; // (msg, send) => void, when a store is served
   /** @type {ReturnType<typeof setInterval> | null} */
@@ -154,11 +153,22 @@ export const createRoomMesh = ({
   const contentChannelFor = (did) => {
     const link = links.get(did);
     if (!link) return null;
+    // why: concurrent downloads own separate handlers, scoped to this link
+    // generation; finishing an old transfer must not detach a new one.
+    /** @type {((msg: any) => void) | null} */
+    let handler = null;
     return {
       /** @param {any} m */
-      send: (m) => link.channel.send(m),
+      send: (m) => {
+        if (closed || links.get(did) !== link) throw new Error('content link closed');
+        link.channel.send(m);
+      },
       /** @param {((msg: any) => void) | null} h */
-      setHandler: (h) => { if (h) contentClients.set(did, h); else contentClients.delete(did); },
+      setHandler: (h) => {
+        if (handler) link.contentHandlers.delete(handler);
+        handler = h;
+        if (h && links.get(did) === link) link.contentHandlers.add(h);
+      },
     };
   };
 
@@ -167,6 +177,7 @@ export const createRoomMesh = ({
     const link = links.get(did);
     if (!link) return;
     links.delete(did);
+    link.contentHandlers.clear();
     link.offClose?.();
     try { link.channel.close(); } catch { /* already down */ }
     dlog('mesh', `🔌 peer ${(did || '').slice(-8)} link dropped (${why}) — ${links.size} link(s) left`);
@@ -257,7 +268,7 @@ export const createRoomMesh = ({
       return;
     }
     if (typeof msg.t === 'string' && CONTENT_RESP.has(msg.t)) {
-      contentClients.get(link.did)?.(msg);
+      for (const handler of [...link.contentHandlers]) handler(msg);
       return;
     }
     if (msg.__t === 'HELLO') return; // stale handshake frame
@@ -328,10 +339,11 @@ export const createRoomMesh = ({
       // both sides converge on without a tiebreak protocol.
       if (links.has(did)) removeLink(did, 'replaced');
       /** @type {Link} */
-      const link = { did, channel, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
+      const link = { did, channel, contentHandlers: new Set(), lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
       link.offClose = channel.onClose(() => {
         if (links.get(did) === link) {
           links.delete(did);
+          link.contentHandlers.clear();
           audit?.('peer_link_closed', { did, why: 'channel-closed' });
           emit(goneCbs, { did, why: 'channel-closed' });
         }
@@ -416,7 +428,7 @@ export const createRoomMesh = ({
     fetchFrom(did, uri, opts = {}) {
       const channel = contentChannelFor(did);
       if (!channel) return Promise.reject(new Error(`fetchFrom: no link to ${did}`));
-      return fetchBundle({ uri, channel, ...opts }).finally(() => contentClients.delete(did));
+      return fetchBundle({ uri, channel, ...opts }).finally(() => channel.setHandler(null));
     },
 
     // Liveness. start() is explicit so tests (and short-lived dances) can
