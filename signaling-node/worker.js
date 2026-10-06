@@ -36,6 +36,7 @@ import {
 // socket. Mirrors bun-server.mjs. The rate-limit window rides the socket
 // attachment, so it survives hibernation (a wake doesn't reset it).
 const MAX_MSG_BYTES = 64 * 1024;
+const utf8 = new TextEncoder();
 const MSG_RATE_LIMIT = 120;          // messages …
 const MSG_RATE_WINDOW_MS = 10_000;   // … per 10s window, per connection
 
@@ -173,7 +174,10 @@ export class SignalingRoom {
     const connId = att.connId;
     if (!connId) return; // not one of ours / lost its tag
 
-    const size = typeof data === 'string' ? data.length : (data?.byteLength ?? 0);
+    let size = typeof data === 'string' ? data.length : (data?.byteLength ?? 0);
+    // UTF-16 code units undercount non-ASCII wire bytes. Reject obviously huge
+    // strings before encoding, and enforce the actual UTF-8 limit before parse.
+    if (typeof data === 'string' && size <= MAX_MSG_BYTES) size = utf8.encode(data).byteLength;
     if (size > MAX_MSG_BYTES) { try { ws.close(1009, 'message too large'); } catch { /* */ } return; }
 
     // Per-connection rate limit, persisted on the socket so it holds across a
@@ -183,7 +187,10 @@ export class SignalingRoom {
     let msgCount = att.msgCount ?? 0;
     if (now - windowStart > MSG_RATE_WINDOW_MS) { windowStart = now; msgCount = 0; }
     msgCount += 1;
-    ws.serializeAttachment({ connId, windowStart, msgCount });
+    // The attachment is the durable connection identity, not just rate state.
+    // Dropping kind here moves website visitors into the extension pool on the
+    // next event, including after a hibernation wake.
+    ws.serializeAttachment({ ...att, windowStart, msgCount });
     if (msgCount > MSG_RATE_LIMIT) { try { ws.close(1008, 'rate limit exceeded'); } catch { /* */ } return; }
 
     let m;
