@@ -1,4 +1,6 @@
 // @ts-check
+
+import { isRawProtocolClose } from './channel.js';
 // peerd-distributed/transport/mesh.js — the per-room peer set.
 //
 // A mesh is the room made manifest: one authenticated link (Channel +
@@ -68,7 +70,7 @@ const QUEUED_PER_MESH = 128;
 
 /** @typedef {{ did: string, sign: (bytes: Uint8Array) => Promise<Uint8Array> }} Identity */
 /** @typedef {((type: string, detail?: any) => void) | null} AuditFn */
-/** @typedef {{ send: (msg: any, options?: import('./outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: any) => void, close: () => void, onClose: (cb: () => void) => (() => void) }} Channel */
+/** @typedef {{ send: (msg: any, options?: import('./outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: any) => void, close: () => void, isClosed?: () => boolean, onClose: (cb: (reason?: string) => void) => (() => void) }} Channel */
 /**
  * @typedef {{
  *   did: string,
@@ -253,8 +255,8 @@ export const createRoomMesh = ({
     link.offClose?.();
     try { link.channel.close(); } catch { /* already down */ }
     dlog('mesh', `🔌 peer ${(did || '').slice(-8)} link dropped (${why}) — ${links.size} link(s) left`);
-    audit?.('peer_link_closed', { did, why });
-    emit(goneCbs, { did, why });
+    try { audit?.('peer_link_closed', { did, why }); }
+    finally { emit(goneCbs, { did, why }); }
   };
 
   /** @param {Link} link @param {string} reason @param {boolean} [immediate] */
@@ -272,8 +274,8 @@ export const createRoomMesh = ({
       if (oldest !== undefined) cooldowns.delete(oldest);
     }
     cooldowns.set(link.did, t + COOLDOWN_MS);
-    audit?.('peer_cooldown', { did: link.did, reason, until: t + COOLDOWN_MS });
-    removeLink(link.did, reason);
+    try { audit?.('peer_cooldown', { did: link.did, reason, until: t + COOLDOWN_MS }); }
+    finally { removeLink(link.did, reason); }
   };
 
   /** @param {Link} link */
@@ -429,7 +431,7 @@ export const createRoomMesh = ({
     /** @param {Channel} channel @param {string} did @param {any} [info]
      * @param {{ locallySelected?: boolean }} [ownership] */
     addLink(channel, did, info = {}, { locallySelected = false } = {}) {
-      if (closed) { channel.close(); return false; }
+      if (closed || channel.isClosed?.()) { channel.close(); return false; }
       pruneCooldowns();
       if (cooldowns.has(did)) {
         audit?.('peer_cooldown_refused', { did });
@@ -469,20 +471,25 @@ export const createRoomMesh = ({
       /** @type {Link} */
       const link = { did, channel, locallySelected: locallySelected || previous?.locallySelected || false,
         admittedAt: previous?.admittedAt ?? now(), protectedUntil: previous?.protectedUntil ?? 0, serving: 0, retired: new AbortController(), contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
-      link.offClose = channel.onClose(() => {
+      // Own this exact generation before an already-closed channel can invoke
+      // its immediate observer. A close during handoff must not become connected.
+      links.set(did, link);
+      link.offClose = channel.onClose((reason) => {
         if (links.get(did) === link) {
+          if (isRawProtocolClose(reason)) { penalize(link, /** @type {string} */ (reason), true); return; }
           links.delete(did);
           link.retired.abort();
           link.contentHandlers.clear();
           cancelVerification(link);
-          audit?.('peer_link_closed', { did, why: 'channel-closed' });
-          emit(goneCbs, { did, why: 'channel-closed' });
+          try { audit?.('peer_link_closed', { did, why: 'channel-closed' }); }
+          finally { emit(goneCbs, { did, why: 'channel-closed' }); }
         }
       });
-      links.set(did, link);
+      if (links.get(did) !== link) { link.offClose(); return false; }
       channel.setHandler((/** @type {any} */ msg) => {
         handle(link, msg).catch(() => { if (links.get(did) === link) removeLink(did, 'service-or-send-failed'); });
       });
+      if (links.get(did) !== link) return false;
       audit?.('peer_connected', { did, room: roomId });
       emit(peerCbs, { did, info });
       return true;

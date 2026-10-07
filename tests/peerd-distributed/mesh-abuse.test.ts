@@ -21,6 +21,67 @@ const channel = () => {
 const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
 
 describe('mesh local abuse cooldowns', () => {
+  test('closed admission cannot replace a healthy DID or emit a false connected event', async () => {
+    const events: string[] = [];
+    const mesh = createRoomMesh({ roomId: 'r', identity: await generateIdentity(), audit: type => events.push(type) });
+    const healthy = createBufferedChannel({ send() {} }); mesh.addLink(healthy, 'peer');
+    const closed = createBufferedChannel({ send() {} }); closed.close('raw-frame-json');
+    expect(mesh.addLink(closed, 'peer')).toBe(false);
+    expect(mesh.hasLink('peer')).toBe(true); expect(healthy.isClosed()).toBe(false);
+    expect(events.filter(type => type === 'peer_connected')).toHaveLength(1);
+    const immediate = createBufferedChannel({ send() {} });
+    const subscribe = immediate.onClose;
+    immediate.onClose = callback => { immediate.close('raw-frame-json'); return subscribe(callback); };
+    expect(mesh.addLink(immediate, 'new-peer')).toBe(false);
+    expect(mesh.hasLink('new-peer')).toBe(false);
+    expect(events.filter(type => type === 'peer_connected')).toHaveLength(1);
+    expect(mesh.addLink(createBufferedChannel({ send() {} }), 'new-peer')).toBe(false);
+    mesh.close();
+  });
+  test('only the current authenticated carrier owns a raw close cooldown', async () => {
+    const identity = await generateIdentity();
+    let time = 0;
+    const audit: any[] = [];
+    const mesh = createRoomMesh({ roomId: 'r', identity, now: () => time,
+      audit: (type, detail) => audit.push({ type, detail }) });
+    const old = createBufferedChannel({ send() {} });
+    let staleClose: ((reason?: string) => void) | undefined;
+    const onClose = old.onClose;
+    old.onClose = callback => { staleClose = callback; return onClose(callback); };
+    mesh.addLink(old, 'authenticated');
+    const current = createBufferedChannel({ send() {} });
+    mesh.addLink(current, 'authenticated');
+    old.close('raw-frame-json');
+    staleClose?.('raw-frame-json');
+    expect(mesh.hasLink('authenticated')).toBe(true);
+    current.close('raw-frame-size');
+    expect(mesh.hasLink('authenticated')).toBe(false);
+    expect(mesh.addLink(createBufferedChannel({ send() {} }), 'authenticated')).toBe(false);
+    expect(audit.filter(event => event.type === 'peer_cooldown')).toEqual([
+      { type: 'peer_cooldown', detail: { did: 'authenticated', reason: 'raw-frame-size', until: 300_000 } },
+    ]);
+    const unauthenticated = createBufferedChannel({ send() {} });
+    unauthenticated.close('raw-frame-json');
+    expect(mesh.addLink(createBufferedChannel({ send() {} }), 'claimed-in-garbage')).toBe(true);
+    time = 300_000;
+    expect(mesh.addLink(createBufferedChannel({ send() {} }), 'authenticated')).toBe(true);
+    mesh.close();
+  });
+
+  test('throwing diagnostic observer cannot retain a raw-fault carrier', async () => {
+    const mesh = createRoomMesh({ roomId: 'r', identity: await generateIdentity(),
+      audit: type => { if (type === 'peer_cooldown' || type === 'peer_link_closed') throw new Error('audit unavailable'); } });
+    const gone: any[] = []; mesh.onPeerGone(event => gone.push(event));
+    const carrier = createBufferedChannel({ send() {} }); mesh.addLink(carrier, 'carrier');
+    carrier.close('raw-frame-json');
+    expect(mesh.hasLink('carrier')).toBe(false);
+    expect(gone).toEqual([{ did: 'carrier', why: 'raw-frame-json' }]);
+    expect(mesh.addLink(createBufferedChannel({ send() {} }), 'carrier')).toBe(false);
+    const ordinary = createBufferedChannel({ send() {} }); mesh.addLink(ordinary, 'ordinary');
+    ordinary.close();
+    expect(gone).toEqual([{ did: 'carrier', why: 'raw-frame-json' }, { did: 'ordinary', why: 'channel-closed' }]);
+    mesh.close();
+  });
   test('malformed frames evict their carrier; readmission resumes after cooldown', async () => {
     const identity = await generateIdentity();
     let time = 0;

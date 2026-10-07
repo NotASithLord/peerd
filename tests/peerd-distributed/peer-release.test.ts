@@ -32,6 +32,66 @@ class PeerConnection extends EventTarget {
 }
 const peer = (initiator = true) => createPeer({ initiator, RTCPeerConnection: PeerConnection as any });
 
+test('raw ingress faults close once with local reasons despite synchronous native close', async () => {
+  for (const [data, reason] of [[{}, 'raw-frame-type'], ['{broken', 'raw-frame-json'],
+    ['x'.repeat(1_000_001), 'raw-frame-size'], ['"' + 'é'.repeat(500_000) + '"', 'raw-frame-size'],
+    [new Uint8Array(1_000_001), 'raw-frame-size']] as const) {
+    const p = peer(); const pc = p.pc as unknown as PeerConnection;
+    pc.dc.readyState = 'open'; pc.dc.onopen();
+    const channel = await p.channelReady;
+    const notices: unknown[] = [];
+    channel.onClose(() => { throw new Error('broken observer'); });
+    channel.onClose((value: unknown) => notices.push(value));
+    pc.dc.onmessage({ data });
+    expect(notices).toEqual([reason]);
+    expect(pc.closes).toBe(1); expect(pc.dc.closes).toBe(1);
+    let accessed = false;
+    pc.dc.onmessage({ get data() { accessed = true; throw new Error('late frame accessed'); } });
+    expect(accessed).toBe(false);
+    channel.close('raw-frame-json');
+    channel.onClose((value: unknown) => notices.push(value));
+    expect(notices).toEqual([reason, reason]);
+  }
+});
+
+test('legal binary view ranges and nonfatal UTF8 decoding remain compatible', async () => {
+  const p = peer(); const pc = p.pc as unknown as PeerConnection;
+  pc.dc.readyState = 'open'; pc.dc.onopen(); const channel = await p.channelReady;
+  const received: unknown[] = []; channel.setHandler((value: unknown) => received.push(value));
+  const bytes = new TextEncoder().encode('x{"ok":true}y');
+  pc.dc.onmessage({ data: new DataView(bytes.buffer, 1, bytes.length - 2) });
+  pc.dc.onmessage({ data: bytes.subarray(1, bytes.length - 1) });
+  pc.dc.onmessage({ data: new Uint8Array([34, 255, 34]).buffer });
+  expect(received).toEqual([{ ok: true }, { ok: true }, '�']);
+  const exact = '"' + 'x'.repeat(999_998) + '"';
+  pc.dc.onmessage({ data: exact });
+  pc.dc.onmessage({ data: new TextEncoder().encode(exact).buffer });
+  expect(received.slice(-2)).toEqual(['x'.repeat(999_998), 'x'.repeat(999_998)]);
+  expect(channel.isClosed()).toBe(false); channel.close();
+});
+
+test('obviously oversized strings are refused before allocating an encoder', async () => {
+  const p = peer(); const pc = p.pc as unknown as PeerConnection;
+  pc.dc.readyState = 'open'; pc.dc.onopen(); const channel = await p.channelReady;
+  const Original = globalThis.TextEncoder;
+  let encoders = 0;
+  try {
+    globalThis.TextEncoder = class extends Original { constructor() { super(); encoders++; } };
+    pc.dc.onmessage({ data: 'x'.repeat(1_000_001) });
+  } finally { globalThis.TextEncoder = Original; }
+  expect(encoders).toBe(0); expect(channel.isClosed()).toBe(true);
+});
+
+test('ordinary first close cannot later acquire a protocol fault and clears consumers', () => {
+  const channel = createBufferedChannel({ send() {} });
+  let delivered = 0;
+  channel.deliver({ queued: true }); channel.signalClose();
+  channel.close('raw-frame-json');
+  channel.setHandler(() => { delivered++; }); channel.deliver({ late: true });
+  let reason: unknown = 'unset'; channel.onClose((value: unknown) => { reason = value; });
+  expect(reason).toBeUndefined(); expect(delivered).toBe(0);
+});
+
 test('a close notification cannot suppress later one-shot transport release', () => {
   let releases = 0;
   const channel = createBufferedChannel({ send() {}, close() { releases++; channel.close(); } });
