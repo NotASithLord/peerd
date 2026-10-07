@@ -160,13 +160,15 @@ test('failed first-script injection does not release unobserved application code
   expect(worker.applicationRuns()).toBe(0);
 });
 
-test('offscreen current document uses a first-script trap when preload only covers later documents', async () => {
+test('enabled Page preload covers the runtime-created current document before offscreen release', async () => {
   const { observeHosts, createConsentDiagnostics } = await import('../../scripts/cdp/network-consent-cold.mjs');
   const origin = 'chrome-extension://fixture/';
   const listeners = new Set<any>();
   const targets = new Map<string, any>();
   const calls: any[] = [];
   const preloads = new Set<string>();
+  const pageEnabled = new Set<string>();
+  const currentContexts = new Set<string>();
   const instrumented = new Set<string>();
   const evidence: any = { phase: 'fresh-locked', events: [], observerErrors: [] };
   const emit = (method: string, params: any, sessionId?: string) => {
@@ -198,7 +200,15 @@ test('offscreen current document uses a first-script trap when preload only cove
           target(`${sessionId}-shared`, 'shared', 'shared_worker', `${origin}shared.js`, true);
         }
       }
-      if (method === 'Page.addScriptToEvaluateOnNewDocument') preloads.add(sessionId!);
+      if (method === 'Runtime.enable') currentContexts.add(sessionId!);
+      if (method === 'Page.enable') pageEnabled.add(sessionId!);
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') {
+        expect(pageEnabled.has(sessionId!)).toBe(true);
+        expect(currentContexts.has(sessionId!)).toBe(true);
+        expect(params.runImmediately).toBe(true);
+        preloads.add(sessionId!);
+        if (params.runImmediately) { instrumented.add(sessionId!); ready(sessionId!); }
+      }
       if (method === 'Runtime.evaluate' && params.expression !== '0') {
         expect(targets.get(sessionId!).type).not.toBe('worker');
         expect(sessionId).not.toBe('offscreen');
@@ -208,11 +218,10 @@ test('offscreen current document uses a first-script trap when preload only cove
       if (method === 'Runtime.runIfWaitingForDebugger') {
         if (sessionId === 'offscreen') {
           expect(preloads.has(sessionId)).toBe(true);
+          expect(instrumented.has(sessionId)).toBe(true);
           expect(calls.some(call => call.sessionId === sessionId
-            && call.method === 'Debugger.setInstrumentationBreakpoint')).toBe(true);
-        }
-        // Registering Page preload need not execute in an already-created offscreen document.
-        emit('Debugger.paused', { reason: 'instrumentation', callFrames: [{ callFrameId: 'first' }] }, sessionId);
+            && call.method === 'Debugger.setInstrumentationBreakpoint')).toBe(false);
+        } else emit('Debugger.paused', { reason: 'instrumentation', callFrames: [{ callFrameId: 'first' }] }, sessionId);
       }
       if (method === 'Debugger.evaluateOnCallFrame') {
         if (params.expression === '1') return { result: { value: 1 } };
@@ -228,7 +237,7 @@ test('offscreen current document uses a first-script trap when preload only cove
       createConsentDiagnostics(evidence, () => {}), () => {}, async () => connection);
     await observer.barrier();
     expect(evidence.observerErrors).toEqual([]);
-    expect(calls.filter(call => call.method === 'Debugger.evaluateOnCallFrame' && call.params.expression !== '1')).toHaveLength(5);
+    expect(calls.filter(call => call.method === 'Debugger.evaluateOnCallFrame' && call.params.expression !== '1')).toHaveLength(4);
     expect(calls.filter(call => call.method === 'Target.detachFromTarget')).toHaveLength(3);
     for (const parent of ['home', 'sw', 'offscreen']) {
       expect(evidence.events.some((event: any) => event.sessionId === `${parent}-worker`)).toBe(true);

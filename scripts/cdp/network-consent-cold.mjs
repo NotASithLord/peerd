@@ -71,7 +71,7 @@ export async function attachConsentObserver(url, diagnostic, connect = attach) {
   }).catch(error => { attachExpired = true; throw error; });
 }
 
-// Startup-paused workers and offscreen targets need a first-script trap;
+// Startup-paused workers need a first-script trap;
 // inject on that script's call frame before releasing application code.
 export async function instrumentPausedTarget(connection, sessionId, diagnostic, recordPause = (/** @type {any} */ _pause) => {}) {
   const send = (method, params = {}) => connection.send(method, params, sessionId);
@@ -178,24 +178,28 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
       await send('Runtime.enable');
       await send('Runtime.addBinding', { name: BINDING });
       await send('Network.enable');
-      // Pages need reinstrumentation on navigation; workers have no Page domain.
-      if (['page', 'iframe', 'other'].includes(targetInfo.type)) {
-        await send('Page.addScriptToEvaluateOnNewDocument', { source: OBSERVER_SOURCE });
+      // Runtime.enable can create the current context before registration. Cover it
+      // immediately; Page.enable keeps the preload active for future documents.
+      const pageTarget = ['page', 'iframe', 'other'].includes(targetInfo.type);
+      if (pageTarget) {
+        await send('Page.enable');
+        await send('Page.addScriptToEvaluateOnNewDocument', { source: OBSERVER_SOURCE, runImmediately: true });
       }
       await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true,
         flatten: true, filter: CHILD_TARGET_FILTER });
-      if (waitingForDebugger && ['worker', 'shared_worker', 'service_worker', 'other'].includes(targetInfo.type)) {
+      if (waitingForDebugger && ['worker', 'shared_worker', 'service_worker'].includes(targetInfo.type)) {
         waitingForDebugger = false; // The pre-execution trap exclusively owns release.
         await instrumentPausedTarget(connection, sessionId, diagnostic, pause => {
           evidence.pauses ??= [];
           if (evidence.pauses.length < 32) evidence.pauses.push({ sessionId, phase: evidence.phase, at: Date.now(), ...pause });
           persist();
         });
-      } else if (waitingForDebugger) {
-        // Page preload is registered before release; evaluating in its startup wait can hang.
-        await send('Runtime.runIfWaitingForDebugger');
-        waitingForDebugger = false;
+      } else if (pageTarget) {
         await diagnostic(`page observer ready session=${sessionId}`, () => ready);
+        if (waitingForDebugger) {
+          await send('Runtime.runIfWaitingForDebugger');
+          waitingForDebugger = false;
+        }
       } else {
         const result = await send('Runtime.evaluate', { expression: OBSERVER_SOURCE, returnByValue: true });
         if (result.exceptionDetails) throw new Error(`observer injection failed: ${JSON.stringify(result.exceptionDetails)}`);
