@@ -19,6 +19,7 @@ import {
 import { sha256hex } from './chunk.js';
 import { parsePeerdUri } from './uri.js';
 import { toBase64, concat } from '/shared/bundle/bytes.js';
+import { contentServiceBudget } from './service-budget.js';
 
 const ALPHA = 3; // lookup/transfer parallelism (PROTOCOL §5.1)
 
@@ -30,31 +31,32 @@ const ALPHA = 3; // lookup/transfer parallelism (PROTOCOL §5.1)
  *   getManifest: (hash: string) => any,
  *   getChunk: (chunkHash: string) => (Uint8Array | null | undefined),
  * }} ContentStore
- * @typedef {{ send: (m: ContentMsg) => void, setHandler: (h: ((msg: ContentMsg) => void) | null) => void, onClose?: (cb: () => void) => (() => void) }} ContentChannel
+ * @typedef {{ send: (m: ContentMsg, options?: import('../transport/outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: ((msg: ContentMsg) => void) | null) => void, onClose?: (cb: () => void) => (() => void) }} ContentChannel
  */
 
 // Publisher side: a handler (msg, send) the channel routes inbound
 // content requests to. Serves only what the store has announced.
 /**
- * @param {{ store: ContentStore }} deps
- * @returns {(msg: ContentMsg, send: (m: ContentMsg) => void) => void}
+ * @param {{ store: ContentStore, budget?: typeof contentServiceBudget }} deps
+ * @returns {(msg: ContentMsg, send: (m: ContentMsg) => void | Promise<void>, owner?: object) => Promise<void>}
  */
-export const createContentResponder = ({ store }) => (msg, send) => {
-  switch (msg && msg.t) {
-    case 'MANIFEST_REQ': {
-      const manifest = store.getManifest(msg.hash);
-      send(manifest ? { t: 'MANIFEST', hash: msg.hash, manifest } : { t: 'NOMANIFEST', hash: msg.hash });
-      return;
+export const createContentResponder = ({ store, budget = contentServiceBudget }) => {
+  const defaultOwner = {};
+  return (msg, send, owner = defaultOwner) => budget.run(owner, async () => {
+    switch (msg && msg.t) {
+      case 'MANIFEST_REQ': {
+        const manifest = store.getManifest(msg.hash);
+        await send(manifest ? { t: 'MANIFEST', hash: msg.hash, manifest } : { t: 'NOMANIFEST', hash: msg.hash });
+        return;
+      }
+      case 'CHUNK_REQ': {
+        const bytes = store.getChunk(msg.hash);
+        await send(bytes ? { t: 'CHUNK', hash: msg.hash, bytes: toBase64(bytes) } : { t: 'NOCHUNK', hash: msg.hash });
+        return;
+      }
+      default: return;
     }
-    case 'CHUNK_REQ': {
-      const bytes = store.getChunk(msg.hash);
-      send(bytes ? { t: 'CHUNK', hash: msg.hash, bytes: toBase64(bytes) } : { t: 'NOCHUNK', hash: msg.hash });
-      return;
-    }
-    default:
-      // why: unknown content message — ignore rather than crash the channel.
-      return;
-  }
+  });
 };
 
 // A thin request/response client over one content channel (the correlation layer
@@ -99,23 +101,35 @@ export const createChannelClient = (channel, timeoutMs) => {
     if (respTypes.some((rt) => pending.has(`${rt}:${h}`))) {
       reject(new Error('duplicate content request')); return;
     }
+    let settled = false;
+    const sending = new AbortController();
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let timer;
     const cleanup = () => {
       clearTimeout(timer);
       for (const rt of respTypes) pending.delete(`${rt}:${h}`);
       cancel.delete(fail);
       signal?.removeEventListener('abort', abort);
+      sending.abort();
     };
     /** @param {Error} error */
-    const fail = (error) => { cleanup(); reject(error); };
+    const fail = (error) => { if (settled) return; settled = true; cleanup(); reject(error); };
     /** @param {ContentMsg} msg */
-    const settle = (msg) => { cleanup(); resolve(msg); };
+    const settle = (msg) => { if (settled) return; settled = true; cleanup(); resolve(msg); };
     const abort = () => fail(new Error('content request cancelled'));
     for (const rt of respTypes) pending.set(`${rt}:${h}`, settle);
     cancel.add(fail);
-    const timer = setTimeout(() => fail(new Error('transfer timeout')), timeoutMs);
+    // Queue wait has its own bound. The response clock starts only once the
+    // request reaches the native transport; synchronous responses still win.
+    timer = setTimeout(() => fail(new Error('content send timed out')), 15_000);
     signal?.addEventListener('abort', abort, { once: true });
-    try { channel.send({ t: reqType, hash: h }); }
-    catch (error) { fail(error instanceof Error ? error : new Error(String(error))); }
+    try {
+      Promise.resolve(channel.send({ t: reqType, hash: h }, { signal: sending.signal })).then(() => {
+        if (settled) return;
+        clearTimeout(timer);
+        timer = setTimeout(() => fail(new Error('transfer timeout')), timeoutMs);
+      }, (error) => fail(error instanceof Error ? error : new Error(String(error))));
+    } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); }
   });
   return {
     /** @param {string} h @param {AbortSignal} [signal] */
@@ -134,13 +148,13 @@ export const createChannelClient = (channel, timeoutMs) => {
  *
  * @param {{
  *   uri: string,
- *   channel: { send: (msg: any) => void, setHandler: (h: ((msg: ContentMsg) => void) | null) => void },
+ *   channel: { send: (msg: any, options?: import('../transport/outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: ((msg: ContentMsg) => void) | null) => void },
  *   onProgress?: (p: { phase: string, done?: number, total?: number, publisher?: string | null }) => void,
  *   timeoutMs?: number,
  * }} opts
  * @returns {Promise<{ manifest: any, payload: Uint8Array }>}
  */
-export const fetchBundle = async ({ uri, channel, onProgress, timeoutMs = 15000 } = /** @type {{ uri: string, channel: { send: (msg: any) => void, setHandler: (h: ((msg: ContentMsg) => void) | null) => void } }} */ ({})) => {
+export const fetchBundle = async ({ uri, channel, onProgress, timeoutMs = 15000 } = /** @type {{ uri: string, channel: { send: (msg: any, options?: import('../transport/outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: ((msg: ContentMsg) => void) | null) => void } }} */ ({})) => {
   const { hash } = parsePeerdUri(uri);
 
   const client = createChannelClient(channel, timeoutMs);

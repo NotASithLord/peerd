@@ -26,7 +26,7 @@ const validEnvelope = (env, typ) => exactKeys(env, ['v', 'ch', 'typ', 'from', 'b
 
 /**
  * @param {{
- *   channel: { send:(msg:any)=>void, setHandler:(h:any)=>void, deliver:(msg:any)=>void,
+ *   channel: { send:(msg:any, options?: import('./outgoing.js').SendOptions)=>void | Promise<void>, setHandler:(h:any)=>void, deliver:(msg:any)=>void,
  *     onClose?:(cb:()=>void)=>(()=>void), close?:()=>void, isClosed?:()=>boolean, getSessionBinding?:()=>(SessionBinding|null) },
  *   identity: {did:string,sign:(bytes:Uint8Array)=>Promise<Uint8Array>},
  *   caps?:string[], now?:()=>number, timeoutMs?:number, signal?:AbortSignal,
@@ -107,7 +107,8 @@ export const createSession = ({ channel, identity, caps = ['content'], now = Dat
       id: newId(), ts: now(),
     }), identity);
     if (settled) return;
-    channel.send({ __t: 'HELLO_PROOF', env });
+    await channel.send({ __t: 'HELLO_PROOF', env }, { signal, priority: 'control' });
+    if (settled) return;
     proofSent = true;
     complete();
   };
@@ -165,7 +166,8 @@ export const createSession = ({ channel, identity, caps = ['content'], now = Dat
     body: { proto: 2, caps }, id: helloId, ts: now(),
   }), identity).then(async (hello) => {
     if (settled) return;
-    channel.send({ __t: 'HELLO', env: hello });
+    await channel.send({ __t: 'HELLO', env: hello }, { signal, priority: 'control' });
+    if (settled) return;
     helloSent = true;
     await sendProof();
   }).catch(fail);

@@ -57,7 +57,7 @@ export const createDiscovery = ({
   const cursors = new Map();
   /** @type {Map<string, {id:string, after:string, limit:number, sentAt:number}>} */
   const requests = new Map();
-  /** @type {Map<string, object>} */
+  /** @type {Map<string, { reconcile?: boolean }>} */
   const processing = new Map();
   /** @type {Map<string, {start:number, sent:number, received:number}>} */
   const snapshotWindows = new Map();
@@ -114,11 +114,11 @@ export const createDiscovery = ({
   const forward = async (item, exceptVia = null) => {
     if (subscribers.size === 0) return true;
     const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.ITEM, { item });
-    let propagated = true;
-    for (const did of subscribers) {
-      if (!closed && !isBlocked(did) && did !== exceptVia && !mesh.send(did, env)) propagated = false;
-    }
-    return propagated;
+    // Subscriber membership is bounded by live mesh links. Launch separately
+    // so one stalled link cannot hold every healthy subscriber behind it.
+    const results = await Promise.all([...subscribers].filter((did) => !closed && !isBlocked(did) && did !== exceptVia)
+      .map((did) => mesh.send(did, env)));
+    return results.every(Boolean);
   };
 
   /** @param {string} id @param {any} item @param {string | null} via */
@@ -191,7 +191,7 @@ export const createDiscovery = ({
       items,
       ...(page ? { page: { id: request.id, after: request.after, next: page.next } } : {}),
     });
-    if (!closed && subscribers.has(did) && !isBlocked(did)) mesh.send(did, env);
+    if (!closed && subscribers.has(did) && !isBlocked(did)) await mesh.send(did, env);
   };
 
   const offEnvelope = mesh.onEnvelope(async (/** @type {{ env: any, via: string }} */ { env, via }) => {
@@ -217,6 +217,7 @@ export const createDiscovery = ({
           || !(page.next === null || typeof page.next === 'string'
             && /^[a-f0-9]{64}$/.test(page.next) && page.next > request.after))) return;
         if (!allowSnapshot(via, 'received')) return;
+        /** @type {{ reconcile?: boolean }} */
         const token = {};
         processing.set(via, token);
         let rateLimited = false;
@@ -247,8 +248,16 @@ export const createDiscovery = ({
             cursors.set(via, page.next ?? '');
           }
         } finally {
-          if (processing.get(via) === token) processing.delete(via);
-          if (requests.get(via) === request) requests.delete(via);
+          if (processing.get(via) === token) {
+            processing.delete(via);
+            if (requests.get(via) === request) requests.delete(via);
+            // why: a visible card can precede its final forwarding signature.
+            // Coalesce reconciliation during that tail without losing intent or
+            // letting a retired subscription restart work. Quotas still apply.
+            if (token.reconcile && receiving(via, subscription) && !unsubscribed.has(via)) {
+              subscribeTo(via).catch(() => {});
+            }
+          }
         }
         return;
       }
@@ -278,7 +287,8 @@ export const createDiscovery = ({
   async function subscribeTo(did) {
     if (closed || !autoSubscribe || isBlocked(did)) return false;
     unsubscribed.delete(did);
-    if (processing.has(did)) return false;
+    const pending = processing.get(did);
+    if (pending) { pending.reconcile = true; return false; }
     const outstanding = requests.get(did);
     if (outstanding && now() - outstanding.sentAt < 12_000) return false;
     const bucket = buckets.get(did);
@@ -294,7 +304,7 @@ export const createDiscovery = ({
     try {
       const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.SUB, { catalog: 1, ...request });
       if (!receiving(did, subscription) || requests.get(did) !== request) return false;
-      const sent = mesh.send(did, env);
+      const sent = await mesh.send(did, env);
       if (!sent) {
         if (!previous && upstreams.get(did) === subscription) upstreams.delete(did);
         if (requests.get(did) === request) requests.delete(did);
@@ -361,7 +371,7 @@ export const createDiscovery = ({
         cursors.clear(); requests.clear(); processing.clear(); snapshotWindows.clear();
         for (const did of dids) {
           mesh.sign(DISCOVERY.CH, DISCOVERY.UNSUB, {}).then((/** @type {any} */ env) => {
-            if (!closed && !upstreams.has(did)) mesh.send(did, env);
+            if (!closed && !upstreams.has(did)) return mesh.send(did, env);
           }).catch(() => {});
         }
       } else this.subscribeAll();

@@ -23,6 +23,7 @@
 // behind the D-5 revisit trigger. For a strict same-LAN /
 // zero-external-contact run, pass `iceServers: []`.
 
+import { createOutgoingWriter } from './outgoing.js';
 import { createBufferedChannel } from './channel.js';
 import { webRtcSessionBinding } from './channel-binding.js';
 import { summarizeCandidates, DirectPathUnavailableError } from './ice.js';
@@ -153,6 +154,8 @@ export const createPeer = ({
   };
   /** @type {RTCDataChannel | null} */
   let activeDc = null;
+  /** @type {ReturnType<typeof createOutgoingWriter> | null} */
+  let outgoing = null;
   /** @type {ReturnType<typeof createBufferedChannel> | null} */
   let activeChannel = null;
   /** @type {ReturnType<typeof setTimeout> | null} */
@@ -160,6 +163,7 @@ export const createPeer = ({
   const release = () => {
     if (released) return;
     released = true;
+    outgoing?.close();
     clearTimeout(discoTimer ?? undefined);
     discoTimer = null;
     pendingRemote.length = 0;
@@ -199,22 +203,11 @@ export const createPeer = ({
     if (released || activeDc) { dc.close(); return; }
     activeDc = dc;
     dc.binaryType = 'arraybuffer';
+    outgoing = createOutgoingWriter({ dc, maxMessageSize: () => pc.sctp?.maxMessageSize ?? Infinity });
     const channel = /** @type {ReturnType<typeof createBufferedChannel> & { pc?: RTCPeerConnection }} */ (
       createBufferedChannel({
         getSessionBinding: () => webRtcSessionBinding(pc, dc),
-        // why guard readyState: the RTCDataChannel can be 'connecting' (a
-        // send racing ahead of onopen) or 'closing'/'closed' (the remote
-        // vanished: a closed tab rarely sends a clean DC close: before
-        // onclose / the connection-state handlers flip the buffered channel
-        // shut). dc.send() in any non-'open' state throws InvalidStateError,
-        // which surfaced as an uncaught rejection in the offscreen doc.
-        // Drop the datagram instead: this is best-effort mesh traffic
-        // (gossip / presence / DHT) that re-gossips and multi-hops, so a
-        // frame lost to a dying peer is recoverable: the throw was not.
-        send: (obj) => {
-          if (dc.readyState === 'open') dc.send(JSON.stringify(obj));
-          else dlog('webrtc', `drop send: data channel is '${dc.readyState}', not open`);
-        },
+        send: (obj, options) => (/** @type {ReturnType<typeof createOutgoingWriter>} */ (outgoing)).send(obj, options),
         close: release,
       })
     );
@@ -226,8 +219,8 @@ export const createPeer = ({
     dc.onmessage = (e) => {
       // why try/catch: e.data is attacker-controlled bytes from a remote peer;
       // a malformed frame would otherwise throw an uncaught exception out of the
-      // event handler. Best-effort mesh traffic: drop the bad frame, like the
-      // outbound send already drops when the channel isn't open.
+      // event handler. Malformed ingress is rejected before protocol dispatch;
+      // outgoing queue failures are reported separately to their producer.
       let m;
       try { m = decode(e.data); }
       catch { dwarn('webrtc', 'dropping unparseable data-channel frame'); return; }

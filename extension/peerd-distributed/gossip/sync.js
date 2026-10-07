@@ -108,7 +108,7 @@ export const createTopicSync = ({
     const haves = store.ids(topic);
     if (haves.length > MAX_HAVES) audit?.('sync_haves_overflow', { topic, count: haves.length });
     const env = await mesh.sign(4, SYNC.REQ, { topic, haves: haves.slice(-MAX_HAVES) });
-    mesh.send(did, env);
+    await mesh.send(did, env);
   };
 
   const offEnvelope = mesh.onEnvelope(async (/** @type {{ env: any, via: any }} */ { env, via }) => {
@@ -124,7 +124,7 @@ export const createTopicSync = ({
       const missing = store.list(topic).filter((e) => !known.has(e.sig));
       if (missing.length > MAX_RESP) audit?.('sync_resp_overflow', { topic, count: missing.length });
       const resp = await mesh.sign(4, SYNC.RESP, { topic, envs: missing.slice(0, MAX_RESP) });
-      mesh.send(via, resp);
+      await mesh.send(via, resp);
       return;
     }
 

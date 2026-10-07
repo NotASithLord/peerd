@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { abortClosesPc, createWebrtcTransport } from '../../extension/peerd-distributed/transport/transports/webrtc.js';
+import { createSignalingBuffer } from '../../extension/peerd-distributed/transport/signaling-buffer.js';
 import { createInprocTransport } from '../../extension/peerd-distributed/transport/transports/inproc.js';
 
 // Drive the real transport through both unopened cancellation and the live-link
@@ -196,6 +197,16 @@ describe('webrtc transport — the wired late-completion guard (D2)', () => {
     expect(await outcome).toBeInstanceOf(Error);
     expect(pc.closed).toBe(true);
     expect(unsubscribed).toBe(1);
+  });
+
+  test('rejected asynchronous offer and answer sends release the native peer without a caller signal', async () => {
+    const transport = createWebrtcTransport({ RTCPeerConnection: MockPC as any });
+    const failingPipe = () => createSignalingBuffer(async () => { throw new Error('signaling backpressure failure'); }, () => {});
+    const signaling = failingPipe().signaling;
+    await expect(transport.connect({ did: 'x' }, { signaling })).rejects.toThrow('signaling backpressure failure');
+    expect(instances.at(-1).closed).toBe(true);
+    await expect(transport.accept({ offer: { sdp: 'offer' }, signaling: failingPipe().signaling })).rejects.toThrow('signaling backpressure failure');
+    expect(instances.at(-1).closed).toBe(true);
   });
 
   test('a channel that opens before abort keeps its live pc', async () => {

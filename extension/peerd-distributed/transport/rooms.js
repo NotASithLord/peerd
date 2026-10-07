@@ -138,7 +138,7 @@ export const joinRoom = async ({
   // the governor makes the slot available to another room.
   /** @param {{ key: string, direction: 'inbound'|'outbound',
    * routers: Map<string, (payload: any) => void>, routeKey: string,
-   * send: (payload: any) => void,
+   * send: (payload: any, signal: AbortSignal) => void | Promise<void>,
    * connect: (signaling: any, signal: AbortSignal) => Promise<any>,
    * expectedDid?: string | null, via: string, signal?: AbortSignal }} opts */
   const attempt = ({ key, direction, routers, routeKey, send, connect, expectedDid = null, via, signal }) =>
@@ -150,7 +150,7 @@ export const joinRoom = async ({
         ac.abort();
       };
       reservationSignal.addEventListener('abort', cancel, { once: true });
-      const pipe = createSignalingBuffer(send, cancel);
+      const pipe = createSignalingBuffer((payload) => send(payload, ac.signal), cancel);
       routers.set(routeKey, pipe.route);
       /** @type {any} */
       let opened = null;
@@ -298,7 +298,7 @@ export const joinRoom = async ({
     try {
       await attempt({ key: `incoming-did/${env.from}`, direction, routers: relayRouters, routeKey,
         expectedDid: env.from, via,
-        send: (p) => mesh.relay(via, env.from, p.type === 'answer' ? 'answer' : 'ice', sid, p),
+        send: (p, signal) => mesh.relay(via, env.from, p.type === 'answer' ? 'answer' : 'ice', sid, p, { signal }),
         connect: async (signaling, signal) => (await t.accept({ offer: { type: 'offer', sdp: payload.sdp }, iceServers, signaling, signal })).channel });
     } catch (e) { logConnectFail('relay accept', env.from, e); }
   });
@@ -313,7 +313,7 @@ export const joinRoom = async ({
     const sid = newId();
     try { await attempt({ key: `did/${targetDid}`, direction: 'outbound', routers: relayRouters,
       routeKey: `${targetDid}/${sid}`, expectedDid: targetDid, via, signal,
-      send: (p) => mesh.relay(via, targetDid, p.type === 'offer' ? 'offer' : 'ice', sid, p),
+      send: (p, attemptSignal) => mesh.relay(via, targetDid, p.type === 'offer' ? 'offer' : 'ice', sid, p, { signal: attemptSignal }),
       connect: (signaling, attemptSignal) => t.connect({ did: targetDid }, { iceServers, signaling, signal: attemptSignal }) }); }
     catch (error) {
       const replacement = attempts.pending(`incoming-did/${targetDid}`);

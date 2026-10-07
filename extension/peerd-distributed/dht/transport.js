@@ -66,7 +66,9 @@ export const attachDht = ({ mesh, identity, selfId, store, providers = null, dia
       ac.signal.throwIfAborted();
       return new Promise((resolve, reject) => {
         pending.set(reqId, { did, resolve, timer });
-        if (!mesh.send(did, env)) reject(new Error('dht: link lost mid-send'));
+        Promise.resolve(mesh.send(did, env, { signal: ac.signal })).then((sent) => {
+          if (!sent) reject(new Error('dht: link lost mid-send'));
+        }, reject);
       });
     };
     try { return await Promise.race([aborted, run()]); }
@@ -90,7 +92,7 @@ export const attachDht = ({ mesh, identity, selfId, store, providers = null, dia
       let resp;
       try { resp = await node.handle(env.from, env.body.msg); }
       catch { resp = { t: 'ERR', reason: 'handler-error' }; }
-      mesh.send(env.from, await mesh.sign(CH_DHT, RESP, { reqId: env.body.reqId, resp }));
+      await mesh.send(env.from, await mesh.sign(CH_DHT, RESP, { reqId: env.body.reqId, resp }));
     } else if (env.typ === RESP) {
       const p = pending.get(env.body.reqId);
       if (p && p.did === env.from) { clearTimeout(p.timer); pending.delete(env.body.reqId); p.resolve(env.body.resp); }

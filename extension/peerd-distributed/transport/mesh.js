@@ -67,11 +67,13 @@ const QUEUED_PER_MESH = 128;
 
 /** @typedef {{ did: string, sign: (bytes: Uint8Array) => Promise<Uint8Array> }} Identity */
 /** @typedef {((type: string, detail?: any) => void) | null} AuditFn */
-/** @typedef {{ send: (msg: any) => void, setHandler: (h: any) => void, close: () => void, onClose: (cb: () => void) => (() => void) }} Channel */
+/** @typedef {{ send: (msg: any, options?: import('./outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: any) => void, close: () => void, onClose: (cb: () => void) => (() => void) }} Channel */
 /**
  * @typedef {{
  *   did: string,
  *   channel: Channel,
+ *   retired: AbortController,
+ *   pinging?: boolean,
  *   lastSeen: number,
  *   queued: number,
  *   verifying: number,
@@ -125,7 +127,7 @@ export const createRoomMesh = ({
   const relayCbs = new Set();
   /** @type {Map<string, Set<(members: any) => void>>} */
   const rosterWaiters = new Map(); // did -> Set<resolve>
-  /** @type {((msg: any, send: (m: any) => void) => void) | null} */
+  /** @type {((msg: any, send: (m: any) => Promise<void>, owner?: object) => Promise<void>) | null} */
   let respondContent = null; // (msg, send) => void, when a store is served
   /** @type {ReturnType<typeof setInterval> | null} */
   let pingTimer = null;
@@ -172,12 +174,32 @@ export const createRoomMesh = ({
   const sign = (ch, typ, body) =>
     signEnvelope(buildEnvelope({ ch, typ, from: identity.did, body, id: newId(), ts: now() }), identity);
 
-  /** @param {string} did @param {any} env */
-  const sendTo = (did, env) => {
+  /** @param {Link} link @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
+  const sendOnLink = async (link, env, options = {}) => {
+    if (closed || links.get(link.did) !== link || options.signal?.aborted) throw new Error('mesh send cancelled or link closed');
+    const ac = new AbortController();
+    const abort = () => ac.abort();
+    link.retired.signal.addEventListener('abort', abort, { once: true });
+    options.signal?.addEventListener('abort', abort, { once: true });
+    try {
+      await link.channel.send(env, { ...options, signal: ac.signal });
+      if (closed || links.get(link.did) !== link || ac.signal.aborted) throw new Error('mesh link retired during send');
+    } finally {
+      link.retired.signal.removeEventListener('abort', abort);
+      options.signal?.removeEventListener('abort', abort);
+    }
+  };
+
+  /** @param {string} did @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
+  const sendTo = async (did, env, options) => {
     const link = links.get(did);
     if (!link) return false;
-    link.channel.send(env);
-    return true;
+    try { await sendOnLink(link, env, options); return true; }
+    catch {
+      // Backpressure failure is a failed connection, never identity misconduct.
+      if (!options?.signal?.aborted && links.get(did) === link) removeLink(did, 'send-failed');
+      return false;
+    }
   };
 
   // A virtual content channel to one linked peer: sends ride the real link,
@@ -191,10 +213,10 @@ export const createRoomMesh = ({
     /** @type {((msg: any) => void) | null} */
     let handler = null;
     return {
-      /** @param {any} m */
-      send: (m) => {
+      /** @param {any} m @param {import('./outgoing.js').SendOptions} [options] */
+      send: async (m, options) => {
         if (closed || links.get(did) !== link) throw new Error('content link closed');
-        link.channel.send(m);
+        await sendOnLink(link, m, options);
       },
       // why: retain the captured generation so replacement cancels only old
       // transfers, even when the same peer immediately reconnects.
@@ -217,6 +239,7 @@ export const createRoomMesh = ({
     const link = links.get(did);
     if (!link) return;
     links.delete(did);
+    link.retired.abort();
     link.contentHandlers.clear();
     cancelVerification(link);
     link.offClose?.();
@@ -260,14 +283,14 @@ export const createRoomMesh = ({
     const linkLocal = env.from === link.did; // signer IS the neighbor
     switch (env.typ) {
       case CTRL.PING:
-        if (linkLocal) link.channel.send(await sign(0, CTRL.PONG, { nonce: env.body?.nonce }));
+        if (linkLocal) await sendOnLink(link, await sign(0, CTRL.PONG, { nonce: env.body?.nonce }), { priority: 'control' });
         return;
       case CTRL.PONG:
         return; // lastSeen already updated on receipt
       case CTRL.ROSTER_REQ: {
         if (!linkLocal || env.body?.room !== roomId) return;
         const members = [identity.did, ...links.keys()].filter((d) => d !== link.did);
-        link.channel.send(await sign(0, CTRL.ROSTER, { room: roomId, members }));
+        await sendOnLink(link, await sign(0, CTRL.ROSTER, { room: roomId, members }));
         return;
       }
       case CTRL.ROSTER: {
@@ -291,7 +314,7 @@ export const createRoomMesh = ({
         // Forward exactly one hop, and only frames received directly from
         // their signer — a relay never launders someone else's envelope.
         if (env.from !== link.did) return;
-        if (!sendTo(b.to, env)) audit?.('relay_target_unreachable', { to: b.to, via: link.did });
+        if (!await sendTo(b.to, env)) audit?.('relay_target_unreachable', { to: b.to, via: link.did });
         return;
       }
       default:
@@ -308,7 +331,7 @@ export const createRoomMesh = ({
       if (typeof msg.hash !== 'string' || !/^[0-9a-f]{64}$/.test(msg.hash)) {
         penalize(link, 'malformed-content-request'); return;
       }
-      respondContent?.(msg, (out) => link.channel.send(out));
+      await respondContent?.(msg, (out) => sendOnLink(link, out), link);
       return;
     }
     if (typeof msg.t === 'string' && CONTENT_RESP.has(msg.t)) {
@@ -362,13 +385,19 @@ export const createRoomMesh = ({
     emit(envelopeCbs, { env: msg, via: link.did });
   };
 
-  const sweep = async () => {
+  const sweep = () => {
     const t = now();
     for (const [did, link] of [...links]) {
       if (t - link.lastSeen > idleTimeoutMs) {
         removeLink(did, 'idle-timeout');
-      } else if (t - link.lastSeen > pingIntervalMs) {
-        link.channel.send(await sign(0, CTRL.PING, { nonce: newId().slice(0, 8) }));
+      } else if (t - link.lastSeen > pingIntervalMs && !link.pinging) {
+        // One pending ping per link; a slow neighbor must not delay another
+        // neighbor's sweep or accumulate more sends on every timer tick.
+        link.pinging = true;
+        sign(0, CTRL.PING, { nonce: newId().slice(0, 8) })
+          .then((env) => sendOnLink(link, env, { priority: 'control' }))
+          .catch(() => { if (links.get(did) === link) removeLink(did, 'ping-failed'); })
+          .finally(() => { link.pinging = false; });
       }
     }
   };
@@ -402,10 +431,11 @@ export const createRoomMesh = ({
       // both sides converge on without a tiebreak protocol.
       if (links.has(did)) removeLink(did, 'replaced');
       /** @type {Link} */
-      const link = { did, channel, contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
+      const link = { did, channel, retired: new AbortController(), contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
       link.offClose = channel.onClose(() => {
         if (links.get(did) === link) {
           links.delete(did);
+          link.retired.abort();
           link.contentHandlers.clear();
           cancelVerification(link);
           audit?.('peer_link_closed', { did, why: 'channel-closed' });
@@ -413,7 +443,9 @@ export const createRoomMesh = ({
         }
       });
       links.set(did, link);
-      channel.setHandler((/** @type {any} */ msg) => { handle(link, msg); });
+      channel.setHandler((/** @type {any} */ msg) => {
+        handle(link, msg).catch(() => { if (links.get(did) === link) removeLink(did, 'service-or-send-failed'); });
+      });
       audit?.('peer_connected', { did, room: roomId });
       emit(peerCbs, { did, info });
       return true;
@@ -444,10 +476,8 @@ export const createRoomMesh = ({
     sign,
     send: sendTo,
     /** @param {any} env @param {string | null} [exceptDid] */
-    broadcast(env, exceptDid = null) {
-      for (const [did, link] of links) {
-        if (did !== exceptDid) link.channel.send(env);
-      }
+    async broadcast(env, exceptDid = null) {
+      await Promise.all([...links.keys()].filter((did) => did !== exceptDid).map((did) => sendTo(did, env)));
     },
 
     // "Who do you see in this room?" — the server-optional roster.
@@ -456,16 +486,33 @@ export const createRoomMesh = ({
       return new Promise((resolve, reject) => {
         const link = links.get(did);
         if (!link) return reject(new Error(`requestRoster: no link to ${did}`));
-        const timer = setTimeout(() => {
+        const ac = new AbortController();
+        let settled = false;
+        let offClose = () => {};
+        /** @type {ReturnType<typeof setTimeout> | undefined} */
+        let timer;
+        const cleanup = () => {
+          clearTimeout(timer); ac.abort(); offClose();
           rosterWaiters.get(did)?.delete(settle);
-          reject(new Error('roster request timed out'));
-        }, timeoutMs);
+          if (!rosterWaiters.get(did)?.size) rosterWaiters.delete(did);
+        };
+        /** @param {any} error */
+        const fail = (error) => { if (!settled) { settled = true; cleanup(); reject(error); } };
         /** @param {any} members */
-        const settle = (members) => { clearTimeout(timer); resolve(members); };
+        const settle = (members) => { if (!settled) { settled = true; cleanup(); resolve(members); } };
         let waiters = rosterWaiters.get(did);
         if (!waiters) { waiters = new Set(); rosterWaiters.set(did, waiters); }
         waiters.add(settle);
-        sign(0, CTRL.ROSTER_REQ, { room: roomId }).then((env) => link.channel.send(env));
+        offClose = link.channel.onClose(() => fail(new Error('roster link closed')));
+        if (settled) { offClose(); return; }
+        timer = setTimeout(() => fail(new Error('roster send timed out')), 15_000);
+        sign(0, CTRL.ROSTER_REQ, { room: roomId }).then(async (env) => {
+          if (settled) return;
+          await sendOnLink(link, env, { signal: ac.signal });
+          if (settled) return;
+          clearTimeout(timer);
+          timer = setTimeout(() => fail(new Error('roster request timed out')), timeoutMs);
+        }).catch(fail);
       });
     },
 
@@ -473,11 +520,13 @@ export const createRoomMesh = ({
     // payload is opaque (SDP); sid correlates offer/answer.
     /**
      * @param {string} via @param {string} to @param {string} kind
-     * @param {string} sid @param {any} payload
+     * @param {string} sid @param {any} payload @param {{ signal?: AbortSignal }} [options]
      */
-    async relay(via, to, kind, sid, payload) {
+    async relay(via, to, kind, sid, payload, { signal } = {}) {
+      if (signal?.aborted) throw new Error('relay cancelled');
       const env = await sign(0, CTRL.RELAY, { room: roomId, to, kind, sid, payload });
-      if (!sendTo(via, env)) throw new Error(`relay: no link to via-peer ${via}`);
+      if (signal?.aborted) throw new Error('relay cancelled');
+      if (!await sendTo(via, env, { signal })) throw new Error(`relay: no link to via-peer ${via}`);
     },
 
     // Content multiplexing on mesh links (announce-set rules unchanged —

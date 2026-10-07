@@ -3,7 +3,7 @@
 // and asynchronous handler work, and retire both with the attempt owner.
 const MAX_MESSAGES = 64;
 const MAX_BYTES = 256 * 1024;
-/** @param {(payload: any) => void} send @param {() => void} overflow */
+/** @param {(payload: any) => void | Promise<void>} send @param {() => void} overflow */
 export const createSignalingBuffer = (send, overflow) => {
   /** @type {((payload: any) => any) | null} */
   let handler = null;
@@ -44,7 +44,10 @@ export const createSignalingBuffer = (send, overflow) => {
     },
     signaling: {
       /** @param {any} payload */
-      send(payload) { if (!closed) send(payload); },
+      async send(payload) {
+        if (closed) throw new Error('signaling attempt closed');
+        await send(payload);
+      },
       /** @param {(payload: any) => any} h */
       onRemote(h) {
         if (closed) return () => {};

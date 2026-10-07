@@ -154,7 +154,7 @@ describe('rooms over the rendezvous (fake node, real reducer)', () => {
       async connect() {
         const [local, remote] = memoryPair();
         const send = local.send;
-        local.send = (message) => { send(message); remote.close(); };
+        local.send = (message) => { const sent = send(message); remote.close(); return sent; };
         return local;
       },
     };

@@ -20,11 +20,12 @@ const spawn = async (over: any = {}) => {
   const rawMesh = createRoomMesh({ roomId: 'base', identity });
   let failSign = false;
   let failSend = false;
-  const mesh = over.failSign === true || over.failSend === true ? Object.freeze({
+  const mesh = over.failSign === true || over.failSend === true || over.signHook ? Object.freeze({
     ...rawMesh,
     sign: (channel: number, type: number, body: any) => failSign
       ? Promise.reject(new Error('transport lost after local commit'))
-      : rawMesh.sign(channel, type, body),
+      : over.signHook ? over.signHook(channel, type, body, () => rawMesh.sign(channel, type, body))
+        : rawMesh.sign(channel, type, body),
     send: (did: string, envelope: any) => failSend
       ? false : rawMesh.send(did, envelope),
   }) : rawMesh;
@@ -457,4 +458,48 @@ describe('dwapp discovery — sovereign subscription plane', () => {
 
     [publisher, restartedHost].forEach((p) => p.discovery.close());
   });
+});
+
+
+for (const mode of ['continue', 'quota', 'unsubscribe', 'disable', 'ban', 'close', 'disconnect']) test(`final forwarding coalesces reconciliation and respects ${mode}`, async () => {
+  let time = 0;
+  let release!: () => void;
+  let reached!: () => void;
+  const held = new Promise<void>((resolve) => { reached = resolve; });
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  let forwards = 0;
+  let subscriptions = 0;
+  const source = await spawn({ now: () => time });
+  const sink = await spawn({ now: () => time, signHook: async (_channel: number, type: number, _body: any, sign: () => Promise<any>) => {
+    if (type === DISCOVERY.SUB) subscriptions++;
+    if (type === DISCOVERY.ITEM && ++forwards === 60) { reached(); await barrier; }
+    return sign();
+  } });
+  try {
+    for (let i = 0; i < 61; i++) await source.discovery.announce(await ownCard(source, `controlled-${i}`));
+    await link(source, sink);
+    await held;
+    expect(sink.library.size()).toBe(60);
+    expect(subscriptions).toBe(1);
+    if (mode !== 'quota') time += 60_000;
+    for (let i = 0; i < 100; i++) sink.discovery.subscribeAll();
+    if (mode === 'unsubscribe') await sink.discovery.unsubscribeFrom(source.identity.did);
+    if (mode === 'disable') sink.discovery.setEnabled(false);
+    if (mode === 'ban') sink.discovery.ban(source.identity.did);
+    if (mode === 'close') sink.discovery.close();
+    if (mode === 'disconnect') sink.mesh.removeLink(source.identity.did);
+    release();
+    if (mode === 'continue') {
+      await waitFor(() => sink.library.size() === 61);
+      expect(subscriptions).toBe(2);
+      expect(sink.library.size()).toBe(61);
+    } else {
+      await tick(100);
+      expect(subscriptions).toBe(1);
+      expect(sink.library.size()).toBe(mode === 'ban' ? 0 : 60);
+    }
+  } finally {
+    release(); source.discovery.close(); sink.discovery.close();
+    source.mesh.close(); sink.mesh.close();
+  }
 });
