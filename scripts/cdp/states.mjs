@@ -4568,18 +4568,27 @@ export const STATES = [
         const sent = await rpc(ctx.page, { type: 'agent/send', text });
         rec.check(`session fixture turn accepted: ${text}`, sent?.ok === true, JSON.stringify(sent));
         if (sent?.ok !== true) throw new Error('sessions-list fixture turn refused');
+        let lastObservation = null;
         const persisted = await waitFor(async () => {
           const state = await rpc(ctx.page, { type: 'state/get' });
           const sessionId = state?.state?.session?.sessionId;
           const view = await probe(ctx);
-          if (!sessionId || view.busy || view.userText !== text || view.assistantText !== 'noted') return null;
+          // The user container also includes the visible role label "you".
+          // Match the message bubble itself, just as the assistant probe does.
+          const userText = await evalIn(ctx.page, `document.querySelector('.message-user .bubble')?.textContent.trim() ?? null`);
+          lastObservation = { stateOk: state?.ok === true, sessionId, busy: view.busy,
+            userMatches: userText === text, assistantMatches: view.assistantText === 'noted',
+            errorPresent: !!view.errorText };
+          if (!sessionId || view.busy || userText !== text || view.assistantText !== 'noted') return null;
           const reply = await rpc(ctx.page, { type: 'session/debugBundle', sessionId });
           const messages = reply?.bundle?.session?.messages ?? [];
-          return reply?.ok === true && messages.some(message => message.role === 'user' && message.content === text)
-            && messages.some(message => message.role === 'assistant' && message.content === 'noted')
-            ? { sessionId, title: text } : null;
+          const userPersisted = messages.some(message => message.role === 'user' && message.content === text);
+          const assistantPersisted = messages.some(message => message.role === 'assistant' && message.content === 'noted');
+          lastObservation = { ...lastObservation, bundleOk: reply?.ok === true,
+            messageCount: messages.length, userPersisted, assistantPersisted };
+          return reply?.ok === true && userPersisted && assistantPersisted ? { sessionId, title: text } : null;
         }, { budgetMs: 20_000 });
-        rec.check(`session fixture turn persisted: ${text}`, !!persisted, JSON.stringify(persisted));
+        rec.check(`session fixture turn persisted: ${text}`, !!persisted, JSON.stringify(lastObservation));
         if (!persisted) throw new Error('sessions-list exact fixture turn did not persist');
         expected.push(persisted);
       }
