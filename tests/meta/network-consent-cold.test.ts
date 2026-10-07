@@ -246,3 +246,44 @@ test('enabled Page preload covers the runtime-created current document before of
     expect(listeners.size).toBe(0);
   } finally { server.stop(true); }
 });
+
+test('RTC canary requires native construction and close, while retaining failure stages', async () => {
+  const { RTC_CANARY_SOURCE, rtcCanaryComplete } = await import('../../scripts/cdp/network-consent-cold.mjs');
+  for (const failure of ['none', 'construct', 'close']) {
+    const records: any[] = [];
+    const error = new Error(`native ${failure} failed`);
+    class Native {
+      constructor() { if (failure === 'construct') throw error; }
+      close() { if (failure === 'close') throw error; }
+    }
+    const context = { RTCPeerConnection: Native,
+      location: { href: 'chrome-extension://fixture/offscreen/offscreen.html' },
+      __peerdConsentTransportObserved: (payload: string) => records.push({ ...JSON.parse(payload), sessionId: 'host' }) };
+    runInNewContext(OBSERVER_SOURCE, context);
+    if (failure === 'none') expect(runInNewContext(RTC_CANARY_SOURCE, context)).toBe(true);
+    else {
+      let caught;
+      try { runInNewContext(RTC_CANARY_SOURCE, context); } catch (value) { caught = value; }
+      expect(caught).toBe(error);
+    }
+    expect(rtcCanaryComplete(records, 'host')).toBe(failure === 'none');
+    expect(rtcCanaryComplete([{ kind: 'RTCPeerConnection', sessionId: 'host' }, ...records,
+      { kind: 'RTCPeerConnection', sessionId: 'host' }], 'host')).toBe(failure === 'none');
+    expect(rtcCanaryComplete(records, 'retired-host')).toBe(false);
+    expect(rtcCanaryComplete(records.filter(event => event.kind !== 'RTCPeerConnection'), 'host')).toBe(false);
+    expect(records.filter(event => event.kind === 'rtc-canary').map(event => event.stage)).toEqual(
+      failure === 'construct' ? ['entry', 'before-construct'] : failure === 'close'
+        ? ['entry', 'before-construct', 'constructed'] : ['entry', 'before-construct', 'constructed', 'closed']);
+  }
+});
+
+test('passive lifecycle diagnostics omit arbitrary messages and lease secrets', async () => {
+  const { lifecycleErrorLabels, leaseDiagnostic } = await import('../../scripts/cdp/network-consent-cold.mjs');
+  expect(lifecycleErrorLabels(['private payload feature-lease-host-start-timeout', 'secret',
+    'feature-lease-host-start-timeout'])).toEqual(['feature-lease-host-start-timeout']);
+  expect(leaseDiagnostic({ locked: false, secret: 'private', leases: { 'dweb/base': {
+    status: 'starting', generation: 2, hostEpoch: 'epoch', durable: true, leaseId: 'secret', context: 'private',
+  } } })).toEqual({ locked: false, leases: { 'dweb/base': {
+    status: 'starting', generation: 2, hostEpoch: 'epoch', durable: true,
+  } } });
+});

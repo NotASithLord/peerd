@@ -30,6 +30,43 @@ export const OBSERVER_SOURCE = `(() => {
   emit('observer-ready', { rtc: typeof RTCPeerConnection === 'function', socket: typeof WebSocket === 'function' });
 })()`;
 
+// Stage markers diagnose target retirement; only the native observer proves construction.
+export const RTC_CANARY_SOURCE = `(() => {
+  const mark = stage => globalThis.${BINDING}(JSON.stringify({
+    kind: 'rtc-canary', stage, href: globalThis.location?.href ?? '',
+  }));
+  mark('entry');
+  mark('before-construct');
+  const pc = new RTCPeerConnection({iceServers: []});
+  mark('constructed');
+  pc.close();
+  mark('closed');
+  return true;
+})()`;
+
+export const rtcCanaryComplete = (events, sessionId) => {
+  const stages = events.filter(event => event.sessionId === sessionId)
+    .filter(event => event.kind === 'rtc-canary' || event.kind === 'RTCPeerConnection')
+    .map(event => event.kind === 'rtc-canary' ? event.stage : event.kind);
+  const start = stages.indexOf('entry');
+  const end = stages.indexOf('closed', start);
+  return start >= 0 && end >= start
+    && stages.slice(start, end + 1).join(',') === 'entry,before-construct,RTCPeerConnection,constructed,closed';
+};
+
+// Never retain console arguments, exception values, source, or arbitrary messages.
+export const lifecycleErrorLabels = values => [...new Set(values.flatMap(value =>
+  String(value ?? '').match(/\b(?:feature-lease-host-(?:start|stop|prepare|close|heartbeat)-timeout|feature-host-retirement-store-timeout|feature-lease-start-failed|feature-lease-stop-unknown)\b/g) ?? []))];
+
+export const leaseDiagnostic = snapshot => ({
+  locked: snapshot?.locked === true,
+  leases: Object.fromEntries(Object.entries(snapshot?.leases ?? {}).slice(0, 16).map(([scope, state]) => [
+    scope.slice(0, 80), Object.fromEntries(['generation', 'status', 'durable', 'hostEpoch', 'poisonedHostEpoch']
+      .filter(key => ['string', 'number', 'boolean'].includes(typeof state?.[key]))
+      .map(key => [key, typeof state[key] === 'string' ? state[key].slice(0, 100) : state[key]])),
+  ])),
+});
+
 export const assertNoTransport = (events, label) => {
   const traffic = events.filter(event => ['WebSocket', 'RTCPeerConnection', 'native-websocket'].includes(event.kind));
   if (traffic.length) throw new Error(`${label}: transport before consent: ${JSON.stringify(traffic)}`);
@@ -149,6 +186,12 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
   let closing = false;
   const origin = `chrome-extension://${ctx.sw.id}/`;
   const ownedUrl = url => String(url ?? '').startsWith(origin) || String(url ?? '').startsWith(`blob:${origin}`);
+  const lifecycle = record => {
+    evidence.lifecycle ??= [];
+    evidence.lifecycle.push({ at: Date.now(), phase: evidence.phase, ...record });
+    if (evidence.lifecycle.length > 128) evidence.lifecycle.shift();
+    persist();
+  };
   const failed = error => { if (!closing) { evidence.observerErrors.push(String(error?.stack ?? error)); persist(); } };
   const install = async ({ sessionId, targetInfo, waitingForDebugger }) => {
     if (owners.has(targetInfo.targetId)) {
@@ -161,7 +204,7 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
     const ready = new Promise(resolve => { markReady = resolve; });
     readiness.set(sessionId, markReady);
     evidence.targets ??= [];
-    evidence.targets.push({ sessionId, targetId: targetInfo.targetId, type: targetInfo.type, url: targetInfo.url, waitingForDebugger });
+    evidence.targets.push({ at: Date.now(), sessionId, targetId: targetInfo.targetId, type: targetInfo.type, url: targetInfo.url, waitingForDebugger });
     persist();
     const send = (method, params = {}) => connection.send(method, params, sessionId);
     try {
@@ -208,12 +251,20 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
     finally { readiness.delete(sessionId); }
   };
   const listener = (method, params, message) => {
-    if (method === 'Target.attachedToTarget') {
+    if (['Runtime.executionContextDestroyed', 'Runtime.executionContextsCleared', 'Target.targetDestroyed', 'Inspector.detached'].includes(method)) {
+      lifecycle({ method, sessionId: message.sessionId, targetId: params.targetId, executionContextId: params.executionContextId });
+    } else if (['Runtime.exceptionThrown', 'Runtime.consoleAPICalled'].includes(method)) {
+      const labels = lifecycleErrorLabels(method === 'Runtime.exceptionThrown'
+        ? [params.exceptionDetails?.text, params.exceptionDetails?.exception?.description]
+        : (params.args ?? []).map(arg => arg.description ?? arg.value));
+      if (labels.length || method === 'Runtime.exceptionThrown') lifecycle({ method, sessionId: message.sessionId, labels });
+    } else if (method === 'Target.attachedToTarget') {
       const pending = install(params);
       installing.add(pending);
       pending.then(() => installing.delete(pending), error => { installing.delete(pending); failed(error); });
     } else if (method === 'Target.detachedFromTarget') {
       const target = sessions.get(params.sessionId);
+      lifecycle({ method, sessionId: params.sessionId, targetId: target?.targetId ?? params.targetId });
       if (target && owners.get(target.targetId) === params.sessionId) owners.delete(target.targetId);
       sessions.delete(params.sessionId);
       readiness.delete(params.sessionId);
@@ -225,7 +276,7 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
         if (ownedUrl(event.href)) {
           const target = sessions.get(message.sessionId);
           if (target) target.url = event.href;
-          evidence.events.push({ ...event, sessionId: message.sessionId, phase: evidence.phase });
+          evidence.events.push({ ...event, at: Date.now(), sessionId: message.sessionId, phase: evidence.phase });
           persist();
         }
       } catch (error) { failed(error); }
@@ -269,10 +320,14 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
       async nativeRtcCanary() {
         const match = [...sessions].find(([, target]) => ownedUrl(target.url) && target.url.includes('/offscreen/offscreen.html'));
         requireResult(match, 'No observed real offscreen realm for native RTC canary');
+        evidence.rtcCanary = { sessionId: match[0], targetId: match[1].targetId, at: Date.now() };
+        persist();
+        const eventStart = evidence.events.length;
         const result = await connection.send('Runtime.evaluate', {
-          expression: '(() => { const pc = new RTCPeerConnection({iceServers: []}); pc.close(); return true; })()', returnByValue: true,
+          expression: RTC_CANARY_SOURCE, returnByValue: true,
         }, match[0]);
         requireResult(!result.exceptionDetails && result.result?.value === true, 'Native RTC canary failed');
+        return { sessionId: match[0], eventStart };
       },
       async close() {
         closing = true;
@@ -386,9 +441,24 @@ export async function runColdConsent({ reportPath = REPORT, launch = launchPeerd
       await observer.barrier();
       check('native CDP confirms signaling positive control', evidence.events.some(event => event.kind === 'native-websocket'
         && event.phase === 'explicit-enable'));
-      await observer.nativeRtcCanary();
+      const captureLease = async stage => {
+        const entry = { stage, at: Date.now() };
+        evidence.featureLeaseSnapshots ??= [];
+        evidence.featureLeaseSnapshots.push(entry);
+        try {
+          // bootstrap/ready reads runtime.snapshot(); it does not acquire a host.
+          const reply = await diagnostic(`passive feature lease snapshot ${stage}`, () =>
+            rpc(ctx.page, { type: 'bootstrap/ready' }, { timeoutMs: 5_000 }), 6_000);
+          Object.assign(entry, { ok: reply?.ok === true, snapshot: leaseDiagnostic(reply?.featureLeases) });
+        } catch { Object.assign(entry, { unavailable: true }); }
+        persist();
+      };
+      await captureLease('before-rtc');
+      let canary;
+      try { canary = await observer.nativeRtcCanary(); }
+      finally { await captureLease('after-rtc'); }
       await observer.barrier();
-      check('real host RTC observer positive control', evidence.events.some(event => event.kind === 'RTCPeerConnection' && event.phase === 'explicit-enable'));
+      check('real host RTC observer positive control', rtcCanaryComplete(evidence.events.slice(canary.eventStart), canary.sessionId));
       // Stop via the ordinary preference route; no host API shim or forced close.
       check('final network disable acknowledged', (await rpc(ctx.page, { type: 'settings/update', patch: { dwebEnabled: false } }, { timeoutMs: 30_000 }))?.ok === true);
       requireResult(!terminated, 'Consent scenario already terminated');
