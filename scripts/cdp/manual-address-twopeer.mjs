@@ -5,7 +5,7 @@ import { createServer as httpServer } from 'node:http';
 import { createServer as tlsServer } from 'node:tls';
 import { connect } from 'node:net';
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { resolve, join, dirname, extname, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -33,20 +33,34 @@ const track = socket => { sockets.add(socket); socket.on('close', () => sockets.
 const listen = async server => { servers.push(server); server.on('connection', track); await new Promise((yes, no) => { server.once('error', no); server.listen(0, '127.0.0.1', yes); }); return server.address().port; };
 const bridge = (a, b) => { a.on('error', () => b.destroy()); b.on('error', () => a.destroy()); a.on('close', () => b.destroy()); b.on('close', () => a.destroy()); a.pipe(b); b.pipe(a); };
 const evaluate = (page, expression) => bounded(stage, () => evalIn(page, expression, true));
+// Peer-derived addresses and identities cross CDP as data, never source text.
+const invoke = (page, functionDeclaration, values) => bounded(stage, async () => {
+  const global = await page.send('Runtime.evaluate', { expression: 'globalThis' });
+  const objectId = global.result?.objectId;
+  if (!objectId) throw new Error('page global unavailable');
+  try {
+    const result = await page.send('Runtime.callFunctionOn', {
+      objectId, functionDeclaration, arguments: values.map(value => ({ value })),
+      returnByValue: true, awaitPromise: true,
+    });
+    if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
+    return result.result?.value;
+  } finally { await page.send('Runtime.releaseObject', { objectId }); }
+});
 const call = message => bounded(stage, () => rpc(ctx.page, message));
 const until = (name, probe, ms = 30_000) => bounded(name, async () => {
   const result = await waitFor(probe, { budgetMs: ms, pollMs: 100 });
   if (!result) throw new Error(`${name}: condition not reached`);
   return result;
 }, ms + 1000);
-const click = text => evaluate(ctx.page, `(async () => {
-  const button = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(text)} && !b.disabled);
-  if (!button) throw new Error('missing enabled button: ' + ${JSON.stringify(text)});
+const click = text => invoke(ctx.page, `async function(text) {
+  const button = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === text && !b.disabled);
+  if (!button) throw new Error('missing enabled button: ' + text);
   button.click();
   // Let Mithril paint the synchronous busy transition before polling completion.
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   return true;
-})()`);
+}`, [text]);
 const appTabs = () => bounded(stage, async () => (await (await fetch(`http://127.0.0.1:${ctx.port}/json/list`)).json())
   .filter(target => target.type === 'page' && target.url.startsWith(`chrome-extension://${ctx.sw.id}/engine-tabs/app-tab/`)));
 const screenshot = name => bounded(`capture ${name}`, async () => writeFileSync(join(output, `${name}.png`), await capturePage(ctx.page)));
@@ -74,7 +88,7 @@ try {
     const path = resolve(ext, '.' + new URL(req.url, 'http://localhost').pathname);
     if (path === ext) { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<!doctype html><title>Manual address publisher</title>'); return; }
     if (!path.startsWith(ext + sep)) { res.writeHead(403); res.end(); return; }
-    try { if (!statSync(path).isFile()) throw new Error(); res.writeHead(200, { 'content-type': extname(path) === '.js' ? 'text/javascript' : 'application/octet-stream' }); res.end(readFileSync(path)); }
+    try { const bytes = readFileSync(path); res.writeHead(200, { 'content-type': extname(path) === '.js' ? 'text/javascript' : 'application/octet-stream' }); res.end(bytes); }
     catch { res.writeHead(404); res.end(); }
   }));
   await bounded('package Preview', () => packageArtifact({ channel: 'preview', browser: 'chrome', version: JSON.parse(readFileSync(join(repo, 'package.json'))).version, sign: false, verify: true, sourceRoot: repo, artifactRoot: join(temp, 'package') }), 60_000);
@@ -127,7 +141,7 @@ try {
   evidence.published = published;
   await until('mutual authenticated link', async () => {
     const status = await rpc(ctx.page, { type: 'dweb/distributed/info' });
-    const other = await evalIn(publisher, `window.manualPublisher.room.mesh.hasLink(${JSON.stringify(receiver.did)})`);
+    const other = await invoke(publisher, 'function(did) { return window.manualPublisher.room.mesh.hasLink(did); }', [receiver.did]);
     return other && Array.isArray(status.peers) && status.peers.some(peer => peer.did === published.publisher && peer.linked);
   });
   const baselineApps = await call({ type: 'apps/list' });
@@ -138,13 +152,16 @@ try {
   const baselineIds = userApps(baselineApps.apps);
   const baselineTabs = await appTabs();
   await until('manual input visible', () => evalIn(ctx.page, `!!document.querySelector('input[aria-label="App address"]')`));
-  await evaluate(ctx.page, `(() => { const input = document.querySelector('input[aria-label="App address"]'); input.value = ${JSON.stringify(published.address)}; input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await invoke(ctx.page, `function(address) { const input = document.querySelector('input[aria-label="App address"]'); input.value = address; input.dispatchEvent(new Event('input', { bubbles: true })); }`, [published.address]);
+  // Input updates Mithril state immediately, but the disabled button changes on
+  // the next redraw. Await the actual control, not a guessed frame or delay.
+  await until('Inspect enabled for entered address', () => invoke(ctx.page, `function(address) { return document.querySelector('input[aria-label="App address"]').value === address && [...document.querySelectorAll('button')].some(b => b.textContent === 'Inspect App' && !b.disabled); }`, [published.address]));
   await click('Inspect App');
   await until('verified inspection rendered', () => evalIn(ctx.page, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Install and share' && !b.disabled)`));
   const inspection = await evaluate(ctx.page, `document.querySelector('section[aria-label="App address"]').textContent`);
   check('inspection binds exact signer hash and decoded size', inspection.includes(published.publisher) && inspection.includes(published.hash) && inspection.includes(`${published.decodedBytes} bytes in 1 files`), inspection);
   check('inspection does not install a user or peer catalog record', JSON.stringify(userApps((await call({ type: 'apps/list' })).apps)) === JSON.stringify(baselineIds));
-  const query = () => evaluate(publisher, `window.manualPublisher.query(${JSON.stringify(receiver.did)})`);
+  const query = () => invoke(publisher, 'function(did) { return window.manualPublisher.query(did); }', [receiver.did]);
   const before = await query(); evidence.beforeInstallContent = before;
   check('inspection does not seed bytes (explicit negative response)', before?.t === 'NOMANIFEST' && before.hash === published.hash, before);
   check('inspection does not execute an App', (await appTabs()).length === baselineTabs.length);

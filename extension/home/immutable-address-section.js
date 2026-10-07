@@ -136,7 +136,7 @@ export const ImmutableAddressSection = () => {
         pending ? m('div', { role: 'status' }, [
           m('p', busy === 'install' ? 'Installing and sharing this revision…'
             : 'Peerd could not confirm whether the install finished. Refresh to reconcile before trying again.'),
-          m('code', { style: 'overflow-wrap:anywhere;' }, pending.address),
+          m('code', { style: 'display:block;overflow-wrap:anywhere;' }, pending.address),
           busy !== 'install' ? m('button.secondary', { disabled: !!busy, onclick: () => reconcile(attrs.send) }, 'Refresh install status') : null,
         ]) : appId ? m('button.secondary', { disabled: !!busy, onclick: () => open(attrs.send) }, 'Open installed App')
           : preview ? m('button.secondary', { disabled: !enabled || !!busy, onclick: () => install(attrs.send) }, 'Install and share') : null,
