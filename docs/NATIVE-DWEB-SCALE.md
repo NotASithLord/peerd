@@ -2,7 +2,7 @@
 
 Run `bun scripts/cdp/run-dweb-scale.mjs --peers=16 --mode=paced` in browser CI.
 The explicit larger experiments accept `--peers=32` or `--peers=64`;
-`--mode=stress` removes the paced spacing between fixture starts. No mode
+`--mode=stress` removes the paced spacing between network starts. No mode
 raises production degree, admission, message, bandwidth, or membership limits.
 A failed attempt remains a failed gate; do not retry it unchanged.
 
@@ -12,6 +12,14 @@ stack. Carriers are native RTCPeerConnection with iceServers set to an empty
 array. The local Bun signaling factory uses its unchanged production budgets.
 The extension loaded by the existing launcher stays locked. Fixture identities
 do not activate the user's network or change stored consent.
+
+All browser contexts and static modules are prepared before any network start.
+A native-resource and signaling barrier verifies that preparation opened no
+peer connections or sockets. Network joins then follow the selected cadence;
+the whole-run deadline includes both phases. This measures preloaded clients
+joining a native network, not cold page creation under an already active mesh.
+Earlier failures of that combined workload remain unresolved evidence; this
+phase separation does not establish their cause or claim to repair them.
 
 Acceptance requires every requested identity and a reciprocal connected graph,
 without raising the default active degree. The driver removes one source-target edge,

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { connected, scaleOptions, startupEvidence, stopScalePeers } from '../../scripts/cdp/run-dweb-scale.mjs';
+import { connected, prepareAndJoinScale, scaleOptions, SCALE_BUDGETS, startupEvidence, stopScalePeers } from '../../scripts/cdp/run-dweb-scale.mjs';
 
 test('scale arguments expose only explicit fixed sizes and paced/stress modes', () => {
   expect(scaleOptions([])).toEqual({ peers: 16, mode: 'paced' });
@@ -46,5 +46,35 @@ test('partial startup stops all initialized peers and retains failures without i
   });
   expect(calls).toEqual([0, 2]);
   expect(receipt.uninitialized).toEqual([{ index: 1, phase: 'navigating', productionStartInvoked: false, nativeCleanup: 'unavailable' }]);
-  expect(receipt.stops).toEqual([{ index: 0, ok: false, error: 'Error: retired context' }, { index: 2, ok: true, error: undefined }]);
+  expect(receipt.stops).toEqual([{ index: 0, productionStartInvoked: false, ok: false, error: 'Error: retired context' }, { index: 2, productionStartInvoked: false, ok: true, error: undefined }]);
+});
+test('native network starts only after every fixture is prepared and retains paced spacing', async () => {
+  const trace: string[] = [];
+  await prepareAndJoinScale({ peers: 3, mode: 'paced' }, {
+    prepare: async (index: number) => { trace.push(`prepare${index}`); return { index }; },
+    prepared: async () => { trace.push('zero-network-barrier'); },
+    start: async (peer: { index: number }) => { trace.push(`start${peer.index}`); },
+    wait: async (ms: number) => { expect(ms).toBe(SCALE_BUDGETS.pacedJoinMs); trace.push('pace'); },
+  });
+  expect(trace).toEqual(['prepare0', 'prepare1', 'prepare2', 'zero-network-barrier', 'start0', 'pace', 'start1', 'pace', 'start2']);
+});
+test('failed static preparation starts no network and cleanup still stops ready unstarted modules', async () => {
+  const peers: { index: number; ready: boolean; diagnostic: { state: { phase: string; startInvoked: boolean } } }[] = [];
+  let starts = 0, barriers = 0;
+  await expect(prepareAndJoinScale({ peers: 3, mode: 'paced' }, {
+    prepare: async (index: number) => {
+      const peer = { index, ready: index === 0, diagnostic: { state: { phase: index === 0 ? 'prepared' : 'navigating', startInvoked: false } } };
+      peers.push(peer);
+      if (index === 1) throw new Error('navigation deadline');
+      return peer;
+    },
+    prepared: async () => { barriers++; },
+    start: async () => { starts++; },
+  })).rejects.toThrow('navigation deadline');
+  expect(starts).toBe(0); expect(barriers).toBe(0);
+  const stopped: number[] = [];
+  const cleanup = await stopScalePeers(peers, async (peer: typeof peers[number]) => { stopped.push(peer.index); });
+  expect(stopped).toEqual([0]);
+  expect(cleanup.stops[0]).toMatchObject({ ok: true, productionStartInvoked: false });
+  expect(cleanup.uninitialized[0]).toMatchObject({ index: 1, nativeCleanup: 'unavailable' });
 });

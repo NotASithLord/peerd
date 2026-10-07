@@ -69,16 +69,33 @@ export async function stopScalePeers(peers, invoke) {
   const initialized = peers.filter(peer => peer.ready);
   const stops = await Promise.allSettled(initialized.map(peer => invoke(peer, 'stop')));
   return { uninitialized: peers.filter(peer => !peer.ready).map(peer => ({ index: peer.index, phase: peer.diagnostic.state.phase, productionStartInvoked: false, nativeCleanup: 'unavailable' })),
-    stops: stops.map((result, index) => ({ index: initialized[index].index, ok: result.status === 'fulfilled', error: result.status === 'rejected' ? String(result.reason).slice(0, 400) : undefined })) };
+    stops: stops.map((result, index) => ({ index: initialized[index].index, productionStartInvoked: initialized[index].diagnostic.state.startInvoked === true,
+      ok: result.status === 'fulfilled', error: result.status === 'rejected' ? String(result.reason).slice(0, 400) : undefined })) };
+}
+// This workload isolates native network joins from browser cold-page creation.
+// Preparation failure starts no peer; the caller still owns every ready module.
+export async function prepareAndJoinScale(options, { prepare, prepared, start, wait = sleep }) {
+  const peers = [];
+  for (let index = 0; index < options.peers; index++) peers.push(await prepare(index));
+  await prepared(peers);
+  for (const peer of peers) {
+    await start(peer);
+    if (options.mode === 'paced' && peer !== peers.at(-1)) await wait(SCALE_BUDGETS.pacedJoinMs);
+  }
 }
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export async function runScale(options = scaleOptions(process.argv.slice(2))) {
   const output = join(repo, 'artifacts/dweb-scale', `${options.peers}-${options.mode}`);
   mkdirSync(output, { recursive: true });
   const report = { ok: false, options, budgets: SCALE_BUDGETS, acceptance: SCALE_ACCEPTANCE, stage: 'starting', checks: [], samples: [],
+    workload: 'All static fixture modules are prepared before paced or stress network joins. Cold-page creation under an active mesh is not measured.',
     limitation: 'One Chrome process on one machine, isolated browser contexts, localhost ICE with no STUN/TURN. No WAN, NAT, multi-machine throughput, or raised-degree claim.',
     observedPeaks: { memberships: 0, sockets: 0 }, resourceViolations: [], startup: [], cleanup: null };
-  const save = () => writeFileSync(join(output, 'result.json'), JSON.stringify(report, null, 2));
+  const save = () => {
+    report.population = { ...report.population, prepared: report.startup.filter(row => row.prepared).length,
+      startInvoked: report.startup.filter(row => row.startInvoked).length };
+    writeFileSync(join(output, 'result.json'), JSON.stringify(report, null, 2));
+  };
   let failed = false, retiring = false, ctx, browser, signaling, server, signalPort;
   const peers = [], sockets = new Set();
   const cleanupErrors = [];
@@ -117,6 +134,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
   }, ms);
   const serverSnapshot = () => {
     const serverState = signaling.stats();
+    report.population = { ...report.population, memberships: serverState.memberships };
     const capped = { connections: 'sockets', rooms: 'rooms', joins: 'processJoins', messages: 'processMessages', ingressBytes: 'processIngressBytes', egressFrames: 'processEgressFrames', egressBytes: 'processEgressBytes' };
     for (const [key, limit] of Object.entries(capped)) if (serverState[key] > BOOTSTRAP_LIMITS[limit] && report.resourceViolations.length < 32) {
       report.resourceViolations.push({ key, actual: serverState[key], limit: BOOTSTRAP_LIMITS[limit] });
@@ -192,9 +210,11 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     });
     await send('Target.setDiscoverTargets', { discover: true });
     const createPeer = async index => {
+      stage(`fixture ${index} context creation`);
       const { browserContextId } = await send('Target.createBrowserContext', { disposeOnDetach: true });
       const diagnostic = startupEvidence(index);
       const peer = { index, browserContextId, diagnostic, ready: false }; peers.push(peer); report.startup.push(diagnostic.state);
+      diagnostic.state.startInvoked = false;
       const target = await send('Target.createTarget', { browserContextId, url: 'about:blank' });
       peer.targetId = target.targetId;
       peer.sessionId = (await send('Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId;
@@ -203,7 +223,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
       await send('Page.enable', {}, peer.sessionId);
       await send('Page.setLifecycleEventsEnabled', { enabled: true }, peer.sessionId);
       await send('Network.enable', {}, peer.sessionId);
-      diagnostic.state.phase = 'navigating';
+      diagnostic.state.phase = 'navigating'; stage(`fixture ${index} navigation`);
       const navigation = await send('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/tests/dweb-scale.html?url=${encodeURIComponent(`ws://127.0.0.1:${signalPort}/rendezvous`)}` }, peer.sessionId);
       diagnostic.state.navigation = navigation;
       if (navigation.errorText) throw new Error(`fixture ${index} navigation: ${navigation.errorText}`);
@@ -212,16 +232,25 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
         diagnostic.state.lastProbe = { at: Date.now(), value: value.result?.value, error: value.exceptionDetails?.text };
         return value.result?.value?.fixtureReady === true;
       }, SCALE_BUDGETS.fixtureMs);
-      peer.ready = true; diagnostic.state.phase = 'starting'; save();
-      await invoke(peer, 'start');
-      diagnostic.state.phase = 'started'; diagnostic.state.initial = await invoke(peer, 'report');
-      diagnostic.state.signaling = serverSnapshot(); save();
+      peer.ready = true; diagnostic.state.prepared = true; diagnostic.state.phase = 'prepared'; save();
+      return peer;
     };
-    stage('joining paced native peers');
-    for (let index = 0; index < options.peers; index++) {
-      await createPeer(index);
-      if (options.mode === 'paced' && index + 1 < options.peers) await sleep(SCALE_BUDGETS.pacedJoinMs);
-    }
+    await prepareAndJoinScale(options, { prepare: createPeer,
+      prepared: async () => {
+        stage('all fixtures prepared before network joins');
+        const rows = await snapshots();
+        check('prepared fixtures have not started native networking', rows.length === options.peers
+          && rows.every(row => !row.did && row.constructed === 0 && row.resources.pcs === 0 && row.resources.channels === 0 && row.resources.sockets === 0)
+          && signaling.stats().connections === 0 && signaling.stats().memberships === 0);
+      },
+      start: async peer => {
+        peer.diagnostic.state.phase = 'starting'; peer.diagnostic.state.startInvoked = true;
+        stage(`peer ${peer.index} network start`);
+        await invoke(peer, 'start');
+        peer.diagnostic.state.phase = 'started'; peer.diagnostic.state.initial = await invoke(peer, 'report');
+        peer.diagnostic.state.signaling = serverSnapshot(); save();
+      },
+    });
     const joined = await until('full membership and reciprocal connectivity', async () => {
       const rows = await snapshots();
       return signaling.stats().memberships === options.peers && rows.every(row => row.rendezvous === 'up') && connected(rows) && rows;

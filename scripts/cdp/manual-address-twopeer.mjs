@@ -63,6 +63,17 @@ const click = text => invoke(ctx.page, `function(text) {
 const appTabs = () => bounded(stage, async () => (await (await fetch(`http://127.0.0.1:${ctx.port}/json/list`)).json())
   .filter(target => target.type === 'page' && target.url.startsWith(`chrome-extension://${ctx.sw.id}/engine-tabs/app-tab/`)));
 const screenshot = name => bounded(`capture ${name}`, async () => writeFileSync(join(output, `${name}.png`), await capturePage(ctx.page)));
+const screenshotReceipt = async name => {
+  await evalIn(ctx.page, `(()=>{
+    const section = document.querySelector('section[aria-label="App address"]');
+    if (!section) throw new Error('App address receipt missing before capture');
+    section.scrollIntoView({block:'start',behavior:'instant'});
+    const rect = section.getBoundingClientRect();
+    if (rect.top < 0 || rect.bottom > innerHeight || rect.left < 0 || rect.right > innerWidth) throw new Error('App address receipt does not fit capture viewport');
+  })()`);
+  await screenshot(name);
+};
+
 // Keep the original failed phase/error: diagnostics must never become a retry
 // or foreground a hidden page before its visibility has been recorded.
 const failureDiagnostic = async (name, operation) => {
@@ -179,7 +190,7 @@ try {
   const before = await query(); evidence.beforeInstallContent = before;
   check('inspection does not seed bytes (explicit negative response)', before?.t === 'NOMANIFEST' && before.hash === published.hash, before);
   check('inspection does not execute an App', (await appTabs()).length === baselineTabs.length);
-  await screenshot('inspected');
+  await screenshotReceipt('inspected');
   await click('Install and share');
   await until('install receipt rendered', () => evalIn(ctx.page, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Open installed App' && !b.disabled)`));
   const catalog = await call({ type: 'apps/list' });
@@ -197,7 +208,7 @@ try {
   await until('reinspection preserves Open', () => evalIn(ctx.page, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Open installed App' && !b.disabled) && ![...document.querySelectorAll('button')].some(b => b.textContent === 'Install and share')`));
   check('reinspection creates no duplicate', (await call({ type: 'apps/list' })).apps.filter(app => app.dweb?.uri === published.uri).length === 1);
   check('no execution before explicit Open', (await appTabs()).length === baselineTabs.length);
-  await screenshot('installed-before-open');
+  await screenshotReceipt('installed-before-open');
   await click('Open installed App');
   const opened = await until('explicit Open creates App tab', async () => { const tabs = await appTabs(); return tabs.length === baselineTabs.length + 1 ? tabs : null; });
   check('explicit Open targets installed App', opened.some(tab => tab.url.includes(installed[0].id)), opened.map(tab => tab.url));
