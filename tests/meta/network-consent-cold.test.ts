@@ -126,9 +126,9 @@ const pausedWorker = (injectFails = false) => {
 };
 
 test('worker observer installs at its first-script pause before application code runs', async () => {
-  const { instrumentPausedWorker, createConsentDiagnostics } = await import('../../scripts/cdp/network-consent-cold.mjs');
+  const { instrumentPausedTarget, createConsentDiagnostics } = await import('../../scripts/cdp/network-consent-cold.mjs');
   const worker = pausedWorker();
-  await instrumentPausedWorker(worker.connection, 'worker', createConsentDiagnostics({ phase: 'before-choice' }, () => {}));
+  await instrumentPausedTarget(worker.connection, 'worker', createConsentDiagnostics({ phase: 'before-choice' }, () => {}));
   expect(worker.commands).not.toContain('Runtime.evaluate');
   expect(worker.commands.indexOf('Debugger.evaluateOnCallFrame')).toBeLessThan(worker.commands.indexOf('Debugger.resume'));
   expect(worker.commands).toContain('Debugger.removeBreakpoint');
@@ -137,21 +137,22 @@ test('worker observer installs at its first-script pause before application code
 });
 
 test('failed first-script injection does not release unobserved application code', async () => {
-  const { instrumentPausedWorker, createConsentDiagnostics } = await import('../../scripts/cdp/network-consent-cold.mjs');
+  const { instrumentPausedTarget, createConsentDiagnostics } = await import('../../scripts/cdp/network-consent-cold.mjs');
   const worker = pausedWorker(true);
-  await expect(instrumentPausedWorker(worker.connection, 'worker', createConsentDiagnostics({ phase: 'before-choice' }, () => {})))
-    .rejects.toThrow('Worker observer injection failed');
+  await expect(instrumentPausedTarget(worker.connection, 'worker', createConsentDiagnostics({ phase: 'before-choice' }, () => {})))
+    .rejects.toThrow('Target observer injection failed');
   expect(worker.listeners.size).toBe(0);
   expect(worker.applicationRuns()).toBe(0);
 });
 
-test('root and descendant attachments share one owner and paused pages arm preload before release', async () => {
+test('offscreen current document uses a first-script trap when preload only covers later documents', async () => {
   const { observeHosts, createConsentDiagnostics } = await import('../../scripts/cdp/network-consent-cold.mjs');
   const origin = 'chrome-extension://fixture/';
   const listeners = new Set<any>();
   const targets = new Map<string, any>();
   const calls: any[] = [];
   const preloads = new Set<string>();
+  const instrumented = new Set<string>();
   const evidence: any = { phase: 'fresh-locked', events: [], observerErrors: [] };
   const emit = (method: string, params: any, sessionId?: string) => {
     for (const listener of [...listeners]) listener(method, params, { sessionId });
@@ -190,10 +191,16 @@ test('root and descendant attachments share one owner and paused pages arm prelo
       }
       if (method === 'Debugger.setInstrumentationBreakpoint') return { breakpointId: 'first' };
       if (method === 'Runtime.runIfWaitingForDebugger') {
-        if (sessionId === 'offscreen') { expect(preloads.has(sessionId)).toBe(true); ready(sessionId); }
-        else emit('Debugger.paused', { reason: 'instrumentation', callFrames: [{ callFrameId: 'first' }] }, sessionId);
+        if (sessionId === 'offscreen') {
+          expect(preloads.has(sessionId)).toBe(true);
+          expect(calls.some(call => call.sessionId === sessionId
+            && call.method === 'Debugger.setInstrumentationBreakpoint')).toBe(true);
+        }
+        // Registering Page preload need not execute in an already-created offscreen document.
+        emit('Debugger.paused', { reason: 'instrumentation', callFrames: [{ callFrameId: 'first' }] }, sessionId);
       }
-      if (method === 'Debugger.evaluateOnCallFrame') { ready(sessionId!); return { result: { value: true } }; }
+      if (method === 'Debugger.evaluateOnCallFrame') { instrumented.add(sessionId!); ready(sessionId!); return { result: { value: true } }; }
+      if (method === 'Debugger.resume') expect(instrumented.has(sessionId!)).toBe(true);
       return {};
     },
   };
@@ -203,7 +210,7 @@ test('root and descendant attachments share one owner and paused pages arm prelo
       createConsentDiagnostics(evidence, () => {}), () => {}, async () => connection);
     await observer.barrier();
     expect(evidence.observerErrors).toEqual([]);
-    expect(calls.filter(call => call.method === 'Debugger.evaluateOnCallFrame')).toHaveLength(4);
+    expect(calls.filter(call => call.method === 'Debugger.evaluateOnCallFrame')).toHaveLength(5);
     expect(calls.filter(call => call.method === 'Target.detachFromTarget')).toHaveLength(3);
     for (const parent of ['home', 'sw', 'offscreen']) {
       expect(evidence.events.some((event: any) => event.sessionId === `${parent}-worker`)).toBe(true);

@@ -71,9 +71,9 @@ export async function attachConsentObserver(url, diagnostic, connect = attach) {
   }).catch(error => { attachExpired = true; throw error; });
 }
 
-// CDP's startup wait precedes a runnable worker context. Trap its first script,
-// inject while paused on that script's call frame, then release application code.
-export async function instrumentPausedWorker(connection, sessionId, diagnostic) {
+// Startup-paused workers and offscreen targets need a first-script trap;
+// inject on that script's call frame before releasing application code.
+export async function instrumentPausedTarget(connection, sessionId, diagnostic) {
   const send = (method, params = {}) => connection.send(method, params, sessionId);
   let pause;
   let ready;
@@ -92,17 +92,17 @@ export async function instrumentPausedWorker(connection, sessionId, diagnostic) 
   try {
     await send('Debugger.enable');
     breakpoint = (await send('Debugger.setInstrumentationBreakpoint', { instrumentation: 'beforeScriptExecution' })).breakpointId;
-    requireResult(typeof breakpoint === 'string', 'Worker pre-execution breakpoint missing');
+    requireResult(typeof breakpoint === 'string', 'Target pre-execution breakpoint missing');
     await send('Runtime.runIfWaitingForDebugger');
-    const event = await diagnostic(`worker first-script pause session=${sessionId}`, () => paused);
+    const event = await diagnostic(`target first-script pause session=${sessionId}`, () => paused);
     requireResult(event.reason === 'instrumentation' && event.callFrames?.[0]?.callFrameId,
-      'Worker did not stop before script execution');
+      'Target did not stop before script execution');
     const result = await send('Debugger.evaluateOnCallFrame', {
       callFrameId: event.callFrames[0].callFrameId,
       expression: `${OBSERVER_SOURCE}; globalThis.__peerdConsentObserverInstalled === true`, returnByValue: true,
     });
-    requireResult(!result.exceptionDetails && result.result?.value === true, 'Worker observer injection failed');
-    await diagnostic(`worker observer ready session=${sessionId}`, () => observed);
+    requireResult(!result.exceptionDetails && result.result?.value === true, 'Target observer injection failed');
+    await diagnostic(`target observer ready session=${sessionId}`, () => observed);
   } catch (error) { failure = error; throw error; }
   finally {
     connection.off(listener);
@@ -172,9 +172,9 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
       }
       await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true,
         flatten: true, filter: CHILD_TARGET_FILTER });
-      if (waitingForDebugger && ['worker', 'shared_worker', 'service_worker'].includes(targetInfo.type)) {
+      if (waitingForDebugger && ['worker', 'shared_worker', 'service_worker', 'other'].includes(targetInfo.type)) {
         waitingForDebugger = false; // The pre-execution trap exclusively owns release.
-        await instrumentPausedWorker(connection, sessionId, diagnostic);
+        await instrumentPausedTarget(connection, sessionId, diagnostic);
       } else if (waitingForDebugger) {
         // Page preload is registered before release; evaluating in its startup wait can hang.
         await send('Runtime.runIfWaitingForDebugger');
