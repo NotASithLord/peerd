@@ -1,9 +1,11 @@
 import { expect, test } from 'bun:test';
-import { connected, prepareAndJoinScale, scaleOptions, SCALE_BUDGETS, startupEvidence, stopScalePeers } from '../../scripts/cdp/run-dweb-scale.mjs';
+import { acquireScaleOwner, closeScaleHosts, connected, gossipArrangement, prepareAndJoinScale, scaleOptions, SCALE_BUDGETS, startupEvidence, stopScalePeers } from '../../scripts/cdp/run-dweb-scale.mjs';
 
 test('scale arguments expose only explicit fixed sizes and paced/stress modes', () => {
-  expect(scaleOptions([])).toEqual({ peers: 16, mode: 'paced' });
-  expect(scaleOptions(['--peers=64', '--mode=stress'])).toEqual({ peers: 64, mode: 'stress' });
+  expect(scaleOptions([])).toEqual({ peers: 16, mode: 'paced', browsers: 1 });
+  expect(scaleOptions(['--peers=64', '--mode=stress'])).toEqual({ peers: 64, mode: 'stress', browsers: 1 });
+  expect(scaleOptions(['--peers=64', '--browsers=4'])).toEqual({ peers: 64, mode: 'paced', browsers: 4 });
+  expect(() => scaleOptions(['--peers=32', '--browsers=4'])).toThrow('four browsers require 64 peers');
   for (const flag of ['--peers=17', '--degree=64', '--timeout=900000', '--url=wss://other', '--mode=retry']) {
     expect(() => scaleOptions([flag])).toThrow('unsupported scale option');
   }
@@ -14,6 +16,29 @@ test('connectivity requires reciprocal paths and unique participating identities
   expect(connected([a, b, { ...c, peers: [] }])).toBe(false);
   expect(connected([a, b, a])).toBe(false);
   expect(connected([])).toBe(false);
+});
+test('gossip keeps a sparse leaf attached and chooses an existing nonneighbor', () => {
+  const rows = [{ did: 'a', peers: ['b', 'c', 'leaf'] }, { did: 'b', peers: ['a', 'c'] },
+    { did: 'c', peers: ['a', 'b'] }, { did: 'leaf', peers: ['a'] }];
+  expect(gossipArrangement(rows)).toEqual({ source: 1, target: 3, removeEdge: false });
+  expect(rows[3]!.peers).toEqual(['a']);
+  expect(connected(rows)).toBe(true);
+});
+test('gossip can select two leaves when the first identity is the star center', () => {
+  const rows = [{ did: 'center', peers: ['a', 'b', 'c'] },
+    ...['a', 'b', 'c'].map(did => ({ did, peers: ['center'] }))];
+  expect(gossipArrangement(rows)).toEqual({ source: 1, target: 2, removeEdge: false });
+});
+test('only complete reciprocal graphs may lose a nonbridge edge for gossip proof', () => {
+  const ids = ['a', 'b', 'c'];
+  const rows = ids.map(did => ({ did, peers: ids.filter(other => other !== did) }));
+  expect(gossipArrangement(rows)).toEqual({ source: 0, target: 2, removeEdge: true });
+  const removed = rows.map(row => ({ ...row, peers: row.peers.filter(did =>
+    !((row.did === 'a' && did === 'c') || (row.did === 'c' && did === 'a'))) }));
+  expect(connected(removed)).toBe(true);
+  expect(gossipArrangement([{ did: 'a', peers: ['b'] }, { did: 'b', peers: ['a'] }])).toBeNull();
+  expect(gossipArrangement([{ did: 'a', peers: ['b', 'c'] }, { did: 'b', peers: ['a', 'c'] }, { did: 'c', peers: ['b'] }])).toBeNull();
+  expect(gossipArrangement([{ did: 'a', peers: [] }, { did: 'b', peers: [] }])).toBeNull();
 });
 test('startup evidence retains module failure and crash independently of room warning traffic', () => {
   const ledger = startupEvidence(29);
@@ -77,4 +102,25 @@ test('failed static preparation starts no network and cleanup still stops ready 
   expect(stopped).toEqual([0]);
   expect(cleanup.stops[0]).toMatchObject({ ok: true, productionStartInvoked: false });
   expect(cleanup.uninitialized[0]).toMatchObject({ index: 1, nativeCleanup: 'unavailable' });
+});
+
+test('late browser acquisition remains owned and is closed after retirement', async () => {
+  let resolve!: (value: { close: () => Promise<void> }) => void;
+  const host: Record<string, unknown> = {};
+  let retired = false, closed = 0;
+  const pending = acquireScaleOwner(host, 'ctx', () => new Promise(yes => { resolve = yes; }), () => retired);
+  retired = true;
+  const value = { close: async () => { closed++; } }; resolve(value);
+  await expect(pending).rejects.toThrow('ctx retired');
+  expect(host.ctx).toBe(value); expect(closed).toBe(1);
+});
+
+test('partial browser launch cleanup attempts every owner even when one close fails', async () => {
+  const calls: string[] = [];
+  await expect(closeScaleHosts([
+    { browser: { close() { calls.push('cdp0'); throw new Error('close failed'); } }, ctx: { async close() { calls.push('process0'); } } },
+    { ctx: { async close() { calls.push('process1'); } } },
+    {},
+  ])).rejects.toThrow('close failed');
+  expect(calls).toEqual(['cdp0', 'process0', 'process1']);
 });

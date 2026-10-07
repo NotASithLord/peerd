@@ -18,12 +18,14 @@ export const SCALE_BUDGETS = Object.freeze({ runMs: 600_000, commandMs: 10_000,
 // move the oracle with its implementation. Native ownership includes pending ICE.
 const SCALE_ACCEPTANCE = Object.freeze({ degree: 16, pending: 8, queued: 64 });
 export function scaleOptions(args) {
-  const options = { peers: 16, mode: 'paced' };
+  const options = { peers: 16, mode: 'paced', browsers: 1 };
   for (const arg of args) {
     if (/^--peers=(16|32|64)$/.test(arg)) options.peers = Number(arg.slice(8));
+    else if (/^--browsers=(1|4)$/.test(arg)) options.browsers = Number(arg.slice(11));
     else if (arg === '--mode=paced' || arg === '--mode=stress') options.mode = arg.slice(7);
     else throw new Error(`unsupported scale option: ${arg}`);
   }
+  if (options.browsers === 4 && options.peers !== 64) throw new Error('four browsers require 64 peers');
   return options;
 }
 // Connectivity requires reciprocal admitted links. A stale one-sided mesh row
@@ -37,6 +39,33 @@ export function connected(rows) {
     if (byDid.get(peer)?.peers.includes(did) && !seen.has(peer)) { seen.add(peer); pending.push(peer); }
   }
   return seen.size === rows.length;
+}
+export function gossipArrangement(rows) {
+  if (!connected(rows)) return null;
+  for (let source = 0; source < rows.length; source++) for (let target = source + 1; target < rows.length; target++) {
+    if (!rows[source].peers.includes(rows[target].did) && !rows[target].peers.includes(rows[source].did)) return { source, target, removeEdge: false };
+  }
+  // Only a complete reciprocal graph needs modification. Sparse leaves and
+  // stars already have non-neighbors; cutting their sole route is not gossip.
+  if (!rows.every(row => rows.every(other => row === other || row.peers.includes(other.did)))) return null;
+  const source = 0, target = rows.length - 1;
+  const without = rows.map((row, index) => ({ ...row, peers: row.peers.filter(did =>
+    !((index === source && did === rows[target].did) || (index === target && did === rows[source].did))) }));
+  return source !== target && connected(without) ? { source, target, removeEdge: true } : null;
+}
+// Register ownership as soon as acquisition returns, including after a deadline.
+export async function acquireScaleOwner(host, key, acquire, isRetiring) {
+  const value = await acquire();
+  host[key] = value;
+  if (isRetiring()) { await value.close(); throw new Error(`${key} retired`); }
+  return value;
+}
+export async function closeScaleHosts(hosts) {
+  const results = await Promise.allSettled(hosts.map(async host => {
+    try { host.browser?.close(); } finally { await host.ctx?.close(); }
+  }));
+  const rejected = results.find(result => result.status === 'rejected');
+  if (rejected?.status === 'rejected') throw rejected.reason;
 }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // Keep startup failures separate from routine room warnings. A busy earlier
@@ -86,12 +115,12 @@ export async function prepareAndJoinScale(options, { prepare, prepared, start, w
 }
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export async function runScale(options = scaleOptions(process.argv.slice(2))) {
-  const output = join(repo, 'artifacts/dweb-scale', `${options.peers}-${options.mode}`);
+  const output = join(repo, 'artifacts/dweb-scale', `${options.peers}-${options.mode}-${options.browsers ?? 1}browser`);
   mkdirSync(output, { recursive: true });
   const report = { ok: false, options, budgets: SCALE_BUDGETS, acceptance: SCALE_ACCEPTANCE, stage: 'starting', checks: [], samples: [],
     workload: 'All static fixture modules are prepared before paced or stress network joins. Cold-page creation under an active mesh is not measured.',
-    limitation: 'One Chrome process on one machine, isolated browser contexts, localhost ICE with no STUN/TURN. No WAN, NAT, multi-machine throughput, or raised-degree claim.',
-    observedPeaks: { memberships: 0, sockets: 0 }, resourceViolations: [], startup: [], hosts: [], cleanup: null };
+    limitation: `${options.browsers ?? 1} independent Chrome browser process(es) on one machine, isolated browser contexts, localhost ICE with no STUN/TURN. No WAN, NAT, multi-machine throughput, or raised-degree claim.`,
+    observedPeaks: { memberships: 0, sockets: 0 }, resourceViolations: [], startup: [], hosts: [], gossipProofs: [], cleanup: null };
   const boundary = signalingCounters(); report.signalingBoundary = boundary;
   const serve = observedSignalingServe(options => Bun.serve(options), boundary);
   const save = () => {
@@ -99,7 +128,8 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
       startInvoked: report.startup.filter(row => row.startInvoked).length };
     writeFileSync(join(output, 'result.json'), JSON.stringify(report, null, 2));
   };
-  let failed = false, retiring = false, ctx, browser, signaling, server, signalPort;
+  let failed = false, retiring = false, signaling, server, signalPort;
+  const hosts = [];
   const peers = [], sockets = new Set();
   const cleanupErrors = [];
   const bounded = async (label, operation, ms = SCALE_BUDGETS.commandMs) => {
@@ -115,26 +145,26 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     if (!ok) throw new Error(name);
   };
   const emergency = () => {
-    retiring = true; signaling?.stop(); browser?.close();
+    retiring = true; signaling?.stop();
+    void closeScaleHosts(hosts).catch(() => {});
     for (const socket of sockets) socket.destroy(); server?.close();
-    void ctx?.close();
   };
   const watchdog = setTimeout(() => {
     failed = true; report.error = `whole-run deadline at ${report.stage}`; save(); emergency(); process.exit(1);
   }, SCALE_BUDGETS.runMs);
-  const send = (method, params = {}, sessionId, ms = SCALE_BUDGETS.commandMs) => bounded(method, () => browser.send(method, params, sessionId), ms);
+  const send = (host, method, params = {}, sessionId, ms = SCALE_BUDGETS.commandMs) => bounded(method, () => host.browser.send(method, params, sessionId), ms);
   const invoke = async (peer, operation, values = [], ms = SCALE_BUDGETS.operationMs) => bounded(operation, async () => {
-    const global = await send('Runtime.evaluate', { expression: 'globalThis' }, peer.sessionId);
+    const global = await send(peer.host, 'Runtime.evaluate', { expression: 'globalThis' }, peer.sessionId);
     const objectId = global.result?.objectId;
     if (!objectId) throw new Error('fixture context unavailable');
     try {
-      const reply = await send('Runtime.callFunctionOn', {
+      const reply = await send(peer.host, 'Runtime.callFunctionOn', {
         objectId, functionDeclaration: 'function(op, values) { return globalThis.__DWEB_SCALE__[op](...values); }',
         arguments: [{ value: operation }, { value: values }], returnByValue: true, awaitPromise: true,
       }, peer.sessionId, ms);
       if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
       return reply.result?.value;
-    } finally { await send('Runtime.releaseObject', { objectId }, peer.sessionId); }
+    } finally { await send(peer.host, 'Runtime.releaseObject', { objectId }, peer.sessionId); }
   }, ms);
   const serverSnapshot = () => {
     const serverState = { ...signaling.stats(), boundary: { ...boundary, http: { ...boundary.http } } };
@@ -160,18 +190,37 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     throw new Error(`${name} condition deadline`);
   };
   const gossip = async (tag, requireNonNeighbor = false) => {
-    const source = peers[0], target = peers.at(-1);
-    const before = await snapshots();
+    let before = await snapshots(), arrangement = { source: 0, target: peers.length - 1, removeEdge: false };
     if (requireNonNeighbor) {
-      await invoke(source, 'drop', [before.at(-1).did]);
-      await invoke(target, 'drop', [before[0].did]);
+      const ready = await until(`arrange gossip ${tag}`, async () => {
+        before = await snapshots(); const selected = gossipArrangement(before);
+        return selected && { selected };
+      });
+      arrangement = ready.selected;
     }
-    const dispatched = await invoke(source, 'publish', [tag, requireNonNeighbor ? before.at(-1).did : undefined]);
+    const source = peers[arrangement.source], target = peers[arrangement.target];
+    const sourceDid = before[arrangement.source].did, targetDid = before[arrangement.target].did;
+    const topology = rows => rows.map(row => ({ did: row.did, peers: [...row.peers] }));
+    const proof = { tag, source: sourceDid, target: targetDid, removeEdge: arrangement.removeEdge, before: topology(before) };
+    report.gossipProofs.push(proof); save();
+    if (arrangement.removeEdge) {
+      await invoke(source, 'drop', [targetDid]);
+      await invoke(target, 'drop', [sourceDid]);
+      const after = await until(`alternate gossip path ${tag}`, async () => {
+        const rows = await snapshots();
+        return connected(rows) && !rows[arrangement.source].peers.includes(targetDid)
+          && !rows[arrangement.target].peers.includes(sourceDid) && rows;
+      });
+      proof.afterRemoval = topology(after); save();
+    }
+    const dispatched = await invoke(source, 'publish', [tag, requireNonNeighbor ? targetDid : undefined]);
+    proof.dispatched = dispatched; save();
     const delivered = await until(`gossip ${tag}`, async () => {
       const rows = await snapshots();
-      return rows.slice(1).every(row => row.received.some(([seen, receipt]) => seen === tag && receipt.from === before[0].did)) && rows;
+      return rows.every((row, index) => index === arrangement.source || row.received.some(([seen, receipt]) => seen === tag && receipt.from === sourceDid)) && rows;
     }, SCALE_BUDGETS.operationMs);
-    const receipt = delivered.at(-1).received.find(([seen]) => seen === tag)?.[1];
+    const receipt = delivered[arrangement.target].received.find(([seen]) => seen === tag)?.[1];
+    proof.targetReceipt = receipt; save();
     check(`all-recipient authenticated gossip ${tag}`, !requireNonNeighbor || (receipt?.via && receipt.via !== dispatched.from), { ...dispatched, targetReceipt: receipt });
   };
   try {
@@ -188,54 +237,61 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     });
     server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
     await bounded('fixture listen', () => new Promise((yes, no) => { server.once('error', no); server.listen(0, '127.0.0.1', yes); }));
-    stage('launch Chrome');
-    ctx = await bounded('launch Chrome', async () => {
-      const launched = await launchPeerd({ interceptModel: false, enforceWebSecurity: true, webRtcLoopbackAcceptance: true });
-      if (retiring) { await launched.close(); throw new Error('launch retired'); } return launched;
-    }, SCALE_BUDGETS.launchMs);
-    const version = await bounded('browser version', async () => (await fetch(`http://127.0.0.1:${ctx.port}/json/version`)).json());
-    report.browser = version.Browser;
-    hostSnapshot();
-    browser = await bounded('browser attach', async () => {
-      const attached = await attach(version.webSocketDebuggerUrl);
-      if (retiring) { attached.close(); throw new Error('attach retired'); } return attached;
-    });
-    browser.on((method, params, message) => {
-      if (browser.events.length > 64) browser.events.splice(0, browser.events.length - 64);
-      const peer = peers.find(value => (message.sessionId && value.sessionId === message.sessionId)
-        || (params.targetId && value.targetId === params.targetId)
-        || (method === 'Target.detachedFromTarget' && value.sessionId === params.sessionId));
-      if (peer) {
-        peer.diagnostic.event(method, params);
-        peer.websockets.event(method, params);
-        // Persist failures immediately; stage saves retain ordinary request
-        // progress without turning every signaling message into synchronous IO.
-        if (method === 'Runtime.exceptionThrown' || method === 'Network.loadingFailed' || method === 'Network.webSocketFrameError'
-          || method.endsWith('Crashed') || (method === 'Runtime.consoleAPICalled' && params.type === 'error')) save();
-      }
-    });
-    await send('Target.setDiscoverTargets', { discover: true });
+    for (let index = 0; index < (options.browsers ?? 1); index++) {
+      const host = { index, ctx: undefined, browser: undefined }; hosts.push(host);
+      stage(`launch Chrome ${index}`);
+      await bounded('launch Chrome', () => acquireScaleOwner(host, 'ctx',
+        () => launchPeerd({ interceptModel: false, enforceWebSecurity: true, webRtcLoopbackAcceptance: true }),
+        () => retiring), SCALE_BUDGETS.launchMs);
+      const version = await bounded('browser version', async () => (await fetch(`http://127.0.0.1:${host.ctx.port}/json/version`)).json());
+      report.browsers ??= []; const provenance = { index, version: version.Browser, pid: null }; report.browsers.push(provenance);
+      hostSnapshot();
+      await bounded('browser attach', () => acquireScaleOwner(host, 'browser',
+        () => attach(version.webSocketDebuggerUrl), () => retiring));
+      const processInfo = await send(host, 'SystemInfo.getProcessInfo');
+      provenance.pid = processInfo.processInfo?.find(process => process.type === 'browser')?.id ?? null;
+      if (provenance.pid === null) throw new Error(`browser ${index} process identity unavailable`);
+      save();
+      host.browser.on((method, params, message) => {
+        if (host.browser.events.length > 64) host.browser.events.splice(0, host.browser.events.length - 64);
+        const peer = peers.find(value => value.host === host && ((message.sessionId && value.sessionId === message.sessionId)
+          || (params.targetId && value.targetId === params.targetId)
+          || (method === 'Target.detachedFromTarget' && value.sessionId === params.sessionId)));
+        if (peer) {
+          peer.diagnostic.event(method, params);
+          peer.websockets.event(method, params);
+          // Persist failures immediately; stage saves retain ordinary request
+          // progress without turning every signaling message into synchronous IO.
+          if (method === 'Runtime.exceptionThrown' || method === 'Network.loadingFailed' || method === 'Network.webSocketFrameError'
+            || method.endsWith('Crashed') || (method === 'Runtime.consoleAPICalled' && params.type === 'error')) save();
+        }
+      });
+      await send(host, 'Target.setDiscoverTargets', { discover: true });
+    }
+    if (new Set(report.browsers.map(host => host.pid)).size !== (options.browsers ?? 1)) throw new Error('browser process identities are not distinct');
     const createPeer = async index => {
+      const host = hosts[Math.floor(index / (options.peers / hosts.length))];
       stage(`fixture ${index} context creation`);
-      const { browserContextId } = await send('Target.createBrowserContext', { disposeOnDetach: true });
+      const { browserContextId } = await send(host, 'Target.createBrowserContext', { disposeOnDetach: true });
       const diagnostic = startupEvidence(index);
       const websockets = websocketEvidence(); diagnostic.state.websockets = websockets.state;
-      const peer = { index, browserContextId, diagnostic, websockets, ready: false }; peers.push(peer); report.startup.push(diagnostic.state);
+      diagnostic.state.browserIndex = host.index;
+      const peer = { index, host, browserContextId, diagnostic, websockets, ready: false }; peers.push(peer); report.startup.push(diagnostic.state);
       diagnostic.state.startInvoked = false;
-      const target = await send('Target.createTarget', { browserContextId, url: 'about:blank' });
+      const target = await send(host, 'Target.createTarget', { browserContextId, url: 'about:blank' });
       peer.targetId = target.targetId;
-      peer.sessionId = (await send('Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId;
-      await send('Runtime.enable', {}, peer.sessionId);
-      await send('Inspector.enable', {}, peer.sessionId);
-      await send('Page.enable', {}, peer.sessionId);
-      await send('Page.setLifecycleEventsEnabled', { enabled: true }, peer.sessionId);
-      await send('Network.enable', {}, peer.sessionId);
+      peer.sessionId = (await send(host, 'Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId;
+      await send(host, 'Runtime.enable', {}, peer.sessionId);
+      await send(host, 'Inspector.enable', {}, peer.sessionId);
+      await send(host, 'Page.enable', {}, peer.sessionId);
+      await send(host, 'Page.setLifecycleEventsEnabled', { enabled: true }, peer.sessionId);
+      await send(host, 'Network.enable', {}, peer.sessionId);
       diagnostic.state.phase = 'navigating'; stage(`fixture ${index} navigation`);
-      const navigation = await send('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/tests/dweb-scale.html?url=${encodeURIComponent(`ws://127.0.0.1:${signalPort}/rendezvous`)}` }, peer.sessionId);
+      const navigation = await send(host, 'Page.navigate', { url: `http://127.0.0.1:${server.address().port}/tests/dweb-scale.html?url=${encodeURIComponent(`ws://127.0.0.1:${signalPort}/rendezvous`)}` }, peer.sessionId);
       diagnostic.state.navigation = navigation;
       if (navigation.errorText) throw new Error(`fixture ${index} navigation: ${navigation.errorText}`);
       await until(`fixture ${index} ready`, async () => {
-        const value = await send('Runtime.evaluate', { expression: '({fixtureReady:!!globalThis.__DWEB_SCALE__,documentState:document.readyState,path:location.pathname})', returnByValue: true }, peer.sessionId);
+        const value = await send(host, 'Runtime.evaluate', { expression: '({fixtureReady:!!globalThis.__DWEB_SCALE__,documentState:document.readyState,path:location.pathname})', returnByValue: true }, peer.sessionId);
         diagnostic.state.lastProbe = { at: Date.now(), value: value.result?.value, error: value.exceptionDetails?.text };
         return value.result?.value?.fixtureReady === true;
       }, SCALE_BUDGETS.fixtureMs);
@@ -300,7 +356,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     check('bootstrap counters remain bounded', report.resourceViolations.length === 0 && signaling.stats().cleanupErrors === 0);
     stage('checks complete');
   } catch (error) { failed = true; report.failedStage = report.stage; report.error = String(error?.stack ?? error).slice(0, 4000);
-    report.browserEvents = browser?.events.slice(-32).map(value => value.slice(0, 1000)) ?? []; hostSnapshot(); }
+    report.browserEvents = hosts.map(host => ({ index: host.index, events: host.browser?.events.slice(-32).map(value => value.slice(0, 1000)) ?? [] })); hostSnapshot(); }
   finally {
     retiring = true;
     try {
@@ -320,7 +376,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     // Evidence above precedes context disposal/process fallback, which must not
     // turn a leaked production carrier into a successful cleanup assertion.
     try { await bounded('browser process cleanup', async () => {
-      browser?.close(); await ctx?.close();
+      await closeScaleHosts(hosts);
     }, SCALE_BUDGETS.cleanupMs); } catch (error) { failed = true; cleanupErrors.push(String(error).slice(0, 400)); }
     signaling?.stop(); for (const socket of sockets) socket.destroy(); server?.close();
     clearTimeout(watchdog); report.cleanupErrors = cleanupErrors;

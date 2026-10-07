@@ -10,11 +10,11 @@ on:
       - extension/tests/dweb-scale.js
   workflow_dispatch:
     inputs:
-      peers:
+      workload:
         description: 'Local native peer population (active degree stays unchanged)'
         type: choice
-        options: ['32', '64']
-        default: '32'
+        options: ['32-1browser', '64-4browser', '64-1browser']
+        default: '32-1browser'
       mode:
         description: 'Join cadence; stress may expose honest overload'
         type: choice
@@ -34,7 +34,7 @@ jobs:
       # why: an overloaded population must not cancel the other evidence run.
       fail-fast: false
       matrix:
-        peers: ${{ fromJSON(github.event_name == 'pull_request' && '[32,64]' || (inputs.peers == '64' && '[64]' || '[32]')) }}
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"peers":32,"browsers":1},{"peers":64,"browsers":4}]' || (inputs.workload == '64-4browser' && '[{"peers":64,"browsers":4}]' || (inputs.workload == '64-1browser' && '[{"peers":64,"browsers":1}]' || '[{"peers":32,"browsers":1}]'))) }}
     steps:
       - name: Harden runner (audit egress and source writes)
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
@@ -45,6 +45,7 @@ jobs:
           persist-credentials: false
       - name: Record the exact candidate and diagnostic boundary
         env:
+          SCALE_BROWSERS: ${{ matrix.browsers }}
           EVENT_NAME: ${{ github.event_name }}
           EVENT_REF: ${{ github.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -54,7 +55,8 @@ jobs:
           git rev-parse HEAD > artifacts/dweb-scale/source-sha.txt
           test "$(cat artifacts/dweb-scale/source-sha.txt)" = "$GITHUB_SHA"
           printf 'event=%s\nref=%s\ncheckout_sha=%s\npr_head_sha=%s\npr_merge_sha=%s\n' "$EVENT_NAME" "$EVENT_REF" "$GITHUB_SHA" "$PR_HEAD_SHA" "$PR_MERGE_SHA" > artifacts/dweb-scale/provenance.txt
-          printf 'Checked-out candidate: `%s`\n\nOne Chrome process and localhost ICE; no WAN or raised-degree claim.\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          printf 'browser_processes=%s\n' "$SCALE_BROWSERS" >> artifacts/dweb-scale/provenance.txt
+          printf 'Checked-out candidate: `%s`\n\n%s Chrome browser process(es) and localhost ICE; no WAN or raised-degree claim.\n' "$GITHUB_SHA" "$SCALE_BROWSERS" >> "$GITHUB_STEP_SUMMARY"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # v2.2.0
         id: chrome
@@ -64,14 +66,15 @@ jobs:
       - name: Run one native scale attempt
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          SCALE_BROWSERS: ${{ matrix.browsers }}
           SCALE_PEERS: ${{ matrix.peers }}
           SCALE_MODE: ${{ github.event_name == 'pull_request' && 'paced' || inputs.mode }}
         # why: typed choices cross as quoted arguments, never generated shell.
         # The driver independently validates them and owns all fixed budgets.
-        run: bun scripts/cdp/run-dweb-scale.mjs "--peers=$SCALE_PEERS" "--mode=$SCALE_MODE"
+        run: bun scripts/cdp/run-dweb-scale.mjs "--peers=$SCALE_PEERS" "--mode=$SCALE_MODE" "--browsers=$SCALE_BROWSERS"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: native-dweb-scale-${{ github.sha }}-${{ matrix.peers }}-${{ github.event_name == 'pull_request' && 'paced' || inputs.mode }}
+          name: native-dweb-scale-${{ github.sha }}-${{ matrix.peers }}-${{ matrix.browsers }}browser-${{ github.event_name == 'pull_request' && 'paced' || inputs.mode }}
           path: artifacts/dweb-scale/
           if-no-files-found: error

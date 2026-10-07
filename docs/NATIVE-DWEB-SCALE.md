@@ -2,6 +2,10 @@
 
 Run `bun scripts/cdp/run-dweb-scale.mjs --peers=16 --mode=paced` in browser CI.
 The explicit larger experiments accept `--peers=32` or `--peers=64`;
+`--peers=64 --browsers=4` distributes those identities over four independent
+Chrome browser processes, while the default `--browsers=1` retains the original
+single-browser experiment. No mode switches or retries after failure.
+Artifact paths and provenance include the browser count.
 `--mode=stress` removes the paced spacing between network starts. No mode
 raises production degree, admission, message, bandwidth, or membership limits.
 A failed attempt remains a failed gate; do not retry it unchanged.
@@ -22,8 +26,11 @@ Earlier failures of that combined workload remain unresolved evidence; this
 phase separation does not establish their cause or claim to repair them.
 
 Acceptance requires every requested identity and a reciprocal connected graph,
-without raising the default active degree. The driver removes one source-target edge,
-records the neighbor set at the first accepted native gossip send, and requires
+without raising the default active degree. The driver selects an existing
+non-neighbor pair in a connected graph. Only a complete reciprocal graph needs
+an edge removed, and the remaining graph must still be connected before publish.
+The source may differ from the content provider. The report retains the chosen
+topology and the neighbor set at the first accepted native gossip send, and requires
 the target's authenticated incoming route to differ from the signed origin.
 Every other identity must receive the message. A small signed App is fetched
 by a distinct directly linked receiver; verification checks the exact manifest
@@ -49,7 +56,10 @@ it is not promoted as scale acceptance merely because overload was refused
 correctly. Production teardown must release native peers, channels, sockets,
 and queues before context or process fallback. A cleanup timeout fails the run.
 
-This is one Chrome process and one host with localhost networking. It does not
+These are explicit single-browser or four-browser workloads on one host with
+localhost networking. Earlier single-browser admission and cold-page failures
+remain unresolved; a four-browser success would not establish their cause or
+claim to repair them. Every workload uses one unchanged signaling endpoint. It does not
 establish independent-device capacity, public bootstrap capacity, WAN loss or
 cross-NAT behavior, or justify raising the default active degree. It uses only the
 existing small-bundle contract. Native execution is CI-only in the current
