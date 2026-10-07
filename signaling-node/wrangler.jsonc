@@ -20,7 +20,7 @@
   },
   "migrations": [
     // SQLite-backed DO: deploys on the Workers Free plan too, and this
-    // node persists nothing, so the SQLite backend is the right default.
+    // room budgets persist independently of hibernating socket attachments.
     { "tag": "v1", "new_sqlite_classes": ["SignalingRoom"] }
   ],
   "observability": { "enabled": true }

@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { SignalingRoom } from '../../signaling-node/worker.js';
+import { ROOM_BUDGET_KEY } from '../../signaling-node/durable-room-budget.js';
 import { ROOM_CAP, WEBSITE_CAP, PUBLIC_ROOM, SPARSE_PUBLIC_PROFILE, INTRODUCTION_LIMIT, SAMPLE_INTERVAL_MS } from '../../extension/peerd-distributed/transport/signaling.js';
 
 class Socket {
@@ -28,7 +29,28 @@ class AutoResponsePair {
 const withRuntime = async (run: (ctx: any, join: (room: SignalingRoom, kind?: string, key?: string, profile?: string) => Promise<Socket>) => Promise<void>) => {
   const sockets: Socket[] = [];
   let autoResponse: AutoResponsePair | null = null;
+  const persisted = new Map<string, any>();
+  let transaction = Promise.resolve();
+  const controls = { beforePut: null as null | ((value: any) => Promise<void>), fail: false, writes: 0 };
   const ctx = {
+    persisted, controls,
+    storage: { transaction(run: (tx: any) => Promise<any>) {
+      const next = transaction.then(async () => {
+        if (controls.fail) throw new Error('storage unavailable');
+        const staged = new Map(persisted);
+        const result = await run({
+          get: async (key: string) => structuredClone(staged.get(key)),
+          put: async (key: string, value: any) => {
+            await controls.beforePut?.(value);
+            if (controls.fail) throw new Error('storage unavailable');
+            staged.set(key, structuredClone(value));
+          },
+        });
+        persisted.clear(); for (const [key, value] of staged) persisted.set(key, value);
+        controls.writes++; return result;
+      });
+      transaction = next.then(() => {}, () => {}); return next;
+    } },
     acceptWebSocket(socket: Socket, tags: string[]) { socket.tags = tags; sockets.push(socket); },
     getWebSockets(tag?: string) { return tag ? sockets.filter(socket => socket.tags.includes(tag)) : sockets; },
     setWebSocketAutoResponse(pair: AutoResponsePair) { autoResponse = pair; },
@@ -206,4 +228,181 @@ test('rejected socket remains outside membership if runtime close fails', async 
     expect(replacement.sent[0].members).toHaveLength(ROOM_CAP - 1);
     expect(replacement.sent[0].members).not.toContain(rejected.attachment.connId);
   } finally { Socket.prototype.close = close; }
+}));
+
+
+test('aggregate ingress survives socket churn and a fresh Worker instance after every event', async () => withRuntime(async (ctx, join) => {
+  let parsed = 0, time = 0;
+  const options = { now: () => time, limits: { roomMessages: 2 }, parse: (raw: string) => { parsed++; return JSON.parse(raw); } };
+  const make = () => new SignalingRoom(ctx, {}, options);
+  const a = await join(make()), b = await join(make());
+  await make().webSocketMessage(a, '{bad');
+  await make().webSocketMessage(b, '{bad');
+  await make().webSocketClose(a);
+  const c = await join(make());
+  await make().webSocketMessage(c, '{}');
+  expect(parsed).toBe(2); expect(c.closed.at(-1).code).toBe(1013);
+  expect(ctx.persisted.get(ROOM_BUDGET_KEY).used.messages).toBe(2);
+  time = 10_000;
+  await make().webSocketMessage(b, '{}');
+  time = 0;
+  await make().webSocketMessage(b, '{}');
+  await make().webSocketMessage(b, '{}');
+  expect(parsed).toBe(4); expect(b.closed.at(-1).code).toBe(1013);
+}));
+
+test('durable join failure precedes WebSocketPair acceptance and corrupt records never reset', async () => withRuntime(async (ctx, join) => {
+  ctx.controls.fail = true;
+  const req = new Request('https://node.test/rendezvous?key=test', { headers: { Upgrade: 'websocket' } });
+  expect((await new SignalingRoom(ctx, {}).fetch(req)).status).toBe(503);
+  expect(ctx.getWebSockets()).toHaveLength(0);
+  ctx.controls.fail = false;
+  ctx.persisted.set(ROOM_BUDGET_KEY, { version: 99 });
+  expect((await new SignalingRoom(ctx, {}).fetch(req)).status).toBe(503);
+  expect(ctx.getWebSockets()).toHaveLength(0);
+  expect(ctx.persisted.get(ROOM_BUDGET_KEY)).toEqual({ version: 99 });
+}));
+
+test('retirement during pending ingress debit prevents later parsing and survives a wake', async () => withRuntime(async (ctx, join) => {
+  let parsed = 0;
+  const room = new SignalingRoom(ctx, {}, { parse: raw => { parsed++; return JSON.parse(raw); } });
+  const a = await join(room), b = await join(room), before = b.sent.length;
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  ctx.controls.beforePut = async () => { entered.resolve(); await release.promise; };
+  const message = room.webSocketMessage(a, JSON.stringify({ t: 'signal', to: b.attachment.connId, payload: 'late' }));
+  await entered.promise;
+  expect(parsed).toBe(0); expect(b.sent).toHaveLength(before);
+  const close = room.webSocketClose(a);
+  expect(a.attachment).toMatchObject({ retired: true, admitted: false });
+  ctx.controls.beforePut = null; release.resolve();
+  await message; await close;
+  expect(parsed).toBe(0);
+  await new SignalingRoom(ctx, {}).webSocketMessage(a, '{}');
+  expect(parsed).toBe(0);
+  expect(b.sent.filter(m => m.t === 'signal')).toHaveLength(0);
+}));
+
+test('whole-operation custody serializes admissions across a pending egress debit', async () => withRuntime(async (ctx, join) => {
+  const room = new SignalingRoom(ctx, {});
+  await join(room);
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  ctx.controls.beforePut = async (value: any) => {
+    if (value.used.egressFrames > 1) { entered.resolve(); await release.promise; }
+  };
+  const first = join(room); await entered.promise;
+  const second = join(room);
+  expect(ctx.getWebSockets()).toHaveLength(2);
+  expect(ctx.getWebSockets()[1].attachment.admitted).toBe(false);
+  expect(ctx.getWebSockets()[1].sent).toHaveLength(0);
+  ctx.controls.beforePut = null; release.resolve();
+  const a = await first, b = await second;
+  expect(a.attachment.admitted).toBe(true); expect(b.attachment.admitted).toBe(true);
+  expect(b.sent[0].members).toContain(a.attachment.connId);
+}));
+
+test('pending work is bounded and excess senders retire without parsing or a late useful effect', async () => withRuntime(async (ctx, join) => {
+  let parsed = 0;
+  const room = new SignalingRoom(ctx, {}, { parse: raw => { parsed++; return JSON.parse(raw); } });
+  const a = await join(room);
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  ctx.controls.beforePut = async () => { entered.resolve(); await release.promise; };
+  const first = room.webSocketMessage(a, '{}'); await entered.promise;
+  const rest = Array.from({ length: 20 }, () => room.webSocketMessage(a, '{}'));
+  expect(a.closed.at(-1).code).toBe(1013); expect(parsed).toBe(0);
+  expect(a.attachment.retired).toBe(true);
+  ctx.controls.beforePut = null; release.resolve();
+  await Promise.all([first, ...rest]);
+  expect(parsed).toBe(0);
+}));
+
+test('failed outgoing reservation leaves sampling lease unchanged and closes before any partial reply', async () => withRuntime(async (ctx, join) => {
+  let time = 0;
+  const room = new SignalingRoom(ctx, {}, { now: () => time });
+  const a = await join(room, 'extension', PUBLIC_ROOM, SPARSE_PUBLIC_PROFILE);
+  const before = a.sent.length;
+  time = SAMPLE_INTERVAL_MS;
+  ctx.controls.beforePut = async (value: any) => { if (value.used.egressFrames > 0) throw new Error('egress persist rejected'); };
+  await room.webSocketMessage(a, JSON.stringify({ t: 'sample', requestId: 'test' }));
+  expect(a.attachment.lastSampleAt).toBe(0);
+  expect(a.attachment.admitted).toBe(false);
+  expect(a.sent).toHaveLength(before);
+  expect(a.closed.at(-1).code).toBe(1013);
+  await room.webSocketClose(a); await room.webSocketError(a);
+  expect(a.closed).toHaveLength(1);
+}));
+
+test('durable aggregate byte and join refusals survive fresh instances without extra parsing or socket allocation', async () => withRuntime(async (ctx, join) => {
+  let parsed = 0;
+  const options = { now: () => 0, limits: { roomJoins: 2, roomIngressBytes: 6 },
+    parse: (raw: string) => { parsed++; return JSON.parse(raw); } };
+  const make = () => new SignalingRoom(ctx, {}, options);
+  const a = await join(make()), b = await join(make());
+  await make().webSocketMessage(a, '"😀"');
+  await make().webSocketMessage(b, '{}');
+  expect(parsed).toBe(1); expect(b.closed.at(-1).code).toBe(1013);
+  const response = await make().fetch(new Request('https://node.test/rendezvous?key=test', { headers: { Upgrade: 'websocket' } }));
+  expect(response.status).toBe(503); expect(ctx.getWebSockets()).toHaveLength(2);
+  expect(ctx.persisted.get(ROOM_BUDGET_KEY).used).toMatchObject({ joins: 2, ingressBytes: 6, messages: 1 });
+}));
+
+test('failed send keeps its debit and retires a recipient durably even when native close throws', async () => withRuntime(async (ctx, join) => {
+  const room = new SignalingRoom(ctx, {}), sender = await join(room), target = await join(room);
+  const before = ctx.persisted.get(ROOM_BUDGET_KEY).used.egressFrames;
+  target.send = () => { throw new Error('write failed'); };
+  target.close = () => { throw new Error('close failed'); };
+  await room.webSocketMessage(sender, JSON.stringify({ t: 'signal', to: target.attachment.connId, payload: 'opaque' }));
+  expect(ctx.persisted.get(ROOM_BUDGET_KEY).used.egressFrames).toBe(before + 1);
+  expect(target.attachment).toMatchObject({ retired: true, admitted: false });
+  const replacement = await join(new SignalingRoom(ctx, {}));
+  expect(replacement.sent[0].members).not.toContain(target.attachment.connId);
+  const count = sender.sent.length;
+  await new SignalingRoom(ctx, {}).webSocketMessage(target, JSON.stringify({ t: 'signal', to: sender.attachment.connId, payload: 'forbidden' }));
+  expect(sender.sent).toHaveLength(count);
+}));
+
+test('local protocol retirement and dead-socket reaping each notify honest legacy peers once', async () => withRuntime(async (ctx, join) => {
+  const room = new SignalingRoom(ctx, {});
+  const a = await join(room), honest = await join(room);
+  await room.webSocketMessage(a, 'x'.repeat(64 * 1024 + 1));
+  // An admitted operation is a queue barrier behind the best-effort notice.
+  await room.webSocketMessage(honest, '{}');
+  await room.webSocketClose(a); await room.webSocketError(a);
+  expect(honest.sent.filter(message => message.t === 'left' && message.member === a.attachment.connId)).toHaveLength(1);
+  const dead = await join(room);
+  dead.readyState = 2;
+  await join(room);
+  await room.webSocketMessage(honest, '{}');
+  await room.webSocketClose(dead);
+  expect(honest.sent.filter(message => message.t === 'left' && message.member === dead.attachment.connId)).toHaveLength(1);
+}));
+
+test('attached socket ceiling survives clock windows and failed native closes independently of membership', async () => withRuntime(async (ctx, join) => {
+  let time = 0;
+  const make = () => new SignalingRoom(ctx, {}, { now: () => time, attachedLimit: 2 });
+  const room = make(), a = await join(room), b = await join(room);
+  for (const socket of [a, b]) socket.close = () => { socket.readyState = 2; throw new Error('native close stalled'); };
+  await room.webSocketClose(a); await room.webSocketClose(b);
+  for (let index = 0; index < 3; index++) {
+    time += 10_000;
+    const response = await make().fetch(new Request('https://node.test/rendezvous?key=test', { headers: { Upgrade: 'websocket' } }));
+    expect(response.status).toBe(503);
+    expect(ctx.getWebSockets()).toHaveLength(2);
+  }
+  expect(ctx.getWebSockets().every((socket: Socket) => socket.attachment.admitted === false)).toBe(true);
+}));
+
+test('double platform custody failure fences current-instance work without claiming durable retirement', async () => withRuntime(async (ctx, join) => {
+  let parsed = 0;
+  const room = new SignalingRoom(ctx, {}, { parse: raw => { parsed++; return JSON.parse(raw); } });
+  const a = await join(room), b = await join(room);
+  a.serializeAttachment = () => { throw new Error('attachment unavailable'); };
+  a.close = () => { throw new Error('close unavailable'); };
+  await room.webSocketClose(a);
+  await room.webSocketMessage(b, '{}');
+  expect(parsed).toBe(0);
+  const result = await room.fetch(new Request('https://node.test/rendezvous?key=test', { headers: { Upgrade: 'websocket' } }));
+  expect(result.status).toBe(503);
+  expect(ctx.getWebSockets()).toHaveLength(2);
+  // Both platform operations failed: never assert the old attachment vanished.
+  expect(a.attachment.admitted).toBe(true);
 }));

@@ -1,6 +1,7 @@
 // @ts-check
-// Bun process-local admission only. These counters are NOT durable across a
-// Worker wake and must not be presented as Cloudflare/account-wide protection.
+// Shared numeric policy; the counter implementation below is Bun process-local.
+// Worker room persistence is owned separately by durable-room-budget.js. Neither
+// implementation provides Cloudflare/account-wide protection.
 export const BOOTSTRAP_LIMITS = Object.freeze({
   windowMs: 10_000, rooms: 128, sockets: 2048,
   roomJoins: 128, processJoins: 256,
