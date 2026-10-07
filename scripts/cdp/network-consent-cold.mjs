@@ -73,29 +73,42 @@ export const assertNoTransport = (events, label) => {
 };
 
 const requireResult = (condition, message) => { if (!condition) throw new Error(message); };
+class ObserverClosedError extends Error {
+  constructor() { super('Consent observer closed'); this.name = 'ObserverClosedError'; }
+}
 
 // Host deadlines remain effective when a renderer is paused or its socket disappears.
 export const createConsentDiagnostics = (evidence, persist, timeoutMs = 15_000) => {
   let sequence = 0;
   evidence.commands = [];
-  return async (label, operation, budgetMs = timeoutMs) => {
+  return async (label, operation, budgetMs = timeoutMs, signal = undefined) => {
     const entry = { id: ++sequence, label, phase: evidence.phase, started: Date.now(), status: 'pending' };
     evidence.commands.push(entry);
     if (evidence.commands.length > 256) evidence.commands.shift();
     persist();
-    let timer;
+    let timer, aborted;
     try {
+      const cancellation = signal ? new Promise((_, reject) => {
+        aborted = () => reject(signal.reason);
+        if (signal.aborted) aborted();
+        else signal.addEventListener('abort', aborted, { once: true });
+      }) : new Promise(() => {});
       const result = await Promise.race([
-        Promise.resolve().then(operation),
+        cancellation,
+        Promise.resolve().then(() => { signal?.throwIfAborted(); return operation(); }),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Consent deadline: ${label}`)), budgetMs); }),
       ]);
       entry.status = 'complete';
       return result;
     } catch (error) {
-      entry.status = 'failed';
+      entry.status = error instanceof ObserverClosedError ? 'cancelled' : 'failed';
       entry.error = String(error?.stack ?? error);
       throw error;
-    } finally { clearTimeout(timer); entry.finished = Date.now(); persist(); }
+    } finally {
+      clearTimeout(timer);
+      if (aborted) signal.removeEventListener('abort', aborted);
+      entry.finished = Date.now(); persist();
+    }
   };
 };
 
@@ -177,13 +190,23 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
   const version = await diagnostic('observer browser endpoint', () => fetch(`http://127.0.0.1:${ctx.port}/json/version`, { signal: AbortSignal.timeout(15_000) }).then(r => r.json()));
   const connection = await attachConsentObserver(version.webSocketDebuggerUrl, diagnostic, connect);
   const nativeSend = connection.send.bind(connection);
-  connection.send = (method, params = {}, sessionId) => diagnostic(
-    `${method} session=${sessionId ?? 'browser'}`, () => nativeSend(method, params, sessionId));
+  const lifetime = new AbortController();
+  const cancelled = new ObserverClosedError();
+  let closing = false;
+  const activeDiagnostic = (label, operation, budgetMs = undefined) => closing
+    ? Promise.reject(cancelled)
+    : diagnostic(label, operation, budgetMs, lifetime.signal);
+  connection.send = (method, params = {}, sessionId) => activeDiagnostic(
+    `${method} session=${sessionId ?? 'browser'}`, () => {
+      if (closing) throw cancelled;
+      lifetime.signal.throwIfAborted();
+      return nativeSend(method, params, sessionId);
+    });
   const sessions = new Map();
   const owners = new Map();
   const readiness = new Map();
   const installing = new Set();
-  let closing = false;
+  let closePromise;
   const origin = `chrome-extension://${ctx.sw.id}/`;
   const ownedUrl = url => String(url ?? '').startsWith(origin) || String(url ?? '').startsWith(`blob:${origin}`);
   const lifecycle = record => {
@@ -192,8 +215,10 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
     if (evidence.lifecycle.length > 128) evidence.lifecycle.shift();
     persist();
   };
-  const failed = error => { if (!closing) { evidence.observerErrors.push(String(error?.stack ?? error)); persist(); } };
+  // why: closing only explains our own cancellation, never a real protocol failure.
+  const failed = error => { if (error !== cancelled) { evidence.observerErrors.push(String(error?.stack ?? error)); persist(); } };
   const install = async ({ sessionId, targetInfo, waitingForDebugger }) => {
+    lifetime.signal.throwIfAborted();
     if (owners.has(targetInfo.targetId)) {
       await connection.send('Target.detachFromTarget', { sessionId });
       return;
@@ -232,13 +257,13 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
         flatten: true, filter: CHILD_TARGET_FILTER });
       if (waitingForDebugger && ['worker', 'shared_worker', 'service_worker'].includes(targetInfo.type)) {
         // The pre-execution trap exclusively owns release.
-        await instrumentPausedTarget(connection, sessionId, diagnostic, pause => {
+        await instrumentPausedTarget(connection, sessionId, activeDiagnostic, pause => {
           evidence.pauses ??= [];
           if (evidence.pauses.length < 32) evidence.pauses.push({ sessionId, phase: evidence.phase, at: Date.now(), ...pause });
           persist();
         });
       } else if (pageTarget) {
-        await diagnostic(`page observer ready session=${sessionId}`, () => ready);
+        await activeDiagnostic(`page observer ready session=${sessionId}`, () => ready);
         if (waitingForDebugger) {
           await send('Runtime.runIfWaitingForDebugger');
         }
@@ -258,6 +283,11 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
         : (params.args ?? []).map(arg => arg.description ?? arg.value));
       if (labels.length || method === 'Runtime.exceptionThrown') lifecycle({ method, sessionId: message.sessionId, labels });
     } else if (method === 'Target.attachedToTarget') {
+      if (closing) {
+        lifecycle({ method: 'Target.attachedToTarget', sessionId: params.sessionId,
+          targetId: params.targetInfo?.targetId, duringTeardown: true });
+        return;
+      }
       const pending = install(params);
       installing.add(pending);
       pending.then(() => installing.delete(pending), error => { installing.delete(pending); failed(error); });
@@ -287,17 +317,40 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
       persist();
     }
   };
+  const close = () => {
+    if (closePromise) return closePromise;
+    closing = true;
+    // why: fence at the ownership boundary; queued microtasks cannot dispatch CDP
+    // or resume an unobserved worker after this point. Only teardown uses nativeSend.
+    closePromise = (async () => {
+      try {
+        // why: a native rejection may already be queued through async CDP layers.
+        // Let those microtasks settle before cancellation, with dispatch fenced above.
+        // This yields one turn; it never waits for an unresolved target command.
+        await new Promise(resolve => setTimeout(resolve, 0));
+        lifetime.abort(cancelled);
+        await diagnostic('observer installation drain', () => Promise.allSettled([...installing]), 5_000);
+        await diagnostic('observer stop auto-attach', () => nativeSend('Target.setAutoAttach',
+          { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }), 5_000);
+        requireResult(evidence.observerErrors.length === 0, `Observer failed: ${evidence.observerErrors.join('\n')}`);
+      } finally {
+        connection.off(listener); connection.close();
+        sessions.clear(); owners.clear(); readiness.clear();
+      }
+    })();
+    return closePromise;
+  };
   connection.on(listener);
   try {
     await connection.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true, filter: ROOT_TARGET_FILTER });
-    await diagnostic('observer installations', async () => {
+    await activeDiagnostic('observer installations', async () => {
           while (installing.size) await Promise.all([...installing]);
         }, 120_000);
     requireResult(await waitFor(() => evidence.events.some(event => event.kind === 'observer-ready'
       && event.href.includes('/home/home.html')), { budgetMs: 10_000, pollMs: 25 }), 'Home observer never armed');
     return {
       async barrier() {
-        await diagnostic('observer installations', async () => {
+        await activeDiagnostic('observer installations', async () => {
           while (installing.size) await Promise.all([...installing]);
         }, 120_000);
         // Drain CDP events already emitted by each live extension realm.
@@ -328,15 +381,10 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
         requireResult(!result.exceptionDetails && result.result?.value === true, 'Native RTC canary failed');
         return { sessionId: match[0], eventStart };
       },
-      async close() {
-        closing = true;
-        try { await connection.send('Target.setAutoAttach', { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }); }
-        finally { connection.off(listener); connection.close(); }
-      },
+      close,
     };
   } catch (error) {
-    closing = true;
-    connection.off(listener); connection.close();
+    try { await close(); } catch (cleanupError) { evidence.cleanupError = String(cleanupError); persist(); }
     throw error;
   }
 }
