@@ -75,7 +75,7 @@ const evaluate = async expression => {
   return result.result.value;
 };
 
-const launch = async ({ chrome, mdns = true }) => {
+const launch = async ({ chrome, mdns = true, allInterfaces = false }) => {
   if (typeof chrome !== 'string' || !existsSync(chrome)) throw new Error('Configure an existing Chrome binary');
   if (browser) throw new Error('Browser already launched');
   const host = fingerprint();
@@ -91,6 +91,7 @@ const launch = async ({ chrome, mdns = true }) => {
   profile = mkdtempSync(join(tmpdir(), 'peerd-cluster-'));
   browser = spawn(chrome, ['--headless=new', '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update',
+    ...(allInterfaces ? ['--use-fake-device-for-media-stream'] : []),
     ...(!mdns ? ['--disable-features=WebRtcHideLocalIpsWithMdns'] : []),
     `--user-data-dir=${profile}`, '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', 'about:blank'],
   { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -126,12 +127,17 @@ const launch = async ({ chrome, mdns = true }) => {
     pending.clear();
   };
   await send('Runtime.enable');
+  // why: an HTTP fixture may otherwise see only the default interface.
+  // Grant only this disposable origin; fake devices preclude real capture.
+  if (allInterfaces) await send('Browser.grantPermissions', {
+    origin: `http://127.0.0.1:${server.port}`, permissions: ['audioCapture'],
+  });
   await send('Page.navigate', { url: `http://127.0.0.1:${server.port}/` });
   while (!await evaluate('!!window.cluster')) {
     if (Date.now() >= deadline) throw new Error(`Fixture readiness deadline: ${errors.join('')}`);
     await sleep(100);
   }
-  return { ...host, browser: version.Browser, mdns };
+  return { ...host, browser: version.Browser, mdns, allInterfaces };
 };
 
 const lines = createInterface({ input: process.stdin });

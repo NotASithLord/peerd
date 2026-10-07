@@ -16,6 +16,10 @@ The coordinator uses the repository's signaling server over authenticated SSH
 reverse forwards; HTTP and debugging endpoints bind only to loopback. WebRTC
 uses native UDP between hosts, with no STUN/TURN service. mDNS remains enabled
 unless the private config explicitly sets `mdns: false` for diagnostics.
+For a secondary LAN interface, `allInterfaces: true` grants microphone permission
+only to the temporary fixture origin so Chrome can enumerate interfaces. The
+browser uses fake media devices and the fixture never captures media. Both
+options are recorded in host evidence; neither changes a user's browser profile.
 
 Example private configuration (keep addresses, sockets and credentials outside Git):
 

@@ -118,7 +118,8 @@ try {
   signaling = createSignalingServer({ hostname: '127.0.0.1', port: 0, log: () => {} });
   for (const target of config.hosts) startWorker(target, signaling.server.port);
   report.hosts = await Promise.all(workers.map(async worker => ({ name: worker.target.name,
-    ...await worker.call('launch', { chrome: worker.target.chrome, mdns: config.mdns !== false }) })));
+    ...await worker.call('launch', { chrome: worker.target.chrome, mdns: config.mdns !== false,
+      allInterfaces: config.allInterfaces === true }) })));
   await check(local ? 'matching source and browser (rehearsal)' : 'identical source on distinct Macs', async () => { validateHosts(report.hosts, { local }); return report.hosts; });
   const roomId = `cluster-${crypto.randomUUID()}`;
   const start = (worker, id = roomId) => worker.call('start', { roomId: id, signaling: worker.signaling, name: worker.target.name });
