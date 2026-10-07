@@ -49,12 +49,12 @@ const subMsgTopic = (id) => `dwapp/${id}/msg`;            // a sub-protocol's go
 /**
  * @param {{ identity: import('./transport/mesh.js').Identity, mesh: any,
  *   meta?: () => any, dial?: any, audit?: import('./transport/mesh.js').AuditFn,
- *   now?: () => number, maxBundleBytes?: number,
+ *   now?: () => number, maxBundleBytes?: number, userBlocked?: (did:string)=>boolean,
  *   admitDwappMeta?: ((candidate: { dwappId: string, publisher: string, seq: number, versionId: string }) => Promise<boolean>) | null }} opts
  */
 export const createBaseNetwork = async ({
   identity, mesh, meta = () => ({}), dial = null, audit = null,
-  now = Date.now, maxBundleBytes = MAX_BUNDLE_BYTES, admitDwappMeta = null,
+  now = Date.now, maxBundleBytes = MAX_BUNDLE_BYTES, admitDwappMeta = null, userBlocked = () => false,
 }) => {
   dlog('base', `assembling base network for ${(identity.did || '').slice(-8)} on lobby "${BASE_TOPIC}"`);
   const node = await createPeerNode({ identity, mesh, meta, dial, audit, now });
@@ -108,9 +108,9 @@ export const createBaseNetwork = async ({
   /** @type {Set<string>} */
   const blocklist = new Set();
   /** @param {string} did */
-  const isBlocked = (did) => blocklist.has(did);
+  const isBlocked = (did) => userBlocked(did) || blocklist.has(did);
   /** @param {string} did @param {string} [reason] */
-  const block = (did, reason) => { blocklist.add(did); audit?.('dwapp_publisher_blocked', { did, reason }); };
+  const block = (did, reason) => { if (reason !== 'user-policy') blocklist.add(did); audit?.('dwapp_publisher_blocked', { did, reason }); };
   /** @type {Set<(card: any) => void>} */
   const dwappCbs = new Set();
   const library = createLibrary({ isBlocked, now });
@@ -260,7 +260,11 @@ export const createBaseNetwork = async ({
     // share take MINUTES and delayed the discovery announce behind it. Background.
     announceProvider(uri).catch(() => {}); // the publisher is the first provider
     dlog('base', `published app "${name}" → ${uri}`);
-    return { uri, hash, packedBytes, created: manifest.created };
+    // A discovery hint from these exact published bytes, not a compatibility or
+    // safety verdict. Do not add it to the manifest and change immutable hashes.
+    const includesWasm = Object.values(bytes).some(file => file.length >= 8
+      && file[0] === 0 && file[1] === 97 && file[2] === 115 && file[3] === 109);
+    return { uri, hash, packedBytes, created: manifest.created, includesWasm };
   };
 
   // Re-seed bytes we fetched so WE become a provider too (install → seeder). The
@@ -269,6 +273,7 @@ export const createBaseNetwork = async ({
   // re-attribution). Then announce ourselves as a provider.
   /** @param {{ manifest: any, payload: Uint8Array }} opts */
   const seedApp = async ({ manifest, payload }) => {
+    if (isBlocked(manifest.publisher)) throw new Error('publisher-user-blocked');
     assertBundleWithinLimits(manifest);
     if (!(payload instanceof Uint8Array) || payload.byteLength !== manifest.size) {
       throw new Error('seed App payload does not match its signed manifest size');
@@ -287,6 +292,7 @@ export const createBaseNetwork = async ({
         throw new Error(`seed App compressed chunk ${index} failed verification`);
       }
     }
+    if (isBlocked(manifest.publisher)) throw new Error('publisher-user-blocked');
     node.content.publish({ manifest, hash, chunks });
     announceProvider(formatPeerdUri({ did: manifest.publisher ?? identity.did, hash })).catch(() => {}); // background durability
     return hash;
@@ -340,13 +346,14 @@ export const createBaseNetwork = async ({
   // (you're linked to the author) is then one fast round-trip. Only if the
   // publisher can't serve do we widen to other linked seeders, then the bounded DHT.
   /** @param {string} uri @param {{ timeoutMs?: number, onProgress?: (p: any) => void }} [opts] */
-  const fetchApp = async (uri, { timeoutMs = 15_000, onProgress } = {}) => {
+  const fetchAllowedApp = async (uri, { timeoutMs = 15_000, onProgress } = {}) => {
     /** @param {string} did */
-    const channelFor = (did) => node.mesh.contentChannel(did);
+    const channelFor = (did) => isBlocked(did) ? null : node.mesh.contentChannel(did);
     /** @type {string | null | undefined} */
     let publisher = null;
     let localHash = null;
     try { ({ did: publisher, hash: localHash } = parsePeerdUri(uri)); } catch { /* malformed uri → skip the fast path */ }
+    if (publisher && isBlocked(publisher)) throw new Error('publisher-user-blocked');
     // A freshly re-seeded renderer may be the only provider. Read its announced
     // bytes directly instead of requiring a nonsensical mesh channel to self.
     if (publisher === identity.did && localHash && node.content.isAnnounced(localHash)) {
@@ -400,7 +407,7 @@ export const createBaseNetwork = async ({
       signal.throwIfAborted();
       return node.dht.findProviderContacts(key, { signal });
     }).catch(() => []);
-    const candidates = contacts.filter((/** @type {any} */ contact) => contact.did !== identity.did).slice(0, 8);
+    const candidates = contacts.filter((/** @type {any} */ contact) => contact.did !== identity.did && !isBlocked(contact.did)).slice(0, 8);
     let next = 0;
     const connectProvider = async () => {
       while (next < candidates.length && !closed) {
@@ -416,6 +423,15 @@ export const createBaseNetwork = async ({
     const providers = [...new Set([...provided, ...linked])];
     if (!providers.length) throw new Error(`no peer is serving ${uri} right now — the peer may have dropped; try again`);
     return swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress });
+  };
+
+  /** @param {string} uri @param {{timeoutMs?:number,onProgress?:(p:any)=>void}} [options] */
+  const fetchApp = async (uri, options) => {
+    const { did } = parsePeerdUri(uri);
+    if (did && isBlocked(did)) throw new Error('publisher-user-blocked');
+    const result = await fetchAllowedApp(uri, options);
+    if (isBlocked(result.manifest.publisher)) throw new Error('publisher-user-blocked');
+    return result;
   };
 
   // --- a ROOM: the full feed / presence / dm / content surface a dwapp expects,
@@ -517,6 +533,14 @@ export const createBaseNetwork = async ({
         } catch { /* not found */ }
       }
       return null;
+    },
+    // Apply user policy to cached publishers too, even when their signed cards
+    // arrived through a different seeder rather than a current direct link.
+    enforceUserPolicy: () => {
+      for (const did of new Set([...node.mesh.peers().map((/** @type {any} */ peer) => peer.did),
+        ...library.rows().map((/** @type {any} */ row) => row.publisher)])) {
+        if (userBlocked(did)) discovery.ban(did, 'user-policy');
+      }
     },
     // Ban a publisher/peer: drop their feed, blocklist, purge, cut the link.
     /** @param {string} did @param {string} [reason] */

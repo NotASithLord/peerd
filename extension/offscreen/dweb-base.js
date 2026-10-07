@@ -3,6 +3,9 @@
 // why: The network must survive tab closure. The store build stays inert.
 // Keep detailed logs because WebRTC and offscreen lifecycles require live diagnosis.
 
+import { publishedAppHead } from './published-app-head.js';
+import { createPeerPolicyView } from './peer-policy.js';
+import { withDeadline } from '/shared/cold-util.js';
 import { createImmutableInstallOwner } from './immutable-install-owner.js';
 import { immutableAppRoot } from '/shared/address/immutable-app-root.js';
 import browser from '/shared/browser-api.js';
@@ -37,6 +40,27 @@ const warn = (...a) => console.warn('[offscreen/dweb]', ...a);
 // why: Keep the larger live surface local instead of widening the shared stub.
 /** @type {any} */
 let handle = null;    // { base, room, close } once the lobby is joined
+const peerPolicy = createPeerPolicyView();
+/** @type {Set<any>} */ const policyMeshes = new Set();
+const enforcePeerPolicy = () => {
+  for (const mesh of policyMeshes) for (const { did } of mesh.peers()) {
+    if (peerPolicy.isBlocked(did)) mesh.removeLink(did, 'user-policy');
+  }
+  handle?.base.enforceUserPolicy();
+};
+/** @type {Promise<void>|null} */ let policyRead = null;
+// Coalesce concurrent HELLO reads so a late valid response cannot reopen the
+// view after a later read failed, or multiply kernel storage work per peer.
+const refreshPeerPolicy = () => policyRead ??= (async () => {
+  try {
+    const result = /** @type {any} */ (await withDeadline(() => browser.runtime.sendMessage({ type: 'dweb/peer-policy' }), 5_000, () => new Error('peer-policy-unavailable')));
+    if (!result?.ok) throw new Error('peer-policy-unavailable');
+    peerPolicy.apply(result.policy);
+    enforcePeerPolicy();
+  } catch (error) {
+    peerPolicy.invalidate(); enforcePeerPolicy(); throw error;
+  }
+})().finally(() => { policyRead = null; });
 // Renderer-local mesh generation. It increments only when a newly assembled
 // base handle activates, never when a successor kernel adopts the existing
 // lease. Bound with hostEpoch, this makes a hidden stop/restart observable.
@@ -337,8 +361,12 @@ const baseLifecycle = makeStartStopBarrier({
       throw e;
     }
     log(`joining lobby "${client.BASE_TOPIC}" as …${identity.did.slice(-8)}`);
+    await refreshPeerPolicy();
     const joined = await client.joinBaseNetwork({
       identity,
+      isBlocked: peerPolicy.isBlocked,
+      onMesh: (/** @type {any} */ mesh) => { policyMeshes.add(mesh); return () => policyMeshes.delete(mesh); },
+      admitPeer: async (/** @type {string} */ did) => { await refreshPeerPolicy(); return !peerPolicy.isBlocked(did); },
       // Signature/shape/derived-id verification happens in discovery before
       // this callback. The SW persists the monotonic decision; fail closed if
       // that authority is unavailable so an offscreen restart cannot reset it.
@@ -364,7 +392,12 @@ const baseLifecycle = makeStartStopBarrier({
     candidate.base.onDwappAnnounce((/** @type {any} */ a) => log('discovery card:', a?.dwapp_id?.slice(0, 12), `from …${String(a?.publisher).slice(-8)}`));
     // Self-heal discovery if the initial subscription races WebRTC readiness.
     if (!resubTimer) {
-      resubTimer = setInterval(() => { try { handle?.base?.discovery?.subscribeAll(); } catch { /* best-effort */ } }, 12_000);
+      resubTimer = setInterval(() => {
+        const current = handle;
+        void refreshPeerPolicy().then(() => {
+          if (handle === current) return current?.base?.discovery?.subscribeAll();
+        }).catch(() => {});
+      }, 12_000);
     }
     // Same-user device discovery rides the mesh that just came up. It stays
     // INERT on an install that has not been enrolled into a person's device
@@ -984,8 +1017,14 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
           sendResponse({ ...result, result });
           return;
         }
-        case 'dweb/base-host/ban': { const h = await start(); h.base.ban(msg.did, msg.reason); sendResponse({ ok: true }); return; }
-        case 'dweb/base-host/unblock': { const h = await start(); h.base.unblock(msg.did); sendResponse({ ok: true }); return; }
+        case 'dweb/base-host/peer-policy': {
+          try { peerPolicy.apply(msg.policy); } finally { enforcePeerPolicy(); }
+          sendResponse({ ok: true, revision: peerPolicy.revision() }); return;
+        }
+        case 'dweb/base-host/ban':
+        case 'dweb/base-host/unblock': {
+          sendResponse({ ok: false, error: 'durable-peer-policy-required' }); return;
+        }
         case 'dweb/base-host/set-discovery': { const h = await start(); h.base.setDiscovery(!!msg.enabled); sendResponse({ ok: true, enabled: !!msg.enabled }); return; }
         // The agent's peer/discovery read window: who we're linked to + the
         // sovereign discovery state (on/off, subscribers, blocked dids).
@@ -1048,19 +1087,9 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
               unserveTrackedHash(h, publicationOwnerId, published.hash);
             }
           };
-          const announce = (/** @type {any} */ {
-            uri, hash, size,
-          }) => h.base.publishMeta({
+          const announce = (/** @type {any} */ published) => h.base.publishMeta({
               slug, name: msg.name, description: msg.description ?? '',
-              head: {
-                version_id: hash, content_addr: uri, size,
-                ...(msg.release?.previousVersionId
-                  ? { previous_version_id: msg.release.previousVersionId } : {}),
-                ...(msg.release?.gitCommitOid
-                  ? { git_commit_oid: msg.release.gitCommitOid } : {}),
-                ...(msg.release?.changelog
-                  ? { changelog: msg.release.changelog } : {}),
-              },
+              head: publishedAppHead(published, msg.release),
               // why: A reseed reuses its signed version identity.
               ...(Number.isInteger(msg.seq) ? { seq: msg.seq } : {}),
             });

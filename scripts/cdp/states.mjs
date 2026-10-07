@@ -4859,6 +4859,35 @@ export const STATES = [
     },
   },
 
+  // Real Explore component with a controlled catalog. Both themes and widths
+  // show the signed-hint caveat and the legacy unknown state.
+  ...[false, true].map(narrow => ({
+    name: narrow ? 'home-explore-narrow' : 'home-explore', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openExtPage(ctx, 'tests/fixtures/explore.html');
+      try {
+        await page.send('Emulation.setDeviceMetricsOverride', {width:narrow ? 320 : 960,height:narrow ? 1200 : 760,deviceScaleFactor:1,mobile:false});
+        const ready = await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 3`), {budgetMs:8000,pollMs:80});
+        const fullView = await evalIn(page, `(() => {
+          const cards = [...document.querySelectorAll('.disc-card')];
+          return cards.length === 3 && cards.every(card => {
+            const rect = card.getBoundingClientRect();
+            return rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
+          });
+        })()`);
+        rec.check('Explore renders all publisher claims including legacy unknown in full view', ready === true && fullView === true);
+        await rec.visualPage(narrow ? 'home-explore-narrow' : 'home-explore', page);
+        await evalIn(page, `(() => {const filter=document.querySelector('select');filter.value='yes';filter.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+        const filtered = await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 1 && document.querySelector('.disc-name')?.textContent === 'Orbit lab'`), {budgetMs:4000,pollMs:50});
+        rec.check('WebAssembly filter selects the declared module App', filtered === true);
+        await rec.visualPage(narrow ? 'home-explore-wasm-narrow' : 'home-explore-wasm', page);
+        const fits = await evalIn(page, `document.documentElement.scrollWidth <= innerWidth`);
+        rec.check('Explore controls and cards fit the viewport', fits === true);
+      } finally { try {page.close();} catch { /* */ } }
+    },
+  })),
+
   // Functional rendered coverage for committed success warnings. This takes a
   // screenshot without creating a local visual authority baseline. CI remains
   // the only source of Linux pixel baselines.

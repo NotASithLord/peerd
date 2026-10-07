@@ -53,3 +53,17 @@ describe('dwapp meta — the signed app card', () => {
     expect(metaWellFormed({ ...card, value: { ...card.value, head: { version_id: 'h' } } })).toBe(false);
   });
 });
+
+test('WASM discovery claims are optional, bounded and signed with their version head', async () => {
+  const identity = await generateIdentity();
+  const legacy = await buildMeta({slug:'legacy',name:'Legacy',seq:1,head:head()}, identity);
+  expect(legacy.value.head.includes_wasm).toBeUndefined();
+  expect(await verifyMeta(legacy)).toBe(true);
+  for (const includes_wasm of [true, false]) {
+    const card = await buildMeta({slug:'app',name:'App',seq:1,head:{...head(),includes_wasm}}, identity);
+    expect(card.value.head.includes_wasm).toBe(includes_wasm);
+    expect(await verifyMeta(card)).toBe(true);
+    expect(await verifyMeta({...card,value:{...card.value,head:{...card.value.head,includes_wasm:!includes_wasm}}})).toBe(false);
+    expect(metaWellFormed({...card,value:{...card.value,head:{...card.value.head,includes_wasm:'true'}}})).toBe(false);
+  }
+});

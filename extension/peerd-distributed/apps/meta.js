@@ -57,6 +57,7 @@ const headWellFormed = (head) => {
   return typeof h.version_id === 'string' && h.version_id.length > 0 && h.version_id.length <= 128
     && typeof h.content_addr === 'string' && h.content_addr.startsWith('peerd://')
     && typeof h.size === 'number' && Number.isInteger(h.size) && h.size >= 0
+    && (h.includes_wasm === undefined || typeof h.includes_wasm === 'boolean')
     && (h.previous_version_id == null || (typeof h.previous_version_id === 'string' && h.previous_version_id.length <= 128))
     && (h.git_commit_oid == null || (typeof h.git_commit_oid === 'string' && h.git_commit_oid.length <= 128))
     && (h.changelog == null || (typeof h.changelog === 'string' && h.changelog.length <= 1200));
@@ -72,7 +73,7 @@ const headWellFormed = (head) => {
  *   name: string,
  *   description?: string,
  *   seq: number,
- *   head: { version_id: string, content_addr: string, size: number,
+ *   head: { version_id: string, content_addr: string, size: number, includes_wasm?: boolean,
  *           previous_version_id?: string, git_commit_oid?: string, changelog?: string },
  *   icon?: string | null,
  * }} fields
@@ -93,6 +94,7 @@ export const buildMeta = async ({ slug, name, description = '', seq, head, icon 
     description,
     head: {
       version_id: head.version_id, content_addr: head.content_addr, size: head.size,
+      ...(typeof head.includes_wasm === 'boolean' ? { includes_wasm: head.includes_wasm } : {}),
       ...(head.previous_version_id ? { previous_version_id: head.previous_version_id } : {}),
       ...(head.git_commit_oid ? { git_commit_oid: head.git_commit_oid } : {}),
       ...(head.changelog ? { changelog: head.changelog } : {}),
@@ -108,7 +110,7 @@ export const buildMeta = async ({ slug, name, description = '', seq, head, icon 
  * The validated DWAPP_META shape (an app card).
  * @typedef {{
  *   publisher: string, salt: string, seq: number, sig: string,
- *   value: { name: string, description: string, head: { version_id: string, content_addr: string, size: number, previous_version_id?: string, git_commit_oid?: string, changelog?: string }, icon?: string },
+ *   value: { name: string, description: string, head: { version_id: string, content_addr: string, size: number, includes_wasm?: boolean, previous_version_id?: string, git_commit_oid?: string, changelog?: string }, icon?: string },
  * }} MetaItem
  */
 

@@ -1,16 +1,15 @@
 // @ts-check
+import { makeSerialLane, withDeadline } from '/shared/cold-util.js';
 // Extend surviving tab-scoped DNR blocks to an exact page-created child while
 // the service worker is still restoring its in-memory ownership registries.
 
 /** @param {{getSessionRules:()=>Promise<any[]>,updateSessionRules:(update:any)=>Promise<unknown>}} dnr */
 export const makeSerializedDnrSessionRules = (dnr) => {
-  let queue = Promise.resolve();
+  const queue = makeSerialLane();
   return Object.freeze({
     getSessionRules: () => dnr.getSessionRules(),
     updateSessionRules(/** @type {any} */ update) {
-      const pending = queue.then(() => dnr.updateSessionRules(update));
-      queue = pending.then(() => {}, () => {});
-      return pending;
+      return queue(() => dnr.updateSessionRules(update));
     },
   });
 };
@@ -31,13 +30,7 @@ export const makeStartupPopupNetworkGuard = (dnr, ownedRuleIds, options = {}) =>
   const retryMs = Number.isFinite(options.retryMs)
     ? Math.max(1, Number(options.retryMs)) : 250;
   const bounded = (/** @type {Promise<any>} */ operation, /** @type {string} */ code) =>
-    new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(code)), timeoutMs);
-      operation.then(
-        (value) => { clearTimeout(timer); resolve(value); },
-        (cause) => { clearTimeout(timer); reject(cause); },
-      );
-    });
+    withDeadline(() => operation, timeoutMs, () => new Error(code));
   /** @type {Set<number>} */
   const guardedChildren = new Set();
   /** @type {Map<number,symbol>} */

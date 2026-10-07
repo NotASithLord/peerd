@@ -2,6 +2,7 @@
 // Track each tab-hosted engine instance across service-worker restarts.
 
 import browser from '/shared/browser-api.js';
+import { VM_TAB_PATH, VMTabClosedError, NOTEBOOK_TAB_PATH, POD_TAB_PATH } from '/peerd-engine/background.js';
 
 /** @typedef {Object} TabTrackerConfig
  * @property {string} tabPath
@@ -298,4 +299,163 @@ const addToGroup = async (tabId, title, color) => {
   } else {
     await browser.tabs.group({ tabIds: [tabId], groupId });
   }
+};
+
+// vm-tab-tracker: which vmId lives in which tab. Thin config over the
+// shared createTabTracker.
+//
+// Each WebVM is a discrete browser tab at
+//   chrome-extension://<id>/engine-tabs/vm-tab/index.html#<vmId>
+// The tab streams a CheerpX disk image, so "ready" can take a while,
+// hence the 30s timeout, longer than the Notebook / app trackers.
+//
+// VM is the one kind with an injectable `tabs` dep (the in-browser
+// vm-tab-close test stubs it) and a dedicated VMTabClosedError carrying
+// `.vmId`, so the SW can interrupt that VM's pending RPCs in vm-client.
+
+
+const VM_READY_TIMEOUT_MS = 30_000;
+
+/**
+ * @param {Object} [deps]
+ * @param {import('webextension-polyfill').Tabs.Static} [deps.tabs]
+ *   Injected tabs API; defaults to the real browser.tabs.
+ * @param {TabTrackerConfig['announce']} [deps.announce]
+ * @param {TabTrackerConfig['onAdopt']} [deps.onAdopt]
+ * @param {TabTrackerConfig['onDrop']} [deps.onDrop]
+ */
+export const createVmTabTracker = ({ tabs, announce, onAdopt, onDrop } = {}) => {
+  const tracker = createTabTracker({
+    tabPath: VM_TAB_PATH,
+    readyTimeoutMs: VM_READY_TIMEOUT_MS,
+    closedError: (vmId) => new VMTabClosedError(vmId),
+    notReadyMessage: (vmId) => `vm tab ${vmId} did not become ready in ${VM_READY_TIMEOUT_MS}ms`,
+    announce,
+    onAdopt,
+    onDrop,
+    kindLabel: 'a Linux VM',
+    ...(tabs ? { tabs } : {}),
+  });
+
+  return {
+    bootstrap: tracker.bootstrap,
+    onTabReady: tracker.onTabReady,
+    onTabRemoved: tracker.onTabRemoved,
+    // why parseVmIdFromUrl: the VM tracker has always exposed the
+    // vm-flavored name; keep it so existing callers don't have to change.
+    parseVmIdFromUrl: tracker.parseIdFromUrl,
+    getTabId: tracker.getTabId,
+    isReady: tracker.isReady,
+    ensureTab: tracker.ensureTab,
+    closeTab: tracker.closeTab,
+    // reloadTab + markReloading: the wedged-VM self-heal in vm-client recycles a
+    // hung tab in place (reload, not close: close would interrupt the command lane).
+    reloadTab: tracker.reloadTab,
+    markReloading: tracker.markReloading,
+    listLive: tracker.listLive,
+  };
+};
+
+// notebook-tab-tracker: which notebookId lives in which tab. Thin config
+// over the shared createTabTracker.
+//
+// Mirrors vm-tab-tracker but for chrome-extension://<id>/
+// notebook-tab/index.html#<notebookId>. The Notebook tab boots a Web Worker
+// inline (no CheerpX), so "ready" fires within a few ms of tab load,
+// no streaming disk image like VMs, hence the tighter 15s timeout. The
+// closed-tab rejection is a plain Error (no per-instance interrupt lane
+// like VMs have).
+
+
+const NOTEBOOK_READY_TIMEOUT_MS = 15_000;       // Notebooks boot fast; tighter than VMs
+const QUIESCE_TIMEOUT_MS = 5_000;
+
+/** @param {{ announce?: TabTrackerConfig['announce'],
+ *   onAdopt?: TabTrackerConfig['onAdopt'],
+ *   onDrop?: TabTrackerConfig['onDrop'],
+ *   sendTabMessage?: (tabId:number, message:any)=>Promise<any> }} [deps] */
+export const createJsTabTracker = ({
+  announce, onAdopt, onDrop,
+  sendTabMessage = browser.tabs.sendMessage.bind(browser.tabs),
+} = {}) => {
+  const tracker = createTabTracker({
+    tabPath: NOTEBOOK_TAB_PATH,
+    readyTimeoutMs: NOTEBOOK_READY_TIMEOUT_MS,
+    closedError: () => new Error('Notebook tab closed before ready'),
+    notReadyMessage: (id) => `Notebook ${id} did not become ready in ${NOTEBOOK_READY_TIMEOUT_MS}ms`,
+    announce,
+    onAdopt,
+    onDrop,
+    kindLabel: 'a Notebook',
+  });
+
+  /** Flush and freeze a live Notebook editor before repository work. */
+  const quiesceTab = async (/** @type {string} */ notebookId) => {
+    const tabId = tracker.getTabId(notebookId);
+    if (tabId == null) return false;
+    /** @type {ReturnType<typeof setTimeout>|undefined} */ let timer;
+    try {
+      const response = /** @type {any} */ (await Promise.race([
+        sendTabMessage(tabId, { type: 'js/quiesce', action: 'acquire', notebookId }),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Notebook ${notebookId} editor flush timed out`)), QUIESCE_TIMEOUT_MS);
+        }),
+      ]));
+      if (!response?.ok) throw new Error(response?.error ?? `Notebook ${notebookId} editor flush failed`);
+      return true;
+    } finally { clearTimeout(timer); }
+  };
+
+  /** Re-enable a Notebook after non-tree-replacing repository work. */
+  const resumeTab = async (/** @type {string} */ notebookId) => {
+    const tabId = tracker.getTabId(notebookId);
+    if (tabId == null) return false;
+    const response = /** @type {any} */ (await sendTabMessage(tabId, {
+      type: 'js/quiesce', action: 'release', notebookId,
+    }));
+    return response?.ok === true;
+  };
+
+  return {
+    bootstrap: tracker.bootstrap,
+    onTabReady: tracker.onTabReady,
+    onTabRemoved: tracker.onTabRemoved,
+    parseIdFromUrl: tracker.parseIdFromUrl,
+    getTabId: tracker.getTabId,
+    isReady: tracker.isReady,
+    ensureTab: tracker.ensureTab,
+    closeTab: tracker.closeTab,
+    reloadTab: tracker.reloadTab,
+    quiesceTab,
+    resumeTab,
+    listLive: tracker.listLive,
+  };
+};
+
+// Pod tab lifecycle: thin configuration over the shared tracker.
+
+
+const POD_READY_TIMEOUT_MS = 15_000;
+
+/** @param {{ announce?: TabTrackerConfig['announce'], onAdopt?: TabTrackerConfig['onAdopt'], onDrop?: TabTrackerConfig['onDrop'], tabs?:TabTrackerConfig['tabs'] }} [deps] */
+export const createPodTabTracker = ({ announce, onAdopt, onDrop, tabs } = {}) => {
+  const tracker = createTabTracker({
+    tabPath: POD_TAB_PATH,
+    readyTimeoutMs: POD_READY_TIMEOUT_MS,
+    closedError: () => new Error('Pod tab closed before ready'),
+    notReadyMessage: (id) => `Pod ${id} did not become ready in ${POD_READY_TIMEOUT_MS}ms`,
+    announce, onAdopt, onDrop, tabs, kindLabel: 'a Pod',
+  });
+  return {
+    bootstrap: tracker.bootstrap,
+    onTabPending: tracker.onTabPending,
+    onTabReady: tracker.onTabReady,
+    onTabRemoved: tracker.onTabRemoved,
+    parseIdFromUrl: tracker.parseIdFromUrl,
+    getTabId: tracker.getTabId,
+    isReady: tracker.isReady,
+    ensureTab: tracker.ensureTab,
+    closeTab: tracker.closeTab,
+    listLive: tracker.listLive,
+  };
 };

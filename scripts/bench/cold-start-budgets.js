@@ -204,7 +204,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // Pin the measured pacing/consent/revocation closure with no reserve.
     serviceWorker: Object.freeze({
       modules: 410, graphBytes: 2_095_484, entryBytes: 173,
-      inputSha256: '6bee21da2c36e5f9cea49a207b4728d07a49318a507295eb167c5021277c5aab',
+      inputSha256: '12b82da78ea8c1390943b6e762cb08a0faacd3d4125683e213bdb03af055d2c5',
     }),
     // One shared read-only authority schema/provenance validator rejects
     // corrupt or partial state before cold human controls become actionable.
@@ -236,7 +236,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
     chrome: Object.freeze({
       serviceWorker: Object.freeze({
         modules: 416, graphBytes: 2_213_778, entryBytes: 207,
-        inputSha256: 'd48f59bf3c02c2e1c798a789127209f8ca58eecef79f63233515f554e141ab66',
+        inputSha256: '58d2f25738ab54bc3d031da25c83859d31d29c5759b2459aeb9739b2bca138fd',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 129_474, entryBytes: 564 }),

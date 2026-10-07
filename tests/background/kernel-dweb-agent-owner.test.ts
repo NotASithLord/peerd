@@ -176,3 +176,18 @@ describe('kernel dweb agent owner', () => {
     );
   });
 });
+
+test('failed contact revocation stays locally denied and retry persists before success', async () => {
+  let writes = 0, closes = 0;
+  const approved = new Set(['did:peer']);
+  let durable = ['did:peer'];
+  const state = setup({ approvedDids: approved,
+    conversations: { closeDid: () => { closes++; } },
+    persistApproved: async () => { if (++writes === 1) throw new Error('disk'); durable = [...approved]; },
+  });
+  await expect(state.owner.revokePeer('did:peer')).rejects.toThrow('disk');
+  expect(approved.has('did:peer')).toBe(false); expect(closes).toBe(1);
+  expect(durable).toEqual(['did:peer']);
+  await state.owner.revokePeer('did:peer');
+  expect(durable).toEqual([]); expect(writes).toBe(2); expect(closes).toBe(2);
+});

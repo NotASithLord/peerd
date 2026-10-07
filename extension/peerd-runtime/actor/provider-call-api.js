@@ -10,11 +10,14 @@
 // be an agent loop inside a capability we can't see into (that is what
 // peerd.runtime.runAgent / the actors client are for, real gated delegation).
 //
-// Pure — values in, values out, no IO, no imports. The imperative shell (the
+// Pure: values in, values out, no IO. The imperative shell (the
 // worker bridge, the job-runner relay wall, the SW `script/model-call` route
 // that adds the key + folds cost) lives elsewhere; keeping validation, quota
 // arithmetic, and the event fold here makes the refusal matrix unit-testable
 // without a browser or a live provider.
+
+// why: the authority needs quota policy, not argument normalization or stream folding.
+export { ProviderQuotaError, PROVIDER_RUN_MAX_CALLS, PROVIDER_RUN_MAX_OUTPUT_TOKENS, providerQuotaError } from '../cost/accumulator.js';
 
 /** A refused call REJECTS in the realm like a thrown call — bad args, never quota. */
 export class ProviderCallError extends Error {
@@ -22,28 +25,6 @@ export class ProviderCallError extends Error {
   constructor(message) { super(message); this.name = 'ProviderCallError'; }
 }
 
-/** Quota overflow — a STRUCTURED refusal the script can catch and degrade on
- * (a fan-out should finish with partial results), never a worker kill. The
- * message always starts with 'provider quota exceeded' so realm code can
- * string-match it (the bridge re-raises plain Errors across the seam). */
-export class ProviderQuotaError extends Error {
-  /** @param {string} message */
-  constructor(message) { super(message); this.name = 'ProviderQuotaError'; }
-}
-
-// ── Per-RUN quota (design 5's policy decision) ─────────────────────────────
-// Counted SW-side keyed by runId (script-runs.js) so a hostile/buggy realm
-// cannot reset its own meter. No cross-run daily budget in v1 — the cost view
-// + Stop + the session spend limit are the existing levers.
-// why 20: enough fan-out for the target workload (map-reduce over ~a screen of
-// rows, grading a candidate list) while keeping a runaway while-loop's worst
-// case at one turn's order of spend — the design-doc proposal, owner-tunable.
-export const PROVIDER_RUN_MAX_CALLS = 20;
-// why 32k: "a ceiling in the same order as one normal turn's budget" — the
-// turn's streamed output cap is 64k (to-anthropic.js maxTokens default), so
-// half of it bounds sub-call output at the same order without letting the
-// side-channel outspend the turn that caused it.
-export const PROVIDER_RUN_MAX_OUTPUT_TOKENS = 32_768;
 // why 8192: the per-call clamp — 2× the actor per-call default (spawn.js
 // DEFAULT_MAX_OUTPUT_TOKENS), room for a real extraction, an order below the
 // run ceiling so one call can't drain the whole run's budget.
@@ -137,30 +118,6 @@ export const validateProviderCallArgs = (raw) => {
     ...(typeof args.model === 'string' ? { model: args.model } : {}),
     maxTokens,
   };
-};
-
-/**
- * The per-run quota check — pure over the SW-side counters. Returns the
- * ProviderQuotaError to refuse with, or null when the run may call again.
- * Counters are read BEFORE a call and the call is counted before it flies, so
- * a concurrent fan-out can overshoot the token ceiling only by its in-flight
- * calls' clamped output — bounded, by construction.
- *
- * @param {{ calls?: number, outputTokens?: number } | null | undefined} used
- * @returns {ProviderQuotaError | null}
- */
-export const providerQuotaError = (used) => {
-  const calls = used?.calls ?? 0;
-  const outputTokens = used?.outputTokens ?? 0;
-  if (calls >= PROVIDER_RUN_MAX_CALLS) {
-    return new ProviderQuotaError(
-      `provider quota exceeded: ${PROVIDER_RUN_MAX_CALLS} sub-calls per run — reduce the fan-out or batch rows per call`);
-  }
-  if (outputTokens >= PROVIDER_RUN_MAX_OUTPUT_TOKENS) {
-    return new ProviderQuotaError(
-      `provider quota exceeded: ${PROVIDER_RUN_MAX_OUTPUT_TOKENS} output tokens per run — lower maxTokens or summarize tighter`);
-  }
-  return null;
 };
 
 /**

@@ -9,9 +9,10 @@
 // the store build prunes nothing here but it never mounts (DWEB_ENABLED gate).
 
 import m from '/vendor/mithril/mithril.js';
+import { exploreOrder, EXPLORE_PAGE, EXPLORE_WINDOW } from './explore-order.js';
 
 /** @typedef {import('../options/sections/reset-row.js').Send} Send */
-/** @typedef {{ dwapp_id?: string, uri?: string, name?: string, slug?: string, seq?: number, publisher?: string, from?: string, version_id?: string }} DwebApp */
+/** @typedef {{ dwapp_id?: string, uri?: string, name?: string, slug?: string, seq?: number, publisher?: string, from?: string, version_id?: string, description?: string, size?: number, includes_wasm?: boolean|null }} DwebApp */
 
 /** @param {string} [did] */
 const short = (did) => (typeof did === 'string' ? did.slice(-8) : '????????');
@@ -37,8 +38,9 @@ const dedupe = (apps) => {
   return [...seen.values()];
 };
 
-/** The Discover section, mounted on the home page (DWEB_ENABLED only). attrs: { send } */
-export const DiscoverSection = () => {
+/** The Discover section, mounted on the home page (DWEB_ENABLED only).
+ * @param {{attrs?:{initialSeed?:number}}} [initialVnode] */
+export const DiscoverSection = (initialVnode) => {
   /** @type {DwebApp[]} */
   let apps = [];
   let loading = true;
@@ -48,6 +50,11 @@ export const DiscoverSection = () => {
   let timer = 0;
   let dead = false;
   let query = '';          // client-side filter over the heard list (name / peer)
+  let wasm = 'all';
+  let seed = initialVnode?.attrs?.initialSeed ?? crypto.getRandomValues(new Uint32Array(1))[0];
+  let limit = EXPLORE_PAGE;
+  let offset = 0;
+  /** @type {string[]} */ let orderedIds = [];
   let refreshing = false;  // drives the manual ↻ spin (the 4s poll stays silent)
   /** @type {(() => void) | null} */
   let onVisible = null;    // focus/visibility re-sync handler (removed on teardown)
@@ -151,7 +158,15 @@ export const DiscoverSection = () => {
         if (r?.ok === false || !Array.isArray(r?.apps)) throw new Error('discover-unavailable');
         if (epoch >= appliedRefreshEpoch) {
           appliedRefreshEpoch = epoch;
-          apps = dedupe(r.apps);
+          const next = dedupe(r.apps);
+          const present = new Set(next.map(app => app.dwapp_id));
+          // A refresh is not an effect receipt. Retain the exact pending card,
+          // including its version, until the mutation can be reconciled.
+          const pending = new Map(apps.filter(app => app.dwapp_id
+            && (unconfirmed.has(app.dwapp_id) || ['installing', 'updating'].includes(busy[app.dwapp_id])))
+            .map(app => [app.dwapp_id, app]));
+          apps = [...next.map(app => pending.get(app.dwapp_id) ?? app),
+            ...[...pending.values()].filter(app => !present.has(app.dwapp_id))];
           error = null;
         }
         return true;
@@ -313,8 +328,16 @@ export const DiscoverSection = () => {
         m('.disc-avatar', { style: `background:${colorOf(id)}`, 'aria-hidden': 'true' }, label.trim().charAt(0) || '?'),
         m('div', { style: 'flex:1; min-width:0;' }, [
           m('.disc-name', { title: label }, label),
-          m('.disc-meta', mine ? 'by you' : `from …${short(app.publisher || app.from)}`),
+          m('details.disc-publisher', [
+            m('summary.disc-meta', mine ? 'by you' : `from …${short(app.publisher || app.from)}`),
+            m('span.disc-meta', app.publisher || app.from || 'Publisher not specified'),
+          ]),
         ]),
+      ]),
+      app.description ? m('p.disc-description', app.description) : null,
+      m('p.disc-meta', [
+        app.includes_wasm === true ? 'Includes WebAssembly' : app.includes_wasm === false ? 'No detected WebAssembly files' : 'WebAssembly not specified',
+        Number.isSafeInteger(app.size) && /** @type {number} */ (app.size) >= 0 ? ` · ${new Intl.NumberFormat().format(/** @type {number} */ (app.size))} bundle bytes` : '',
       ]),
       updatable && !failed ? m('.disc-update-badge', { title: 'A newer version is available' }, '● update available') : null,
       failed ? m('p.peerd-disc-err', { style: 'margin:0;' }, state) : null,
@@ -371,13 +394,14 @@ export const DiscoverSection = () => {
           + 'share one, and it spreads to your peers. Or wait for one of theirs to arrive.')]);
       }
 
-      const q = query.trim().toLowerCase();
-      const shown = apps.filter((app) => {
-        if (!q) return true;
-        const hay = `${app.name || ''} ${short(app.publisher || app.from)} ${app.slug || ''}`.toLowerCase();
-        return hay.includes(q);
-      });
-
+      const balanced = exploreOrder(apps, { query, wasm, seed });
+      const byId = new Map(balanced.map(app => [app.dwapp_id, app]));
+      orderedIds = orderedIds.filter(id => byId.has(id));
+      const known = new Set(orderedIds);
+      for (const app of balanced) if (app.dwapp_id && !known.has(app.dwapp_id)) orderedIds.push(app.dwapp_id);
+      const ordered = orderedIds.map(id => /** @type {DwebApp} */ (byId.get(id)));
+      if (offset >= ordered.length) offset = 0;
+      const shown = ordered.slice(offset, offset + limit);
       return m('.peerd-disc', [
         header,
         errorBanner,
@@ -386,11 +410,27 @@ export const DiscoverSection = () => {
           placeholder: 'Filter shared apps… (name, peer)',
           'aria-label': 'Filter shared apps',
           value: query,
-          oninput: (/** @type {{ target: HTMLInputElement }} */ e) => { query = e.target.value; },
+          oninput: (/** @type {{ target: HTMLInputElement }} */ e) => { query = e.target.value; limit = EXPLORE_PAGE; offset = 0; orderedIds = []; },
         }),
+        m('.disc-controls', [
+          m('select', { 'aria-label': 'WebAssembly content', value: wasm,
+            onchange: (/** @type {{target: HTMLSelectElement}} */ e) => { wasm = e.target.value; limit = EXPLORE_PAGE; offset = 0; orderedIds = []; },
+          }, [m('option', {value:'all'}, 'All Apps'), m('option', {value:'yes'}, 'Includes WebAssembly'),
+            m('option', {value:'no'}, 'No detected WebAssembly files'), m('option', {value:'unknown'}, 'Not specified')]),
+          m('button.secondary', { onclick: () => { seed = crypto.getRandomValues(new Uint32Array(1))[0]; limit = EXPLORE_PAGE; offset = 0; orderedIds = []; } }, 'Shuffle'),
+        ]),
+        m('p.muted', 'WebAssembly hints are publisher-signed, not a safety or compatibility guarantee.'),
+        m('p.muted', {role:'status', 'aria-live':'polite'}, ordered.length ? `Showing ${offset + 1}–${offset + shown.length} of ${ordered.length} Apps` : 'No matching Apps'),
         shown.length === 0
           ? m('p.muted', 'Nothing matches.')
           : m('.disc-grid', shown.map((app) => card(send, app))),
+        m('.disc-controls', [
+          offset ? m('button.secondary', {onclick: () => { offset = Math.max(0, offset - EXPLORE_WINDOW); limit = EXPLORE_WINDOW; }}, 'Previous Apps') : null,
+          offset + shown.length < ordered.length ? m('button.secondary', {onclick: () => {
+            if (limit < EXPLORE_WINDOW) limit += EXPLORE_PAGE;
+            else { offset += EXPLORE_WINDOW; limit = EXPLORE_PAGE; }
+          }}, limit < EXPLORE_WINDOW ? 'Show more' : 'Next Apps') : null,
+        ]),
       ]);
     },
   };

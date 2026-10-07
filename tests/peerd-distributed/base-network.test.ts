@@ -1,3 +1,4 @@
+import { publishedAppHead } from '../../extension/offscreen/published-app-head.js';
 import { describe, test, expect } from 'bun:test';
 import { generateIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
 import { memoryPair } from '../../extension/peerd-distributed/transport/channel.js';
@@ -269,4 +270,42 @@ test('provider deadlines abort transports before reusing a dial slot', async () 
     expect(peak).toBe(3);
     expect(active).toBe(0);
   } finally { globalThis.setTimeout = original; reader.base.close(); }
+});
+
+test('publication classifies exact snapshot bytes and reseeding preserves immutable version identity', async () => {
+  const p = await spawn('classification');
+  try {
+    const options = { name: 'Not a filename guess', entry: 'index.html', created: 123,
+      files: { 'index.html': '<h1>App</h1>', 'opaque.bin': new Uint8Array([0,97,115,109,1,0,0,0]) } };
+    const first = await p.base.publishApp(options);
+    expect(first.includesWasm).toBe(true);
+    const signed = await p.base.publishMeta({slug:'classification',name:'Module App',seq:1,
+      head:publishedAppHead({...first,size:first.packedBytes})});
+    expect(signed.card.value.head).toMatchObject({version_id:first.hash,includes_wasm:true});
+    expect(p.base.heardDwapps()[0]?.head.includes_wasm).toBe(true);
+    const reseed = await p.base.publishApp({...options, expectedHash:first.hash});
+    expect(reseed.hash).toBe(first.hash); expect(reseed.includesWasm).toBe(true);
+    expect(publishedAppHead({...reseed,size:reseed.packedBytes})).toEqual(signed.card.value.head);
+    const changed = {...options,files:{'index.html':'<h1>App</h1>','misleading.wasm':new Uint8Array([1,2,3])}};
+    expect((await p.base.publishApp(changed)).includesWasm).toBe(false);
+    await expect(p.base.publishApp({...changed, expectedHash:first.hash})).rejects.toThrow('changed');
+  } finally { p.base.close(); }
+});
+
+test('user policy refuses an absent publisher via honest seeders and refuses reseeding verified bytes', async () => {
+  const denied = new Set<string>();
+  const publisher = await spawn('publisher'), seeder = await spawn('seeder');
+  const reader = await spawn('reader', { userBlocked: (did: string) => denied.has(did) });
+  try {
+    await link(publisher, seeder);
+    const shared = await publisher.base.publishApp({ name: 'test', files: { 'index.html': '<h1>test</h1>' }, entry: 'index.html' });
+    const verified = await seeder.base.fetchApp(shared.uri);
+    await seeder.base.seedApp(verified);
+    await link(seeder, reader);
+    expect((await reader.base.fetchApp(shared.uri)).manifest.publisher).toBe(publisher.identity.did);
+    denied.add(publisher.identity.did); reader.base.enforceUserPolicy();
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow('publisher-user-blocked');
+    await expect(reader.base.seedApp(verified)).rejects.toThrow('publisher-user-blocked');
+    expect(reader.mesh.hasLink(seeder.identity.did)).toBe(true);
+  } finally { for (const p of [publisher, seeder, reader]) { p.base.close(); p.mesh.close(); } }
 });

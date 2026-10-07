@@ -57,8 +57,11 @@ export const createKernelDwebAgentOwner = (deps) => {
   };
 
   const revokePeer = async (/** @type {string} */ did) => {
-    if (deps.approvedDids?.delete(did)) await deps.persistApproved?.();
-    deps.conversations.closeDid(did);
+    deps.approvedDids?.delete(did);
+    // Retry the durable write even if an earlier failed write removed the DID
+    // locally. Never restore an approval merely because persistence failed.
+    try { await deps.persistApproved?.(); }
+    finally { deps.conversations.closeDid(did); }
   };
 
   const handleInbound = (/** @type {{from?:string,data?:unknown}} */ event) => {

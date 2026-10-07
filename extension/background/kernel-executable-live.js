@@ -25,14 +25,12 @@ import { createAppQuiescence } from './app-quiescence.js';
 import { createAppTabTracker } from './app-tab-tracker.js';
 import { createDwebPublicationFence } from './dweb-publication-fence.js';
 import { createJsClient } from './notebook-client.js';
-import { createJsTabTracker } from './notebook-tab-tracker.js';
+import { createJsTabTracker, createPodTabTracker, createVmTabTracker } from './tab-tracker.js';
 import { makeArtifactEngineClient } from './offscreen-artifact-client.js';
 import { makeOffscreenWebClient } from './offscreen-web-client.js';
 import { createPodClient } from './pod-client.js';
-import { createPodTabTracker } from './pod-tab-tracker.js';
 import { listOffscreenContexts } from './offscreen-contexts.js';
 import { createVmClient } from './vm-client.js';
-import { createVmTabTracker } from './vm-tab-tracker.js';
 
 /** @param {Record<string,any>} deps */
 export const createKernelEngineLive = async (deps) => {

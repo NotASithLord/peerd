@@ -180,3 +180,54 @@ test('attempt deadline cancels transport and lets a queued candidate construct i
     expect(admission.stats()).toEqual({ active: 0, inbound: 0, queued: 0 });
   } finally { room.leave(); }
 });
+
+for (const duringRead of [false, true]) test(`authenticated user ban refuses room admission (policy races HELLO: ${duringRead})`, async () => {
+  const { createSession } = await import('../../extension/peerd-distributed/transport/session.js');
+  const identity = await generateIdentity(), other = await generateIdentity();
+  const [local, remote] = memoryPair();
+  const denied = new Set<string>();
+  let entered!: () => void, release!: () => void;
+  const reading = new Promise<void>(r => { entered = r; });
+  const gate = new Promise<void>(r => { release = r; });
+  const room = await joinRoom({ roomId: 'policy', identity, url: null,
+    transport: { connect: async () => local }, isBlocked: did => denied.has(did),
+    admitPeer: async () => { entered(); await gate; return true; } });
+  const handshake = createSession({ channel: remote, identity: other }).catch(e => e);
+  const pending = room.dialVia('broker', other.did).catch(e => e);
+  try {
+    await reading;
+    if (duringRead) denied.add(other.did);
+    release();
+    const result = await pending; await handshake;
+    if (duringRead) {
+      expect(result).toBeInstanceOf(Error); expect(local.isClosed()).toBe(true);
+      expect(room.peers()).toHaveLength(0);
+    } else {
+      expect(room.mesh.hasLink(other.did)).toBe(true);
+      denied.add(other.did); room.mesh.removeLink(other.did);
+      const [replacement, far] = memoryPair();
+      expect(room.mesh.addLink(replacement, other.did)).toBe(false);
+      expect(replacement.isClosed()).toBe(true); far.close();
+      expect(await room.dialVia('broker', other.did).catch(e => e.message)).toBe('peer-user-blocked');
+    }
+  } finally { release(); room.leave(); remote.close(); }
+});
+
+test('an authenticated inbound HELLO can revalidate repaired policy before the synchronous admission check', async () => {
+  const { createSession } = await import('../../extension/peerd-distributed/transport/session.js');
+  const identity = await generateIdentity(), other = await generateIdentity();
+  const [local, remote] = memoryPair();
+  const f = fixture(); let unavailable = true, checks = 0;
+  const room = await joinRoom({ roomId: 'recover-policy', identity, WebSocket: f.WebSocket,
+    transport: { accept: async () => ({ channel: local }) }, isBlocked: () => unavailable,
+    admitPeer: async did => { expect(did).toBe(other.did); checks++; unavailable = false; return true; } });
+  let connected!: () => void;
+  const accepted = new Promise<void>(r => { connected = r; });
+  room.onPeer(() => connected());
+  try {
+    const handshake = createSession({ channel: remote, identity: other });
+    receiveOffer(f.sockets[0], 'untrusted-connection-label');
+    await Promise.all([handshake, accepted]);
+    expect(checks).toBe(1); expect(room.mesh.hasLink(other.did)).toBe(true);
+  } finally { room.leave(); remote.close(); }
+});

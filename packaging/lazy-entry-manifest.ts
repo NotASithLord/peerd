@@ -41,6 +41,7 @@ export const PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES = Object.freeze([
   'background/repository-local-client.js',
   'peerd-egress/ui.js',
   'sidepanel/components/vault-gate.js',
+  'home/discover-section.js',
   'sidepanel/components/vault-code-stream.js',
   'offscreen/repository-host.js',
   'offscreen/repository-worker.js',

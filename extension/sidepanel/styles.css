@@ -946,7 +946,8 @@ textarea {
    text-input surface above and swap the native arrow for a themed chevron so
    it reads like the rest of the form. (Same appearance-strip approach as
    type=search below.) The open option list stays OS-native, as selects do. */
-.input-row select {
+.input-row select,
+.disc-controls select {
   font: inherit;
   padding: 8px 32px 8px 10px;
   border: 1px solid var(--border);

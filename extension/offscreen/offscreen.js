@@ -46,6 +46,13 @@ const errorResponse = (/** @type {any} */ cause) => cause?.phase === 'startup'
     ok: false,
     error: cause?.name ? `${cause.name}: ${cause.message}` : (cause?.message ?? String(cause)),
   };
+// Keep exact sender admission and its existing refusal receipt shared across hosts.
+const trustedSender = (/** @type {any} */ sender,
+  /** @type {(value:any)=>void} */ sendResponse, error = 'unauthorized-command-sender') => {
+  if (isServiceWorkerSender(sender)) return true;
+  sendResponse({ ok: false, error });
+  return false;
+};
 const claimLease = (/** @type {string} */ scope,
   /** @type {(value:any)=>void} */ sendResponse) => {
   const lease = featureLeaseHost?.activeLease(scope) ?? null;
@@ -101,15 +108,14 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
   /** @type {(value:any)=>void} */ sendResponse,
 ) => {
   if (typeof msg?.type !== 'string' || !msg.type.startsWith('dweb/base-host/')) return false;
-  if (!isServiceWorkerSender(sender)) {
-    sendResponse({ ok: false, error: 'unauthorized-command-sender' });
-    return false;
-  }
-  const claim = claimLease('dweb', sendResponse);
-  if (!claim) return false;
+  if (!trustedSender(sender, sendResponse)) return false;
+  // Policy applies to this existing realm without granting network participation.
+  const policy = msg.type === 'dweb/base-host/peer-policy';
+  const claim = policy ? null : claimLease('dweb', sendResponse);
+  if (!policy && !claim) return false;
   loadDwebHost()
     .then(({ handleDwebBaseMessage }) => {
-      if (rejectStaleClaim('dweb', claim, sendResponse)) return;
+      if (!policy && rejectStaleClaim('dweb', claim, sendResponse)) return;
       const handled = handleDwebBaseMessage(msg, sender, sendResponse);
       if (handled !== true) sendResponse({ ok: false, error: 'unknown-dweb-host-message' });
     }, (cause) => sendResponse(errorResponse(cause)));
@@ -136,10 +142,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
   const isDocumentAbort = msg?.type === 'doc/abort';
   const load = extractionLoaders[/** @type {keyof typeof extractionLoaders} */ (msg?.type)];
   if (!load && !isDocumentAbort) return false;
-  if (!isServiceWorkerSender(sender)) {
-    sendResponse({ ok: false, error: 'untrusted-sender' });
-    return false;
-  }
+  if (!trustedSender(sender, sendResponse, 'untrusted-sender')) return false;
   const claim = claimLease('dom-host', sendResponse);
   if (!claim) return false;
 
@@ -228,7 +231,7 @@ const onJobMessage = (msg, sender, sendResponse) => {
   // Fail closed for any non-first-party sender — this runs arbitrary code, so it
   // must match the SW dispatcher's posture (sender-trust.js). externally_connectable
   // is unset today, so this is defense-in-depth, not an active hole.
-  if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
+  if (!trustedSender(sender, sendResponse)) return true;
   const claim = claimLease('dom-host', sendResponse);
   if (!claim) return true;
   loadJobHost().then(({ runJob, extractMarkdownLocal }) => {
@@ -281,7 +284,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ (onJobMessage));
  */
 const onJobAbort = (msg, sender, sendResponse) => {
   if (msg?.type !== 'job/abort') return undefined;
-  if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
+  if (!trustedSender(sender, sendResponse)) return true;
   const claim = claimLease('dom-host', sendResponse);
   if (!claim) return true;
   if (typeof msg.runId !== 'string' || !msg.runId) {
@@ -322,7 +325,7 @@ const loadLocalModelHost = makeBoundedModuleLoader(
  */
 const onLocalModelMessage = (msg, sender, sendResponse) => {
   if (typeof msg?.type !== 'string' || !msg.type.startsWith('local-model/host/')) return undefined;
-  if (!isServiceWorkerSender(sender)) { sendResponse({ ok: false, error: 'unauthorized-command-sender' }); return true; }
+  if (!trustedSender(sender, sendResponse)) return true;
   const claim = claimLease('model-host', sendResponse);
   if (!claim) return true;
   (async () => {

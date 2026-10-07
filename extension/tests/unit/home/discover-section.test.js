@@ -144,3 +144,72 @@ describe('home.discover effect custody', () => {
     }
   });
 });
+
+describe('home.discover Explore controls', () => {
+  it('bounds rendered cards, filters signed WASM hints, and never installs through browsing', async () => {
+    const root = document.createElement('div'); document.body.appendChild(root);
+    const apps = Array.from({length:130}, (_,i) => ({dwapp_id:`app-${i}`,name:`App ${i}`,publisher:`publisher-${i % 7}`,
+      description:`Description ${i}`,size:1000,includes_wasm:i % 3 === 0 ? true : i % 3 === 1 ? false : null,uri:`peerd://publisher/hash-${i}`}));
+    /** @type {string[]} */ const writes = [];
+    const send = async (/** @type {any} */ message) => {
+      if (message.type === 'dweb/base/heard') return {ok:true,apps};
+      if (message.type === 'apps/list') return {ok:true,apps:[]};
+      if (message.type === 'dweb/base/status') return {ok:true,did:null};
+      writes.push(message.type); return {ok:true};
+    };
+    /** @param {string} label */
+    const click = async label => {
+      /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')].find(b => b.textContent === label)).click();
+      await settle();
+    };
+    m.mount(root,{view:()=>m(DiscoverSection,{send})});
+    try {
+      await settle(); expect(root.querySelectorAll('.disc-card').length).toBe(24);
+      const before = [...root.querySelectorAll('.disc-name')].map(el=>el.textContent).join(',');
+      /** @type {HTMLButtonElement} */ (root.querySelector('.disc-refresh')).click(); await settle();
+      expect([...root.querySelectorAll('.disc-name')].map(el=>el.textContent).join(',')).toBe(before);
+      await click('Show more'); await click('Show more'); await click('Show more');
+      expect(root.querySelectorAll('.disc-card').length).toBe(96);
+      await click('Next Apps'); expect(root.querySelectorAll('.disc-card').length).toBe(24);
+      expect(root.textContent).toContain('Showing 97–120');
+      await click('Previous Apps'); expect(root.querySelectorAll('.disc-card').length).toBe(96);
+      const filter = /** @type {HTMLSelectElement} */ (root.querySelector('select'));
+      filter.value='unknown'; filter.dispatchEvent(new Event('change',{bubbles:true})); await settle();
+      expect([...root.querySelectorAll('.disc-card')].every(card=>card.textContent?.includes('WebAssembly not specified'))).toBe(true);
+      await click('Shuffle'); expect(writes.length).toBe(0);
+    } finally {m.mount(root,null);root.remove();}
+  });
+});
+
+describe('home.discover polling custody', () => {
+it('preserves existing card nodes and pending effects when a refreshed catalog adds or removes peers', async () => {
+  const root = document.createElement('div'); document.body.appendChild(root);
+  const first = {dwapp_id:'pending',name:'Pending App',publisher:'publisher-a',uri:'peerd://a/hash'};
+  let apps = [first];
+  /** @type {(value:any)=>void} */ let finish = () => {};
+  const effect = new Promise(resolve=>{finish=resolve;});
+  const send = async (/** @type {any} */ message) => {
+    if (message.type === 'dweb/base/heard') return {ok:true,apps};
+    if (message.type === 'apps/list') return {ok:true,apps:[]};
+    if (message.type === 'dweb/base/status') return {ok:true,did:null};
+    if (message.type === 'dweb/base/install') return effect;
+    return {ok:false};
+  };
+  m.mount(root,{view:()=>m(DiscoverSection,{send})});
+  try {
+    await settle();
+    const original = root.querySelector('.disc-card');
+    /** @type {HTMLButtonElement} */ (original?.querySelector('button')).click(); await settle();
+    apps = [{dwapp_id:'new',name:'New App',publisher:'publisher-b',uri:'peerd://b/hash'}];
+    /** @type {HTMLButtonElement} */ (root.querySelector('.disc-refresh')).click(); await settle();
+    expect(root.querySelector('.disc-card')).toBe(original);
+    expect(original?.textContent).toContain('Installing');
+    expect(root.querySelectorAll('.disc-card').length).toBe(2);
+    finish({ok:false,outcomeKnown:false}); await settle();
+    /** @type {HTMLButtonElement} */ (root.querySelector('.disc-refresh')).click(); await settle();
+    expect(root.querySelector('.disc-card')).toBe(original);
+    expect(original?.textContent).toContain('Refresh to reconcile');
+  } finally {finish({ok:false});m.mount(root,null);root.remove();}
+});
+
+});

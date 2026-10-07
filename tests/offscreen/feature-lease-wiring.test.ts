@@ -71,7 +71,8 @@ describe('offscreen production feature-lease wiring', () => {
   test('document Stop is an exact request route behind sender and live lease custody', () => {
     const shell = source('offscreen/offscreen.js');
     const listener = shell.slice(shell.indexOf("const isDocumentAbort = msg?.type === 'doc/abort'"));
-    const senderGate = listener.indexOf('if (!isServiceWorkerSender(sender))');
+    const senderGate = listener.indexOf("if (!trustedSender(sender, sendResponse, 'untrusted-sender'))");
+    expect(shell).toContain('if (isServiceWorkerSender(sender)) return true;');
     const claimGate = listener.indexOf("claimLease('dom-host', sendResponse)");
     const abortRoute = listener.indexOf('if (isDocumentAbort)');
     expect(senderGate).toBeGreaterThanOrEqual(0);

@@ -1,4 +1,6 @@
 // @ts-check
+import { makeSerialLane } from '/shared/cold-util.js';
+import { setUserPeerBlocked } from './dweb-peer-policy.js';
 
 import { effectReceiptFields } from './host-effect-verdict.js';
 
@@ -450,6 +452,13 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
   });
   const dwebEngagedSessions = new Set();
   const a2aApprovedDids = new Set();
+  let a2aApprovalRevision = 0;
+  const approvalWrites = makeSerialLane();
+  const persistA2aApproved = () => {
+    // Snapshot at dispatch, not enqueue: a queued grant cannot resurrect a
+    // later revocation when an earlier browser storage write finally settles.
+    return approvalWrites(() => deps.sessionCache.sessionSet('a2aApprovedDids', [...a2aApprovedDids]));
+  };
   const a2aApprovedReady = deps.sessionCache.sessionGet('a2aApprovedDids')
     .then((/** @type {unknown} */ stored) => {
       for (const did of Array.isArray(stored) ? stored : []) {
@@ -769,18 +778,19 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     }),
     peers: () => withDwebPublication(() =>
       deps.browser.runtime.sendMessage({ type: 'dweb/base-host/peers' })),
-    block: (/** @type {any} */ { did, block = true, reason } = {}) =>
-      withDwebPublication(async (current) => {
-        if (block && typeof did === 'string') {
-          await /** @type {any} */ (dwebAgentOwner)?.revokePeer(did);
-        }
-        if (!current() || !dwebTransportOn()) {
-          return { ok: false, error: 'dweb-disabled' };
-        }
-        return deps.browser.runtime.sendMessage({
-          type: block ? 'dweb/base-host/ban' : 'dweb/base-host/unblock', did, reason,
-        });
-      }),
+    block: (/** @type {any} */ args = {}) => {
+      const generation = engine.dwebPublicationGeneration();
+      return setUserPeerBlocked({
+        kv: deps.kv, vault: deps.vault, browser: deps.browser,
+        current: () => engine.dwebPublicationGeneration() === generation,
+        revokePeer: async (/** @type {string} */ did) => {
+          await a2aApprovedReady;
+          a2aApprovalRevision++;
+          if (dwebAgentOwner) await /** @type {any} */ (dwebAgentOwner).revokePeer(did);
+          else { a2aApprovedDids.delete(did); await persistA2aApproved(); }
+        },
+      }, args);
+    },
     setDiscovery: (/** @type {any} */ { enabled } = {}) => withDwebPublication(() =>
       deps.browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled })),
   }) : null;
@@ -993,7 +1003,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       idb: deps.idb,
       skills: skillRegistry,
       siteClients: siteClientStore,
-      dweb: dwebTransportOn() ? dwebSurface : null,
+      dweb: dwebTransportOn() ? dwebSurface : dwebSurface ? Object.freeze({ block: dwebSurface.block }) : null,
       ...(actorType === 'app' && options.actorInstanceId ? {
         appAgentCall: async (/** @type {'observe'|'act'} */ op,
           /** @type {object} */ args, /** @type {AbortSignal|undefined} */ signal) => {
@@ -3076,9 +3086,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       active: dwebAgentOn, isLocked: deps.vault.isLocked,
       appendAudit: deps.auditLog.append, meshDispatch,
       conversations: conversationRegistry, approvedDids: a2aApprovedDids,
-      persistApproved: () => deps.sessionCache.sessionSet(
-        'a2aApprovedDids', [...a2aApprovedDids],
-      ),
+      persistApproved: persistA2aApproved,
       isolationReady: () => live.actorIsolationReady,
       isolationAvailable: () => actorIsolationAvailable(live.actorIsolation),
       runWhenRecoveryReady: actorRecoveryGate.runWhenReady,
@@ -3121,13 +3129,15 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
               ? conversationRegistry.didFor(args.convId ?? '') : args.did;
           if (!target) return { ok: false, error: `a2a: ${op} has no consent target` };
           if (!a2aApprovedDids.has(target)) {
+            const approvalRevision = a2aApprovalRevision;
             const answer = await confirmAction({
               tool: 'a2a_contact', sessionId: message.ownerSessionId, origins: [target],
             }, /** @type {any} */ (signal));
+            if (approvalRevision !== a2aApprovalRevision) return { ok: false, error: 'a2a: contact consent retired' };
             const consent = a2aConsentOutcome(answer);
             if (consent.persist) {
               a2aApprovedDids.add(target);
-              await deps.sessionCache.sessionSet('a2aApprovedDids', [...a2aApprovedDids]);
+              await persistA2aApproved();
             } else if (consent.ok) oneShotTarget = target;
             deps.auditLog.append({
               type: 'a2a_consent',

@@ -125,6 +125,9 @@ const harness = async (
     pushState?: () => Promise<any>,
     confirm?: (prompt: any, signal?: AbortSignal) => Promise<any>,
     dweb?: boolean,
+    ensureDwebFeature?: () => Promise<void>,
+    ensureOffscreen?: () => Promise<void>,
+    getContexts?: () => Promise<any[]>,
     runtimeSendMessage?: (message: any) => Promise<any>,
     sessionCache?: {
       sessionGet: (key: string) => Promise<any>,
@@ -237,6 +240,7 @@ const harness = async (
     runtime: {
       getURL: (path: string) => `chrome-extension://test/${path}`,
       getManifest: () => ({ manifest_version: 3 }),
+      getContexts: options.getContexts,
       sendMessage: options.runtimeSendMessage ?? (async () => ({ ok: true })),
     },
     tabs: {
@@ -365,7 +369,7 @@ const harness = async (
     confirmation: { confirm: options.confirm ?? (async () => 'yes_once') },
     denylist: { ready: async () => ({ ok: true }), patterns: options.denylistPatterns ?? (() => []) },
     featureHost: {
-      ensureOffscreen: async () => {},
+      ensureOffscreen: options.ensureOffscreen ?? (async () => {}),
       runtime: {
         ready: Promise.resolve(),
         runWithLease: async (_scope: string, operation: (lease?: any) => any) => operation({}),
@@ -387,7 +391,7 @@ const harness = async (
     pushState: options.pushState ?? (async () => {}),
     closePanel: async () => ({ ok: true }),
     dwebEnabled: options.dweb === true,
-    ensureDwebFeature: async () => {},
+    ensureDwebFeature: options.ensureDwebFeature ?? (async () => {}),
     firefox: options.firefox === true,
     firefoxActorLifetime: options.firefoxActorLifetime,
     loadDirectActorHost: options.loadDirectActorHost ?? (options.firefox
@@ -2277,4 +2281,77 @@ describe('kernel turn authority adapter', () => {
     await h.runtime.relays.eventOwners.onRemoved(9);
     expect(h.siteCaptureEvents).toContainEqual(['release', 9]);
   });
+});
+
+
+test('actual tool context has only exact peer policy control offline and never starts a host', async () => {
+  let starts = 0, sends = 0;
+  const forbidden = async () => { starts++; throw new Error('must not acquire'); };
+  const h = await harness(undefined, { dweb: true, ensureDwebFeature: forbidden,
+    ensureOffscreen: forbidden, getContexts: async () => [],
+    runtimeSendMessage: async () => { sends++; throw new Error('must not send'); } });
+  h.settings.dwebEnabled = false;
+  const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+  expect(Object.keys(ctx.dweb)).toEqual(['block']);
+  const did = 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP';
+  expect(await ctx.dweb.block({ did })).toMatchObject({ ok: true, durable: true, inactive: true });
+  expect(h.kvState.get('dweb.userPeerPolicy').blocked).toEqual([did]);
+  expect(await ctx.dweb.block({ did, block: false })).toMatchObject({ ok: true });
+  expect(h.kvState.get('dweb.userPeerPolicy').blocked).toEqual([]);
+  expect(starts).toBe(0); expect(sends).toBe(0);
+});
+
+test('a contact confirmation pending across a user ban cannot restore approval or send', async () => {
+  let confirm!: (value: string) => void, entered!: () => void, sent = 0;
+  const prompting = new Promise<void>(r => { entered = r; });
+  const answer = new Promise<string>(r => { confirm = r; });
+  const h = await harness(undefined, { dweb: true, getContexts: async () => [],
+    confirm: async () => { entered(); return answer; },
+    runtimeSendMessage: async () => { sent++; return { ok: true }; } });
+  const actor = await h.sessions.create({ kind: 'actor', parentSessionId: h.root.sessionId,
+    provider: h.root.provider, model: h.root.model, permissionMode: 'act', confirmActions: false,
+    toolManifest: { allow: ['a2a_run'] }, depth: 1, actorType: 'dweb', instanceId: 'dweb' });
+  const runId = h.scriptRuns.mintRunId(actor.sessionId);
+  h.scriptRuns.register(runId, undefined, actor.sessionId, { a2a: true });
+  const did = 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP';
+  const pending = h.runtime.relays.relayRoutes['a2a/call']({ method: 'cast', args: { did, message: 'hello' },
+    ownerSessionId: actor.sessionId, runId }, {});
+  await prompting;
+  const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+  expect(await ctx.dweb.block({ did })).toMatchObject({ ok: true });
+  confirm('yes_session');
+  expect(await pending).toMatchObject({ ok: false, error: 'a2a: contact consent retired' });
+  expect(h.cache.get('a2aApprovedDids')).toEqual([]);
+  expect(sent).toBe(0); h.scriptRuns.release(runId);
+});
+
+test('an older contact storage write cannot land after a confirmed ban', async () => {
+  const cache = new Map<string, any>(); let first = true;
+  let entered!: () => void, release!: () => void;
+  const writing = new Promise<void>(r => { entered = r; });
+  const gate = new Promise<void>(r => { release = r; });
+  const h = await harness(undefined, { dweb: true, getContexts: async () => [], confirm: async () => 'yes_session',
+    sessionCache: { sessionGet: async key => cache.get(key), sessionSet: async (key, value) => {
+      if (key === 'a2aApprovedDids' && first) { first = false; entered(); await gate; }
+      cache.set(key, structuredClone(value));
+    } } });
+  const actor = await h.sessions.create({ kind: 'actor', parentSessionId: h.root.sessionId,
+    provider: h.root.provider, model: h.root.model, permissionMode: 'act', confirmActions: false,
+    toolManifest: { allow: ['a2a_run'] }, depth: 1, actorType: 'dweb', instanceId: 'dweb' });
+  const runId = h.scriptRuns.mintRunId(actor.sessionId);
+  h.scriptRuns.register(runId, undefined, actor.sessionId, { a2a: true });
+  const did = 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP';
+  const pending = h.runtime.relays.relayRoutes['a2a/call']({ method: 'cast', args: { did, message: 'hello' },
+    ownerSessionId: actor.sessionId, runId }, {});
+  await writing;
+  const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+  let banSettled = false;
+  const ban = ctx.dweb.block({ did }).finally(() => { banSettled = true; });
+  // All fixture work is immediate except the explicitly held storage write.
+  // Advance the task queue to let the competing revocation reach that barrier.
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(banSettled).toBe(false);
+  release();
+  expect(await ban).toMatchObject({ ok: true }); await pending;
+  expect(cache.get('a2aApprovedDids')).toEqual([]); h.scriptRuns.release(runId);
 });

@@ -1,4 +1,5 @@
 // @ts-check
+import { withDeadline } from '../shared/cold-util.js';
 
 import {
   CONTRIBUTOR_CHANNEL_CALL, CONTRIBUTOR_CHANNEL_OFFER,
@@ -141,21 +142,9 @@ export const createPreviewContributorAuthority = (/** @type {any} */ {
       || typeof now !== 'function' || typeof makeId !== 'function') {
     throw new TypeError('kernel-preview-contributor-config-invalid');
   }
-  const storage = (/** @type {()=>Promise<any>} */ operation) => new Promise((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      reject(new Error('contributor-storage-timeout'));
-    }, storageDeadlineMs);
-    Promise.resolve().then(operation).then((value) => {
-      if (settled) return;
-      settled = true; clearTimeout(timer); resolve(value);
-    }, (cause) => {
-      if (settled) return;
-      settled = true; clearTimeout(timer); reject(cause);
-    });
-  });
+  const storage = (/** @type {()=>Promise<any>} */ operation) => withDeadline(
+    operation, storageDeadlineMs, () => new Error('contributor-storage-timeout'),
+  );
   const get = (/** @type {string} */ key) => storage(() => kv.get(key));
   const set = (/** @type {string} */ key, /** @type {any} */ value) =>
     storage(() => kv.set(key, value));
