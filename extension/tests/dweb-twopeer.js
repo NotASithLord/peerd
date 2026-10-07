@@ -27,10 +27,10 @@ import { createBaseNetwork } from '/peerd-distributed/base-network.js';
 // cleanly here. (tests/ is exempt from the no-deep-import rule.)
 import { makeMeshDispatch } from '/peerd-runtime/actor/a2a-dispatch.js';
 import { createConversationRegistry } from '/peerd-runtime/actor/conversation-registry.js';
+import { twoPeerEndpoint } from './dweb-twopeer-endpoint.js';
 
 const params = new URLSearchParams(location.search);
 const roomId = params.get('room') ?? 'harness';
-const url = params.get('url') ?? 'ws://localhost:8799/rendezvous';
 const name = params.get('name') ?? 'peer';
 const a2aOn = params.get('a2a') === '1';   // add the live ask/reply beat on top of gossip
 
@@ -78,6 +78,7 @@ bootStage('module-loaded');
 
 const boot = async () => {
   try {
+    const url = twoPeerEndpoint(params.get('url'));
     bootStage('generating-identity');
     const identity = await generateIdentity();
     myDid = identity.did;

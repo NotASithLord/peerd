@@ -8,10 +8,10 @@ export class AdmissionError extends Error {
 
 /**
  * @param {{ active?: number, perScope?: number, reservedOutbound?: number,
- * queued?: number, queuedPerScope?: number, timeoutMs?: number }} [opts]
+ * queued?: number, queuedPerScope?: number, timeoutMs?: number, timers?: any }} [opts]
  */
 export const createAdmissionGovernor = ({ active = 8, perScope = 4, reservedOutbound = 2,
-  queued = 64, queuedPerScope = 16, timeoutMs = 15_000 } = {}) => {
+  queued = 64, queuedPerScope = 16, timeoutMs = 15_000, timers = globalThis } = {}) => {
   if (![active, perScope, reservedOutbound, queued, queuedPerScope, timeoutMs].every(Number.isSafeInteger)
     || active < 2 || perScope < 2 || reservedOutbound < 1 || reservedOutbound >= active
     || queued < 0 || queuedPerScope < 0 || timeoutMs < 1) throw new AdmissionError('invalid limits');
@@ -31,7 +31,7 @@ export const createAdmissionGovernor = ({ active = 8, perScope = 4, reservedOutb
   const finish = (e, error, value) => {
     if (e.settled) return;
     e.settled = true;
-    clearTimeout(e.timer);
+    timers.clearTimeout(e.timer);
     e.external?.removeEventListener('abort', e.cancel);
     const index = waiting.indexOf(e);
     if (index !== -1) waiting.splice(index, 1);
@@ -52,8 +52,8 @@ export const createAdmissionGovernor = ({ active = 8, perScope = 4, reservedOutb
     e.started = true;
     running++; e.scope.running++;
     if (e.direction === 'inbound') { inbound++; e.scope.inbound++; }
-    clearTimeout(e.timer);
-    e.timer = setTimeout(() => finish(e, new AdmissionError('timed out')), timeoutMs);
+    timers.clearTimeout(e.timer);
+    e.timer = timers.setTimeout(() => finish(e, new AdmissionError('timed out')), timeoutMs);
     try { Promise.resolve(e.task(e.controller.signal)).then((v) => finish(e, null, v), (err) => finish(e, err)); }
     catch (err) { finish(e, err); }
   };
@@ -100,7 +100,7 @@ export const createAdmissionGovernor = ({ active = 8, perScope = 4, reservedOutb
           if (eligible) start(entry);
           else {
             waiting.push(entry);
-            entry.timer = setTimeout(() => finish(entry, new AdmissionError('queue timed out')), timeoutMs);
+            entry.timer = timers.setTimeout(() => finish(entry, new AdmissionError('queue timed out')), timeoutMs);
           }
           return promise;
         },

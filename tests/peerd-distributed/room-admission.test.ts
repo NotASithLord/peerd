@@ -57,9 +57,9 @@ test('real room admission bounds unsolicited offers across rooms and reserves ou
   } finally { a.leave(); b.leave(); }
 });
 
-test('large bootstrap roster and relay dials share bounded queued ownership, dedup and cancellation', async () => {
+test('maximum legacy bootstrap roster and relay dials share bounded queued ownership, dedup and cancellation', async () => {
   const admission = createAdmissionGovernor({ active: 4, perScope: 2, reservedOutbound: 1, queued: 4, queuedPerScope: 2 });
-  const f = fixture(Array.from({ length: 1000 }, (_, i) => `candidate-${i}`));
+  const f = fixture(Array.from({ length: 20 }, (_, i) => `candidate-${i}`));
   const room = await joinRoom({ roomId: 'roster', identity: await generateIdentity(), admission,
     WebSocket: f.WebSocket, transport: f.transport, awaitInitialRendezvous: false });
   await flush();

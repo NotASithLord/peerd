@@ -29,12 +29,12 @@ const validEnvelope = (env, typ) => exactKeys(env, ['v', 'ch', 'typ', 'from', 'b
  *   channel: { send:(msg:any, options?: import('./outgoing.js').SendOptions)=>void | Promise<void>, setHandler:(h:any)=>void, deliver:(msg:any)=>void,
  *     onClose?:(cb:()=>void)=>(()=>void), close?:()=>void, isClosed?:()=>boolean, getSessionBinding?:()=>(SessionBinding|null) },
  *   identity: {did:string,sign:(bytes:Uint8Array)=>Promise<Uint8Array>},
- *   caps?:string[], now?:()=>number, timeoutMs?:number, signal?:AbortSignal,
+ *   caps?:string[], now?:()=>number, timeoutMs?:number, signal?:AbortSignal, timers?:any,
  * }} opts
  * @returns {Promise<{remoteDid:string}>}
  */
 export const createSession = ({ channel, identity, caps = ['content'], now = Date.now,
-  timeoutMs = 10_000, signal,
+  timeoutMs = 10_000, signal, timers = globalThis,
 }) => new Promise((resolve, reject) => {
   let settled = false;
   let helloStarted = false;
@@ -54,7 +54,7 @@ export const createSession = ({ channel, identity, caps = ['content'], now = Dat
   const finish = (error) => {
     if (settled) return;
     settled = true;
-    clearTimeout(timer);
+    timers.clearTimeout(timer);
     signal?.removeEventListener('abort', abort);
     offClose();
     channel.setHandler(null);
@@ -76,7 +76,7 @@ export const createSession = ({ channel, identity, caps = ['content'], now = Dat
   };
   const complete = () => { if (helloSent && proofSent && proofReceived) finish(null); };
   const abort = () => finish(new Error('peer HELLO cancelled'));
-  const timer = setTimeout(() => finish(new Error('peer HELLO timed out')), timeoutMs);
+  const timer = timers.setTimeout(() => finish(new Error('peer HELLO timed out')), timeoutMs);
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) { abort(); return; }
   if (channel.isClosed?.()) { finish(new Error('peer closed during HELLO')); return; }

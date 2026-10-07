@@ -28,6 +28,8 @@ import { connectionPath } from './ice.js';
 import { AdmissionError, roomAdmission, MAX_ADMISSION_CANDIDATES } from './admission.js';
 import { createSignalingBuffer } from './signaling-buffer.js';
 import { dlog, dwarn } from '../log.js';
+import { SPARSE_PUBLIC_PROFILE, sparsePublicProfile } from './rendezvous-profile.js';
+import { createNeighborMaintenance, NEIGHBOR_CANDIDATES } from './neighbors.js';
 
 /** @param {string} did */
 const short = (did) => (did || '').slice(-8);
@@ -56,6 +58,9 @@ const newId = () =>
  *   budget?: number,
  *   caps?: string[],
  *   kind?: string,
+ *   profile?: string,
+ *   random?: () => number,
+ *   timers?: any,
  *   awaitInitialRendezvous?: boolean,
  *   admission?: ReturnType<typeof import('./admission.js').createAdmissionGovernor>,
  * }} opts
@@ -69,6 +74,9 @@ export const joinRoom = async ({
   WebSocket: WS = globalThis.WebSocket,
   RTCPeerConnection = globalThis.RTCPeerConnection,
   now = Date.now,
+  random = Math.random,
+  timers = globalThis,
+  profile,
   audit = null,
   budget,
   caps = ['content', 'pubsub'],
@@ -84,6 +92,8 @@ export const joinRoom = async ({
   /** @type {import('./signaling-client.js').RendezvousSession | null} */
   let session = null;
   let left = false;
+  const lifetime = new AbortController();
+  const sparseRequested = peerKind !== 'website' && !!sparsePublicProfile(roomId, profile);
   const attempts = admission.createScope();
 
   /** @param {string} s */
@@ -102,10 +112,11 @@ export const joinRoom = async ({
    * @param {string | null} [expectedDid]
    * @param {string | null} [via]
    * @param {AbortSignal} [signal]
+   * @param {boolean} [locallySelected]
    */
-  const admit = async (channel, expectedDid = null, via = null, signal) => {
+  const admit = async (channel, expectedDid = null, via = null, signal, locallySelected = false) => {
     if (left || signal?.aborted || channel.isClosed?.()) { channel.close(); throw new Error('room dial cancelled or channel closed'); }
-    const { remoteDid } = await createSession({ channel, identity, caps, now, signal });
+    const { remoteDid } = await createSession({ channel, identity, caps, now, signal, timers });
     if (left || signal?.aborted || channel.isClosed?.()) { channel.close(); throw new Error('room dial cancelled or channel closed'); }
     if (expectedDid && remoteDid !== expectedDid) {
       channel.close();
@@ -117,7 +128,7 @@ export const joinRoom = async ({
       channel.close();
       return remoteDid;
     }
-    if (!mesh.addLink(channel, remoteDid)) throw new Error('room peer admission refused');
+    if (!mesh.addLink(channel, remoteDid, {}, { locallySelected })) throw new Error('room peer admission refused');
     if (via) mesh.tagLink(remoteDid, { via });
     dlog('room', `✅ CONNECTED to peer ${short(remoteDid)} — data channel open, in the mesh`);
     // Path telemetry for the HUD (D-5): best-effort, after stats settle.
@@ -165,10 +176,11 @@ export const joinRoom = async ({
         const channel = await connect(pipe.signaling, ac.signal);
         opened = channel;
         if (ac.signal.aborted) { channel.close(); throw new AdmissionError('cancelled'); }
-        await admit(channel, expectedDid, via, ac.signal);
+        const did = await admit(channel, expectedDid, via, ac.signal, direction === 'outbound');
         admitted = true;
+        return did;
       };
-      try { await Promise.race([aborted, work()]); }
+      try { return await Promise.race([aborted, work()]); }
       finally {
         pipe.close();
         if (routers.get(routeKey) === pipe.route) routers.delete(routeKey);
@@ -190,7 +202,7 @@ export const joinRoom = async ({
       // why: keep a bounded sample rather than permanently preferring the same
       // roster prefix. Sparse-overlay maintenance belongs above this scheduler.
       seen++;
-      const index = selected.length < limit ? selected.length : Math.floor(Math.random() * seen);
+      const index = selected.length < limit ? selected.length : Math.floor(random() * seen);
       if (index < limit && !selected.includes(member)) selected[index] = member;
     }
     return selected;
@@ -213,23 +225,48 @@ export const joinRoom = async ({
     /** @type {Map<string, (payload: any) => void>} */
     const routers = new Map(); // member connId -> route(payload)
 
-    const lifetime = new AbortController();
+    const generationLife = new AbortController();
+    const retire = () => generationLife.abort();
+    lifetime.signal.addEventListener('abort', retire, { once: true });
+    generationLife.signal.addEventListener('abort', () => lifetime.signal.removeEventListener('abort', retire), { once: true });
+    const bindings = new Map();
+    const outgoing = new Set();
+    const known = (/** @type {string} */ member) => {
+      const did = bindings.get(member);
+      return !!did && mesh.hasLink(did);
+    };
+    /** @type {ReturnType<typeof createNeighborMaintenance> | null} */
+    let maintenance = null;
     // Session identity keeps reconnect generations from sharing candidate keys.
     const generation = newId();
     s.on('signal', async (/** @type {{ from: string, payload: any }} */ { from, payload }) => {
-      if (left || lifetime.signal.aborted || typeof from !== 'string' || from.length > 512) return;
+      if (left || generationLife.signal.aborted || typeof from !== 'string' || from.length > 512) return;
+      if (payload?.type === 'offer' && (typeof payload.sdp !== 'string' || payload.sdp.length > 128 * 1024
+        || new TextEncoder().encode(payload.sdp).byteLength > 128 * 1024)) return;
+      const key = `${generation}/${from}`;
+      let direction = /** @type {'inbound'|'outbound'} */ ('inbound');
+      // Resolve crossing offers BEFORE forwarding trickle frames into a router.
+      // Connection labels order this endpoint generation, not peer identity.
+      if (payload?.type === 'offer' && outgoing.has(from) && attempts.pending(key)) {
+        if (/** @type {string} */ (s.self) < from) return;
+        outgoing.delete(from);
+        attempts.supersede(key);
+        direction = 'outbound'; // preserve locally requested exploration
+      }
       const route = routers.get(from);
-      if (route) { route(payload); return; }
+      if (route) { if (payload?.type !== 'offer') route(payload); return; }
+      if (known(from)) return;
       if (payload?.type !== 'offer' || typeof payload.sdp !== 'string' || payload.sdp.length > 128 * 1024 || new TextEncoder().encode(payload.sdp).byteLength > 128 * 1024) return;
       try {
-        await attempt({ key: `${generation}/${from}`, direction: 'inbound', routers, routeKey: from,
-          send: (p) => s.sendSignal(from, p), via: 'rendezvous', signal: lifetime.signal,
+        const did = await attempt({ key, direction, routers, routeKey: from,
+          send: (p) => s.sendSignal(from, p), via: 'rendezvous', signal: generationLife.signal,
           connect: async (signaling, signal) => (await t.accept({ offer: { type: 'offer', sdp: payload.sdp }, iceServers, signaling, signal })).channel });
+        bind(from, did);
       } catch (e) { logConnectFail('accept from', from, e); }
     });
 
     s.on('closed', () => {
-      lifetime.abort();
+      generationLife.abort();
       // Ignore a LATE close from a session we've already replaced — otherwise a
       // stale handler + the current one both fire and start two reconnect loops.
       if (s !== session) return;
@@ -242,15 +279,33 @@ export const joinRoom = async ({
       scheduleReconnect();
     });
 
-    /** @param {string} member */
-    const dial = async (member) => {
-      try {
-        await attempt({ key: `${generation}/${member}`, direction: 'outbound', routers, routeKey: member,
-          send: (p) => s.sendSignal(member, p), via: 'rendezvous', signal: lifetime.signal,
-          connect: (signaling, signal) => t.connect({ did: `${roomId}/${member}` }, { iceServers, signaling, signal }) });
-      } catch (e) { logConnectFail('dial to', member, e); }
+    /** @param {string} member @param {any} did */
+    const bind = (member, did) => {
+      if (generationLife.signal.aborted || typeof did !== 'string') return;
+      if (!bindings.has(member) && bindings.size >= NEIGHBOR_CANDIDATES) bindings.delete(bindings.keys().next().value);
+      bindings.set(member, did);
     };
-    return { dial };
+    /** @param {string} member @param {AbortSignal} [signal] */
+    const dial = async (member, signal = generationLife.signal) => {
+      if (outgoing.has(member)) throw new AdmissionError('duplicate');
+      outgoing.add(member);
+      try {
+        if (known(member)) return;
+        const did = await attempt({ key: `${generation}/${member}`, direction: 'outbound', routers, routeKey: member,
+          send: (p) => s.sendSignal(member, p), via: 'rendezvous', signal,
+          connect: (signaling, attemptSignal) => t.connect({ did: `${roomId}/${member}` }, { iceServers, signaling, signal: attemptSignal }) });
+        bind(member, did);
+      } catch (e) { logConnectFail('dial to', member, e); throw e; }
+      finally { outgoing.delete(member); }
+    };
+    if (s.profile === SPARSE_PUBLIC_PROFILE) {
+      mesh.enableSparseAdmission();
+      maintenance = createNeighborMaintenance({ initial: s.members, sample: s.sample,
+        connect: dial, known, localCount: mesh.locallySelectedCount, now, random, timers, signal: generationLife.signal });
+      const offGone = mesh.onPeerGone(() => maintenance?.wake());
+      generationLife.signal.addEventListener('abort', () => { offGone(); bindings.clear(); maintenance?.stop(); }, { once: true });
+    }
+    return { dial, maintenance };
   };
 
   // ---- mesh-assisted path (server-optional) -------------------------------
@@ -363,7 +418,8 @@ export const joinRoom = async ({
     if (left) return;
     // why cast: connectRendezvous is only reached when `url` is truthy (the
     // `if (url)` join guard and the reconnect loop); never with a null url.
-    const s = await openRendezvous({ url: /** @type {string} */ (url), room: roomId, WebSocket: WS, kind: peerKind });
+    const s = await openRendezvous({ url: /** @type {string} */ (url), room: roomId, WebSocket: WS, kind: peerKind,
+      profile: sparsePublicProfile(roomId, profile) ?? undefined, signal: lifetime.signal, now, timers });
     if (left) { s.close(); return; }                    // left() raced the connect — abandon it
     session = s;
     setStatus('up');
@@ -373,10 +429,11 @@ export const joinRoom = async ({
     reconnectFailures = 0;                              // clean connect — forget the streak
     outageSince = 0;
     outageWarned = false;
-    const { dial } = attachSession(session);
+    const { dial, maintenance } = attachSession(session);
     if (session.members.length === 0) dlog('room', 'first one here — waiting for others to join and offer');
     else dlog('room', `${session.members.length} member(s) here; scheduling bounded candidate sample`);
-    await Promise.allSettled(candidates(session.members).map(dial));
+    if (maintenance) await maintenance.start();
+    else await Promise.allSettled(candidates(session.members).map((member) => dial(member)));
   };
 
   /** @param {any} e */
@@ -401,10 +458,10 @@ export const joinRoom = async ({
   const scheduleReconnect = () => {
     if (left || reconnectTimer) return;
     setStatus('connecting');
-    reconnectTimer = setTimeout(() => {
+    reconnectTimer = timers.setTimeout(() => {
       reconnectTimer = null;
       connectRendezvous().catch(noteConnectFailure);
-    }, backoffMs);
+    }, backoffMs + (sparseRequested ? Math.floor(random() * Math.min(1_000, backoffMs / 4)) : 0));
   };
 
   // ---- assemble -----------------------------------------------------------
@@ -445,8 +502,9 @@ export const joinRoom = async ({
     leave() {
       if (left) return;
       left = true;
+      lifetime.abort();
       attempts.close();
-      clearTimeout(reconnectTimer ?? undefined);
+      timers.clearTimeout(reconnectTimer ?? undefined);
       try { session?.close(); } catch { /* already closed */ }
       mesh.close();
     },

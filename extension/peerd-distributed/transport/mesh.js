@@ -29,6 +29,7 @@
 // per-peer fetch in flight.
 
 import { buildEnvelope, signEnvelope, verifyEnvelope } from './envelope.js';
+import { establishedAdmission, TRANSFER_PROTECTION_MS, NEIGHBOR_GRACE_MS } from './neighbor-policy.js';
 import { createContentResponder, fetchBundle } from '../content/transfer.js';
 import { dlog } from '../log.js';
 
@@ -75,6 +76,10 @@ const QUEUED_PER_MESH = 128;
  *   retired: AbortController,
  *   pinging?: boolean,
  *   lastSeen: number,
+ *   locallySelected: boolean,
+ *   admittedAt: number,
+ *   protectedUntil: number,
+ *   serving: number,
  *   queued: number,
  *   verifying: number,
  *   contentHandlers: Set<(msg: any) => void>,
@@ -91,6 +96,7 @@ const QUEUED_PER_MESH = 128;
  *   identity: Identity,
  *   now?: () => number,
  *   budget?: number,
+ *   sparse?: boolean,
  *   pingIntervalMs?: number,
  *   idleTimeoutMs?: number,
  *   ctrlRateLimit?: number,
@@ -102,6 +108,7 @@ export const createRoomMesh = ({
   identity,
   now = Date.now,
   budget = DEFAULT_BUDGET,
+  sparse = false,
   // "Are you still there?" cadence — the BACKSTOP for total silence (when neither
   // a clean data-channel close nor ICE 'disconnected' fired, which is rare). PING
   // is cheap (one signed control frame): ping at 8s, drop after 18s (~2 missed
@@ -117,6 +124,7 @@ export const createRoomMesh = ({
 } = /** @type {{ roomId: string, identity: Identity }} */ ({})) => {
   /** @type {Map<string, Link>} */
   const links = new Map(); // did -> { channel, lastSeen, ctrl: {windowStart, count}, offClose }
+  let lastRotation = -Infinity;
   /** @type {Set<(arg: any) => void>} */
   const peerCbs = new Set();
   /** @type {Set<(arg: any) => void>} */
@@ -331,7 +339,9 @@ export const createRoomMesh = ({
       if (typeof msg.hash !== 'string' || !/^[0-9a-f]{64}$/.test(msg.hash)) {
         penalize(link, 'malformed-content-request'); return;
       }
-      await respondContent?.(msg, (out) => sendOnLink(link, out), link);
+      link.serving++;
+      try { await respondContent?.(msg, (out) => sendOnLink(link, out), link); }
+      finally { link.serving--; }
       return;
     }
     if (typeof msg.t === 'string' && CONTENT_RESP.has(msg.t)) {
@@ -409,10 +419,16 @@ export const createRoomMesh = ({
   return Object.freeze({
     roomId,
     selfDid: identity.did,
+    // Enabled only after the room owner observes a negotiated public profile.
+    // Sticky for this room lifetime: reconnect fallback must not erase local
+    // ownership/reservations while authenticated links survive the outage.
+    enableSparseAdmission: () => { sparse = true; },
+    locallySelectedCount: () => [...links.values()].filter((link) => link.locallySelected).length,
 
     // Admit an AUTHENTICATED link (HELLO already done — did is proven).
-    /** @param {Channel} channel @param {string} did @param {any} [info] */
-    addLink(channel, did, info = {}) {
+    /** @param {Channel} channel @param {string} did @param {any} [info]
+     * @param {{ locallySelected?: boolean }} [ownership] */
+    addLink(channel, did, info = {}, { locallySelected = false } = {}) {
       if (closed) { channel.close(); return false; }
       pruneCooldowns();
       if (cooldowns.has(did)) {
@@ -421,17 +437,38 @@ export const createRoomMesh = ({
         return false;
       }
       if (did === identity.did) { channel.close(); return false; }
-      if (links.size >= budget && !links.has(did)) {
-        audit?.('peer_budget_refused', { did });
-        channel.close();
-        return false;
+      const previous = links.get(did);
+      if (!previous) {
+        const time = now();
+        let decision = { allowed: links.size < budget, evict: /** @type {string | undefined} */ (undefined) };
+        if (sparse) {
+          const values = [...links.values()];
+          const pressure = links.size >= budget || (!locallySelected
+            && values.filter((link) => !link.locallySelected).length >= budget - Math.min(2, Math.max(0, budget - 1)));
+          const peers = values.map((link) => {
+            const busy = link.serving > 0 || link.contentHandlers.size > 0;
+            // One bounded protection window per link begins on first pressure,
+            // not each remote request. Continuous work cannot pin a slot forever.
+            if (pressure && busy && time - link.admittedAt >= NEIGHBOR_GRACE_MS && link.protectedUntil === 0) link.protectedUntil = time + TRANSFER_PROTECTION_MS;
+            return { did: link.did, locallySelected: link.locallySelected, admittedAt: link.admittedAt,
+              protectedUntil: link.protectedUntil, busy };
+          });
+          decision = { evict: undefined, ...establishedAdmission({ peers, budget, locallySelected, now: time, lastRotation }) };
+        }
+        if (!decision.allowed) {
+          audit?.('peer_budget_refused', { did });
+          channel.close();
+          return false;
+        }
+        if (decision.evict) { lastRotation = time; removeLink(decision.evict, 'neighbor-rotation'); }
       }
-      // why replace: two peers connecting to each other simultaneously can
-      // produce crossing links; last-in wins and the loser closes, which
-      // both sides converge on without a tiebreak protocol.
+      // The room resolves crossing offers before this point. Replacement of
+      // the same authenticated neighbor preserves its age and local ownership;
+      // reconnecting cannot renew grace or obtain another protection window.
       if (links.has(did)) removeLink(did, 'replaced');
       /** @type {Link} */
-      const link = { did, channel, retired: new AbortController(), contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
+      const link = { did, channel, locallySelected: locallySelected || previous?.locallySelected || false,
+        admittedAt: previous?.admittedAt ?? now(), protectedUntil: previous?.protectedUntil ?? 0, serving: 0, retired: new AbortController(), contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
       link.offClose = channel.onClose(() => {
         if (links.get(did) === link) {
           links.delete(did);
