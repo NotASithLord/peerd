@@ -49,12 +49,12 @@ const subMsgTopic = (id) => `dwapp/${id}/msg`;            // a sub-protocol's go
 /**
  * @param {{ identity: import('./transport/mesh.js').Identity, mesh: any,
  *   meta?: () => any, dial?: any, audit?: import('./transport/mesh.js').AuditFn,
- *   now?: () => number, maxBundleBytes?: number, userBlocked?: (did:string)=>boolean,
+ *   now?: () => number, maxBundleBytes?: number, discoveryEnabled?: ()=>boolean, userBlocked?: (did:string)=>boolean,
  *   admitDwappMeta?: ((candidate: { dwappId: string, publisher: string, seq: number, versionId: string }) => Promise<boolean>) | null }} opts
  */
 export const createBaseNetwork = async ({
   identity, mesh, meta = () => ({}), dial = null, audit = null,
-  now = Date.now, maxBundleBytes = MAX_BUNDLE_BYTES, admitDwappMeta = null, userBlocked = () => false,
+  now = Date.now, maxBundleBytes = MAX_BUNDLE_BYTES, admitDwappMeta = null, userBlocked = () => false, discoveryEnabled = () => true,
 }) => {
   dlog('base', `assembling base network for ${(identity.did || '').slice(-8)} on lobby "${BASE_TOPIC}"`);
   const node = await createPeerNode({ identity, mesh, meta, dial, audit, now });
@@ -109,13 +109,14 @@ export const createBaseNetwork = async ({
   const blocklist = new Set();
   /** @param {string} did */
   const isBlocked = (did) => userBlocked(did) || blocklist.has(did);
+  let contributionGeneration = 0;
   /** @param {string} did @param {string} [reason] */
-  const block = (did, reason) => { if (reason !== 'user-policy') blocklist.add(did); audit?.('dwapp_publisher_blocked', { did, reason }); };
+  const block = (did, reason) => { contributionGeneration += 1; if (reason !== 'user-policy') blocklist.add(did); audit?.('dwapp_publisher_blocked', { did, reason }); };
   /** @type {Set<(card: any) => void>} */
   const dwappCbs = new Set();
   const library = createLibrary({ isBlocked, now });
   const discovery = createDiscovery({
-    mesh: node.mesh, identity, library, isBlocked, block, audit, now, admitMeta: admitDwappMeta,
+    mesh: node.mesh, identity, library, isBlocked, block, audit, now, admitMeta: admitDwappMeta, isEnabled: discoveryEnabled,
     onCard: (/** @type {any} */ card) => { dlog('base', `card ingested: ${card.value?.name} (${card.dwapp_id.slice(0, 8)}…)`); for (const cb of dwappCbs) cb(card); },
   });
 
@@ -373,7 +374,7 @@ export const createBaseNetwork = async ({
       if (manifest.v === 2 && await sha256ChunkHex(payload) !== manifest.bundle.compressedHash) {
         throw new Error('local compressed bundle hash mismatch');
       }
-      return { manifest, payload, providers: [identity.did] };
+      return { manifest, payload, providers: [identity.did], verifiedContributors: [] };
     }
     if (publisher === identity.did) {
       // why: a local generation still rebuilding its served bytes cannot fetch
@@ -427,10 +428,17 @@ export const createBaseNetwork = async ({
 
   /** @param {string} uri @param {{timeoutMs?:number,onProgress?:(p:any)=>void}} [options] */
   const fetchApp = async (uri, options) => {
-    const { did } = parsePeerdUri(uri);
+    const { did, hash } = parsePeerdUri(uri);
+    const generation = contributionGeneration;
     if (did && isBlocked(did)) throw new Error('publisher-user-blocked');
     const result = await fetchAllowedApp(uri, options);
     if (isBlocked(result.manifest.publisher)) throw new Error('publisher-user-blocked');
+    // why: a ban/unban during a transfer cannot resurrect pre-policy history.
+    // Evidence is local to the exact verified version and the live host lifetime.
+    if (!closed && generation === contributionGeneration) {
+      library.observeContributors(result.manifest.publisher, hash,
+        result.verifiedContributors.filter((provider) => provider !== identity.did));
+    }
     return result;
   };
 
@@ -537,6 +545,10 @@ export const createBaseNetwork = async ({
     // Apply user policy to cached publishers too, even when their signed cards
     // arrived through a different seeder rather than a current direct link.
     enforceUserPolicy: () => {
+      // why: a policy refresh can revoke a disconnected contributor absent
+      // from the publisher catalog. Fence every older transfer, even if the
+      // blocked DID is subsequently unblocked before verification completes.
+      contributionGeneration += 1;
       for (const did of new Set([...node.mesh.peers().map((/** @type {any} */ peer) => peer.did),
         ...library.rows().map((/** @type {any} */ row) => row.publisher)])) {
         if (userBlocked(did)) discovery.ban(did, 'user-policy');
@@ -619,12 +631,11 @@ export const createBaseNetwork = async ({
       refreshProviders().catch(() => {});
       dlog('base', 'base network ONLINE (presence + liveness started)');
       node.start();
-      node.presence.announce();
       // Reconcile against peers we're ALREADY linked to: the base mesh is usually
       // up long before discovery starts, and onPeer only covers FUTURE links — so
       // subscribe to current peers too, or a late starter's Library stays empty.
       discovery.subscribeAll();
     },
-    close: () => { closed = true; for (const ac of operations) ac.abort(); if (providerTimer) clearInterval(providerTimer); providerRenewals.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
+    close: () => { closed = true; library.clearContributors(); for (const ac of operations) ac.abort(); if (providerTimer) clearInterval(providerTimer); providerRenewals.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
   });
 };

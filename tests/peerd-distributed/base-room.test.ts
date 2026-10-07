@@ -68,7 +68,7 @@ describe('base-room — a dwapp room over the shared base mesh (no signaler)', (
     const ra = a.openRoom('peerd-global', { meta: () => ({ name: 'ada' }) });
     const rb = b.openRoom('peerd-global', { meta: () => ({ name: 'bo' }) });
     await tick();
-    ra.presence.announce(); rb.presence.announce();
+    await Promise.all([ra.presence.announce(), rb.presence.announce()]);
     await waitFor(() => rb.presence.list().some((p: any) => p.did === ia.did));
     const bSeesA = rb.presence.list().find((p: any) => p.did === ia.did);
     expect(bSeesA?.meta).toEqual({ name: 'ada' });
@@ -90,14 +90,14 @@ describe('base-room — a dwapp room over the shared base mesh (no signaler)', (
   });
 
   test('retained feed: history is kept under the namespaced topic', async () => {
-    const { a } = await linkedPair();
+    const { a, b } = await linkedPair();
     const ra = a.openRoom('peerd-global');
     ra.sync.retain('feed');
     await ra.sync.publish('feed', { text: 'kept' });
     const hist = ra.sync.history('feed');
     expect(hist.map((e: any) => e.body.data.text)).toContain('kept');
     expect(hist[0].body.topic).toBe('dwapp/peerd-global/feed'); // namespaced, not bare 'feed'
-    ra.leave(); a.close();
+    ra.leave(); a.close(); b.close();
   });
 
   test('retained feed backfills over an ALREADY-connected peer (link precedes retain)', async () => {

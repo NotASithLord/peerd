@@ -38,6 +38,7 @@ const DEFAULTS = Object.freeze({
  *   identity: { did: string },
  *   library: ReturnType<typeof import('./library.js').createLibrary>,
  *   isBlocked?: (did: string) => boolean,
+ *   isEnabled?: () => boolean,
  *   block?: ((did: string, reason?: string) => void) | null,
  *   audit?: ((type: string, detail?: any) => void) | null,
  *   now?: () => number,
@@ -48,7 +49,7 @@ const DEFAULTS = Object.freeze({
  */
 export const createDiscovery = ({
   mesh, identity, library, isBlocked = () => false, block = null, audit = null, now = Date.now, caps = {}, onCard = null,
-  admitMeta = null,
+  admitMeta = null, isEnabled = () => true,
 } = /** @type {{ mesh: any, identity: { did: string }, library: any }} */ ({})) => {
   const relayPerMin = caps.relayPerMin ?? DEFAULTS.relayPerMin;
   const snapshotMax = caps.snapshotMax ?? DEFAULTS.snapshotMax;
@@ -95,7 +96,7 @@ export const createDiscovery = ({
   let closed = false;
 
   /** @param {string} did @param {object | undefined} subscription */
-  const receiving = (did, subscription) => !closed && autoSubscribe
+  const receiving = (did, subscription) => !closed && autoSubscribe && isEnabled()
     && !!subscription && upstreams.get(did) === subscription && !isBlocked(did);
 
   /** @param {string} did */
@@ -285,7 +286,7 @@ export const createDiscovery = ({
 
   /** @param {string} did */
   async function subscribeTo(did) {
-    if (closed || !autoSubscribe || isBlocked(did)) return false;
+    if (closed || !autoSubscribe || !isEnabled() || isBlocked(did)) return false;
     unsubscribed.delete(did);
     const pending = processing.get(did);
     if (pending) { pending.reconcile = true; return false; }
@@ -355,7 +356,7 @@ export const createDiscovery = ({
     // Subscribe to every peer we're already linked to — the cold-start reconcile
     // (the base mesh is usually up long before discovery starts).
     subscribeAll() {
-      if (closed || !autoSubscribe) return;
+      if (closed || !autoSubscribe || !isEnabled()) return;
       for (const p of mesh.peers()) if (!unsubscribed.has(p.did)) subscribeTo(p.did).catch(() => {});
     },
     // The sovereign switch: "I don't want to see shit." Off → stop asking new
@@ -396,7 +397,7 @@ export const createDiscovery = ({
     /** @param {string} id */
     isTombstoned: (id) => tombstoned.has(id),
     subscriberCount: () => subscribers.size,
-    enabled: () => autoSubscribe,
+    enabled: () => autoSubscribe && isEnabled(),
     rows: () => library.rows(),
     close() {
       closed = true;

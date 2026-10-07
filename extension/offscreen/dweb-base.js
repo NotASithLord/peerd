@@ -4,6 +4,7 @@
 // Keep detailed logs because WebRTC and offscreen lifecycles require live diagnosis.
 
 import { publishedAppHead } from './published-app-head.js';
+import { createDiscoverySettings } from './discovery-settings.js';
 import { createPeerPolicyView } from './peer-policy.js';
 import { withDeadline } from '/shared/cold-util.js';
 import { createImmutableInstallOwner } from './immutable-install-owner.js';
@@ -41,6 +42,11 @@ const warn = (...a) => console.warn('[offscreen/dweb]', ...a);
 /** @type {any} */
 let handle = null;    // { base, room, close } once the lobby is joined
 const peerPolicy = createPeerPolicyView();
+const discoverySettings = createDiscoverySettings({
+  read: () => withDeadline(() => browser.runtime.sendMessage({ type: 'dweb/peer-policy' }),
+    5_000, () => new Error('discovery-settings-unavailable')),
+  apply: enabled => handle?.base.setDiscovery(enabled),
+});
 /** @type {Set<any>} */ const policyMeshes = new Set();
 const enforcePeerPolicy = () => {
   for (const mesh of policyMeshes) for (const { did } of mesh.peers()) {
@@ -362,8 +368,10 @@ const baseLifecycle = makeStartStopBarrier({
     }
     log(`joining lobby "${client.BASE_TOPIC}" as …${identity.did.slice(-8)}`);
     await refreshPeerPolicy();
+    await discoverySettings.refresh();
     const joined = await client.joinBaseNetwork({
       identity,
+      discoveryEnabled: discoverySettings.enabled,
       isBlocked: peerPolicy.isBlocked,
       onMesh: (/** @type {any} */ mesh) => { policyMeshes.add(mesh); return () => policyMeshes.delete(mesh); },
       admitPeer: async (/** @type {string} */ did) => { await refreshPeerPolicy(); return !peerPolicy.isBlocked(did); },
@@ -408,6 +416,7 @@ const baseLifecycle = makeStartStopBarrier({
     log('✅ base network ONLINE — lobby joined, presence beaconing');
   },
   close: async (candidate) => {
+    discoverySettings.invalidate();
     // The self-device coordinator rides this mesh; it must let go of its
     // rooms before the network under it disappears.
     try { await selfHost.stop(); } catch { /* best-effort teardown */ }
@@ -1025,7 +1034,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
         case 'dweb/base-host/unblock': {
           sendResponse({ ok: false, error: 'durable-peer-policy-required' }); return;
         }
-        case 'dweb/base-host/set-discovery': { const h = await start(); h.base.setDiscovery(!!msg.enabled); sendResponse({ ok: true, enabled: !!msg.enabled }); return; }
+        case 'dweb/base-host/set-discovery': { sendResponse(await discoverySettings.refresh()); return; }
         // The agent's peer/discovery read window: who we're linked to + the
         // sovereign discovery state (on/off, subscribers, blocked dids).
         case 'dweb/base-host/peers': {

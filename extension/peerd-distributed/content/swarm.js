@@ -44,7 +44,7 @@ const ALPHA = 3;
  *   timeoutMs?: number,
  *   alpha?: number,
  * }} opts
- * @returns {Promise<{ manifest: any, payload: Uint8Array, providers: string[] }>}
+ * @returns {Promise<{ manifest: any, payload: Uint8Array, providers: string[], verifiedContributors: string[] }>}
  */
 export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeoutMs = 15000, alpha = ALPHA }) => {
   const { hash } = parsePeerdUri(uri);
@@ -56,6 +56,10 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
   }
   if (!clients.length) throw new Error(`swarm: no reachable provider for ${hash}`);
 
+  // why: reachable candidates are not evidence of useful bytes. Keep the
+  // original providers list separate from verified chunk contributors, and
+  // expose evidence only after whole-bundle verification succeeds.
+  const verifiedContributors = new Set();
   try {
     // why: a silent early provider must not suppress a healthy neighbor.
     // Bound concurrent requests, verify each candidate before winning, and
@@ -102,14 +106,17 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
         /** @type {Uint8Array | null} */
         let got = null;
         for (let j = 0; j < clients.length && !got; j++) {
-          const { client } = clients[(start + j) % clients.length];
+          const { did, client } = clients[(start + j) % clients.length];
           try {
             const resp = await client.chunk(h);
             if (resp.t === 'CHUNK') {
               // why cast: a CHUNK reply carries bytes; re-verified by the
               // hash check on the next line.
               const bytes = decodeCommittedChunk(resp.bytes, /** @type {number} */ (expectedSizes.get(h)));
-              if (await sha256hex(bytes) === h) got = bytes; // tamper → treat as a miss, try next provider
+              if (await sha256hex(bytes) === h) {
+                got = bytes;
+                verifiedContributors.add(did);
+              } // tamper → treat as a miss, try next provider
             }
           } catch { /* miss → next provider */ }
         }
@@ -128,7 +135,7 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
     if (manifest.v === 2 && await sha256hex(payload) !== manifest.bundle.compressedHash) {
       throw new Error('compressed bundle hash mismatch');
     }
-    return { manifest, payload, providers: clients.map((c) => c.did) };
+    return { manifest, payload, providers: clients.map((c) => c.did), verifiedContributors: [...verifiedContributors] };
   } finally {
     for (const { client } of clients) client.close();
   }

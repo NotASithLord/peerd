@@ -120,9 +120,9 @@ export const createDwebClient = () => {
     // tab (S1b). close() leaves the lobby + tears down the mesh.
     BASE_TOPIC,
     /** @param {{ identity: import('./transport/mesh.js').Identity, url?: string, audit?: import('./transport/mesh.js').AuditFn,
-     *   onMesh?: ((mesh:any)=>()=>void)|null, isBlocked?: (did:string)=>boolean, admitPeer?: ((did:string)=>Promise<boolean>)|null,
+     *   onMesh?: ((mesh:any)=>()=>void)|null, discoveryEnabled?: ()=>boolean, isBlocked?: (did:string)=>boolean, admitPeer?: ((did:string)=>Promise<boolean>)|null,
      *   admitDwappMeta?: ((candidate: { dwappId: string, publisher: string, seq: number, versionId: string }) => Promise<boolean>) | null }} opts */
-    joinBaseNetwork: async ({ identity, url = DEFAULT_SIGNALING[0], audit = null, admitDwappMeta = null, isBlocked = () => false, admitPeer = null, onMesh = null } = /** @type {any} */ ({})) => {
+    joinBaseNetwork: async ({ identity, url = DEFAULT_SIGNALING[0], audit = null, admitDwappMeta = null, isBlocked = () => false, admitPeer = null, onMesh = null, discoveryEnabled = () => true } = /** @type {any} */ ({})) => {
       // The base host is a local runtime with a separately observable
       // rendezvous state. Do not make identity recovery, unlock, or MV3 startup
       // wait on an external bootstrap node: assemble immediately, then let the
@@ -136,7 +136,7 @@ export const createDwebClient = () => {
       let base;
       try { base = await createBaseNetwork({
         identity, mesh: room.mesh, meta: () => ({ kind: 'extension' }),
-        dial: makeDhtDialer(room), audit, admitDwappMeta, userBlocked: isBlocked,
+        dial: makeDhtDialer(room), audit, admitDwappMeta, userBlocked: isBlocked, discoveryEnabled,
       }); } catch (error) { room.leave(); throw error; }
       return { base, room, url, close: () => { base.close(); room.leave(); } };
     },

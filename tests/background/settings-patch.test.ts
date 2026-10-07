@@ -291,3 +291,13 @@ describe('native authority settings routes', () => {
       .not.toContain('private-storage-detail');
   });
 });
+
+test('discovery preference is a preview-only strict boolean and cannot grant transport consent', () => {
+  for (const enabled of [true, false]) {
+    expect(norm({ dwebDiscoveryEnabled: enabled })).toEqual({ dwebDiscoveryEnabled: enabled });
+    expect(norm({ dwebDiscoveryEnabled: enabled }, { dwebEnabled: false })).toEqual({});
+  }
+  for (const enabled of [undefined, null, 'true', 'false', 1, 0]) {
+    expect(norm({ dwebDiscoveryEnabled: enabled })).toEqual({});
+  }
+});

@@ -79,3 +79,26 @@ export const setUserPeerBlocked = async (deps, { did, block = true }) => {
     }, current);
   } catch (error) { return { ok: false, error: String(error), outcomeKnown: false }; }
 };
+
+// why: every settings entry point shares the same live receipt. Notifications
+// contain no value and never acquire a host; the receiver reads current custody.
+/** @param {{browser:any,settingsStore:{get:()=>Record<string,any>}}} deps
+ * @param {()=>boolean} [current] */
+export const refreshDiscoverySetting = async ({ browser, settingsStore }, current = () => true) => {
+  let expired = false;
+  const result = await withDeadline(async () => {
+    if (!current()) throw new Error('discovery-authority-retired');
+    const settings = settingsStore.get();
+    const enabled = settings.dwebDiscoveryEnabled === true;
+    const contexts = await browser.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+    if (expired || !current()) throw new Error('discovery-authority-retired');
+    if (contexts.length === 0) return { ok: true, inactive: true, enabled };
+    // Master OFF may have persisted before a failed physical teardown.
+    if (settings.dwebEnabled !== true) throw new Error('discovery-enforcement-unconfirmed');
+    return browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery' });
+  }, 5_000, () => { expired = true; return new Error('discovery-enforcement-timeout'); });
+  if (!current() || !result?.ok || result.enabled !== (settingsStore.get().dwebDiscoveryEnabled === true)) {
+    throw new Error('discovery-enforcement-unconfirmed');
+  }
+  return result;
+};

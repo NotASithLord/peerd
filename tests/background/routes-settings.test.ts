@@ -1,4 +1,5 @@
 import { describe, test, expect } from 'bun:test';
+import { makeKernelSettingsRoutes } from '../../extension/background/settings-patch.js';
 import { makeSettingsRoutes } from '../../extension/background/routes/settings.js';
 
 const PRIVATE_TRANSFER_AUTHORIZATION = Symbol('test-transfer');
@@ -6,9 +7,8 @@ const authorized = (message: Record<string, unknown> = {}) => ({
   ...message, privateTransferAuthorization: PRIVATE_TRANSFER_AUTHORIZATION,
 });
 
-// settings/update + settings/reset + transfer/export, now over settingsStore.
-// Pin: patch normalization is delegated, the vault auto-lock side effect fires,
-// reset filters to known keys, and export gates on a passphrase when secrets exist.
+// Exercise mutations through the production native owner, and private export
+// through the separate transfer-only factory.
 
 const baseDeps = (over: any = {}) => {
   const calls: any = { autoLock: [], updated: [], reset: [], getSecret: [], identityExport: [], changing: [], changed: [] };
@@ -29,8 +29,6 @@ const baseDeps = (over: any = {}) => {
       update: async (p: any) => { calls.updated.push(p); },
       reset: async (k: any) => { calls.reset.push(k); },
     },
-    // pass-through normalizer so we test the route's wiring, not the patch math
-    normalizeSettingsPatch: (patch: any) => ({ ...patch }),
     normalizeVariant: (v: string) => v,
     normalizeEngine: (v: string) => v,
     listProviders: () => [{ name: 'anthropic' }],
@@ -56,25 +54,36 @@ const baseDeps = (over: any = {}) => {
   return { deps, calls };
 };
 
+const mutationRoutes = (deps: any) => makeKernelSettingsRoutes({
+  ready: deps.ensureSettingsReady(), settingsStore: deps.settingsStore,
+  defaults: deps.DEFAULT_SETTINGS, knownProviderNames: deps.listProviders().map((p: any) => p.name),
+  dwebEnabled: true, normalizeVariant: deps.normalizeVariant, normalizeEngine: deps.normalizeEngine,
+  onChanging: deps.onSettingsChanging, onChanged: deps.onSettingsChanged, pushState: deps.pushState,
+});
+
+test('private export factory exposes no second settings mutation authority', () => {
+  expect(Object.keys(makeSettingsRoutes(baseDeps().deps))).toEqual(['transfer/export']);
+});
+
 describe('settings/update', () => {
   test('rejects a non-object patch', async () => {
     const { deps } = baseDeps();
-    expect(await makeSettingsRoutes(deps)['settings/update']({ patch: null })).toEqual({ ok: false, error: 'invalid-patch' });
+    expect(await mutationRoutes(deps)['settings/update']({ patch: null })).toEqual({ ok: false, error: 'invalid-patch' });
   });
   test('empty normalized patch → no-known-keys', async () => {
-    const { deps } = baseDeps({ normalizeSettingsPatch: () => ({}) });
-    expect(await makeSettingsRoutes(deps)['settings/update']({ patch: { junk: 1 } })).toEqual({ ok: false, error: 'no-known-keys-in-patch' });
+    const { deps } = baseDeps();
+    expect(await mutationRoutes(deps)['settings/update']({ patch: { junk: 1 } })).toEqual({ ok: false, error: 'no-known-keys-in-patch' });
   });
   test('persists auto-lock and forwards it to the centralized side-effect hook', async () => {
-    const { deps, calls } = baseDeps({ normalizeSettingsPatch: () => ({ vaultAutoLockMs: 0 }) });
-    await makeSettingsRoutes(deps)['settings/update']({ patch: { vaultAutoLockMs: 0 } });
+    const { deps, calls } = baseDeps();
+    await mutationRoutes(deps)['settings/update']({ patch: { vaultAutoLockMs: 0 } });
     expect(calls.autoLock).toEqual([]);
     expect(calls.updated).toEqual([{ vaultAutoLockMs: 0 }]);
     expect(calls.changed).toEqual([{ vaultAutoLockMs: 0 }]);
   });
   test('persists via the store and returns the merged view', async () => {
-    const { deps, calls } = baseDeps({ normalizeSettingsPatch: () => ({ providerModel: 'x' }) });
-    expect(await makeSettingsRoutes(deps)['settings/update']({ patch: {} })).toEqual({ ok: true, settings: { a: 1 } });
+    const { deps, calls } = baseDeps();
+    expect(await mutationRoutes(deps)['settings/update']({ patch: { providerModel: 'x' } })).toEqual({ ok: true, settings: { a: 1 } });
     expect(calls.updated).toEqual([{ providerModel: 'x' }]);
   });
   test('waits for dweb disable side effects before acknowledging the setting', async () => {
@@ -82,10 +91,9 @@ describe('settings/update', () => {
     const stopGate = new Promise<void>((resolve) => { finishStop = resolve; });
     let settled = false;
     const { deps, calls } = baseDeps({
-      normalizeSettingsPatch: () => ({ dwebEnabled: false }),
       onSettingsChanged: async () => { await stopGate; calls.changed.push('stopped'); },
     });
-    const updating = makeSettingsRoutes(deps)['settings/update']({ patch: { dwebEnabled: false } })
+    const updating = mutationRoutes(deps)['settings/update']({ patch: { dwebEnabled: false } })
       .then((result: any) => { settled = true; return result; });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(settled).toBe(false);
@@ -103,7 +111,7 @@ describe('settings/update', () => {
       { onSettingsChanged: async () => { throw new Error('private-host-epoch'); } },
     ]) {
       const { deps } = baseDeps(over);
-      const reply = await makeSettingsRoutes(deps)['settings/update']({ patch: { providerModel: 'x' } });
+      const reply = await mutationRoutes(deps)['settings/update']({ patch: { providerModel: 'x' } });
       expect(reply).toMatchObject({
         ok: false, code: 'settings-update-outcome-unknown',
         outcomeKnown: false, outcomeKind: 'unknown', retryable: false,
@@ -144,15 +152,15 @@ describe('settings hydration gate', () => {
 describe('settings/reset', () => {
   test('requires a non-empty keys array', async () => {
     const { deps } = baseDeps();
-    expect(await makeSettingsRoutes(deps)['settings/reset']({ keys: [] })).toEqual({ ok: false, error: 'keys-required' });
+    expect(await mutationRoutes(deps)['settings/reset']({ keys: [] })).toEqual({ ok: false, error: 'keys-required' });
   });
   test('filters to known keys; unknown-only → no-known-keys', async () => {
     const { deps } = baseDeps();
-    expect(await makeSettingsRoutes(deps)['settings/reset']({ keys: ['nope'] })).toEqual({ ok: false, error: 'no-known-keys' });
+    expect(await mutationRoutes(deps)['settings/reset']({ keys: ['nope'] })).toEqual({ ok: false, error: 'no-known-keys' });
   });
   test('resets known keys via the store', async () => {
     const { deps, calls } = baseDeps();
-    expect(await makeSettingsRoutes(deps)['settings/reset']({ keys: ['providerModel', 'nope'] })).toEqual({ ok: true, settings: { a: 1 } });
+    expect(await mutationRoutes(deps)['settings/reset']({ keys: ['providerModel', 'nope'] })).toEqual({ ok: true, settings: { a: 1 } });
     expect(calls.reset).toEqual([['providerModel']]);
   });
   test('resetting a preview dweb default does not invalidate admitted work', async () => {
@@ -165,7 +173,7 @@ describe('settings/reset', () => {
         reset: async (keys: string[]) => { calls.reset.push(keys); },
       },
     });
-    expect(await makeSettingsRoutes(deps)['settings/reset']({ keys: ['dwebEnabled'] }))
+    expect(await mutationRoutes(deps)['settings/reset']({ keys: ['dwebEnabled'] }))
       .toEqual({ ok: true, settings: { dwebEnabled: true } });
     expect(calls.changing).toEqual([]);
     expect(calls.changed).toEqual([{ dwebEnabled: true }]);
@@ -183,7 +191,7 @@ describe('settings/reset', () => {
       onSettingsChanging: () => { events.push('invalidate'); },
       onSettingsChanged: async () => { events.push('changed'); },
     });
-    await makeSettingsRoutes(deps)['settings/reset']({ keys: ['dwebEnabled'] });
+    await mutationRoutes(deps)['settings/reset']({ keys: ['dwebEnabled'] });
     expect(events).toEqual(['invalidate', 'reset', 'changed']);
   });
   test('a lost reset result is unknown and never exposes storage details', async () => {
@@ -193,7 +201,7 @@ describe('settings/reset', () => {
         reset: async () => { throw new Error('private-reset-transaction'); },
       },
     });
-    const reply = await makeSettingsRoutes(deps)['settings/reset']({ keys: ['providerModel'] });
+    const reply = await mutationRoutes(deps)['settings/reset']({ keys: ['providerModel'] });
     expect(reply).toMatchObject({
       ok: false, code: 'settings-reset-outcome-unknown',
       outcomeKnown: false, retryable: false,
@@ -211,7 +219,7 @@ describe('settings/reset', () => {
         reset: async (keys: string[]) => { calls.reset.push(keys); },
       },
     });
-    await makeSettingsRoutes(deps)['settings/reset']({ keys: ['voiceEnabled'] });
+    await mutationRoutes(deps)['settings/reset']({ keys: ['voiceEnabled'] });
     expect(calls.reset).toEqual([['voiceEnabled']]);
     expect(calls.changed).toEqual([{ voiceEnabled: false }]);
   });
@@ -225,7 +233,7 @@ describe('settings/reset', () => {
         reset: async (keys: string[]) => { calls.reset.push(keys); },
       },
     });
-    await makeSettingsRoutes(deps)['settings/reset']({ keys: ['autoUpdateEnabled'] });
+    await mutationRoutes(deps)['settings/reset']({ keys: ['autoUpdateEnabled'] });
     expect(calls.reset).toEqual([['autoUpdateEnabled']]);
     expect(calls.changed).toEqual([{ autoUpdateEnabled: true }]);
   });
