@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { launchPeerd, attach } from './e2e-harness.mjs';
 import { createSignalingServer } from '../../signaling-node/bun-server.mjs';
 import { BOOTSTRAP_LIMITS } from '../../signaling-node/admission-budget.js';
+import { nativeHostSnapshot, observedSignalingServe, signalingCounters, websocketEvidence } from './native-scale-diagnostics.mjs';
 
 export const SCALE_BUDGETS = Object.freeze({ runMs: 600_000, commandMs: 10_000,
   convergenceMs: 90_000, operationMs: 30_000, outageMs: 10_000, cleanupMs: 30_000,
@@ -90,7 +91,9 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
   const report = { ok: false, options, budgets: SCALE_BUDGETS, acceptance: SCALE_ACCEPTANCE, stage: 'starting', checks: [], samples: [],
     workload: 'All static fixture modules are prepared before paced or stress network joins. Cold-page creation under an active mesh is not measured.',
     limitation: 'One Chrome process on one machine, isolated browser contexts, localhost ICE with no STUN/TURN. No WAN, NAT, multi-machine throughput, or raised-degree claim.',
-    observedPeaks: { memberships: 0, sockets: 0 }, resourceViolations: [], startup: [], cleanup: null };
+    observedPeaks: { memberships: 0, sockets: 0 }, resourceViolations: [], startup: [], hosts: [], cleanup: null };
+  const boundary = signalingCounters(); report.signalingBoundary = boundary;
+  const serve = observedSignalingServe(options => Bun.serve(options), boundary);
   const save = () => {
     report.population = { ...report.population, prepared: report.startup.filter(row => row.prepared).length,
       startInvoked: report.startup.filter(row => row.startInvoked).length };
@@ -106,6 +109,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     })]); } finally { clearTimeout(timer); }
   };
   const stage = value => { report.stage = value; save(); };
+  const hostSnapshot = () => { report.hosts.push({ stage: report.stage, ...nativeHostSnapshot() }); save(); };
   const check = (name, ok, detail) => {
     report.checks.push({ name, ok: !!ok, detail }); save();
     if (!ok) throw new Error(name);
@@ -133,7 +137,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     } finally { await send('Runtime.releaseObject', { objectId }, peer.sessionId); }
   }, ms);
   const serverSnapshot = () => {
-    const serverState = signaling.stats();
+    const serverState = { ...signaling.stats(), boundary: { ...boundary, http: { ...boundary.http } } };
     report.population = { ...report.population, memberships: serverState.memberships };
     const capped = { connections: 'sockets', rooms: 'rooms', joins: 'processJoins', messages: 'processMessages', ingressBytes: 'processIngressBytes', egressFrames: 'processEgressFrames', egressBytes: 'processEgressBytes' };
     for (const [key, limit] of Object.entries(capped)) if (serverState[key] > BOOTSTRAP_LIMITS[limit] && report.resourceViolations.length < 32) {
@@ -172,7 +176,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
   };
   try {
     save();
-    signaling = createSignalingServer({ port: 0, hostname: '127.0.0.1' }); signalPort = signaling.server.port;
+    signaling = createSignalingServer({ port: 0, hostname: '127.0.0.1', serve }); signalPort = signaling.server.port;
     const extension = join(repo, 'extension');
     server = createServer((request, response) => {
       try {
@@ -191,6 +195,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     }, SCALE_BUDGETS.launchMs);
     const version = await bounded('browser version', async () => (await fetch(`http://127.0.0.1:${ctx.port}/json/version`)).json());
     report.browser = version.Browser;
+    hostSnapshot();
     browser = await bounded('browser attach', async () => {
       const attached = await attach(version.webSocketDebuggerUrl);
       if (retiring) { attached.close(); throw new Error('attach retired'); } return attached;
@@ -202,9 +207,10 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
         || (method === 'Target.detachedFromTarget' && value.sessionId === params.sessionId));
       if (peer) {
         peer.diagnostic.event(method, params);
+        peer.websockets.event(method, params);
         // Persist failures immediately; stage saves retain ordinary request
         // progress without turning every signaling message into synchronous IO.
-        if (method === 'Runtime.exceptionThrown' || method === 'Network.loadingFailed'
+        if (method === 'Runtime.exceptionThrown' || method === 'Network.loadingFailed' || method === 'Network.webSocketFrameError'
           || method.endsWith('Crashed') || (method === 'Runtime.consoleAPICalled' && params.type === 'error')) save();
       }
     });
@@ -213,7 +219,8 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
       stage(`fixture ${index} context creation`);
       const { browserContextId } = await send('Target.createBrowserContext', { disposeOnDetach: true });
       const diagnostic = startupEvidence(index);
-      const peer = { index, browserContextId, diagnostic, ready: false }; peers.push(peer); report.startup.push(diagnostic.state);
+      const websockets = websocketEvidence(); diagnostic.state.websockets = websockets.state;
+      const peer = { index, browserContextId, diagnostic, websockets, ready: false }; peers.push(peer); report.startup.push(diagnostic.state);
       diagnostic.state.startInvoked = false;
       const target = await send('Target.createTarget', { browserContextId, url: 'about:blank' });
       peer.targetId = target.targetId;
@@ -238,6 +245,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     await prepareAndJoinScale(options, { prepare: createPeer,
       prepared: async () => {
         stage('all fixtures prepared before network joins');
+        hostSnapshot();
         const rows = await snapshots();
         check('prepared fixtures have not started native networking', rows.length === options.peers
           && rows.every(row => !row.did && row.constructed === 0 && row.resources.pcs === 0 && row.resources.channels === 0 && row.resources.sockets === 0)
@@ -251,6 +259,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
         peer.diagnostic.state.signaling = serverSnapshot(); save();
       },
     });
+    stage('all network starts invoked'); hostSnapshot();
     const joined = await until('full membership and reciprocal connectivity', async () => {
       const rows = await snapshots();
       return signaling.stats().memberships === options.peers && rows.every(row => row.rendezvous === 'up') && connected(rows) && rows;
@@ -277,7 +286,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     await until('all rendezvous sessions observe outage', async () => (await snapshots()).every(row => row.rendezvous !== 'up'), SCALE_BUDGETS.retirementMs);
     await gossip('during-outage');
     await sleep(SCALE_BUDGETS.outageMs);
-    signaling = createSignalingServer({ port: signalPort, hostname: '127.0.0.1' });
+    signaling = createSignalingServer({ port: signalPort, hostname: '127.0.0.1', serve });
     await until('signaling membership restored', async () => {
       const rows = await snapshots(); return signaling.stats().memberships === options.peers && rows.every(row => row.rendezvous === 'up') && connected(rows);
     });
@@ -291,7 +300,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     check('bootstrap counters remain bounded', report.resourceViolations.length === 0 && signaling.stats().cleanupErrors === 0);
     stage('checks complete');
   } catch (error) { failed = true; report.failedStage = report.stage; report.error = String(error?.stack ?? error).slice(0, 4000);
-    report.browserEvents = browser?.events.slice(-32).map(value => value.slice(0, 1000)) ?? []; save(); }
+    report.browserEvents = browser?.events.slice(-32).map(value => value.slice(0, 1000)) ?? []; hostSnapshot(); }
   finally {
     retiring = true;
     try {
@@ -307,6 +316,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
         }, SCALE_BUDGETS.retirementMs);
       }, SCALE_BUDGETS.cleanupMs);
     } catch (error) { failed = true; cleanupErrors.push(String(error).slice(0, 400)); }
+    hostSnapshot();
     // Evidence above precedes context disposal/process fallback, which must not
     // turn a leaked production carrier into a successful cleanup assertion.
     try { await bounded('browser process cleanup', async () => {
