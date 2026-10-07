@@ -417,16 +417,16 @@ export const DiscoverSection = (initialVnode) => {
             onchange: (/** @type {{target: HTMLSelectElement}} */ e) => { wasm = e.target.value; limit = EXPLORE_PAGE; offset = 0; orderedIds = []; },
           }, [m('option', {value:'all'}, 'All Apps'), m('option', {value:'yes'}, 'Includes WebAssembly'),
             m('option', {value:'no'}, 'No detected WebAssembly files'), m('option', {value:'unknown'}, 'Not specified')]),
-          m('button', { onclick: () => { seed = crypto.getRandomValues(new Uint32Array(1))[0]; limit = EXPLORE_PAGE; offset = 0; orderedIds = []; } }, 'Shuffle'),
+          m('button.secondary', { onclick: () => { seed = crypto.getRandomValues(new Uint32Array(1))[0]; limit = EXPLORE_PAGE; offset = 0; orderedIds = []; } }, 'Shuffle'),
         ]),
-        m('p.muted', 'Publisher-signed WebAssembly hints describe detected file headers, not inline or generated code. They are not a safety or compatibility review.'),
+        m('p.muted', 'WebAssembly hints are publisher-signed, not a safety or compatibility guarantee.'),
         m('p.muted', {role:'status', 'aria-live':'polite'}, ordered.length ? `Showing ${offset + 1}–${offset + shown.length} of ${ordered.length} Apps` : 'No matching Apps'),
         shown.length === 0
           ? m('p.muted', 'Nothing matches.')
           : m('.disc-grid', shown.map((app) => card(send, app))),
         m('.disc-controls', [
-          offset ? m('button', {onclick: () => { offset = Math.max(0, offset - EXPLORE_WINDOW); limit = EXPLORE_WINDOW; }}, 'Previous Apps') : null,
-          offset + shown.length < ordered.length ? m('button', {onclick: () => {
+          offset ? m('button.secondary', {onclick: () => { offset = Math.max(0, offset - EXPLORE_WINDOW); limit = EXPLORE_WINDOW; }}, 'Previous Apps') : null,
+          offset + shown.length < ordered.length ? m('button.secondary', {onclick: () => {
             if (limit < EXPLORE_WINDOW) limit += EXPLORE_PAGE;
             else { offset += EXPLORE_WINDOW; limit = EXPLORE_PAGE; }
           }}, limit < EXPLORE_WINDOW ? 'Show more' : 'Next Apps') : null,

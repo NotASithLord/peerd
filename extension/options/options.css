@@ -354,6 +354,7 @@
    (The flat .peerd-disc-row list below is now Contacts-only.) */
 .disc-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
 .disc-controls select { min-width: 0; max-width: 100%; }
+.disc-controls select:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 .disc-publisher { overflow-wrap: anywhere; }
 .disc-publisher summary { cursor: pointer; }
 .disc-description { margin: 0; font-size: 13px; overflow-wrap: anywhere; }

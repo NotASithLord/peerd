@@ -4867,9 +4867,16 @@ export const STATES = [
     async run(ctx, rec) {
       const page = await openExtPage(ctx, 'tests/fixtures/explore.html');
       try {
-        if (narrow) await page.send('Emulation.setDeviceMetricsOverride', {width:320,height:900,deviceScaleFactor:1,mobile:false});
+        await page.send('Emulation.setDeviceMetricsOverride', {width:narrow ? 320 : 960,height:narrow ? 1200 : 760,deviceScaleFactor:1,mobile:false});
         const ready = await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 3`), {budgetMs:8000,pollMs:80});
-        rec.check('Explore renders all publisher claims including legacy unknown', ready === true);
+        const fullView = await evalIn(page, `(() => {
+          const cards = [...document.querySelectorAll('.disc-card')];
+          return cards.length === 3 && cards.every(card => {
+            const rect = card.getBoundingClientRect();
+            return rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
+          });
+        })()`);
+        rec.check('Explore renders all publisher claims including legacy unknown in full view', ready === true && fullView === true);
         await rec.visualPage(narrow ? 'home-explore-narrow' : 'home-explore', page);
         await evalIn(page, `(() => {const filter=document.querySelector('select');filter.value='yes';filter.dispatchEvent(new Event('change',{bubbles:true}));})()`);
         const filtered = await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 1 && document.querySelector('.disc-name')?.textContent === 'Orbit lab'`), {budgetMs:4000,pollMs:50});
