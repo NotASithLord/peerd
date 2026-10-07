@@ -148,6 +148,106 @@ describe('home.discover effect custody', () => {
 });
 
 describe('home.discover Explore controls', () => {
+  it('filters confirmed Library identities, retains stale evidence honestly, and observes deletion', async () => {
+    const root = document.createElement('div'); document.body.appendChild(root);
+    const apps = [
+      {dwapp_id:'lineage',name:'Updated',publisher:'peer',uri:'peerd://peer/new',version_id:'new',seq:2},
+      {dwapp_id:'import',name:'Imported',publisher:'peer',uri:'peerd://peer/import'},
+      {dwapp_id:'own',name:'Own publication',publisher:'self',uri:'peerd://self/own'},
+    ];
+    let local = [{id:'first',dweb:{dwapp_id:'lineage',uri:'peerd://peer/old',version_id:'old',seq:1}},
+      {id:'second',dweb:{uri:'peerd://peer/import'}}];
+    let fail = false;
+    const send = async (/** @type {any} */ message) => {
+      if (message.type === 'dweb/base/heard') return {ok:true,apps};
+      if (message.type === 'dweb/base/status') return {ok:true,did:'self'};
+      if (message.type === 'apps/list') return fail ? {ok:false} : {ok:true,apps:local};
+      throw new Error('browsing must not mutate');
+    };
+    m.mount(root,{view:()=>m(DiscoverSection,{send})});
+    try {
+      await settle();
+      const filter = /** @type {HTMLSelectElement} */ (root.querySelector('[aria-label="Library filter"]'));
+      expect(filter.value).toBe('all');
+      expect(root.querySelectorAll('.disc-card').length).toBe(3);
+      expect(root.textContent).toContain('Update');
+      filter.value='uninstalled'; filter.dispatchEvent(new Event('change',{bubbles:true})); await settle();
+      expect(root.querySelectorAll('.disc-card').length).toBe(1);
+      expect(root.querySelector('.disc-name')?.textContent).toBe('Own publication');
+      expect(root.querySelector('.disc-card')?.textContent).toContain('Install');
+      expect(root.querySelector('.disc-card')?.textContent.includes('in your Library')).toBe(false);
+      fail = true;
+      /** @type {HTMLButtonElement} */ (root.querySelector('.disc-refresh')).click(); await settle();
+      expect(root.querySelectorAll('.disc-card').length).toBe(1);
+      expect(root.textContent).toContain('last confirmed Library');
+      fail = false; local = [];
+      /** @type {HTMLButtonElement} */ (root.querySelector('.disc-refresh')).click(); await settle();
+      expect(root.querySelectorAll('.disc-card').length).toBe(3);
+      expect(root.textContent.includes('last confirmed Library')).toBe(false);
+    } finally {m.mount(root,null);root.remove();}
+  });
+
+  it('does not treat an unread Library as empty and redraws after a delayed read', async () => {
+    const root = document.createElement('div'); document.body.appendChild(root);
+    /** @type {(value:any)=>void} */ let finish = () => {};
+    const pending = new Promise(resolve=>{finish=resolve;});
+    let retry = false;
+    const send = async (/** @type {any} */ message) => {
+      if (message.type === 'dweb/base/heard') return {ok:true,apps:[{dwapp_id:'a',name:'App'}]};
+      if (message.type === 'dweb/base/status') return {ok:true,did:'self'};
+      if (message.type === 'apps/list') return retry ? {ok:true,apps:[]} : pending;
+      throw new Error('browsing must not mutate');
+    };
+    m.mount(root,{view:()=>m(DiscoverSection,{send})});
+    try {
+      await settle();
+      const filter = /** @type {HTMLSelectElement} */ (root.querySelector('[aria-label="Library filter"]'));
+      expect(filter.disabled).toBe(true);
+      expect(root.textContent).toContain('Checking your Library');
+      finish({ok:false}); await settle();
+      expect(filter.disabled).toBe(true);
+      expect(root.textContent).toContain('Could not read your Library');
+      retry = true;
+      /** @type {HTMLButtonElement} */ (root.querySelector('.disc-refresh')).click(); await settle();
+      expect(filter.disabled).toBe(false);
+      expect(filter.value).toBe('all');
+    } finally {finish({ok:false});m.mount(root,null);root.remove();}
+  });
+
+  it('keeps an installed App visible while its update is pending or unconfirmed', async () => {
+    const root = document.createElement('div'); document.body.appendChild(root);
+    const app = {dwapp_id:'a',name:'App',uri:'peerd://peer/new',publisher:'peer',version_id:'new',seq:2};
+    /** @type {(value:any)=>void} */ let finish = () => {};
+    const pending = new Promise(resolve=>{finish=resolve;});
+    let committed = false;
+    const send = async (/** @type {any} */ message) => {
+      if (message.type === 'dweb/base/heard') return {ok:true,apps:[app]};
+      if (message.type === 'dweb/base/status') return {ok:true,did:'self'};
+      if (message.type === 'apps/list') return {ok:true,apps:[{id:'local',dweb:{dwapp_id:'a',
+        version_id:committed ? 'new' : 'old',seq:committed ? 2 : 1}}]};
+      if (message.type === 'dweb/base/update-app') return pending;
+      throw new Error('unexpected mutation');
+    };
+    m.mount(root,{view:()=>m(DiscoverSection,{send})});
+    try {
+      await settle();
+      /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')].find(button=>button.textContent==='Update')).click();
+      await settle();
+      const filter = /** @type {HTMLSelectElement} */ (root.querySelector('[aria-label="Library filter"]'));
+      filter.value='uninstalled'; filter.dispatchEvent(new Event('change',{bubbles:true})); await settle();
+      expect(root.textContent).toContain('Updating');
+      finish({ok:false,outcomeKnown:false}); await settle();
+      /** @type {HTMLButtonElement} */ (root.querySelector('.disc-refresh')).click(); await settle();
+      expect(root.textContent).toContain('Refresh to reconcile');
+      committed = true;
+      /** @type {HTMLButtonElement} */ (root.querySelector('.disc-refresh')).click(); await settle();
+      expect(root.querySelectorAll('.disc-card').length).toBe(0);
+      /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')].find(button=>button.textContent==='Clear filters')).click();
+      await settle();
+      expect(root.textContent).toContain('Open ↗');
+    } finally {finish({ok:false});m.mount(root,null);root.remove();}
+  });
+
   it('bounds rendered cards, filters signed WASM hints, and never installs through browsing', async () => {
     const root = document.createElement('div'); document.body.appendChild(root);
     const apps = Array.from({length:130}, (_,i) => ({dwapp_id:`app-${i}`,name:`App ${i}`,publisher:`publisher-${i % 7}`,
@@ -179,6 +279,32 @@ describe('home.discover Explore controls', () => {
       filter.value='unknown'; filter.dispatchEvent(new Event('change',{bubbles:true})); await settle();
       expect([...root.querySelectorAll('.disc-card')].every(card=>card.textContent?.includes('WebAssembly not specified'))).toBe(true);
       await click('Shuffle'); expect(writes.length).toBe(0);
+    } finally {m.mount(root,null);root.remove();}
+  });
+
+  it('keeps committed install warnings visible under the Library filter', async () => {
+    const root = document.createElement('div'); document.body.appendChild(root);
+    const app = {dwapp_id:'a',name:'App',uri:'peerd://peer/app'};
+    let installed = false;
+    const send = async (/** @type {any} */ message) => {
+      if (message.type === 'dweb/base/heard') return {ok:true,apps:[app]};
+      if (message.type === 'dweb/base/status') return {ok:true,did:'self'};
+      if (message.type === 'apps/list') return {ok:true,apps:installed ? [{id:'local',dweb:{dwapp_id:'a'}}] : []};
+      if (message.type === 'dweb/base/install') {
+        installed = true; return {ok:true,appId:'local',warning:'audit-write-failed'};
+      }
+      throw new Error('unexpected mutation');
+    };
+    m.mount(root,{view:()=>m(DiscoverSection,{send})});
+    try {
+      await settle();
+      const filter = /** @type {HTMLSelectElement} */ (root.querySelector('[aria-label="Library filter"]'));
+      filter.value='uninstalled'; filter.dispatchEvent(new Event('change',{bubbles:true})); await settle();
+      /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')].find(button=>button.textContent==='Install')).click();
+      await settle();
+      /** @type {HTMLButtonElement} */ (root.querySelector('.disc-refresh')).click(); await settle();
+      expect(root.textContent).toContain('security audit entry could not be written');
+      expect(root.textContent).toContain('Open ↗');
     } finally {m.mount(root,null);root.remove();}
   });
 });
