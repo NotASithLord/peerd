@@ -49,7 +49,7 @@ const fixture = () => {
     constructor(url: string) {
       if (!online) { queueMicrotask(() => this.close()); return; }
       sockets.set(this.id, this); const u = new URL(url);
-      queueMicrotask(() => step({ t: 'join', connId: this.id, key: u.searchParams.get('key'), profile: u.searchParams.get('profile') }));
+      queueMicrotask(() => step({ t: 'join', connId: this.id, key: u.searchParams.get('key'), profile: u.searchParams.get('profile'), kind: u.searchParams.get('kind') }));
     }
     receive(message: any) { if (this.readyState === 1) this.onmessage?.({ data: JSON.stringify(message) }); }
     send(raw: string) {
@@ -93,11 +93,11 @@ const fixture = () => {
   const rooms: Awaited<ReturnType<typeof joinRoom>>[] = [];
   const governors: ReturnType<typeof createAdmissionGovernor>[] = [];
   const nodes: Awaited<ReturnType<typeof createPeerNode>>[] = [];
-  const add = async () => {
+  const add = async ({ sparse = true, kind }: { sparse?: boolean; kind?: string } = {}) => {
     const identity = await generateIdentity(); const admission = createAdmissionGovernor({ timers }); governors.push(admission);
     const owner = governors.length - 1;
     class OwnedSocket extends Socket { constructor(url: string) { super(url); this.owner = owner; } }
-    const room = await joinRoom({ identity, roomId: PUBLIC_ROOM, profile: SPARSE_PUBLIC_PROFILE, url: 'ws://fixture',
+    const room = await joinRoom({ identity, roomId: PUBLIC_ROOM, profile: sparse ? SPARSE_PUBLIC_PROFILE : undefined, kind, url: 'ws://fixture',
       awaitInitialRendezvous: false, WebSocket: OwnedSocket, transport: makeTransport(admission), admission, now: () => now, random, timers });
     room.mesh.stop(); // explicit churn below; wall-clock liveness has its own tests
     rooms.push(room);
@@ -275,3 +275,35 @@ for (const count of [100, 1000]) test(`${count} clients use production bootstrap
   expect(f.tasks.size).toBe(0); expect(f.pending.size).toBe(0); expect(f.sockets.size).toBe(0); expect(f.liveCarriers()).toBe(0);
   for (const governor of f.governors) expect(governor.stats()).toEqual({ active: 0, inbound: 0, queued: 0 });
 }, 60_000);
+
+// Server membership is not a bridge through saturated, non-cooperating legacy
+// meshes. This migration boundary requires spare capacity, churn, or upgrade;
+// sampling must never silently change legacy degree/admission policy.
+test('saturated legacy public component needs churn before sparse introductions can bridge it', async () => {
+  const f = fixture();
+  try {
+    for (let index = 0; index < 16; index++) await f.add({ sparse: false });
+    const website = await f.add({ sparse: false, kind: 'website' });
+    for (const room of f.rooms) expect(room.peers().length).toBe(16);
+    const sparse = await f.add();
+    expect(f.membership()).toBe(18);
+    for (let round = 0; round < 6; round++) await f.advance(20_000);
+    expect(f.samples()).toBeGreaterThan(0);
+    expect(sparse.peers()).toHaveLength(0);
+    for (const room of f.rooms.slice(0, 17)) expect(room.peers()).toHaveLength(16);
+
+    website.leave();
+    for (let round = 0; round < 12 && !sparse.peers().length; round++) await f.advance(20_000);
+    expect(f.membership()).toBe(17);
+    expect(sparse.peers().length).toBeGreaterThan(0);
+    const all = Promise.withResolvers<void>(), received = new Set<string>();
+    for (const node of f.nodes.slice(0, 16)) node.gossip.subscribe('migration', () => {
+      received.add(node.did); if (received.size === 16) all.resolve();
+    });
+    await f.nodes[17]!.gossip.publish('migration', { after: 'legacy capacity release' });
+    await deadline(all.promise, 'mixed-version gossip');
+    expect(received.size).toBe(16);
+    for (const room of f.rooms) expect(room.peers().length).toBeLessThanOrEqual(16);
+  } finally { f.close(); }
+  assertTeardown(f);
+}, 20_000);
