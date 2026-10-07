@@ -76,7 +76,7 @@ const vaultAuthorityWorkers = new Set();
 const loadServiceWorkerChannels = makeBoundedModuleLoader(
   () => Promise.all([
     import('./supervisor-channels.js'),
-    String(CHANNEL) === 'store' ? Promise.resolve({ contributorChannelAddon: {} })
+    String(CHANNEL) === 'store' ? { contributorChannelAddon: {} }
       : import('./contributor-channel-addon.js'),
   ]).then(([{ createServiceWorkerChannels }, { contributorChannelAddon }]) => (
     createServiceWorkerChannels({

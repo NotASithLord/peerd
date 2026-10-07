@@ -4,7 +4,7 @@ import { swarmFetch } from '../../extension/peerd-distributed/content/swarm.js';
 import { createContentResponder, createChannelClient, fetchBundle } from '../../extension/peerd-distributed/content/transfer.js';
 import { createContentStore } from '../../extension/peerd-distributed/content/store.js';
 import { buildManifest } from '../../extension/peerd-distributed/content/manifest.js';
-import { packBundle } from '../../extension/peerd-distributed/content/bundle.js';
+import { packBundle, packTransportBundle, unpackBundle } from '../../extension/peerd-distributed/content/bundle.js';
 import { formatPeerdUri } from '../../extension/peerd-distributed/content/uri.js';
 import { createRoomMesh } from '../../extension/peerd-distributed/transport/mesh.js';
 import { memoryPair } from '../../extension/peerd-distributed/transport/channel.js';
@@ -261,4 +261,48 @@ describe('content transfer ownership and failover', () => {
     } })).rejects.toThrow('link lost');
     expect(handler).toBeNull();
   });
+});
+
+
+test('contribution evidence excludes candidates supplying invalid or missing chunks', async () => {
+  const identity = await generateIdentity();
+  const store = createContentStore();
+  const { uri } = await publishInto(store, identity, { 'index.html': 'verified' });
+  const channels: Record<string, any> = {
+    bad: providerChannel(store, (m) => m.t === 'CHUNK' ? { ...m, bytes: toBase64(utf8('garbage')) } : m),
+    missing: providerChannel(createContentStore()),
+    good: providerChannel(store),
+  };
+  const result = await swarmFetch({ uri, providers: ['bad', 'missing', 'good'], channelFor: (did) => channels[did] });
+  expect(result.providers).toEqual(['bad', 'missing', 'good']);
+  expect(result.verifiedContributors).toEqual(['good']);
+});
+
+
+test('a full compressed-hash failure never exposes contribution evidence', async () => {
+  const identity = await generateIdentity();
+  const packed = await packTransportBundle({ entry: 'index.html', files: { 'index.html': utf8('hello') } });
+  const signed = await buildManifest({ payload: packed.payload, type: 'app', entry: 'index.html', identity,
+    bundle: { ...packed.descriptor, compressedHash: '0'.repeat(64) } });
+  const store = createContentStore();
+  store.publish(signed);
+  const channel = providerChannel(store);
+  let chunkSeen = false;
+  await expect(swarmFetch({ uri: formatPeerdUri({ did: identity.did, hash: signed.hash }),
+    providers: ['peer'], channelFor: () => channel,
+    onProgress: (progress) => { if (progress.phase === 'chunk') chunkSeen = true; },
+  })).rejects.toThrow('compressed bundle hash mismatch');
+  expect(chunkSeen).toBe(true); // individually valid chunks still yield no successful result
+});
+
+test('verified transport contributions do not assert that app bytes are installable', async () => {
+  const identity = await generateIdentity();
+  const signed = await buildManifest({ payload: utf8('not an app container'), type: 'app', entry: 'index.html', identity });
+  const store = createContentStore();
+  store.publish(signed);
+  const channel = providerChannel(store);
+  const result = await swarmFetch({ uri: formatPeerdUri({ did: identity.did, hash: signed.hash }),
+    providers: ['peer'], channelFor: () => channel });
+  expect(result.verifiedContributors).toEqual(['peer']);
+  expect(() => unpackBundle(result.payload)).toThrow();
 });

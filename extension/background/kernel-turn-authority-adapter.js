@@ -1,6 +1,6 @@
 // @ts-check
 import { makeSerialLane } from '/shared/cold-util.js';
-import { setUserPeerBlocked } from './dweb-peer-policy.js';
+import { setUserPeerBlocked, refreshDiscoverySetting } from './dweb-peer-policy.js';
 
 import { effectReceiptFields } from './host-effect-verdict.js';
 
@@ -791,8 +791,17 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         },
       }, args);
     },
-    setDiscovery: (/** @type {any} */ { enabled } = {}) => withDwebPublication(() =>
-      deps.browser.runtime.sendMessage({ type: 'dweb/base-host/set-discovery', enabled })),
+    setDiscovery: async (/** @type {any} */ { enabled } = {}) => {
+      const generation = engine.dwebPublicationGeneration();
+      const current = () => !deps.vault.isLocked() && engine.dwebPublicationGeneration() === generation;
+      if (typeof enabled !== 'boolean' || !current()) return { ok: false, error: 'invalid-discovery-setting' };
+      await deps.settingsStore.update({ dwebDiscoveryEnabled: enabled }, current);
+      try {
+        const result = await refreshDiscoverySetting({ browser: deps.browser, settingsStore: deps.settingsStore }, current);
+        return result.enabled === enabled ? { ...result, durable: true }
+          : { ok: false, durable: true, outcomeKnown: false };
+      } catch { return { ok: false, durable: true, error: 'discovery-enforcement-unconfirmed', outcomeKnown: false }; }
+    },
   }) : null;
 
   const buildToolContext = async (/** @type {any} */ options = {}) => {
@@ -1003,7 +1012,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       idb: deps.idb,
       skills: skillRegistry,
       siteClients: siteClientStore,
-      dweb: dwebTransportOn() ? dwebSurface : dwebSurface ? Object.freeze({ block: dwebSurface.block }) : null,
+      dweb: dwebTransportOn() ? dwebSurface : dwebSurface ? Object.freeze({ block: dwebSurface.block, setDiscovery: dwebSurface.setDiscovery }) : null,
       ...(actorType === 'app' && options.actorInstanceId ? {
         appAgentCall: async (/** @type {'observe'|'act'} */ op,
           /** @type {object} */ args, /** @type {AbortSignal|undefined} */ signal) => {

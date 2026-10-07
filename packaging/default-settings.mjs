@@ -262,6 +262,7 @@ export const defaults = {
   // onboarding or Settings. Stored overrides remain authoritative; an inherited
   // preview default is not consent. Unsupported targets omit these keys.
   dwebEnabled: { preview: false },
+  dwebDiscoveryEnabled: { preview: true },
 
   // The DWEB AGENT — the mesh-operator actor (a persistent, keyless envoy that
   // absorbs the dweb tools and monitors inbound mesh traffic). OPT-IN even on

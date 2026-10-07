@@ -37,9 +37,12 @@ export const makeSettingsStore = ({ kv, key, defaults }) => {
     /**
      * Apply a (already-validated) patch: merge into stored, persist, return merged.
      * @param {Record<string, any>} patch
+     * @param {()=>boolean} [current]
      */
-    update: (patch) => enqueue(async () => {
+    update: (patch, current = () => true) => enqueue(async () => {
+      if (!current()) throw new Error('settings-authority-retired');
       await hydrate();
+      if (!current()) throw new Error('settings-authority-retired');
       const next = { ...stored, ...patch };
       await kv.set(key, next);
       stored = next;

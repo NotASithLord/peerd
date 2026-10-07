@@ -39,6 +39,9 @@ const PUB = 0; // ch=4 typ — a topic publish
 // (MAX_RESP, gossip/sync.js) to single-digit megabytes. Bulk data does
 // not belong here at any size: it rides chunked signed-bundle transfer.
 export const MAX_GOSSIP_ENVELOPE_BYTES = 32 * 1024;
+// why: relayed origins outlive direct links; identity churn must not grow an
+// unbounded rate ledger. Capacity refuses new origins, never forgives debt.
+export const MAX_GOSSIP_ORIGIN_BUCKETS = 4096;
 
 /**
  * @param {{
@@ -67,8 +70,10 @@ export const createGossip = ({
   const subs = new Map(); // topic -> Set<cb>
   /** @type {Set<string>} */
   const seen = new Set(); // envelope sigs, insertion-ordered (LRU by eviction)
-  /** @type {Map<string, { tokens: number, last: number }>} */
-  const buckets = new Map(); // did -> { tokens, last }
+  /** @type {Map<string, { tokens: number, last: number, expires: number }>} */
+  const buckets = new Map(); // insertion order is last accepted debit order
+  let lastTime = -Infinity;
+  let closed = false;
   /** @type {Set<string>} */
   const muted = new Set(); // did
   /** @type {Set<(msg: GossipMsg, topic: string) => void>} */
@@ -86,16 +91,32 @@ export const createGossip = ({
 
   /** @param {string} did */
   const allow = (did) => {
-    const t = now();
+    // Monotonic accounting prevents clock rollback from extending debt or
+    // moving an accepted entry ahead of older expiry deadlines.
+    const observed = now();
+    if (!Number.isFinite(observed)) return false;
+    const t = Math.max(lastTime, observed);
+    lastTime = t;
+    // Expiry uses a full burst refill after the last accepted debit. This is
+    // conservative for partly full buckets. Denied attempts consume no tokens
+    // and do not move the expiry, so the Map remains ordered without timers.
+    for (const [origin, bucket] of buckets) {
+      if (t < bucket.expires || bucket.expires === Infinity) break;
+      buckets.delete(origin);
+    }
     let b = buckets.get(did);
     if (!b) {
-      b = { tokens: rateBurst, last: t };
+      if (buckets.size >= MAX_GOSSIP_ORIGIN_BUCKETS) return false;
+      b = { tokens: rateBurst, last: t, expires: Infinity };
       buckets.set(did, b);
     }
     b.tokens = Math.min(rateBurst, b.tokens + ((t - b.last) / 1000) * ratePerSec);
     b.last = t;
     if (b.tokens < 1) return false;
     b.tokens -= 1;
+    b.expires = ratePerSec > 0 ? t + (rateBurst / ratePerSec) * 1000 : Infinity;
+    buckets.delete(did);
+    buckets.set(did, b);
     return true;
   };
 
@@ -118,7 +139,7 @@ export const createGossip = ({
   };
 
   const offEnvelope = mesh.onEnvelope(async (/** @type {{ env: any, via: any }} */ { env, via }) => {
-    if (env.ch !== 4 || env.typ !== PUB) return;
+    if (closed || env.ch !== 4 || env.typ !== PUB) return;
     if (!env.body || typeof env.body.topic !== 'string') return;
     if (seen.has(env.sig)) return; // duplicate via another path
     markSeen(env.sig);
@@ -134,7 +155,7 @@ export const createGossip = ({
     if (oversized(env, env.body.topic)) return;
     deliver(env, via);
     // Forward the same signed frame onward — everyone but where it came from.
-    await mesh.broadcast(env, via);
+    if (!closed) await mesh.broadcast(env, via);
   });
 
   return Object.freeze({
@@ -143,7 +164,10 @@ export const createGossip = ({
      * @param {any} data
      */
     async publish(topic, data) {
+      if (closed) throw new Error('gossip-closed');
       const env = await mesh.sign(4, PUB, { topic, data });
+      // Signing may finish after the mesh owner retires this gossip instance.
+      if (closed) throw new Error('gossip-closed');
       markSeen(env.sig); // our own frame must not boomerang back to us
       await mesh.broadcast(env);
       return env;
@@ -181,7 +205,7 @@ export const createGossip = ({
      * @param {any} [via]
      */
     ingest(env, via = null) {
-      if (env.ch !== 4 || env.typ !== PUB) return false;
+      if (closed || env.ch !== 4 || env.typ !== PUB) return false;
       if (!env.body || typeof env.body.topic !== 'string') return false;
       if (muted.has(env.from)) return false;
       // The backfill door gets the same cap as the live one — otherwise a
@@ -200,6 +224,6 @@ export const createGossip = ({
     unmute(did) { muted.delete(did); },
     /** @param {string} did */
     isMuted: (did) => muted.has(did),
-    close() { offEnvelope(); subs.clear(); taps.clear(); },
+    close() { closed = true; offEnvelope(); subs.clear(); taps.clear(); buckets.clear(); seen.clear(); muted.clear(); },
   });
 };

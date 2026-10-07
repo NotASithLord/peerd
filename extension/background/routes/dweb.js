@@ -231,7 +231,7 @@ export const makeDwebRoutes = (deps) => {
     'dweb/peer-policy': async (_message, sender) => {
       if (isOffscreenSender?.(sender) !== true) return { ok: false, error: 'offscreen-sender-required' };
       if (!(await dwebReady())) return dwebDisabled();
-      try { return { ok: true, policy: await userPeerPolicy(kv).snapshot() }; }
+      try { return { ok: true, policy: await userPeerPolicy(kv).snapshot(), discoveryEnabled: settingsStore.get().dwebDiscoveryEnabled === true }; }
       catch (error) { return failureResult(error); }
     },
     'dweb/app-authority-generations': async (_msg, sender) => {
