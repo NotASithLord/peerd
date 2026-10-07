@@ -57,7 +57,7 @@ export const createDiscovery = ({
   const cursors = new Map();
   /** @type {Map<string, {id:string, after:string, limit:number, sentAt:number}>} */
   const requests = new Map();
-  /** @type {Map<string, object>} */
+  /** @type {Map<string, { reconcile?: boolean }>} */
   const processing = new Map();
   /** @type {Map<string, {start:number, sent:number, received:number}>} */
   const snapshotWindows = new Map();
@@ -217,6 +217,7 @@ export const createDiscovery = ({
           || !(page.next === null || typeof page.next === 'string'
             && /^[a-f0-9]{64}$/.test(page.next) && page.next > request.after))) return;
         if (!allowSnapshot(via, 'received')) return;
+        /** @type {{ reconcile?: boolean }} */
         const token = {};
         processing.set(via, token);
         let rateLimited = false;
@@ -247,8 +248,16 @@ export const createDiscovery = ({
             cursors.set(via, page.next ?? '');
           }
         } finally {
-          if (processing.get(via) === token) processing.delete(via);
-          if (requests.get(via) === request) requests.delete(via);
+          if (processing.get(via) === token) {
+            processing.delete(via);
+            if (requests.get(via) === request) requests.delete(via);
+            // why: a visible card can precede its final forwarding signature.
+            // Coalesce reconciliation during that tail without losing intent or
+            // letting a retired subscription restart work. Quotas still apply.
+            if (token.reconcile && receiving(via, subscription) && !unsubscribed.has(via)) {
+              subscribeTo(via).catch(() => {});
+            }
+          }
         }
         return;
       }
@@ -278,7 +287,8 @@ export const createDiscovery = ({
   async function subscribeTo(did) {
     if (closed || !autoSubscribe || isBlocked(did)) return false;
     unsubscribed.delete(did);
-    if (processing.has(did)) return false;
+    const pending = processing.get(did);
+    if (pending) { pending.reconcile = true; return false; }
     const outstanding = requests.get(did);
     if (outstanding && now() - outstanding.sentAt < 12_000) return false;
     const bucket = buckets.get(did);
