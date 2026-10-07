@@ -103,6 +103,7 @@ import {
   makeSessionSupportPreflight,
 } from './vault-kernel-core.js';
 import { openHome } from '/shared/open-home.js';
+import { createVaultLockLifecycle } from './routes/vault.js';
 
 const TARGET_RUNTIME_MODULE_KEYS = Object.freeze([
   'controllerClient',
@@ -440,26 +441,27 @@ const pendingProviderView = (/** @type {Record<string,any>} */ settings,
   });
 };
 let stateProjectionGeneration = 0;
-const stateSnapshot = async () => {
+/** @param {any} [authority] */
+const stateSnapshot = async (authority = lockLifecycle.state() && vault.isLocked() ? vault.snapshot() : null) => {
   const projectionGeneration = ++stateProjectionGeneration;
   // why: a cold state read can wait on storage and semantic provider shaping
   // longer than a short actor turn. Freeze topology before the first await,
   // then select only the authority-proven current root below.
   const capturedActorProjections = controllerRelays()?.actorSnapshots?.() ?? {};
-  await kernelReady;
-  const current = await generation.reconcile();
-  if (!current.ok) throw new Error(current.error);
-  const indexed = vaultPosture.snapshot() ?? await vaultPosture.read();
-  const authority = indexed?.initialized === false && !vault.isInitialized()
-    ? {
-      initialized: false, prfEnrolled: false, hasRecovery: false,
-      locked: true, unlockedAt: 0, lockReason: null,
+  if (!authority) {
+    await kernelReady;
+    const current = await generation.reconcile();
+    if (!current.ok) throw new Error(current.error);
+    const indexed = vaultPosture.snapshot() ?? await vaultPosture.read();
+    authority = indexed?.initialized === false && !vault.isInitialized()
+      ? vault.snapshot() : await vault.status();
+    providerProjection.observeLocked(authority.locked);
+    if (authority.initialized || indexed?.initialized !== false) {
+      await vaultPosture.write(authority);
     }
-    : await vault.status();
-  providerProjection.observeLocked(authority.locked);
-  if (authority.initialized || indexed?.initialized !== false) {
-    await vaultPosture.write(authority);
   }
+  // This is a read-only projection, never a writable preference. Defaults
+  // are not consent; settings-store persists only explicit user overrides.
   const settings = settingsStore.get();
   let session = {
     sessionId: null, messages: [], cost: null,
@@ -500,24 +502,12 @@ const stateSnapshot = async () => {
     : await providerProjection.peek(currentSession, false)
       ?? pendingProviderView(settings, currentSession);
   return buildVaultKernelState({
-    kernel: generation.identity,
-    status: {
-      initialized: authority.initialized,
-      prfEnrolled: authority.prfEnrolled,
-      hasRecovery: authority.hasRecovery,
-    },
-    locked: authority.locked,
-    unlockedAt: authority.unlockedAt,
-    lockReason: authority.lockReason,
-    autoLockMs,
-    settings,
-    session,
-    providers: providerView.providers,
-    composer: providerView.composer,
-    profile,
+    kernel: generation.identity, status: authority, ...authority, autoLockMs,
     generation: projectionGeneration,
     actorHost: kernelFirefox ? 'background-page-worker' : 'offscreen-document-worker',
-    runtimeCapabilities,
+    runtimeCapabilities, lockCleanup: lockLifecycle.state(),
+    settings: { ...settings, dwebChoiceMade: typeof settingsStore.stored().dwebEnabled === 'boolean' },
+    session, ...providerView, profile,
     actorProjection,
     // why: once the demand plane is live, its actor host is the authority for
     // isolation health. Retaining the cold-shell placeholder would tell users
@@ -526,8 +516,9 @@ const stateSnapshot = async () => {
   });
 };
 
-const pushState = async () => {
-  const state = await stateSnapshot();
+/** @param {any} [authority] */
+const pushState = async (authority) => {
+  const state = await stateSnapshot(authority);
   const ownerSessionId = typeof state.session?.sessionId === 'string'
     ? state.session.sessionId : null;
   const pendingConfirm = confirmation.coordinator.getPendingForOwner(ownerSessionId);
@@ -561,20 +552,17 @@ const onKernelSettingsChanged = async (/** @type {Record<string,any>} */ patch) 
     await featureHost.runtime.resume({ dwebEnabled: true });
   }
 };
-/** @type {Promise<any> | null} */
-let featureLockInFlight = null;
-const lockFeatureHost = () => {
-  if (featureLockInFlight) return featureLockInFlight;
-  demandPlane?.invalidateDwebPublications?.();
-  controllerGateway.retire();
-  const run = Promise.resolve(voiceCustody.teardown())
-    .catch(() => {})
-    .then(() => featureHost.vaultLocked()).finally(() => {
-    if (featureLockInFlight === run) featureLockInFlight = null;
-  });
-  featureLockInFlight = run;
-  return run;
-};
+const lockLifecycle = createVaultLockLifecycle({
+  revoke: () => {
+    demandPlane?.invalidateDwebPublications?.();
+    controllerGateway.retire();
+  },
+  voice: () => voiceCustody.teardown(),
+  stop: () => featureHost.vaultLocked(),
+  firefox: kernelFirefox,
+  publish: () => { if (vault.isLocked()) void pushState(vault.snapshot()).catch(() => {}); },
+});
+const lockFeatureHost = lockLifecycle.run;
 const recoveryCustody = createKernelRecoveryCustody({
   kv,
   alarms: browser.alarms,
@@ -613,6 +601,8 @@ const vaultRoutes = makeVaultKernelRoutes({
       );
     },
     onLocked: lockFeatureHost,
+    beforeUnlock: () => lockLifecycle.state()
+      ? { ok: false, error: `vault-cleanup-${lockLifecycle.state()}` } : null,
   },
 });
 const indexedVaultRoutes = makeIndexedVaultRoutes({
@@ -1146,11 +1136,10 @@ kernelEvents.event(
 });
 
 vault.subscribe((event) => {
-  void pushState().catch(() => {});
   if (event?.type === 'locked') {
     demandPlane?.abortProviderTests();
     void lockFeatureHost().catch(() => {});
-  }
+  } else void pushState().catch(() => {});
 });
 
 void kernelReady.then(() => coldReceipts.recover()).catch((error) => {

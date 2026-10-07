@@ -20,7 +20,7 @@
 import { localSessionBindings } from './channel-binding.js';
 
 /**
- * @param {{ send: (msg: any) => void, close?: () => void, getSessionBinding?: () => Readonly<import('./channel-binding.js').SessionBinding> }} io
+ * @param {{ send: (msg: any, options?: import('./outgoing.js').SendOptions) => void | Promise<void>, close?: () => void, getSessionBinding?: () => Readonly<import('./channel-binding.js').SessionBinding> }} io
  */
 export const createBufferedChannel = ({ send, close, getSessionBinding } = /** @type {{ send: (msg: any) => void }} */ ({})) => {
   /** @type {((msg: any) => void) | null} */
@@ -32,17 +32,25 @@ export const createBufferedChannel = ({ send, close, getSessionBinding } = /** @
   /** @type {Set<() => void>} */
   const closeCbs = new Set();
 
+  /** @param {any} msg */
+  const invoke = (msg) => {
+    try { Promise.resolve(handler?.(msg)).catch(() => chan.close()); }
+    catch { chan.close(); }
+  };
+
   const chan = {
     getSessionBinding: () => closed ? null : getSessionBinding?.() ?? null,
-    /** @param {any} msg */
-    send: (msg) => {
-      if (!closed) send(msg);
+    /** @param {any} msg @param {import('./outgoing.js').SendOptions} [options] */
+    send: async (msg, options) => {
+      if (closed) throw new Error('peer channel closed');
+      if (options?.signal?.aborted) throw new Error('peer send cancelled');
+      await send(msg, options);
     },
     // Called by the transport when a message arrives.
     /** @param {any} msg */
     deliver(msg) {
       if (closed) return;
-      if (handler) handler(msg);
+      if (handler) invoke(msg);
       else if (backlog.length < 16) backlog.push(msg);
       // why: a stalled handshake/consumer cannot retain an unbounded stream.
       else chan.close();
@@ -52,7 +60,7 @@ export const createBufferedChannel = ({ send, close, getSessionBinding } = /** @
     setHandler(fn) {
       handler = fn;
       if (closed) return;
-      if (fn) while (backlog.length && handler) handler(backlog.shift());
+      if (fn) while (backlog.length && handler) invoke(backlog.shift());
     },
     isClosed: () => closed,
     // Fires once, immediately if already closed. Returns unsubscribe.

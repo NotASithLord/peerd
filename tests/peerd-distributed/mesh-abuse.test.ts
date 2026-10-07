@@ -175,7 +175,7 @@ describe('aggregate ingress bounds', () => {
     }));
     for (const data of iterateSyncChunks({ snapshotId: 'test', surface: 'memory',
       bytes: new Uint8Array(257 * SYNC_CHUNK_BYTES) })) {
-      expect(sender.send(remote.did, await sender.sign(3, 1, { data }))).toBe(true);
+      expect(await sender.send(remote.did, await sender.sign(3, 1, { data }))).toBe(true);
     }
     await complete;
     expect(received).toBe(257);

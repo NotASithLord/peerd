@@ -1,7 +1,8 @@
+import { makeConfirmAnswerRoute } from '../../extension/background/kernel-confirmation.js';
 import { describe, test, expect } from 'bun:test';
 import {
-  makeConfirmAnswerRoute,
   makeVaultRoutes,
+  createVaultLockLifecycle,
 } from '../../extension/background/routes/vault.js';
 import { createDwebPublicationFence } from '../../extension/background/dweb-publication-fence.js';
 
@@ -51,8 +52,8 @@ const makeDeps = (vaultOver: Record<string, any> = {}) => {
     purgeVaultBlob: async () => {},
     sessionCache: { sessionGet: async () => 'chat-a' },
     maybeAutoResumeAfterRecovery: () => {},
-    isActualSidepanelSender: (sender: any) => sender?.surface === 'sidepanel',
-    isActualHomeSender: (sender: any) => sender?.surface === 'home',
+    isSidepanelSender: (sender: any) => sender?.surface === 'sidepanel',
+    isHomeSender: (sender: any) => sender?.surface === 'home',
     onLocked: async () => {},
     confirmCoordinator: {
       resolve: (claim: Record<string, unknown>, answer: string, via: string) => {
@@ -87,6 +88,95 @@ describe('vault routes — success paths', () => {
     expect(await r['vault/unlock']({ passphrase: 'pw' })).toEqual({ ok: true });
     expect(calls.maybeStart).toEqual(['unlock']);
     expect(calls.ensureOffscreen.length).toBe(1);
+  });
+
+  test('locked posture publishes during hanging cleanup; both unlock paths stay fenced until acknowledgement', async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    let locked = false;
+    let unlocks = 0;
+    let settled = false;
+    const projected: any[] = [];
+    const { deps } = makeDeps({
+      lock: async () => { locked = true; },
+      unlock: async () => { unlocks += 1; },
+      unlockWithPrf: async () => { unlocks += 1; },
+    });
+    const lifecycle = createVaultLockLifecycle({
+      stop: async () => { entered(); await held; return [{ ok: true }]; },
+      publish: (cleanup: string | null) => projected.push({ locked, cleanup }),
+    });
+    const routes = makeVaultRoutes({ ...deps, onLocked: lifecycle.run,
+      beforeUnlock: () => lifecycle.state() ? { ok: false, error: 'vault-cleanup-pending' } : null });
+    const locking = routes['vault/lock']().then(result => { settled = true; return result; });
+    await started;
+    expect(projected).toEqual([{ locked: true, cleanup: 'pending' }]);
+    expect(settled).toBe(false);
+    expect(await routes['vault/unlock']({ passphrase: 'pw' })).toEqual({ ok: false, error: 'vault-cleanup-pending' });
+    expect(await routes['vault/unlockPrf']({ prfOutput: 'aa' })).toEqual({ ok: false, error: 'vault-cleanup-pending' });
+    expect(unlocks).toBe(0);
+    release();
+    expect(await locking).toEqual({ ok: true });
+    expect(projected).toEqual([{ locked: true, cleanup: 'pending' }, { locked: true, cleanup: null }]);
+    expect(await routes['vault/unlock']({ passphrase: 'pw' })).toEqual({ ok: true });
+    expect(unlocks).toBe(1);
+  });
+
+  test('failed cleanup remains unconfirmed and blocks unlock until an explicit successful retry', async () => {
+    const failure = new Error('host shutdown unknown');
+    let attempts = 0;
+    const projected: any[] = [];
+    const lifecycle = createVaultLockLifecycle({
+      stop: () => { if (++attempts === 1) throw failure; return Promise.resolve([{ ok: true }]); },
+      publish: (state: string | null) => { projected.push(state); },
+    });
+    const { deps } = makeDeps();
+    const routes = makeVaultRoutes({ ...deps, onLocked: lifecycle.run,
+      beforeUnlock: () => lifecycle.state() ? { ok: false, error: 'vault-cleanup-unconfirmed' } : null });
+    await expect(routes['vault/lock']()).rejects.toBe(failure);
+    expect(projected).toEqual(['pending', 'unconfirmed']);
+    expect(await routes['vault/unlock']({ passphrase: 'pw' }))
+      .toEqual({ ok: false, error: 'vault-cleanup-unconfirmed' });
+    expect(await routes['vault/lock']()).toEqual({ ok: true });
+    expect(projected).toEqual(['pending', 'unconfirmed', 'pending', null]);
+  });
+
+  test.each(['reject', 'failure'])('Firefox voice %s requires browser restart even after an inactive retry', async failure => {
+    let calls = 0;
+    let stopped = 0;
+    let revoked = false;
+    const states: any[] = [];
+    const lifecycle = createVaultLockLifecycle({
+      firefox: true,
+      revoke: () => { revoked = true; },
+      voice: async () => {
+        if (++calls > 1) return { ok: true, inactive: true };
+        if (failure === 'reject') throw new Error('voice stop timeout');
+        return { ok: false, outcomeKnown: false };
+      },
+      stop: async () => { stopped += 1; return [{ ok: true }]; },
+      publish: (state: string | null) => { expect(revoked).toBe(true); states.push(state); },
+    });
+    await expect(lifecycle.run()).rejects.toThrow('vault-cleanup-unconfirmed');
+    expect(stopped).toBe(1);
+    expect(lifecycle.state()).toBe('restart-required');
+    await expect(lifecycle.run()).rejects.toThrow('vault-cleanup-unconfirmed');
+    expect(stopped).toBe(2);
+    expect(lifecycle.state()).toBe('restart-required');
+    expect(states).toEqual(['pending', 'restart-required', 'pending', 'restart-required']);
+  });
+
+  test('resolved failure receipts remain unconfirmed and rendering cannot replace a cleanup error', async () => {
+    const states: any[] = [];
+    const lifecycle = createVaultLockLifecycle({
+      stop: async () => [{ ok: false, outcomeKnown: false }],
+      publish: (state: string | null) => { states.push(state); throw new Error('render unavailable'); },
+    });
+    await expect(lifecycle.run()).rejects.toThrow('vault-cleanup-unconfirmed');
+    expect(lifecycle.state()).toBe('unconfirmed');
+    expect(states).toEqual(['pending', 'unconfirmed']);
   });
 
   test('lock: pushes state so the panel flips to the gate immediately', async () => {
@@ -237,6 +327,16 @@ describe('vault routes — typed error → code mapping', () => {
 });
 
 describe('vault routes — payload validation', () => {
+  test.each(['vault/initialize', 'vault/initializeWithPasskey'])('%s preserves its post-mutation rollback boundary', async name => {
+    let purged = false;
+    const { deps } = makeDeps();
+    deps.onInitialized = () => { throw new Error('post-mutation hook failed'); };
+    deps.purgeVaultBlob = async () => { purged = true; };
+    await expect(makeVaultRoutes(deps)[name]({ passphrase: 'pw',
+      credentialId: 'a', prfSalt: 'b', prfOutput: 'c' })).rejects.toThrow('post-mutation hook failed');
+    expect(purged).toBe(name === 'vault/initialize');
+  });
+
   test('initializeWithPasskey rejects a non-string payload', async () => {
     const { r } = routes();
     expect(await r['vault/initializeWithPasskey']({ credentialId: 1, prfSalt: 's', prfOutput: 'o' }))

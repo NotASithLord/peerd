@@ -4180,8 +4180,11 @@ return {
     && !stoppedFetch.output.includes(REMOTE_MODULE_SLOW_PATH),
   'Stop cancels the Firefox host fetch operation without late resolver output',
   JSON.stringify({ stoppedFetch, requests: stoppedRequests }));
+  // why observe arrival: a deadline may correctly cancel before fetch dispatch.
+  // This case must prove an in-flight fetch timed out, with the real runtime
+  // timer still armed at eval entry and the existing completion bound intact.
   const timedOutFetch = await driver.executeAsync(`
-    const [id, url] = arguments;
+    const [id, url, statusUrl] = arguments;
     const done = arguments[arguments.length - 1];
     (async () => {
       const browser = (await import('/vendor/browser-polyfill.js')).default;
@@ -4193,19 +4196,41 @@ return {
         message,
       });
       const startedAt = Date.now();
-      const run = await send({
+      const timeoutMs = 1_500;
+      let settled = false;
+      const evaluation = send({
         type: 'js/eval', notebookId: id, runId: 'firefox-remote-fetch-timeout',
-        code: 'import ' + JSON.stringify(url) + '; return false;', timeoutMs: 400,
-      });
+        code: 'import ' + JSON.stringify(url) + '; return false;', timeoutMs,
+      }).finally(() => { settled = true; });
+      let sawRequestBeforeDeadline = false;
+      let arrivalElapsedMs = null;
+      while (!settled && Date.now() - startedAt < timeoutMs) {
+        try {
+          const statusResponse = await browser.runtime.sendMessage({
+            type: 'sw/web-fetch', notebookId: id, url: statusUrl, noCache: true,
+          });
+          const body = statusResponse?.bodyB64 ? JSON.parse(atob(statusResponse.bodyB64)) : null;
+          if ((body?.requests ?? 0) === 2) {
+            arrivalElapsedMs = Date.now() - startedAt;
+            sawRequestBeforeDeadline = !settled && arrivalElapsedMs < timeoutMs;
+            break;
+          }
+        } catch { /* preserve the explicit arrival prerequisite on failure */ }
+        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      }
+      const run = await evaluation;
       await new Promise((resolveWait) => setTimeout(resolveWait, 300));
       done({
-        run, elapsedMs: Date.now() - startedAt,
+        run, sawRequestBeforeDeadline, arrivalElapsedMs, elapsedMs: Date.now() - startedAt,
         status: document.getElementById('run-status')?.textContent ?? '',
         output: document.getElementById('console-output')?.textContent ?? '',
       });
     })().catch((error) => done({ error: error?.message || String(error) }));
-  `, [notebookId, slowUrl]);
+  `, [notebookId, slowUrl, slowStatusUrl]);
   const timedOutRequests = await slowModuleRequestsSettle(2);
+  assert(timedOutFetch?.sawRequestBeforeDeadline === true,
+    'the Firefox deadline probe observes an in-flight host fetch before its natural deadline',
+    JSON.stringify({ timedOutFetch, requests: timedOutRequests }));
   assert(/timed out/.test(timedOutFetch?.run?.result?.error ?? '')
     && timedOutFetch?.run?.result?.errorCode === 'notebook_run_timeout'
     && timedOutFetch?.run?.result?.stopped !== true

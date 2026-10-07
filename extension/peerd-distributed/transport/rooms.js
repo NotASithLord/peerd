@@ -25,6 +25,8 @@ import { createWebrtcTransport } from './transports/webrtc.js';
 import { createRoomMesh } from './mesh.js';
 import { createSession } from './session.js';
 import { connectionPath } from './ice.js';
+import { AdmissionError, roomAdmission, MAX_ADMISSION_CANDIDATES } from './admission.js';
+import { createSignalingBuffer } from './signaling-buffer.js';
 import { dlog, dwarn } from '../log.js';
 
 /** @param {string} did */
@@ -32,13 +34,6 @@ const short = (did) => (did || '').slice(-8);
 
 const newId = () =>
   (globalThis.crypto?.randomUUID?.() ?? `id-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-
-// How long to wait for a dialed/answered connect to complete before giving up.
-// A live peer answers over the rendezvous in seconds (then ICE connects); a
-// STALE roster member (a ghost left by a reload that didn't cleanly leave) never
-// answers, so this is mostly the "ghost dial" budget — kept modest so a ghost
-// doesn't hang for half a minute.
-const ANSWER_TIMEOUT_MS = 15_000;
 
 /**
  * Join a room. Resolves to a Room handle once the rendezvous confirms the
@@ -62,6 +57,7 @@ const ANSWER_TIMEOUT_MS = 15_000;
  *   caps?: string[],
  *   kind?: string,
  *   awaitInitialRendezvous?: boolean,
+ *   admission?: ReturnType<typeof import('./admission.js').createAdmissionGovernor>,
  * }} opts
  */
 export const joinRoom = async ({
@@ -78,8 +74,9 @@ export const joinRoom = async ({
   caps = ['content', 'pubsub'],
   kind: peerKind,             // 'website' = observe-only visitor (own rendezvous cap pool); omitted/default = extension
   awaitInitialRendezvous = true,
+  admission = roomAdmission,
 } = /** @type {{ roomId: string, identity: import('./mesh.js').Identity }} */ ({})) => {
-  const t = transport ?? createWebrtcTransport({ iceServers });
+  const t = transport ?? createWebrtcTransport({ iceServers, RTCPeerConnection });
   const mesh = createRoomMesh({ roomId, identity, now, budget, audit });
   /** @type {Set<(arg: { rendezvous: string }) => void>} */
   const statusCbs = new Set();
@@ -87,8 +84,7 @@ export const joinRoom = async ({
   /** @type {import('./signaling-client.js').RendezvousSession | null} */
   let session = null;
   let left = false;
-  /** @type {Set<AbortController>} */
-  const relayDials = new Set();
+  const attempts = admission.createScope();
 
   /** @param {string} s */
   const setStatus = (s) => {
@@ -137,53 +133,77 @@ export const joinRoom = async ({
 
   // ---- shared trickle signaling ------------------------------------------
 
-  // A buffering, per-connection signaling channel for the trickle transport.
-  // `send` relays a payload to the remote; inbound payloads arrive via the
-  // returned `route` fn and are buffered until the transport registers its
-  // onRemote handler (the answer + first candidates race over the wire).
-  /** @param {(payload: any) => void} send */
-  const makeSignaling = (send) => {
-    /** @type {((payload: any) => void) | null} */
-    let handler = null;
-    /** @type {any[]} */
-    const buffer = [];
-    return {
-      /** @param {any} payload */
-      route: (payload) => { if (handler) handler(payload); else buffer.push(payload); },
-      signaling: {
-        send,
-        /** @param {(payload: any) => void} h */
-        onRemote: (h) => {
-          handler = h;
-          while (buffer.length) h(buffer.shift());
-          return () => { handler = null; };
-        },
-      },
-    };
+  // why: all construction paths share the same reservation, including HELLO.
+  // Cancellation retires signaling and closes unadmitted/late channels before
+  // the governor makes the slot available to another room.
+  /** @param {{ key: string, direction: 'inbound'|'outbound',
+   * routers: Map<string, (payload: any) => void>, routeKey: string,
+   * send: (payload: any, signal: AbortSignal) => void | Promise<void>,
+   * connect: (signaling: any, signal: AbortSignal) => Promise<any>,
+   * expectedDid?: string | null, via: string, signal?: AbortSignal }} opts */
+  const attempt = ({ key, direction, routers, routeKey, send, connect, expectedDid = null, via, signal }) =>
+    attempts.run(key, direction, async (reservationSignal) => {
+      const ac = new AbortController();
+      const cancel = () => {
+        pipe.close();
+        if (routers.get(routeKey) === pipe.route) routers.delete(routeKey);
+        ac.abort();
+      };
+      reservationSignal.addEventListener('abort', cancel, { once: true });
+      const pipe = createSignalingBuffer((payload) => send(payload, ac.signal), cancel);
+      routers.set(routeKey, pipe.route);
+      /** @type {any} */
+      let opened = null;
+      let admitted = false;
+      const aborted = new Promise((_, reject) => {
+        ac.signal.addEventListener('abort', () => {
+          if (!admitted) opened?.close();
+          reject(new AdmissionError('cancelled'));
+        }, { once: true });
+      });
+      const work = async () => {
+        const channel = await connect(pipe.signaling, ac.signal);
+        opened = channel;
+        if (ac.signal.aborted) { channel.close(); throw new AdmissionError('cancelled'); }
+        await admit(channel, expectedDid, via, ac.signal);
+        admitted = true;
+      };
+      try { await Promise.race([aborted, work()]); }
+      finally {
+        pipe.close();
+        if (routers.get(routeKey) === pipe.route) routers.delete(routeKey);
+        reservationSignal.removeEventListener('abort', cancel);
+        ac.abort();
+      }
+    }, signal);
+
+  // Bound both task closures and candidate identity bytes, not just active PCs.
+  /** @param {any} members @param {(member: string) => boolean} [eligible] */
+  const candidates = (members, eligible = () => true) => {
+    /** @type {string[]} */
+    const selected = [];
+    const limit = Math.min(MAX_ADMISSION_CANDIDATES, attempts.candidateCapacity);
+    let seen = 0;
+    if (!Array.isArray(members)) return selected;
+    for (const member of members) {
+      if (typeof member !== 'string' || !member.length || member.length > 512 || !eligible(member)) continue;
+      // why: keep a bounded sample rather than permanently preferring the same
+      // roster prefix. Sparse-overlay maintenance belongs above this scheduler.
+      seen++;
+      const index = selected.length < limit ? selected.length : Math.floor(Math.random() * seen);
+      if (index < limit && !selected.includes(member)) selected[index] = member;
+    }
+    return selected;
   };
 
-  // Bound a connect/accept so an unreachable peer (offer sent, answer never
-  // arrives) fails the join instead of hanging on the slow ICE timeout.
-  /**
-   * @template T
-   * @param {Promise<T>} promise
-   * @param {string} label
-   * @returns {Promise<T>}
-   */
-  const withConnectTimeout = (promise, label) => Promise.race([
-    promise,
-    /** @type {Promise<T>} */ (new Promise((_, rej) => setTimeout(() => rej(new Error(`${label} timed out`)), ANSWER_TIMEOUT_MS))),
-  ]);
-
-  // A connect that merely TIMED OUT is almost always a stale roster member (a
-  // ghost the rendezvous hasn't reaped yet) or a peer that can't form a path —
-  // routine and harmless on a best-effort dial, so log it gently. A real error
-  // (something threw) stays loud.
+  // Preserve transport versus HELLO timeout detail: an open carrier is not a stale roster entry.
   /** @param {string} what @param {string} who @param {unknown} e */
   const logConnectFail = (what, who, e) => {
-    const msg = /** @type {{ message?: string }} */ (e)?.message ?? String(e);
-    if (msg.includes('timed out')) dlog('room', `${what} ${short(who)} timed out — likely a stale roster member, skipping`);
-    else dwarn('room', `${what} ${short(who)} failed: ${msg}`);
+    if (e instanceof AdmissionError) return; // overload/cancellation is not misconduct or a warning
+    const error = /** @type {{ message?: string, helloProgress?: object }} */ (e);
+    const msg = error?.message ?? String(e);
+    const progress = error?.helloProgress ? ` ${JSON.stringify(error.helloProgress)}` : '';
+    (msg.includes('timed out') ? dlog : dwarn)('room', `${what} ${short(who)} failed: ${msg}${progress}`);
   };
 
   // ---- rendezvous path ----------------------------------------------------
@@ -193,32 +213,23 @@ export const joinRoom = async ({
     /** @type {Map<string, (payload: any) => void>} */
     const routers = new Map(); // member connId -> route(payload)
 
+    const lifetime = new AbortController();
+    // Session identity keeps reconnect generations from sharing candidate keys.
+    const generation = newId();
     s.on('signal', async (/** @type {{ from: string, payload: any }} */ { from, payload }) => {
+      if (left || lifetime.signal.aborted || typeof from !== 'string' || from.length > 512) return;
       const route = routers.get(from);
-      if (route) { route(payload); return; } // candidate/answer for an in-flight connect
-      // No connection to `from` yet → an OFFER starts the responder flow
-      // (the room protocol has the JOINER offer; existing members answer).
-      if (payload?.type !== 'offer') return; // stray candidate/answer — ignore
-      dlog('room', `📥 offer from ${from} — answering (trickle)`);
-      const { route: r, signaling } = makeSignaling((p) => s.sendSignal(from, p));
-      routers.set(from, r);
-      // why ac: on the give-up timeout below, abort tells the transport to close
-      // the abandoned pc (D2 leak). The transport ignores the abort once the
-      // channel has opened, so aborting in finally never harms an admitted link.
-      const ac = new AbortController();
+      if (route) { route(payload); return; }
+      if (payload?.type !== 'offer' || typeof payload.sdp !== 'string' || payload.sdp.length > 128 * 1024 || new TextEncoder().encode(payload.sdp).byteLength > 128 * 1024) return;
       try {
-        const { channel } = await t.accept({ offer: payload, iceServers, signaling, signal: ac.signal });
-        await admit(await withConnectTimeout(channel, `accept ${from}`), null, 'rendezvous', ac.signal);
-      } catch (e) {
-        logConnectFail('accept from', from, e);
-        audit?.('room_accept_failed', { member: from, error: /** @type {{ message?: string }} */ (e)?.message });
-      } finally {
-        ac.abort();
-        routers.delete(from);
-      }
+        await attempt({ key: `${generation}/${from}`, direction: 'inbound', routers, routeKey: from,
+          send: (p) => s.sendSignal(from, p), via: 'rendezvous', signal: lifetime.signal,
+          connect: async (signaling, signal) => (await t.accept({ offer: { type: 'offer', sdp: payload.sdp }, iceServers, signaling, signal })).channel });
+      } catch (e) { logConnectFail('accept from', from, e); }
     });
 
     s.on('closed', () => {
+      lifetime.abort();
       // Ignore a LATE close from a session we've already replaced — otherwise a
       // stale handler + the current one both fire and start two reconnect loops.
       if (s !== session) return;
@@ -233,24 +244,11 @@ export const joinRoom = async ({
 
     /** @param {string} member */
     const dial = async (member) => {
-      dlog('room', `📞 dialing ${member} (trickle: offer now, candidates streaming)…`);
-      const { route, signaling } = makeSignaling((p) => s.sendSignal(member, p));
-      routers.set(member, route);
-      // why ac: see s.on('signal') above — close the abandoned pc on timeout (D2).
-      const ac = new AbortController();
       try {
-        const channel = await withConnectTimeout(
-          t.connect({ did: `${roomId}/${member}` }, { iceServers, signaling, signal: ac.signal }),
-          `dial ${member}`,
-        );
-        await admit(channel, null, 'rendezvous', ac.signal);
-      } catch (e) {
-        logConnectFail('dial to', member, e);
-        audit?.('room_dial_failed', { member, error: /** @type {{ message?: string }} */ (e)?.message });
-      } finally {
-        ac.abort();
-        routers.delete(member);
-      }
+        await attempt({ key: `${generation}/${member}`, direction: 'outbound', routers, routeKey: member,
+          send: (p) => s.sendSignal(member, p), via: 'rendezvous', signal: lifetime.signal,
+          connect: (signaling, signal) => t.connect({ did: `${roomId}/${member}` }, { iceServers, signaling, signal }) });
+      } catch (e) { logConnectFail('dial to', member, e); }
     };
     return { dial };
   };
@@ -260,70 +258,68 @@ export const joinRoom = async ({
   /** @type {Map<string, (payload: any) => void>} */
   const relayRouters = new Map(); // sid -> route(payload)
 
+  // why: a crossing-offer replacement belongs to the room, but the original
+  // caller must still be able to stop waiting without tearing down that link.
+  /** @param {Promise<any>} pending @param {AbortSignal} [signal] */
+  const waitForAdmission = (pending, signal) => {
+    if (!signal) return pending;
+    if (signal.aborted) return Promise.reject(new AdmissionError('cancelled'));
+    return new Promise((resolve, reject) => {
+      const cancel = () => reject(new AdmissionError('cancelled'));
+      signal.addEventListener('abort', cancel, { once: true });
+      pending.then((value) => { signal.removeEventListener('abort', cancel); resolve(value); },
+        (error) => { signal.removeEventListener('abort', cancel); reject(error); });
+    });
+  };
+
   mesh.onRelay(async (/** @type {{ env: any, via: string }} */ { env, via }) => {
     const { kind, sid, payload } = env.body;
-    if (kind === 'offer') {
-      // A newcomer reached us through a member we already link. Room-scoped
-      // consent (D-9): answer it (trickle over the relay).
-      dlog('room', `📥 relayed offer via ${short(via)} — answering`);
-      const { route, signaling } = makeSignaling((p) =>
-        mesh.relay(via, env.from, p.type === 'answer' ? 'answer' : 'ice', sid, p));
-      relayRouters.set(sid, route);
-      // why ac: a hostile relayed offerer can answer then stall ICE forever —
-      // close the abandoned pc on the give-up timeout (D2).
-      const ac = new AbortController();
-      try {
-        const { channel } = await t.accept({ offer: payload, iceServers, signaling, signal: ac.signal });
-        await admit(await withConnectTimeout(channel, `relay accept ${short(env.from)}`), env.from, via, ac.signal);
-        audit?.('relay_join_accepted', { did: env.from, via });
-      } catch (e) {
-        logConnectFail('relay accept', env.from, e);
-        audit?.('relay_accept_failed', { from: env.from, error: /** @type {{ message?: string }} */ (e)?.message });
-      } finally {
-        ac.abort();
-        relayRouters.delete(sid);
-      }
-      return;
+    if (left || typeof sid !== 'string' || sid.length > 512 || typeof env.from !== 'string' || env.from.length > 512) return;
+    // why: a session id alone lets another authenticated origin inject ICE
+    // into, or replace, a different peer's pending attempt.
+    const routeKey = `${env.from}/${sid}`;
+    const route = relayRouters.get(routeKey);
+    if (route) { if (kind !== 'offer') route(payload); return; }
+    if (kind !== 'offer' || payload?.type !== 'offer' || typeof payload.sdp !== 'string' || payload.sdp.length > 128 * 1024 || new TextEncoder().encode(payload.sdp).byteLength > 128 * 1024) return;
+    // why: if both ends dial, retaining whichever channel authenticates first
+    // can make each close the other's survivor. The lower DID owns the dial;
+    // the higher DID cancels its outgoing attempt before accepting that offer.
+    /** @type {'inbound'|'outbound'} */
+    let direction = 'inbound';
+    if (attempts.pending(`did/${env.from}`)) {
+      if (identity.did < env.from) return;
+      attempts.supersede(`did/${env.from}`);
+      // This is still locally requested exploration: swapping wire roles must
+      // not lose its reserved outbound capacity to an inbound flood.
+      direction = 'outbound';
     }
-    // answer / ice → route to the relay-dialer's signaling for this sid
-    relayRouters.get(sid)?.(payload);
+    try {
+      await attempt({ key: `incoming-did/${env.from}`, direction, routers: relayRouters, routeKey,
+        expectedDid: env.from, via,
+        send: (p, signal) => mesh.relay(via, env.from, p.type === 'answer' ? 'answer' : 'ice', sid, p, { signal }),
+        connect: async (signaling, signal) => (await t.accept({ offer: { type: 'offer', sdp: payload.sdp }, iceServers, signaling, signal })).channel });
+    } catch (e) { logConnectFail('relay accept', env.from, e); }
   });
 
   /** @param {string} via @param {string} targetDid @param {{signal?: AbortSignal}} [opts] */
   const dialViaRelay = async (via, targetDid, { signal } = {}) => {
-    if (left || signal?.aborted) throw new Error('room dial cancelled');
+    if (left || signal?.aborted) throw new AdmissionError('cancelled');
+    if (mesh.hasLink(targetDid)) return;
+    if (typeof targetDid !== 'string' || targetDid.length > 512) throw new AdmissionError('invalid candidate');
+    const incoming = attempts.pending(`incoming-did/${targetDid}`);
+    if (incoming) throw new AdmissionError('duplicate');
     const sid = newId();
-    dlog('room', `📞 relay-dialing ${short(targetDid)} via ${short(via)}…`);
-    const { route, signaling } = makeSignaling((p) =>
-      mesh.relay(via, targetDid, p.type === 'offer' ? 'offer' : 'ice', sid, p));
-    relayRouters.set(sid, route);
-    const ac = new AbortController();
-    relayDials.add(ac);
-    /** @type {any} */
-    let opened = null;
-    let admitted = false;
-    const cancel = () => ac.abort();
-    signal?.addEventListener('abort', cancel, { once: true });
-    const timer = setTimeout(cancel, ANSWER_TIMEOUT_MS);
-    const aborted = new Promise((_, reject) => {
-      ac.signal.addEventListener('abort', () => {
-        if (!admitted) opened?.close();
-        reject(new Error('relay dial cancelled or timed out'));
-      }, { once: true });
-    });
-    const connect = async () => {
-      const channel = await t.connect({ did: targetDid }, { iceServers, signaling, signal: ac.signal });
-      opened = channel;
-      await admit(channel, targetDid, via, ac.signal);
-      admitted = true;
-    };
-    try { await Promise.race([aborted, connect()]); }
-    finally {
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', cancel);
-      relayDials.delete(ac);
-      ac.abort();
-      relayRouters.delete(sid);
+    try { await attempt({ key: `did/${targetDid}`, direction: 'outbound', routers: relayRouters,
+      routeKey: `${targetDid}/${sid}`, expectedDid: targetDid, via, signal,
+      send: (p, attemptSignal) => mesh.relay(via, targetDid, p.type === 'offer' ? 'offer' : 'ice', sid, p, { signal: attemptSignal }),
+      connect: (signaling, attemptSignal) => t.connect({ did: targetDid }, { iceServers, signaling, signal: attemptSignal }) }); }
+    catch (error) {
+      const replacement = attempts.pending(`incoming-did/${targetDid}`);
+      if (error instanceof AdmissionError && error.reason === 'superseded' && replacement && !left && !signal?.aborted) {
+        await waitForAdmission(replacement, signal);
+        return;
+      }
+      throw error;
     }
   };
 
@@ -333,8 +329,7 @@ export const joinRoom = async ({
   const expandViaPeer = async (viaDid) => {
     const members = /** @type {string[]} */ (await mesh.requestRoster(viaDid));
     const results = await Promise.allSettled(
-      members
-        .filter((d) => d !== identity.did && !mesh.hasLink(d))
+      candidates(members, (d) => d !== identity.did && !mesh.hasLink(d))
         .map((d) => dialViaRelay(viaDid, d)),
     );
     for (const r of results) {
@@ -380,8 +375,8 @@ export const joinRoom = async ({
     outageWarned = false;
     const { dial } = attachSession(session);
     if (session.members.length === 0) dlog('room', 'first one here — waiting for others to join and offer');
-    else dlog('room', `${session.members.length} member(s) here — dialing each:`, session.members);
-    await Promise.allSettled(session.members.map(dial));
+    else dlog('room', `${session.members.length} member(s) here; scheduling bounded candidate sample`);
+    await Promise.allSettled(candidates(session.members).map(dial));
   };
 
   /** @param {any} e */
@@ -450,7 +445,7 @@ export const joinRoom = async ({
     leave() {
       if (left) return;
       left = true;
-      for (const ac of relayDials) ac.abort();
+      attempts.close();
       clearTimeout(reconnectTimer ?? undefined);
       try { session?.close(); } catch { /* already closed */ }
       mesh.close();

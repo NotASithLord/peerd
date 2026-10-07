@@ -42,6 +42,29 @@ const mountGate = (state, send) => {
   return { root, unmount: () => { m.mount(root, null); root.remove(); } };
 };
 
+describe('sidepanel.vault-gate cleanup posture', () => {
+  for (const cleanup of ['pending', 'unconfirmed', 'restart-required']) it(`keeps unlock unavailable while cleanup is ${cleanup}`, async () => {
+    const state = stateFor({ initialized: true, prfEnrolled: false });
+    state.vault.hasRecovery = true;
+    state.vault.lockCleanup = cleanup;
+    /** @type {Message[]} */ const sent = [];
+    const { root, unmount } = mountGate(state, async message => { sent.push(message); return { ok: true }; });
+    try {
+      expect(root.textContent).toContain('Vault locked.');
+      expect(root.querySelector('input[type="password"]')).toBe(null);
+      expect(!!root.querySelector('[role="status"]')).toBe(true);
+      const retry = root.querySelector('button');
+      if (cleanup === 'unconfirmed') {
+        expect(retry?.textContent).toBe('Retry shutdown');
+        retry?.click();
+        await Promise.resolve();
+        expect(sent).toEqual([{ type: 'vault/lock' }]);
+      } else expect(retry).toBe(null);
+      if (cleanup === 'restart-required') expect(root.textContent).toContain('Fully quit and restart your browser');
+    } finally { unmount(); }
+  });
+});
+
 if (HAVE_VIRTUAL_AUTHENTICATOR) describe('sidepanel.vault-gate post-credential authority', () => {
   /** @type {Message | null} */
   let enrollment = null;

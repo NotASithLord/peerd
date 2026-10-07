@@ -57,10 +57,13 @@ const mountWhole = async (send) => {
   return { root, unmount: () => { m.mount(root, null); root.remove(); } };
 };
 
-const flushUntil = async (/** @type {() => boolean} */ ready) => {
-  for (const _attempt of Array.from({ length: 20 })) {
+const flushUntil = async (/** @type {() => boolean} */ ready, /** @type {string} */ stage) => {
+  // A cold dynamic import is not bounded by a number of event-loop ticks.
+  // Wait for the tested effect; the watchdog fails explicitly if it never arrives.
+  const deadline = performance.now() + 5_000;
+  while (!ready()) {
+    if (performance.now() >= deadline) throw new Error(`Artifact test did not reach: ${stage}`);
     await flush();
-    if (ready()) return;
   }
 };
 
@@ -85,7 +88,7 @@ describe('options.transfer: artifact import', () => {
         value: [{ size: 12, text: async () => { reads += 1; return '{"fixture":true}'; } }],
       });
       input.dispatchEvent(new Event('change'));
-      await flushUntil(() => calls.some((call) => call.type === 'import/inspect'));
+      await flushUntil(() => root.textContent?.includes('Name: Fixture') === true, 'small-file inspection rendered');
       expect(reads).toBe(1);
       expect(calls.filter((call) => call.type === 'import/inspect')).toEqual([
         { type: 'import/inspect', envelope: { fixture: true } },
@@ -109,7 +112,7 @@ describe('options.transfer: artifact import', () => {
         value: [{ size: Number.MAX_SAFE_INTEGER, text: async () => { reads += 1; return '{}'; } }],
       });
       input.dispatchEvent(new Event('change'));
-      await flushUntil(() => root.textContent?.includes('too large to import safely') === true);
+      await flushUntil(() => root.textContent?.includes('too large to import safely') === true, 'oversize rejection rendered');
       expect(root.textContent).toContain('96 MB maximum');
       expect(reads).toBe(0);
       expect(calls.some((call) => call.type === 'import/inspect')).toBe(false);
@@ -146,9 +149,9 @@ describe('options.transfer: artifact import', () => {
         input.dispatchEvent(new Event('change'));
       };
       select('A');
-      await flushUntil(() => inspections.some((envelope) => envelope.id === 'A'));
+      await flushUntil(() => inspections.some((envelope) => envelope.id === 'A'), 'first inspection dispatched');
       select('B');
-      await flushUntil(() => root.textContent?.includes('Name: B') === true);
+      await flushUntil(() => root.textContent?.includes('Name: B') === true, 'newer inspection rendered');
       resolveA({
         ok: true, summary: { kind: 'app', name: 'A', size: 12, fileCount: 1 },
       });

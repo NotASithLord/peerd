@@ -462,6 +462,7 @@ export const makeVaultAuthorityClient = ({
 
   return Object.freeze({
     status: refreshStatus,
+    snapshot: () => Object.freeze({ ...cached }),
     boot,
     initialize: (/** @type {string} */ passphrase) => invokeAndRefresh('initialize', passphrase),
     initializeWithPrfOnly: (/** @type {any} */ value) => invokeAndRefresh('initializeWithPrfOnly', value),

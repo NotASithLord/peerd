@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { abortClosesPc, createWebrtcTransport } from '../../extension/peerd-distributed/transport/transports/webrtc.js';
+import { createSignalingBuffer } from '../../extension/peerd-distributed/transport/signaling-buffer.js';
 import { createInprocTransport } from '../../extension/peerd-distributed/transport/transports/inproc.js';
 
 // Drive the real transport through both unopened cancellation and the live-link
@@ -198,6 +199,16 @@ describe('webrtc transport — the wired late-completion guard (D2)', () => {
     expect(unsubscribed).toBe(1);
   });
 
+  test('rejected asynchronous offer and answer sends release the native peer without a caller signal', async () => {
+    const transport = createWebrtcTransport({ RTCPeerConnection: MockPC as any });
+    const failingPipe = () => createSignalingBuffer(async () => { throw new Error('signaling backpressure failure'); }, () => {});
+    const signaling = failingPipe().signaling;
+    await expect(transport.connect({ did: 'x' }, { signaling })).rejects.toThrow('signaling backpressure failure');
+    expect(instances.at(-1).closed).toBe(true);
+    await expect(transport.accept({ offer: { sdp: 'offer' }, signaling: failingPipe().signaling })).rejects.toThrow('signaling backpressure failure');
+    expect(instances.at(-1).closed).toBe(true);
+  });
+
   test('a channel that opens before abort keeps its live pc', async () => {
     instances.length = 0;
     const t = createWebrtcTransport({ RTCPeerConnection: MockPC as any });
@@ -228,15 +239,8 @@ describe('non-webrtc transports ignore the new signal opt (D2 abstraction safety
 });
 
 describe('rooms.js + webrtc wire the AbortController at every abandonment site (D2)', () => {
-  test('all four dial/accept sites construct, pass, and abort a controller', async () => {
-    const src = await Bun.file('extension/peerd-distributed/transport/rooms.js').text();
-    expect((src.match(/new AbortController\(\)/g) ?? []).length).toBe(4);
-    expect((src.match(/signal: ac\.signal/g) ?? []).length).toBe(4);
-    // Every dial/accept still aborts in finally. Additional caller-cancel and
-    // room-shutdown abort sites must not invalidate this cleanup invariant.
-    expect((src.match(/finally\s*\{[^}]*\bac\.abort\(\)/g) ?? []).length).toBe(4);
-  });
-
+  // Real four-path admission/cancellation coverage lives in room-admission.test.ts;
+  // counting inline controllers would reject the shared lifecycle owner.
   test('the webrtc transport threads signal into connect + accept and guards the helper', async () => {
     const src = await Bun.file('extension/peerd-distributed/transport/transports/webrtc.js').text();
     expect(src).toContain('{ once: true }');

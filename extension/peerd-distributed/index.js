@@ -85,6 +85,10 @@ export {
 
 // --- content addressing (peerd://, signed manifests, chunked bundles) ----
 export { parsePeerdUri, formatPeerdUri } from './content/uri.js';
+export {
+  parseDwappUri, formatDwappUri, canonicalizeDwappUri, toWebDwappUri, fromWebDwappUri,
+  DwappUriError, MAX_DWAPP_URI_LENGTH, MAX_DWAPP_PATH_BYTES,
+} from './content/dwapp-uri.js';
 export { buildManifest, verifyManifest, manifestHash } from './content/manifest.js';
 export { chunkBytes, sha256hex, CHUNK_SIZE } from './content/chunk.js';
 export { packBundle, unpackBundle, unpackBundleText } from './content/bundle.js';

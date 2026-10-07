@@ -144,6 +144,36 @@ describe('rooms over the rendezvous (fake node, real reducer)', () => {
     ra.leave(); rb.leave(); rc.leave();
   });
 
+  test('room failure logs retain the actual HELLO timeout stage and progress', async () => {
+    const node = createFakeNode();
+    const ether = createFakeEther();
+    const [a, b] = await Promise.all([generateIdentity(), generateIdentity()]);
+    const first = await join('diagnostic-hello', a, node, ether);
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    const originalLog = console.log;
+    const messages: string[] = [];
+    let second: any;
+    try {
+      Object.defineProperty(globalThis, 'window', { configurable: true, value: {} });
+      console.log = (...args) => { messages.push(args.join(' ')); };
+      second = await join('diagnostic-hello', b, node, ether, { transport: {
+        ...ether.makeTransport(),
+        connect: async () => { throw Object.assign(new Error('peer HELLO timed out'), {
+          helloProgress: { helloSent: true, helloReceived: false },
+        }); },
+      } });
+      expect(second.peers()).toHaveLength(0);
+      const failure = messages.find(message => message.includes('peer HELLO timed out'));
+      expect(failure).toContain('"helloReceived":false');
+      expect(messages.join(' ')).not.toContain('stale roster');
+    } finally {
+      console.log = originalLog;
+      if (descriptor) Object.defineProperty(globalThis, 'window', descriptor);
+      else Reflect.deleteProperty(globalThis, 'window');
+      second?.leave(); first.leave();
+    }
+  });
+
   test('a channel closing during HELLO cannot keep the initial room join pending', async () => {
     const node = createFakeNode();
     const ether = createFakeEther();
@@ -154,7 +184,7 @@ describe('rooms over the rendezvous (fake node, real reducer)', () => {
       async connect() {
         const [local, remote] = memoryPair();
         const send = local.send;
-        local.send = (message) => { send(message); remote.close(); };
+        local.send = (message) => { const sent = send(message); remote.close(); return sent; };
         return local;
       },
     };

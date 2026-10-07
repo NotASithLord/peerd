@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import { makeDwebRoutes } from '../../extension/background/routes/dweb.js';
 import { createDwebRollbackGuard } from '../../extension/background/dweb-rollback-guard.js';
+import { createDwebPublicationFence } from '../../extension/background/dweb-publication-fence.js';
 import { createAppQuiescence } from '../../extension/background/app-quiescence.js';
 import { appReleaseDescriptorMatches } from '../../extension/background/app-client.js';
 
@@ -118,6 +119,43 @@ describe('dweb gate (build flag + setting)', () => {
     const second = baseDeps();
     expect(() => makeDwebRoutes({ ...second.deps, dwebPublicationGeneration: undefined }))
       .toThrow('dweb route custody dependencies are required');
+  });
+
+  test('repeated status reads never acquire or start a host, including an absent host', async () => {
+    let acquisitions = 0;
+    const { deps, sent } = baseDeps({ ensureDwebFeature: async () => { acquisitions += 1; } });
+    const routes = makeDwebRoutes(deps);
+    await routes['dweb/distributed/info']();
+    await routes['dweb/distributed/info']();
+    expect(acquisitions).toBe(0);
+    expect(sent).toEqual([{ type: 'dweb/base-host/info' }, { type: 'dweb/base-host/info' }]);
+    deps.browser.runtime.sendMessage = async () => { throw new Error('no receiving end'); };
+    expect(await routes['dweb/distributed/info']()).toEqual({
+      ok: false, error: 'dweb-status-unavailable', running: false,
+    });
+    expect(acquisitions).toBe(0);
+  });
+  test('a status reply crossing disable cannot report the retired host as connected', async () => {
+    const fence = createDwebPublicationFence();
+    let enabled = true;
+    let enter!: () => void;
+    let release!: (value: any) => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const pending = new Promise(resolve => { release = resolve; });
+    const { deps } = baseDeps({
+      settingsStore: { get: () => ({ dwebEnabled: enabled }) },
+      dwebPublicationGeneration: fence.generation,
+      withDwebPublication: fence.run,
+      browser: { runtime: { sendMessage: async () => { enter(); return pending; } } },
+    });
+    const reading = makeDwebRoutes(deps)['dweb/distributed/info']();
+    await entered;
+    enabled = false;
+    fence.invalidate();
+    release({ ok: true, running: true, linkedCount: 4 });
+    expect(await reading).toEqual({ ok: false, error: 'dweb-custody-changed' });
+    expect(await makeDwebRoutes(deps)['dweb/distributed/info']())
+      .toEqual({ ok: false, error: 'dweb-disabled' });
   });
 
   test('disabled when the build flag is off', async () => {

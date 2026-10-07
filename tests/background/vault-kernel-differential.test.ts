@@ -585,6 +585,37 @@ describe('vault authority kernel boot and UI contract', () => {
     expect(pushed).toBe(1);
   });
 
+  test.each([false, true])('failed lock uses cached posture without reacquiring authority (posture failure=%s)', async failWrite => {
+    const failure = new Error('vault-cleanup-unconfirmed');
+    const cached = Object.freeze({ initialized: true, prfEnrolled: true, hasRecovery: false,
+      locked: true, unlockedAt: 0, lockReason: 'manual' });
+    let statusReads = 0;
+    let snapshotReads = 0;
+    let pushed = 0;
+    const writes: any[] = [];
+    const routes = makeIndexedVaultRoutes({
+      routes: { 'vault/lock': async () => { throw failure; } },
+      posture: {
+        snapshot: () => ({ initialized: true }),
+        write: async (status: any) => {
+          writes.push(status);
+          if (failWrite) throw new Error('posture unavailable');
+        },
+      },
+      vault: {
+        isInitialized: () => true,
+        snapshot: () => { snapshotReads++; return cached; },
+        status: async () => { statusReads++; throw new Error('retiring host must not be acquired'); },
+      },
+      pushState: async () => { pushed++; },
+    });
+    await expect(routes['vault/lock']()).rejects.toBe(failure);
+    expect(statusReads).toBe(0);
+    expect(snapshotReads).toBe(1);
+    expect(writes).toEqual([cached]);
+    expect(pushed).toBe(1);
+  });
+
   test('an already-initialized retry repairs a stale fresh-install posture', async () => {
     const writes: any[] = [];
     const routes = makeIndexedVaultRoutes({

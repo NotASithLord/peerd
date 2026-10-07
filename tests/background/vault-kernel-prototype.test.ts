@@ -100,6 +100,22 @@ describe('minimal vault authority-kernel prototype', () => {
     expect(JSON.stringify(state)).not.toMatch(/credentialId|prfSalt|wrappedDK|secret|apiKey/);
   });
 
+  test('locked cleanup projection excludes authority metadata and rejects invalid cleanup states', () => {
+    const authority = {
+      initialized: true, prfEnrolled: true, hasRecovery: false,
+      locked: true, unlockedAt: 0, lockReason: 'manual', secret: 'snapshot-secret-sentinel',
+    };
+    const state = buildVaultKernelState({
+      kernel: KERNEL, status: authority, ...authority, autoLockMs: 0,
+      ...lockedUi, lockCleanup: 'pending', generation: 12,
+    });
+    expect(state.vault.lockCleanup).toBe('pending');
+    expect(state.projection.generation).toBe(12);
+    expect(state.composer.canSend).toBe(false);
+    expect(JSON.stringify(state)).not.toContain('snapshot-secret-sentinel');
+    expect(validateKernelStateProjection({ ...state, vault: { ...state.vault, lockCleanup: true } }).ok).toBe(false);
+  });
+
   test('unlocked projection combines live actor isolation with provider readiness', () => {
     const runtimeCapabilities = {
       version: 1,

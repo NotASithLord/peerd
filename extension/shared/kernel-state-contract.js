@@ -10,6 +10,12 @@ export const KERNEL_STATE_DEFERRED_FIELDS = Object.freeze([
 const own = (/** @type {object} */ value, /** @type {string} */ key) => Object.hasOwn(value, key);
 /** @param {unknown} value @returns {value is Record<string, any>} */
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+/** @param {unknown} value @param {number} max @param {number} [min] */
+const boundedString = (value, max, min = 0) => typeof value === 'string'
+  && value.length >= min && value.length <= max;
+/** @param {unknown} value @param {(entry:any)=>boolean} valid */
+const recordMap = (value, valid) => record(value) && Object.keys(value).length <= 256
+  && Object.values(value).every(valid);
 const safeCount = (/** @type {unknown} */ value) => Number.isSafeInteger(value) && /** @type {number} */ (value) > 0;
 const invalid = (/** @type {string} */ error) => ({ ok: /** @type {const} */ (false), error: `kernel-state-${error}` });
 
@@ -20,7 +26,8 @@ export const validKernelVault = (value) => {
   if (typeof v.initialized !== 'boolean' || typeof v.locked !== 'boolean'
       || typeof v.prfEnrolled !== 'boolean' || typeof v.hasRecovery !== 'boolean'
       || !Number.isFinite(v.unlockedAt) || v.unlockedAt < 0
-      || ![null, 'idle', 'manual'].includes(v.lockReason ?? null)) return false;
+      || ![null, 'idle', 'manual'].includes(v.lockReason ?? null)
+      || ![undefined, 'pending', 'unconfirmed', 'restart-required'].includes(v.lockCleanup)) return false;
   if (v.locked && v.unlockedAt !== 0) return false;
   if (!v.initialized && !v.locked) return false;
   return true;
@@ -49,9 +56,7 @@ export const validKernelSettings = (value) => {
   const s = value;
   if (!Number.isFinite(s.vaultAutoLockMs) || s.vaultAutoLockMs < 0) return false;
   for (const [key, item] of Object.entries(s)) {
-    const boolean = key.endsWith('Enabled')
-      || ['voiceOnboardingDismissed', 'devMode', 'watchAgentTab',
-        'confirmWebWrites', 'schemaValidatedReplies', 'autoResumeInterruptedTurns'].includes(key);
+    const boolean = /Enabled$|^(voiceOnboardingDismissed|dwebChoiceMade|devMode|watchAgentTab|confirmWebWrites|schemaValidatedReplies|autoResumeInterruptedTurns)$/.test(key);
     if (boolean && typeof item !== 'boolean') return false;
     if (/(?:Variant|Engine|Effort|ActionSurface|Name|Model|Host|View)$/.test(key)
         && typeof item !== 'string') return false;
@@ -69,37 +74,36 @@ const validSession = (value) => {
   if (!record(value)) return false;
   const s = value;
   if (s.sessionId !== null
-      && (typeof s.sessionId !== 'string' || s.sessionId.length > 256)) return false;
+      && (!boundedString(s.sessionId, 256))) return false;
   if (!Array.isArray(s.messages) || s.messages.length > 10_000
       || s.messages.some((item) => !record(item))) return false;
   if (!record(s.permission) || !['plan', 'act'].includes(s.permission.mode)
       || typeof s.permission.confirmActions !== 'boolean') return false;
-  return s.provider == null || typeof s.provider === 'string' && s.provider.length <= 64;
+  return s.provider == null || boundedString(s.provider, 64);
 };
 
 /** @param {unknown} providers @param {unknown} composer */
 export const validKernelProviderView = (providers, composer) => record(providers)
-  && typeof providers.current === 'string' && providers.current.length <= 64
-  && typeof providers.model === 'string' && providers.model.length <= 256
+  && boundedString(providers.current, 64)
+  && boundedString(providers.model, 256)
   && typeof providers.hasKey === 'boolean'
   && (providers.defaultRunnerModel === undefined
-    || typeof providers.defaultRunnerModel === 'string'
-      && providers.defaultRunnerModel.length <= 256)
+    || boundedString(providers.defaultRunnerModel, 256))
   && record(composer)
-  && typeof composer.provider === 'string' && composer.provider.length <= 64
-  && typeof composer.model === 'string' && composer.model.length <= 256
+  && boundedString(composer.provider, 64)
+  && boundedString(composer.model, 256)
   && ['keyless', 'credentialReady', 'localReady', 'canSend']
     .every((key) => typeof composer[key] === 'boolean')
   && (composer.reason === null
-    || typeof composer.reason === 'string' && composer.reason.length <= 128)
+    || boundedString(composer.reason, 128))
   && (composer.warning == null
-    || typeof composer.warning === 'string' && composer.warning.length <= 128);
+    || boundedString(composer.warning, 128));
 
 /** @param {unknown} value */
 const validProfile = (value) => record(value)
   && Object.keys(value).length === 3
   && value.id === 'default'
-  && typeof value.peerName === 'string' && value.peerName.length > 0 && value.peerName.length <= 32
+  && boundedString(value.peerName, 32, 1)
   && typeof value.onboardingComplete === 'boolean';
 
 /** @param {unknown} value */
@@ -108,18 +112,12 @@ const validActorProjection = (value) => {
   const actors = value.actors;
   const spawned = value.spawned;
   const asyncTasks = value.asyncTasks;
-  if (!record(actors) || Object.keys(actors).length > 256
-      || Object.values(actors).some((entry) => !record(entry))
-      || !record(spawned) || !record(spawned.byToolUse) || !record(spawned.sessions)
-      || Object.keys(spawned.sessions).length > 256
-      || Object.values(spawned.sessions).some((entry) => !record(entry))
-      || !record(asyncTasks) || Object.keys(asyncTasks).length > 256
-      || Object.values(asyncTasks).some((entry) => !Array.isArray(entry)
-        || entry.length > 256 || entry.some((task) => !record(task)))) return false;
+  if (!recordMap(actors, record) || !record(spawned) || !record(spawned.byToolUse)
+      || !recordMap(spawned.sessions, record)
+      || !recordMap(asyncTasks, entry => Array.isArray(entry)
+        && entry.length <= 256 && entry.every(record))) return false;
   return (value.actorProjectionEpoch === null
-      || typeof value.actorProjectionEpoch === 'string'
-        && value.actorProjectionEpoch.length >= 8
-        && value.actorProjectionEpoch.length <= 128)
+      || boundedString(value.actorProjectionEpoch, 128, 8))
     && Number.isSafeInteger(value.actorProjectionRevision)
     && value.actorProjectionRevision >= 0;
 };
@@ -132,8 +130,7 @@ export const validateKernelStateProjection = (value) => {
   if (!record(p)) return invalid('projection-missing');
   if (p.schema !== KERNEL_STATE_SCHEMA) return invalid('schema-mismatch');
   if (p.provenance !== KERNEL_STATE_PROVENANCE) return invalid('provenance-mismatch');
-  if (typeof p.authorityEpoch !== 'string' || p.authorityEpoch.length < 8
-      || p.authorityEpoch.length > 128 || !safeCount(p.generation))
+  if (!boundedString(p.authorityEpoch, 128, 8) || !safeCount(p.generation))
     return invalid('generation-invalid');
   if (!['hydrated', 'defaulted', 'failed'].includes(p.settings)
       || !['hydrated', 'base', 'failed'].includes(p.actorIsolation)

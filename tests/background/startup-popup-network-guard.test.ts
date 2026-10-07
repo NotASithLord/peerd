@@ -496,6 +496,8 @@ describe('startup popup network guard', () => {
   test('retries a failed cleanup-ledger read before numeric reuse', async () => {
     let rules = [rule(4, [7, 9])];
     let reads = 0;
+    let cleanupPersisted!: () => void;
+    const cleaned = new Promise<void>((resolve) => { cleanupPersisted = resolve; });
     let pending = [{ tabId: 9, sourceTabId: 7 }];
     makeStartupPopupNetworkGuard({
       getSessionRules: async () => rules,
@@ -511,15 +513,20 @@ describe('startup popup network guard', () => {
         if (reads === 1) throw new Error('storage-transient');
         return pending;
       },
-      savePending: async (rows) => { pending = [...rows]; },
+      savePending: async (rows) => {
+        pending = [...rows];
+        if (rows.length === 0) cleanupPersisted();
+      },
       loadTabs: async () => [{ id: 7 }],
       retryMs: 1,
     });
-    await new Promise((resolve) => setTimeout(resolve, 8));
+    // Completion is the verified rule cleanup persisted to the ledger, not
+    // elapsed wall time. The test timeout remains a bounded failure watchdog.
+    await cleaned;
     expect(reads).toBeGreaterThanOrEqual(2);
     expect(rules[0].condition.tabIds).toEqual([7]);
     expect(pending).toEqual([]);
-  });
+  }, 5_000);
 
   test('tombstones removal before a stale restoration snapshot settles', async () => {
     let rules = [rule(4, [7, 9])];

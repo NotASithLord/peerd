@@ -45,9 +45,9 @@ export const DwebSection = {
     // The network switch is NOT a plain toggleRow: it has a third state. When
     // the setting persisted Off but the live network refused to stop, the
     // stored value and the running network disagree, and the row has to say
-    // so rather than showing a clean OFF. The switch then RETRIES the stop
-    // instead of flipping - which is why the click target computes its own
-    // target rather than negating `dwebEnabled`.
+    // so rather than showing a clean OFF. An explicit Retry stop button keeps
+    // recovery discoverable and requests Off again rather than negating
+    // `dwebEnabled`.
     const networkBusy = !!ui.dwebBusy;
     const stopFailed = !!ui.dwebStopIncomplete;
     const applyNetwork = async () => {
@@ -106,28 +106,26 @@ export const DwebSection = {
           ? 'Set to Off, but the live network is still running. Retry to stop it.'
           : dwebEnabled
             ? 'This peerd can join dweb rooms with other instances and run peer-to-peer dwapps.'
-            : 'Nothing connects anywhere. Enabling lets this peerd join dweb rooms over WebRTC.',
+            : 'The peer network is off. Enable it to discover and share peer-hosted apps.',
       why: dwebEnabled
-        ? 'ON - this peerd can join dweb rooms with other peerd instances '
-          + '(N-peer rooms over WebRTC) and run dwapps that chat and share '
-          + 'data peer-to-peer. Connections are end-to-end between peers; '
-          + 'the rendezvous node only relays opaque handshakes, and a room '
-          + 'keeps working if it goes away. Turn this off to stop all dweb '
-          + 'activity.'
-        : 'OFF. Enabling lets this peerd join dweb rooms with other peerd '
-          + 'instances over WebRTC and run peer-to-peer dwapps. (On the '
-          + 'preview package dweb is on by default; you turned it off.) '
-          + 'Nothing connects anywhere until you explicitly join a room.',
+        ? 'The peer network connects this browser to other peers to discover, '
+          + 'download, and share published apps. It uses bandwidth and storage; '
+          + 'connected peers can see your network address. Private apps, files, '
+          + 'and chats are not published by turning this on. Turn it off to stop '
+          + 'peer-network activity.'
+        : 'Joining is optional. Turning this on starts peer-network connections '
+          + 'for app discovery and sharing. You can change this choice at any time. '
+          + 'Allowing peers to trigger agent work is a separate setting.',
       open: whyOpen('dweb-network'),
       onToggleWhy: toggleWhy('dweb-network'),
       control: ui.dwebOutcomeUnknown ? m('button.secondary', {
         type: 'button', disabled: networkBusy, onclick: applyNetwork,
-      }, 'Reload dweb status') : toggleSwitch({
+      }, 'Reload dweb status') : stopFailed ? m('button.secondary', {
+        type: 'button', disabled: networkBusy, onclick: applyNetwork,
+      }, 'Retry stop') : toggleSwitch({
         on: dwebEnabled,
         busy: networkBusy,
-        label: stopFailed
-          ? 'Participate in the dweb - retry stopping'
-          : `Participate in the dweb - ${dwebEnabled ? 'on' : 'off'}`,
+        label: `Participate in the dweb - ${dwebEnabled ? 'on' : 'off'}`,
         onclick: applyNetwork,
       }),
       children: networkStatus,
@@ -137,7 +135,7 @@ export const DwebSection = {
       m('.dweb-banner', [
         m('strong', 'Dweb preview. '),
         'This is research-grade. The protocol may change; data formats '
-        + 'may evolve. Dweb traffic is opt-in per-tab.',
+        + 'may evolve. Network participation is off until you enable it.',
       ]),
       m('p', 'You’re running peerd with the dweb preview enabled. '
         + 'The core extension is the same peerd that ships on the stores - '
