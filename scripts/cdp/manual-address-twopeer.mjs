@@ -53,17 +53,26 @@ const until = (name, probe, ms = 30_000) => bounded(name, async () => {
   if (!result) throw new Error(`${name}: condition not reached`);
   return result;
 }, ms + 1000);
-const click = text => invoke(ctx.page, `async function(text) {
+const click = text => invoke(ctx.page, `function(text) {
   const button = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === text && !b.disabled);
   if (!button) throw new Error('missing enabled button: ' + text);
   button.click();
-  // Let Mithril paint the synchronous busy transition before polling completion.
-  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  // Each caller awaits its actual outcome. Open can hide Home and suspend RAF.
   return true;
 }`, [text]);
 const appTabs = () => bounded(stage, async () => (await (await fetch(`http://127.0.0.1:${ctx.port}/json/list`)).json())
   .filter(target => target.type === 'page' && target.url.startsWith(`chrome-extension://${ctx.sw.id}/engine-tabs/app-tab/`)));
 const screenshot = name => bounded(`capture ${name}`, async () => writeFileSync(join(output, `${name}.png`), await capturePage(ctx.page)));
+// Keep the original failed phase/error: diagnostics must never become a retry
+// or foreground a hidden page before its visibility has been recorded.
+const failureDiagnostic = async (name, operation) => {
+  let timer;
+  try { evidence[name] = await Promise.race([operation(), new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('diagnostic deadline')), 5000);
+  })]); }
+  catch (error) { evidence[name] = { unavailable: String(error?.message ?? error) }; }
+  finally { clearTimeout(timer); report(); }
+};
 process.on('exit', () => { signaling?.kill('SIGKILL'); for (const socket of sockets) socket.destroy(); for (const server of servers) server.close(); rmSync(temp, { recursive: true, force: true }); });
 
 try {
@@ -151,6 +160,11 @@ try {
   const userApps = apps => apps.filter(app => !app.dweb?.seed).map(app => app.id).sort();
   const baselineIds = userApps(baselineApps.apps);
   const baselineTabs = await appTabs();
+  evidence.homeBeforeInteraction = await evaluate(ctx.page, `({ visibility: document.visibilityState, focused: document.hasFocus() })`);
+  // Opening the publisher tab can background Home. A real user returns to Home
+  // before typing; its requestAnimationFrame-driven UI must be visible too.
+  await bounded('foreground Home for user input', () => ctx.page.send('Page.bringToFront'));
+  await until('Home visible for user input', () => evalIn(ctx.page, `document.visibilityState === 'visible'`));
   await until('manual input visible', () => evalIn(ctx.page, `!!document.querySelector('input[aria-label="App address"]')`));
   await invoke(ctx.page, `function(address) { const input = document.querySelector('input[aria-label="App address"]'); input.value = address; input.dispatchEvent(new Event('input', { bubbles: true })); }`, [published.address]);
   // Input updates Mithril state immediately, but the disabled button changes on
@@ -175,6 +189,10 @@ try {
   const after = await query();
   check('same content query positively observes installed seed', after?.t === 'MANIFEST' && after.hash === published.hash && after.manifest?.publisher === published.publisher, { type: after?.t, hash: after?.hash });
   check('Install and share does not execute', (await appTabs()).length === baselineTabs.length);
+  // Re-entering the exact address clears the previous receipt through the real
+  // input handler, so the next Open cannot be satisfied by stale installed DOM.
+  await invoke(ctx.page, `function(address) { const input = document.querySelector('input[aria-label="App address"]'); input.value = address; input.dispatchEvent(new Event('input', { bubbles: true })); }`, [published.address]);
+  await until('previous inspection cleared', () => evalIn(ctx.page, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Inspect App' && !b.disabled) && ![...document.querySelectorAll('button')].some(b => b.textContent === 'Open installed App' || b.textContent === 'Install and share')`));
   await click('Inspect App');
   await until('reinspection preserves Open', () => evalIn(ctx.page, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Open installed App' && !b.disabled) && ![...document.querySelectorAll('button')].some(b => b.textContent === 'Install and share')`));
   check('reinspection creates no duplicate', (await call({ type: 'apps/list' })).apps.filter(app => app.dweb?.uri === published.uri).length === 1);
@@ -188,6 +206,26 @@ try {
   stage = 'checks-complete'; report();
 } catch (error) {
   failed = true; evidence.error = String(error?.stack ?? error); evidence.homeEvents = ctx?.page?.events?.slice(-30); evidence.publisherEvents = publisher?.events?.slice(-30); report(); console.error(evidence.error);
+  if (ctx?.page) {
+    await failureDiagnostic('failureDom', () => evalIn(ctx.page, `(() => {
+      const section = document.querySelector('section[aria-label="App address"]');
+      return { visibility: document.visibilityState, focused: document.hasFocus(), readyState: document.readyState,
+        inputCount: document.querySelectorAll('input[aria-label="App address"]').length,
+        inputs: [...document.querySelectorAll('input[aria-label="App address"]')].slice(0, 3).map(input => ({ value: input.value.slice(0, 4096), disabled: input.disabled })),
+        buttons: [...(section || document).querySelectorAll('button')].slice(0, 24).map(button => ({ text: button.textContent.slice(0, 120), disabled: button.disabled })),
+        sectionText: section?.textContent.slice(0, 3000) ?? null };
+    })()`));
+    await failureDiagnostic('failureNetworkChoice', async () => {
+      const result = await rpc(ctx.page, { type: 'state/get' });
+      return { ok: result?.ok, enabled: result?.state?.settings?.dwebEnabled,
+        choiceMade: result?.state?.settings?.dwebChoiceMade, locked: result?.state?.vault?.locked };
+    });
+    await failureDiagnostic('failureScreenshot', async () => {
+      const result = await ctx.page.send('Page.captureScreenshot', { format: 'png' });
+      writeFileSync(join(output, 'failed-home.png'), Buffer.from(result.data, 'base64'));
+      return 'failed-home.png';
+    });
+  }
 } finally {
   let cleanupTimer;
   try {

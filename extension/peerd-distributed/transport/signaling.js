@@ -67,14 +67,9 @@ export const WEBSITE_CAP = 4;
 // why: membership is a server resource budget, independent of a browser's
 // established-neighbor degree. Only negotiated public peers use this pool.
 // Kind/profile are untrusted labels, not authenticated identity or Sybil defense.
-export const SPARSE_PUBLIC_PROFILE = 'sparse-public-v1';
-export const PUBLIC_ROOM = 'peerd/base/1';
 export const PUBLIC_MEMBERSHIP_CAP = 1024;
-export const INTRODUCTION_LIMIT = 16;
-export const SAMPLE_INTERVAL_MS = 10_000;
-/** @param {unknown} key @param {unknown} profile */
-export const sparsePublicProfile = (key, profile) =>
-  key === PUBLIC_ROOM && profile === SPARSE_PUBLIC_PROFILE ? SPARSE_PUBLIC_PROFILE : null;
+import { SPARSE_PUBLIC_PROFILE, PUBLIC_ROOM, INTRODUCTION_LIMIT, SAMPLE_INTERVAL_MS, sparsePublicProfile } from './rendezvous-profile.js';
+export { SPARSE_PUBLIC_PROFILE, PUBLIC_ROOM, INTRODUCTION_LIMIT, SAMPLE_INTERVAL_MS, sparsePublicProfile };
 
 /** @param {string[]} members @param {() => number} random */
 const sampleMembers = (members, random) => {

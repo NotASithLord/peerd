@@ -18,7 +18,12 @@
 // members and forgets them.
 
 import { createWebrtcTransport } from './transports/webrtc.js';
-import { dlog, dwarn } from '../log.js';
+import { SPARSE_PUBLIC_PROFILE, INTRODUCTION_LIMIT, SAMPLE_INTERVAL_MS, sparsePublicProfile } from './rendezvous-profile.js';
+
+export class SignalingError extends Error {
+  /** @param {string} message */
+  constructor(message) { super(`signaling: ${message}`); this.name = 'SignalingError'; }
+}
 
 // The bootstrap seed(s) — the rendezvous node(s) used for cold-start. This
 // is a SEED, not a single point of failure: once a peer holds any room
@@ -51,11 +56,13 @@ export const DEFAULT_SIGNALING = ['wss://bootstrap.peerd.ai/rendezvous'];
  * 'signal' delivers { from, payload }. The session stays open for roster
  * updates until close() — the WS is the roster feed, not just the dance.
  *
- * @param {{ url?: string, room?: string, kind?: string, WebSocket?: any, timeoutMs?: number }} [opts]
+ * @param {{ url?: string, room?: string, kind?: string, WebSocket?: any, timeoutMs?: number, profile?: string, signal?: AbortSignal, now?: () => number, timers?: any }} [opts]
  * @returns {Promise<RendezvousSession>}
  *
  * @typedef {'joined' | 'left' | 'signal' | 'closed'} RendezvousEvent
  * @typedef {{
+ *   profile: string | null,
+ *   sample: (opts?: {signal?: AbortSignal}) => Promise<string[]>,
  *   self: string | null,
  *   members: string[],
  *   sendSignal: (to: string, payload: any) => void,
@@ -64,94 +71,124 @@ export const DEFAULT_SIGNALING = ['wss://bootstrap.peerd.ai/rendezvous'];
  * }} RendezvousSession
  */
 export const openRendezvous = ({
-  url = DEFAULT_SIGNALING[0],
-  room,
-  kind,                       // 'website' = observe-only visitor (own cap pool); omitted/default = extension
-  WebSocket: WS = globalThis.WebSocket,
-  timeoutMs = 20000,
+  url = DEFAULT_SIGNALING[0], room, kind, WebSocket: WS = globalThis.WebSocket,
+  timeoutMs = 20000, profile, signal, now = Date.now, timers = globalThis,
 } = {}) =>
   /** @type {Promise<RendezvousSession>} */ (new Promise((resolve, reject) => {
-    dlog('rendezvous', `connecting to ${url} — room "${room}"`);
-    // Only append &kind for a non-default kind, so an extension's URL stays
-    // byte-identical to before (the node defaults a kind-less join to extension).
+    const requested = kind === 'website' ? null : sparsePublicProfile(room, profile);
+    if (signal?.aborted) { reject(new SignalingError('cancelled')); return; }
     const kindQ = kind && kind !== 'extension' ? `&kind=${encodeURIComponent(kind)}` : '';
-    const ws = new WS(`${url}?key=${encodeURIComponent(/** @type {string} */ (room))}${kindQ}`);
-    // why: WebSocket.send() on a CLOSING/CLOSED socket does NOT throw — it drops
-    // the frame and logs a browser warning ("WebSocket is already in CLOSING or
-    // CLOSED state"). A signal or keepalive that races a drop (the bootstrap node
-    // dropping mid-reconnect) would spam that. Guarding on readyState (OPEN === 1)
-    // is the only thing that silences it; the dropped frame is fine — onclose
-    // reconnects and the mesh carries on meanwhile.
-    /** @param {any} obj */
-    const wsSend = (obj) => { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); };
+    const profileQ = requested ? `&profile=${requested}` : '';
+    const ws = new WS(`${url}?key=${encodeURIComponent(/** @type {string} */ (room))}${kindQ}${profileQ}`);
     /** @type {Record<RendezvousEvent, Set<(arg: any) => void>>} */
     const listeners = { joined: new Set(), left: new Set(), signal: new Set(), closed: new Set() };
-    /** @param {RendezvousEvent} ev @param {any} arg */
-    const emit = (ev, arg) => { for (const cb of [...listeners[ev]]) cb(arg); };
-
-    let opened = false;
-    let closed = false;
-    /** @type {ReturnType<typeof setInterval> | undefined} */
+    /** @param {RendezvousEvent} event @param {any} value */
+    const emit = (event, value) => { for (const cb of [...listeners[event]]) cb(value); };
+    let opened = false, ended = false;
+    let sequence = 0, nextSampleAt = Infinity;
+    /** @type {any} */
     let keepalive;
-    const timer = setTimeout(() => {
-      if (!opened) { try { ws.close(); } catch { /* ignore */ } reject(new Error('signaling: timed out before join confirm')); }
-    }, timeoutMs);
-    // Keep the WS warm: idle connections get reaped by NAT/proxies and the
-    // rendezvous node's edge, which silently strips a node from discovery (it
-    // can no longer be dialed). A periodic no-op the reducer ignores (default
-    // case) resets those idle timers. rooms.js ALSO reconnects if it drops anyway.
-    const KEEPALIVE_MS = 25_000;
-
+    /** @type {{ id: string, resolve: (members: string[]) => void, reject: (error: Error) => void, timer: any, detach: () => void } | null} */
+    let pending = null;
+    /** @param {Error | null} error @param {string[]} [members] */
+    const finishSample = (error, members = []) => {
+      const request = pending;
+      if (!request) return;
+      pending = null;
+      timers.clearTimeout(request.timer);
+      request.detach();
+      if (error) request.reject(error); else request.resolve(members);
+    };
+    /** @param {Error} error @param {boolean} [notify] */
+    const end = (error, notify = true) => {
+      if (ended) return;
+      ended = true;
+      timers.clearTimeout(joinTimer);
+      timers.clearInterval(keepalive);
+      signal?.removeEventListener('abort', cancel);
+      finishSample(error);
+      try { ws.close(); } catch { /* already gone */ }
+      try {
+        if (!opened) reject(error);
+        else if (notify) emit('closed', undefined);
+      } finally { for (const callbacks of Object.values(listeners)) callbacks.clear(); }
+    };
+    const cancel = () => end(new SignalingError('cancelled'));
+    /** @param {any} message */
+    const send = (message) => {
+      if (ended || ws.readyState !== 1) throw new SignalingError('connection closed');
+      ws.send(JSON.stringify(message));
+    };
+    /** @param {unknown} id */
+    const validId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 512;
+    /** @param {any} value @param {number} limit @param {string | null} self */
+    const validMembers = (value, limit, self) => Array.isArray(value) && value.length <= limit
+      && value.every((id) => validId(id) && id !== self) && new Set(value).size === value.length;
     /** @type {RendezvousSession} */
     const session = {
-      self: null,
-      members: [],
-      sendSignal: (to, payload) => wsSend({ t: 'signal', to, payload }),
-      on: (ev, cb) => { listeners[ev].add(cb); return () => listeners[ev].delete(cb); },
-      close: () => { closed = true; clearInterval(keepalive); try { ws.close(); } catch { /* ignore */ } },
+      profile: null, self: null, members: [],
+      sendSignal: (to, payload) => send({ t: 'signal', to, payload }),
+      on: (event, callback) => { if (!ended) listeners[event].add(callback); return () => listeners[event].delete(callback); },
+      close: () => end(new SignalingError('connection closed'), false),
+      sample: ({ signal: requestSignal } = {}) => {
+        if (ended || requestSignal?.aborted) return Promise.reject(new SignalingError('cancelled'));
+        if (session.profile !== SPARSE_PUBLIC_PROFILE) return Promise.reject(new SignalingError('sampling unavailable'));
+        if (pending) return Promise.reject(new SignalingError('sample already pending'));
+        if (now() < nextSampleAt) return Promise.reject(new SignalingError('sample cooldown'));
+        return new Promise((sampleResolve, sampleReject) => {
+          const id = `sample-${++sequence}`;
+          const abort = () => finishSample(new SignalingError('sample cancelled'));
+          pending = { id, resolve: sampleResolve, reject: sampleReject,
+            timer: timers.setTimeout(() => finishSample(new SignalingError('sample timed out')), timeoutMs),
+            detach: () => requestSignal?.removeEventListener('abort', abort) };
+          requestSignal?.addEventListener('abort', abort, { once: true });
+          // Charge attempts, including failures: remote silence never accelerates
+          // retries. One request/timer is retained, regardless of caller pressure.
+          nextSampleAt = now() + SAMPLE_INTERVAL_MS;
+          try { send({ t: 'sample', requestId: id }); } catch (error) { finishSample(/** @type {Error} */ (error)); }
+        });
+      },
     };
-
-    ws.onerror = () => {
-      // why debug, not warn: a single failed attempt is usually the expected
-      // transient (CF cold start / edge reset). The error still PROPAGATES via
-      // reject — the caller decides whether it's worth a warning: rooms.js
-      // escalates only after a streak (a persistent outage), and dweb-base warns
-      // on a hard startup failure. Warning HERE would spam the transient.
-      dlog('rendezvous', `websocket error connecting to ${url} (transient? the caller escalates a real outage)`);
-      if (!opened) { clearTimeout(timer); reject(new Error(`signaling: websocket error (${url})`)); }
-    };
-    ws.onclose = () => {
-      clearTimeout(timer);
-      clearInterval(keepalive);
-      if (!opened) { dlog('rendezvous', 'closed before join confirm (transient? the caller escalates a real outage)'); reject(new Error('signaling: closed before join confirm')); }
-      else if (!closed) { dlog('rendezvous', 'node connection closed — reconnecting; mesh survives meanwhile'); emit('closed', undefined); }
-    };
-
-    ws.onmessage = (/** @type {MessageEvent} */ e) => {
-      /** @type {any} */
-      let m;
-      try { m = JSON.parse(typeof e.data === 'string' ? e.data : new TextDecoder().decode(e.data)); }
-      catch { return; }
-      switch (m.t) {
-        case 'full':
-          clearTimeout(timer);
-          dwarn('rendezvous', `room "${room}" reported FULL. With real peers this means STALE/ghost connections piled up `
-            + 'on the rendezvous node (reloads that never cleanly closed). Fix: try a fresh room code, or restart the '
-            + 'node — the server now reaps dead connections on each join, so this should self-heal.');
-          return reject(new Error(`signaling: room "${room}" is full (likely stale connections — try a fresh room code)`));
-        case 'room':
-          opened = true;
-          clearTimeout(timer);
-          keepalive = setInterval(() => wsSend({ t: 'ping' }), KEEPALIVE_MS);
-          session.self = m.self;
-          session.members = m.members ?? [];
-          dlog('rendezvous', `JOINED room "${room}" as ${m.self} — ${session.members.length} member(s) already here:`, session.members);
-          return resolve(session);
-        case 'joined': dlog('rendezvous', `peer ${m.member} JOINED the room`); return emit('joined', m.member);
-        case 'left': dlog('rendezvous', `peer ${m.member} LEFT the room`); return emit('left', m.member);
-        case 'signal': dlog('rendezvous', `SIGNAL from ${m.from}`); return emit('signal', { from: m.from, payload: m.payload });
-        default: return;
+    signal?.addEventListener('abort', cancel, { once: true });
+    const joinTimer = timers.setTimeout(() => end(new SignalingError('timed out before join confirm')), timeoutMs);
+    ws.onerror = () => end(new SignalingError(`websocket error (${url})`));
+    ws.onclose = () => end(new SignalingError('connection closed'));
+    ws.onmessage = (/** @type {MessageEvent} */ event) => {
+      if (ended) return;
+      if (typeof event.data !== 'string' && (!(event.data instanceof ArrayBuffer) && !ArrayBuffer.isView(event.data)
+        || event.data.byteLength > 64 * 1024)) {
+        end(new SignalingError('unsupported or oversized response')); return;
       }
+      let text;
+      try { text = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data); }
+      catch { end(new SignalingError('invalid response encoding')); return; }
+      if (text.length > 64 * 1024 || new TextEncoder().encode(text).byteLength > 64 * 1024) {
+        end(new SignalingError('oversized response')); return;
+      }
+      let message;
+      try { message = JSON.parse(text); } catch { return; }
+      if (!message || typeof message !== 'object') return;
+      if (message.t === 'room' && !opened) {
+        const acknowledged = message.profile === SPARSE_PUBLIC_PROFILE;
+        if (!validId(message.self) || !validMembers(message.members, acknowledged ? INTRODUCTION_LIMIT : 20, message.self)
+          || (message.profile != null && (!requested || !acknowledged))
+          || (acknowledged && (message.sampleLimit !== INTRODUCTION_LIMIT || message.sampleIntervalMs !== SAMPLE_INTERVAL_MS))) {
+          end(new SignalingError('invalid room response')); return;
+        }
+        opened = true;
+        timers.clearTimeout(joinTimer);
+        session.self = message.self;
+        session.members = message.members;
+        session.profile = acknowledged ? SPARSE_PUBLIC_PROFILE : null;
+        nextSampleAt = now() + SAMPLE_INTERVAL_MS;
+        keepalive = timers.setInterval(() => { try { send({ t: 'ping' }); } catch { end(new SignalingError('keepalive failed')); } }, 25_000);
+        resolve(session);
+      } else if (message.t === 'full' && !opened) end(new SignalingError(`room "${room}" is at capacity`));
+      else if (message.t === 'sample' && pending && message.requestId === pending.id) {
+        if (!validMembers(message.members, INTRODUCTION_LIMIT, session.self)) end(new SignalingError('invalid sample response'));
+        else finishSample(null, message.members);
+      } else if (opened && (message.t === 'joined' || message.t === 'left') && validId(message.member)) emit(message.t, message.member);
+      else if (opened && message.t === 'signal' && validId(message.from) && message.from !== session.self) emit('signal', { from: message.from, payload: message.payload });
     };
   }));
 
