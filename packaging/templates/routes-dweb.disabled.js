@@ -7,6 +7,7 @@
 // module; Preview Chrome continues to run the authored implementation.
 
 const disabled = async () => ({ ok: false, error: 'dweb-disabled' });
+const addressDisabled = async () => ({ ok: false, error: 'invalid-address-or-network-off' });
 
 /**
  * @param {Record<string, any>} deps
@@ -46,6 +47,8 @@ export const makeDwebRoutes = (deps) => {
     'dweb/base/find': disabled,
     'dweb/base/share-app': disabled,
     'dweb/base/heard': disabled,
+    'dweb/base/inspect-address': addressDisabled,
+    'dweb/base/install-address': addressDisabled,
     'dweb/base/install': disabled,
     'dweb/base/updates': disabled,
     'dweb/base/update-app': disabled,

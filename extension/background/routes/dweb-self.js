@@ -1,4 +1,5 @@
 // @ts-check
+import { finiteEffectReceiptFields } from '../host-effect-verdict.js';
 // background/routes/dweb-self.js: the service-worker half of same-user
 // device sync (portable identity).
 //
@@ -67,24 +68,16 @@ const PROTOCOL_SURFACE_NAMES = Object.freeze([
 
 /** Preserve only finite host-effect custody fields from an apply failure. */
 const applyFailureCustody = (/** @type {any} */ failure) => {
-  const source = [failure, failure?.cause].find((candidate) => candidate
-    && typeof candidate === 'object'
-    && (typeof candidate.performed === 'boolean'
-      || typeof candidate.outcomeKnown === 'boolean'
-      || typeof candidate.retryable === 'boolean'
-      || ['pre-effect-failure', 'effect-completed', 'host-lost', 'transport-lost']
-        .includes(candidate.outcomeKind))) ?? {};
-  return {
-    ...(typeof source.performed === 'boolean' ? { performed: source.performed } : {}),
-    ...(typeof source.outcomeKnown === 'boolean' ? { outcomeKnown: source.outcomeKnown } : {}),
-    ...(typeof source.retryable === 'boolean' ? { retryable: source.retryable } : {}),
-    ...(['pre-effect-failure', 'effect-completed', 'host-lost', 'transport-lost']
-      .includes(source.outcomeKind) ? { outcomeKind: source.outcomeKind } : {}),
-  };
+  for (const source of [failure, failure?.cause]) {
+    if (!source || typeof source !== 'object') continue;
+    const receipt = finiteEffectReceiptFields(source);
+    if (Object.keys(receipt).length) return receipt;
+  }
+  return {};
 };
 
 /**
- * Deps (all injected, this module imports nothing):
+ * Deps (all authority is injected):
  *   dwebReady           build + setting gate, awaited on every route
  *   isOffscreenSender    the offscreen-document provenance check
  *   callBaseHost         relay to the offscreen `dweb/base-host/*` handler

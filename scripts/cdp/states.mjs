@@ -39,6 +39,7 @@ import { startWebFixtureServer } from './fixtures/web-suite.mjs';
 import { recordNetworkFloorVector, recordPrivateChildFloor, ordinaryProbeReached } from './network-floor-oracle.mjs';
 import { NOTEBOOK_FETCH_STATE } from './notebook-fetch-state.mjs';
 import { WASMER_STATE } from './wasmer-state.mjs';
+import { IMMUTABLE_ADDRESS_VISUAL_STATES } from './immutable-address-visuals.mjs';
 import { CONSENT_LOCK_VISUAL_STATES } from './consent-lock-visuals.mjs';
 import { armVaultLockStages } from './vault-lock-stages.mjs';
 
@@ -530,6 +531,7 @@ let pacingActorCalled = false;
 
 export const STATES = [
   ...CONSENT_LOCK_VISUAL_STATES,
+  ...IMMUTABLE_ADDRESS_VISUAL_STATES,
   WASMER_STATE,
   {
     name: 'pacing-wait-stop', kind: 'functional', phase: 'post-unlock',

@@ -3,6 +3,8 @@
 // why: The network must survive tab closure. The store build stays inert.
 // Keep detailed logs because WebRTC and offscreen lifecycles require live diagnosis.
 
+import { createImmutableInstallOwner } from './immutable-install-owner.js';
+import { immutableAppRoot } from '/shared/address/immutable-app-root.js';
 import browser from '/shared/browser-api.js';
 import { DWEB_ENABLED } from '/shared/channel-config.js';
 import { loadDweb } from '/shared/dweb-loader.js';
@@ -38,6 +40,7 @@ let handle = null;    // { base, room, close } once the lobby is joined
 // Renderer-local mesh generation. It increments only when a newly assembled
 // base handle activates, never when a successor kernel adopts the existing
 // lease. Bound with hostEpoch, this makes a hidden stop/restart observable.
+const manualInstalls = createImmutableInstallOwner();
 let meshGeneration = 0;
 /** @type {string | null} */
 let activeFeatureHostEpoch = null;
@@ -903,6 +906,52 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
   (async () => {
     try {
       switch (msg.type) {
+        // Parsing uses this existing privileged host, never the mesh start path.
+        case 'dweb/base-host/parse-address': {
+          sendResponse({ ok: true, address: immutableAppRoot(msg.address).address });
+          return;
+        }
+        case 'dweb/base-host/inspect-address':
+        case 'dweb/base-host/install-address': {
+          const target = immutableAppRoot(msg.address);
+          const execute = async () => {
+            const h = await start();
+            const client = /** @type {any} */ (await loadDweb());
+            const verified = await client.fetchImmutableApp({ address: target.address,
+              fetchApp: (/** @type {string} */ uri) => h.base.fetchApp(uri) });
+            if (handle !== h) throw new Error('dweb-generation-retired');
+            if (msg.type === 'dweb/base-host/inspect-address') {
+              return { ok: true, summary: client.immutableAppSummary(verified) };
+            }
+            // why: a manual immutable install has no mutable discovery lineage.
+            // Revalidation above pins the same signer/revision the user inspected.
+            const appId = mintAppId();
+            const ownerId = appContentOwner(appId, 'seed');
+            const { announced: installed } = await runPublishTransaction({
+              publish: async () => {
+                const hash = await h.base.seedApp(verified);
+                return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
+              },
+              announce: async () => {
+                const summary = client.immutableAppSummary(verified);
+                const a = verified.app;
+                const result = await swEffectCall('dweb/app-install', {
+                  appId, ...a, name: summary.name ?? a.name, files: jsonSafeFiles(a.files),
+                  publicationGeneration: msg.publicationGeneration,
+                });
+                if (!result?.ok) throw publishFailureError(result, 'install failed');
+                return { app: result.app, warning: result.warning };
+              },
+              rollback: ({ hash, ownershipAdded }) => {
+                if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
+              },
+            });
+            return { ok: true, ...installed };
+          };
+          sendResponse(await (msg.type === 'dweb/base-host/install-address'
+            ? manualInstalls.run(target.address, msg.existing, execute) : execute()));
+          return;
+        }
         case 'dweb/base-host/start': { await start(); sendResponse({ ok: true, ...status() }); return; }
         case 'dweb/base-host/status': { sendResponse({ ok: true, ...status() }); return; }
         case 'dweb/base-host/info': { sendResponse({ ok: true, ...info() }); return; }

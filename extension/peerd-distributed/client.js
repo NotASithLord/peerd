@@ -22,6 +22,7 @@ import { generateIdentity, loadIdentityMaterial, identityFromMaterial } from './
 import { buildIdentityRecord, adoptIdentityRecord } from './identity/recovery-record.js';
 import { joinRoom } from './transport/rooms.js';
 import { createBaseNetwork, BASE_TOPIC } from './base-network.js';
+import { fetchImmutableApp, immutableAppSummary } from './apps/immutable-address.js';
 import { installAppBundle } from './apps/loader.js';
 import { createDwebBridge, iframeTransport } from './apps/bridge.js';
 import { loadSeedApp, COMMONS_SEED } from './apps/seed.js';
@@ -106,7 +107,7 @@ export const createDwebClient = () => {
     /** @param {{ record: any, passphrase?: string, existingMaterial?: string | null, replaceExisting?: boolean }} args */
     identityRecordAdopt: async ({ record, passphrase, existingMaterial, replaceExisting }) =>
       adoptIdentityRecord({ record, passphrase, existingMaterial, replaceExisting }),
-    installAppBundle,
+    installAppBundle, fetchImmutableApp, immutableAppSummary,
     // Host a dwapp's bridge. The app-tab passes `frame` (the iframe) and gets
     // the default iframe transport; an offscreen host can pass `transport`
     // directly (an SW relay) to run the same bridge there (S1).

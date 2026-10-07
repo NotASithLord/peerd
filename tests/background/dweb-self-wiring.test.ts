@@ -389,6 +389,22 @@ describe('the offscreen host reaches the stores through exactly two doors', () =
     });
   });
 
+  test('finite apply receipts preserve source selection, false values, and cause fallback', async () => {
+    for (const [fields, expected] of [
+      [{ code: 'outer-only', outcomeKind: 'future-kind' }, { performed: true, outcomeKnown: false, outcomeKind: 'host-lost' }],
+      [{ performed: false, outcomeKind: 'future-kind' }, { performed: false }],
+      [{ retryable: false }, { retryable: false }],
+      [{ outcomeKind: 'pre-effect-failure' }, { outcomeKind: 'pre-effect-failure' }],
+    ]) {
+      const cause = Object.assign(new Error('inner'), { performed: true, outcomeKnown: false, outcomeKind: 'host-lost' });
+      const failure = Object.assign(new Error('outer', { cause }), fields);
+      const { routes } = routesFor({ surfaceAppliers: { settings: async () => { throw failure; } } });
+      expect(await routes['dweb/self-apply-surface'](
+        { surface: 'settings', bytes: btoa('{}'), sourceDeviceDid: 'did:key:zA' }, OFFSCREEN,
+      )).toEqual({ ok: false, error: 'outer', ...expected });
+    }
+  });
+
   test('a lost self-restore response remains unknown and nonretryable', async () => {
     const { routes } = routesFor({
       callBaseHost: async (type: string) => {

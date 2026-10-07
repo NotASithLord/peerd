@@ -608,3 +608,23 @@ export const HOST_EFFECT_OUTCOME = Object.freeze({
   dwebPolicyMutation: closedOkEffect,
   scheduleCancel: booleanMutation,
 });
+
+/**
+ * Copy only typed effect-receipt fields; each caller owns error text and policy.
+ * outcomeKind is deliberately any string, including forward-compatible kinds.
+ * @param {any} value
+ */
+export const effectReceiptFields = (value) => ({
+  ...(typeof value?.performed === 'boolean' ? { performed: value.performed } : {}),
+  ...(typeof value?.outcomeKnown === 'boolean' ? { outcomeKnown: value.outcomeKnown } : {}),
+  ...(typeof value?.outcomeKind === 'string' ? { outcomeKind: value.outcomeKind } : {}),
+  ...(typeof value?.retryable === 'boolean' ? { retryable: value.retryable } : {}),
+});
+
+/** Published dweb receipts accept only the established host-effect vocabulary. @param {any} value */
+export const finiteEffectReceiptFields = (value) => {
+  const receipt = effectReceiptFields(value);
+  if (!['pre-effect-failure', 'effect-completed', 'host-lost', 'transport-lost']
+    .includes(receipt.outcomeKind)) delete receipt.outcomeKind;
+  return receipt;
+};

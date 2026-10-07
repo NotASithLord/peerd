@@ -147,6 +147,7 @@ import './unit/options/contributor-metrics.test.js';
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';
 import './unit/home/discover-section.test.js';
+import './unit/home/immutable-address-section.test.js';
 import './unit/home/actors-section.test.js';
 import './unit/home/contacts-section.test.js';
 import './unit/home/network-section.test.js';
