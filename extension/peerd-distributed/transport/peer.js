@@ -218,6 +218,7 @@ export const createPeer = ({
     const channel = /** @type {ReturnType<typeof createBufferedChannel> & { pc?: RTCPeerConnection }} */ (
       createBufferedChannel({
         getSessionBinding: () => webRtcSessionBinding(pc, dc),
+        maxFrameBytes: () => outgoing?.maxFrameBytes() ?? 0,
         send: (obj, options) => (/** @type {ReturnType<typeof createOutgoingWriter>} */ (outgoing)).send(obj, options),
         close: release,
       })

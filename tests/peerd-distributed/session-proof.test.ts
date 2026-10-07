@@ -146,7 +146,7 @@ test('an early proof is retained once and verified after its HELLO', async () =>
     for (let i = 0; i < 100; i++) peer.b.send(frame);
     expect(reads).toBe(1);
     peer.b.send({ __t: 'HELLO', env: peer.remoteHello });
-    expect(await peer.outcome).toEqual({ remoteDid: peer.bob.did });
+    expect(await peer.outcome).toEqual({ remoteDid: peer.bob.did, remoteCaps: ['content'] });
   } finally { peer.a.close(); peer.b.close(); }
 });
 
@@ -159,7 +159,7 @@ test('verified transcript fields remain stable if sender-owned objects change', 
     env.body.binding.localFingerprint = '0'.repeat(64);
     peer.b.send({ __t: 'HELLO', env: peer.remoteHello });
     peer.remoteHello.from = peer.alice.did;
-    expect(await peer.outcome).toEqual({ remoteDid: peer.bob.did });
+    expect(await peer.outcome).toEqual({ remoteDid: peer.bob.did, remoteCaps: ['content'] });
   } finally { peer.a.close(); peer.b.close(); }
 });
 
@@ -220,7 +220,7 @@ test('WebRTC-shaped bindings use the same reversed-fingerprint transcript', asyn
   b.getSessionBinding = () => ({ ...bindB, kind: 'webrtc-dtls-sha256', streamId: 12 });
   try {
     const sessions = await Promise.all([createSession({ channel: a, identity: alice }), createSession({ channel: b, identity: bob })]);
-    expect(sessions).toEqual([{ remoteDid: bob.did }, { remoteDid: alice.did }]);
+    expect(sessions).toEqual([{ remoteDid: bob.did, remoteCaps: ['content'] }, { remoteDid: alice.did, remoteCaps: ['content'] }]);
   } finally { a.close(); b.close(); }
 });
 
@@ -238,6 +238,19 @@ test('outbound proof objects cannot mutate the private transport binding', async
     peer.b.send({ __t: 'HELLO', env: peer.remoteHello });
     await sentProof;
     peer.b.send({ __t: 'HELLO_PROOF', env: await peer.proof() });
-    expect(await peer.outcome).toEqual({ remoteDid: peer.bob.did });
+    expect(await peer.outcome).toEqual({ remoteDid: peer.bob.did, remoteCaps: ['content'] });
   } finally { peer.a.close(); peer.b.close(); }
+});
+
+test('authenticated capabilities are returned as an immutable owned snapshot', async () => {
+  const [alice, bob] = await identities();
+  const [a, b] = memoryPair();
+  const caps = ['content', 'topic-sync-window-v1'];
+  try {
+    const [first] = await Promise.all([createSession({ channel: a, identity: alice }), createSession({ channel: b, identity: bob, caps })]);
+    expect(first.remoteCaps).toEqual(caps);
+    caps.length = 0;
+    expect(first.remoteCaps).toEqual(['content', 'topic-sync-window-v1']);
+    expect(Object.isFrozen(first.remoteCaps)).toBe(true);
+  } finally { a.close(); b.close(); }
 });
