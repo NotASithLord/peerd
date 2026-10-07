@@ -132,6 +132,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
   const hosts = [];
   const peers = [], sockets = new Set();
   const cleanupErrors = [];
+  let contentSelection = null;
   const bounded = async (label, operation, ms = SCALE_BUDGETS.commandMs) => {
     let timer;
     try { return await Promise.race([Promise.resolve().then(operation), new Promise((_, reject) => {
@@ -324,14 +325,21 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
       { membership: signaling.stats().memberships, degrees: joined.map(row => row.peers.length) });
     check('every identity uses native data channels', joined.every(row => row.constructed > 0 && row.opened > 0));
     await gossip('initial-non-neighbor', true);
+    stage('content publish');
     const published = await invoke(peers[0], 'publishContent');
-    const fetchFromNeighbor = async () => {
+    const fetchFromNeighbor = async label => {
+      stage(`content ${label} selection`);
       const rows = await snapshots();
       const index = rows.findIndex((row, at) => at > 0 && row.peers.includes(rows[0].did) && rows[0].peers.includes(row.did));
       if (index < 1) throw new Error('no distinct native content neighbor');
+      contentSelection = { providerIndex: 0, receiverIndex: index, providerBrowser: peers[0].host.index, receiverBrowser: peers[index].host.index,
+        provider: rows[0].did, receiver: rows[index].did, hash: published.hash,
+        providerState: rows[0], receiverState: rows[index] };
+      report.contentSelection = contentSelection;
+      stage(`content ${label} fetch`);
       return { ...(await invoke(peers[index], 'fetchContent', [published.uri, published.hash])), receiver: rows[index].did, provider: rows[0].did };
     };
-    const transfer = await fetchFromNeighbor();
+    const transfer = await fetchFromNeighbor('initial');
     check('signed content hash and decoded bytes verified', transfer.contentVerified && transfer.hash === published.hash, transfer);
     await invoke(peers.at(-1), 'isolate');
     await until('isolated peer reconnects through production maintenance', async () => {
@@ -347,7 +355,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
       const rows = await snapshots(); return signaling.stats().memberships === options.peers && rows.every(row => row.rendezvous === 'up') && connected(rows);
     });
     await gossip('after-signaling-recovery');
-    const recovered = await fetchFromNeighbor();
+    const recovered = await fetchFromNeighbor('recovery');
     check('verified content after outage', recovered.contentVerified && recovered.hash === published.hash, recovered);
     const final = await snapshots();
     check('observed native and governor resource ceilings', final.every(row => row.peaks.degree <= SCALE_ACCEPTANCE.degree && row.peaks.pcs <= SCALE_ACCEPTANCE.degree + SCALE_ACCEPTANCE.pending
@@ -358,6 +366,15 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
   } catch (error) { failed = true; report.failedStage = report.stage; report.error = String(error?.stack ?? error).slice(0, 4000);
     report.browserEvents = hosts.map(host => ({ index: host.index, events: host.browser?.events.slice(-32).map(value => value.slice(0, 1000)) ?? [] })); hostSnapshot(); }
   finally {
+    // Capture selected endpoints before stop mutates their native/transfer state.
+    // Failure here is diagnostic only and never replaces the original failure.
+    if (failed && contentSelection) {
+      report.contentFailure = await Promise.all([contentSelection.providerIndex, contentSelection.receiverIndex].map(async index => {
+        try { return { index, snapshot: await invoke(peers[index], 'report', [], SCALE_BUDGETS.commandMs) }; }
+        catch (error) { return { index, unavailable: String(error).slice(0, 400) }; }
+      }));
+      save();
+    }
     retiring = true;
     try {
       await bounded('production peer cleanup', async () => {

@@ -8,11 +8,15 @@ import { outgoingGovernor, OUTGOING_LIMITS } from '/peerd-distributed/transport/
 import { createBaseNetwork } from '/peerd-distributed/base-network.js';
 import { manifestHash, verifyManifest } from '/peerd-distributed/content/manifest.js';
 import { unpackTransportBundle } from '/peerd-distributed/content/bundle.js';
+import { contentEvidence } from './dweb-scale-content.js';
 import { twoPeerEndpoint } from './dweb-twopeer-endpoint.js';
 
 const endpoint = twoPeerEndpoint(new URLSearchParams(location.search).get('url'));
 const topic = 'native-sparse-scale';
 const fixtureText = '<!doctype html><h1>Native sparse content proof</h1>';
+const contentTrace = contentEvidence();
+let nextChannel = 0;
+/** @type {WeakMap<RTCDataChannel, {id:number, claimedRemote:string|null}>} */ const channelMetadata = new WeakMap();
 const Native = globalThis.RTCPeerConnection;
 /** @type {Set<RTCPeerConnection>} */ const pcs = new Set();
 /** @type {Set<RTCDataChannel>} */ const channels = new Set();
@@ -32,6 +36,12 @@ const record = (name, value) => { errors.push({ name, value: String(value).slice
 const observeChannel = channel => {
   if (channels.has(channel)) return;
   channels.add(channel);
+  const metadata = { id: ++nextChannel, claimedRemote: /** @type {string|null} */ (null) };
+  channelMetadata.set(channel, metadata);
+  channel.addEventListener('message', event => {
+    const claimed = contentTrace.frame(event.data, 'receive', metadata.id, channel.readyState, channel.bufferedAmount);
+    if (claimed) metadata.claimedRemote = claimed;
+  });
   let countedOpen = false;
   const noteOpen = () => { if (!countedOpen) { countedOpen = true; opened++; } };
   if (channel.readyState === 'open') noteOpen();
@@ -40,6 +50,7 @@ const observeChannel = channel => {
   const send = channel.send;
   channel.send = function (/** @type {any} */ data) {
     const result = Reflect.apply(send, this, [data]);
+    contentTrace.frame(data, 'send', metadata.id, channel.readyState, channel.bufferedAmount);
     // Observe the accepted native send, after signing and writer backpressure.
     // Only this fixture's small gossip tags are decoded; no payload is retained.
     if (typeof data === 'string' && data.length < 32_768) {
@@ -81,6 +92,7 @@ const sample = () => {
 const sampler = setInterval(sample, 200);
 const report = () => ({ phase, did: identity?.did, peers: room?.peers().map((/** @type {any} */ peer) => peer.did) ?? [],
   rendezvous: room?.rendezvous(), resources: { pcs: pcs.size, channels: channels.size, sockets: sockets.size, ...sample() },
+  content: contentTrace.snapshot(), nativeChannels: [...channels].slice(0, 32).map(channel => ({ ...channelMetadata.get(channel), readyState: channel.readyState, bufferedAmount: channel.bufferedAmount })),
   constructed, opened, closed, peaks: { ...peaks }, errors: [...errors], received: [...received], limits: OUTGOING_LIMITS });
 const start = async () => {
   if (stopped || room) throw new Error('fixture already started or stopped');
@@ -115,12 +127,20 @@ const start = async () => {
   async publishContent() { return base.publishApp({ name: 'Scale proof', files: { 'index.html': fixtureText }, entry: 'index.html' }); },
   /** @param {string} uri @param {string} expectedHash */
   async fetchContent(uri, expectedHash) {
-    const fetched = await base.fetchApp(uri);
-    const actual = await manifestHash(fetched.manifest), verified = await verifyManifest(fetched.manifest);
-    const { files } = await unpackTransportBundle(fetched);
-    const content = new TextDecoder().decode(files['index.html']);
-    if (!verified.ok || actual !== expectedHash || content !== fixtureText) throw new Error('verified content mismatch');
-    return { hash: actual, publisher: fetched.manifest.publisher, bytes: fetched.payload.byteLength, contentVerified: true };
+    contentTrace.phase('fetch-entered');
+    try {
+      const fetched = await base.fetchApp(uri, { onProgress: (/** @type {any} */ progress) => contentTrace.phase('fetch-progress', progress) });
+      contentTrace.phase('fetch-resolved');
+      const actual = await manifestHash(fetched.manifest), verified = await verifyManifest(fetched.manifest);
+      if (!verified.ok || actual !== expectedHash) throw new Error('verified manifest mismatch');
+      contentTrace.phase('manifest-verified');
+      const { files } = await unpackTransportBundle(fetched);
+      contentTrace.phase('unpacked');
+      const content = new TextDecoder().decode(files['index.html']);
+      if (!verified.ok || actual !== expectedHash || content !== fixtureText) throw new Error('verified content mismatch');
+      contentTrace.phase('complete');
+      return { hash: actual, publisher: fetched.manifest.publisher, bytes: fetched.payload.byteLength, contentVerified: true };
+    } catch (error) { contentTrace.failed(error); throw error; }
   },
   stop() { stopped = true; phase = 'stopped'; clearInterval(sampler); room?.leave(); base?.close(); return report(); },
 };
