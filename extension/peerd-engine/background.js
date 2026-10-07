@@ -12,7 +12,7 @@ export {
   isBinaryAssetPath, isLosslessUtf8Text, MAX_MODEL_APP_FILE_BYTES,
 } from './app-assets.js';
 export { opfsHelpers } from './opfs.js';
-export { IMAGE_PIN_STORAGE_KEY } from './image-pin.js';
+export { IMAGE_PIN_STORAGE_KEY } from './vm-image-contract.js';
 export {
   ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
   VMNotReadyError, VMNetworkDeniedError, VMBootFailedError,

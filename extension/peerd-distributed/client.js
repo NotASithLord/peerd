@@ -120,22 +120,24 @@ export const createDwebClient = () => {
     // tab (S1b). close() leaves the lobby + tears down the mesh.
     BASE_TOPIC,
     /** @param {{ identity: import('./transport/mesh.js').Identity, url?: string, audit?: import('./transport/mesh.js').AuditFn,
+     *   onMesh?: ((mesh:any)=>()=>void)|null, isBlocked?: (did:string)=>boolean, admitPeer?: ((did:string)=>Promise<boolean>)|null,
      *   admitDwappMeta?: ((candidate: { dwappId: string, publisher: string, seq: number, versionId: string }) => Promise<boolean>) | null }} opts */
-    joinBaseNetwork: async ({ identity, url = DEFAULT_SIGNALING[0], audit = null, admitDwappMeta = null } = /** @type {any} */ ({})) => {
+    joinBaseNetwork: async ({ identity, url = DEFAULT_SIGNALING[0], audit = null, admitDwappMeta = null, isBlocked = () => false, admitPeer = null, onMesh = null } = /** @type {any} */ ({})) => {
       // The base host is a local runtime with a separately observable
       // rendezvous state. Do not make identity recovery, unlock, or MV3 startup
       // wait on an external bootstrap node: assemble immediately, then let the
       // room's existing backoff loop establish discovery in the background.
       const room = await joinRoom({
-        roomId: BASE_TOPIC, identity, url, audit, awaitInitialRendezvous: false,
+        roomId: BASE_TOPIC, identity, url, audit, awaitInitialRendezvous: false, isBlocked, admitPeer, onMesh,
       });
       // why kind: the lobby presence beacon carries `kind:'extension'` so other
       // members (e.g. an ephemeral peer the peerd.ai landing page joins) can tell
       // a real extension apart from a website visitor in the live network view.
-      const base = await createBaseNetwork({
+      let base;
+      try { base = await createBaseNetwork({
         identity, mesh: room.mesh, meta: () => ({ kind: 'extension' }),
-        dial: makeDhtDialer(room), audit, admitDwappMeta,
-      });
+        dial: makeDhtDialer(room), audit, admitDwappMeta, userBlocked: isBlocked,
+      }); } catch (error) { room.leave(); throw error; }
       return { base, room, url, close: () => { base.close(); room.leave(); } };
     },
     loadSeedApp,

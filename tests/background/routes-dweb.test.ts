@@ -36,7 +36,7 @@ const baseDeps = (over: any = {}) => {
   const deps = {
     vault: { isLocked: () => false, getSecret: async () => 'id-secret', setSecret: async () => {} },
     auditLog: { append: async (e: any) => { audits.push(e); } },
-    kv: { get: async () => ({}), set: async () => {} },
+    kv: { get: async () => null, set: async () => {} },
     ensureDwebFeature: async () => {},
     dwebPublicationGeneration: () => 1,
     browser: { runtime: { sendMessage: async (m: any) => { sent.push(m); return over._reply ?? { ok: true }; } } },
@@ -308,11 +308,11 @@ describe('dweb app store', () => {
     const { deps, audits } = baseDeps({
       appClient: { create: async (args: any) => { created = args; return { id: args.appId, ...args }; } },
     });
-    const res = await makeDwebRoutes(deps)['dweb/app-install']({ appId: 'app-new12345', name: 'X', files: {}, entryFile: 'i.html', dweb: { uri: 'u', publisher: 'p' }, publicationGeneration: 1 }, offscreenSender);
+    const res = await makeDwebRoutes(deps)['dweb/app-install']({ appId: 'app-new12345', name: 'X', files: {}, entryFile: 'i.html', dweb: { uri: 'u', publisher: 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP' }, publicationGeneration: 1 }, offscreenSender);
     expect(res.ok).toBe(true);
     expect(created).toMatchObject({ appId: 'app-new12345', source: 'dweb' });
     expect(res.app.dweb).toMatchObject({ release_entry_file: 'i.html', release_file_kinds: {} });
-    expect(audits.at(-1)).toMatchObject({ type: 'dweb_app_installed', details: { uri: 'u', publisher: 'p' } });
+    expect(audits.at(-1)).toMatchObject({ type: 'dweb_app_installed', details: { uri: 'u', publisher: 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP' } });
   });
   test('durable discovery history rejects a lower-sequence fresh install after restart', async () => {
     const values = new Map<string, any>();
@@ -321,7 +321,7 @@ describe('dweb app store', () => {
       set: async (key: string, value: any) => { values.set(key, structuredClone(value)); },
     };
     const dwappId = 'a'.repeat(64);
-    const publisher = 'did:key:zPublisher';
+    const publisher = 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP';
     const currentVersion = 'b'.repeat(64);
     const first = baseDeps({ kv });
     expect(await makeDwebRoutes(first.deps)['dweb/meta-admit']({
@@ -359,7 +359,7 @@ describe('dweb app store', () => {
       auditLog: { append: async () => { throw new Error('audit unavailable'); } },
     });
     const result = await makeDwebRoutes(deps)['dweb/app-install']({
-      appId: 'app-new12345', name: 'X', files: {}, entryFile: 'i.html', dweb: { uri: 'u', publisher: 'p' },
+      appId: 'app-new12345', name: 'X', files: {}, entryFile: 'i.html', dweb: { uri: 'u', publisher: 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP' },
       publicationGeneration: 1,
     }, offscreenSender);
     expect(result).toMatchObject({ ok: true, app: { id: 'new' }, warning: 'audit-write-failed' });
@@ -464,7 +464,7 @@ describe('dweb app store', () => {
     });
     const result = await makeDwebRoutes(deps)['dweb/app-install']({
       appId: 'app-new12345', name: 'X', files: {}, entryFile: 'i.html',
-      dweb: { uri: 'u', publisher: 'p' }, publicationGeneration: 7,
+      dweb: { uri: 'u', publisher: 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP' }, publicationGeneration: 7,
     }, offscreenSender);
     expect(result).toEqual({ ok: false, error: 'dweb-custody-changed' });
     expect(deleted).toEqual(['app-new12345']);
@@ -538,7 +538,7 @@ describe('dweb app store', () => {
   test('the storage arm refuses a lower-sequence tracked update before replacing files', async () => {
     let replaced = false;
     const dwappId = 'd'.repeat(64);
-    const publisher = 'did:key:zPublisher';
+    const publisher = 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP';
     const { deps } = baseDeps({
       appRegistry: {
         get: async () => ({
@@ -1371,7 +1371,7 @@ describe('App consent update and room custody cutover', () => {
       },
       appRegistry: {
         get: async () => ({ id: 'app-one', entryFile: 'i.html', dweb: {
-          git_oid: 'base', dwapp_id: 'stream-one', publisher: 'did:key:publisher',
+          git_oid: 'base', dwapp_id: 'stream-one', publisher: 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP',
         } }),
         update: async (_id: string, patch: any) => ({ id: 'app-one', ...patch }),
       },
@@ -1381,7 +1381,7 @@ describe('App consent update and room custody cutover', () => {
         const applied = await routes['dweb/app-update']({
           appId: 'app-one', entryFile: 'i.html', files: { 'i.html': 'new' },
           publicationGeneration: message.publicationGeneration,
-          dweb: { version_id: 'v2', dwapp_id: 'stream-one', publisher: 'did:key:publisher', seq: 2 },
+          dweb: { version_id: 'v2', dwapp_id: 'stream-one', publisher: 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP', seq: 2 },
         }, offscreenSender);
         return { ...applied, pendingUnserveHashes: [] };
       } } },
@@ -1560,8 +1560,8 @@ describe('manual immutable addresses before feature acquisition', () => {
 
 test('retiring an address host after storage dispatch drains old commit and rollback before a second install', async () => {
   const fence = createDwebPublicationFence();
-  const address = `dwapp://content/key/${'a'.repeat(64)}`;
-  const uri = `peerd://did:key:key/${'a'.repeat(64)}`;
+  const address = `dwapp://content/z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP/${'a'.repeat(64)}`;
+  const uri = `peerd://did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP/${'a'.repeat(64)}`;
   let release!: () => void; let entered!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const started = new Promise<void>(resolve => { entered = resolve; });
@@ -1587,7 +1587,7 @@ test('retiring an address host after storage dispatch drains old commit and roll
       if (message.existing) return { ok: true, app: message.existing };
       dispatches++;
       return routes['dweb/app-install']({ appId: `app-${dispatches}`, name: 'App', files: {},
-        dweb: { uri, hash: 'a'.repeat(64), publisher: 'did:key:key' },
+        dweb: { uri, hash: 'a'.repeat(64), publisher: 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP' },
         publicationGeneration: message.publicationGeneration }, offscreenSender);
     } } },
   });
@@ -1609,7 +1609,7 @@ test('retiring an address host after storage dispatch drains old commit and roll
 
 for (const retire of [false, true]) test(`lost outer host response cannot bypass live SW storage (generation retires: ${retire})`, async () => {
   const fence = createDwebPublicationFence();
-  const hash = 'a'.repeat(64); const address = `dwapp://content/key/${hash}`; const uri = `peerd://did:key:key/${hash}`;
+  const hash = 'a'.repeat(64); const address = `dwapp://content/z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP/${hash}`; const uri = `peerd://did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP/${hash}`;
   let release!: () => void; let entered!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const started = new Promise<void>(resolve => { entered = resolve; });
@@ -1636,7 +1636,7 @@ for (const retire of [false, true]) test(`lost outer host response cannot bypass
       if (message.existing) return { ok: true, app: message.existing };
       dispatches++;
       const call = routes['dweb/app-install']({ appId: `app-${dispatches}`, name: 'App', files: {},
-        dweb: { uri, hash, publisher: 'did:key:key' }, publicationGeneration: message.publicationGeneration }, offscreenSender);
+        dweb: { uri, hash, publisher: 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP' }, publicationGeneration: message.publicationGeneration }, offscreenSender);
       if (dispatches !== 1) return call;
       storage = call; await started;
       throw new Error('outer host died while its SW storage remains alive');
@@ -1666,12 +1666,12 @@ test('unknown install rollback stays blocked despite an empty catalog and satura
   const routes = makeDwebRoutes(deps);
   for (let i = 0; i < 64; i++) {
     const result = await routes['dweb/app-install']({ appId: `app-${i}`, name: 'App', files: {},
-      dweb: { uri: `peerd://did:key:key/${String(i).padStart(64, '0')}` }, publicationGeneration: generation }, offscreenSender);
+      dweb: { uri: `peerd://did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP/${String(i).padStart(64, '0')}` }, publicationGeneration: generation }, offscreenSender);
     expect(result.outcomeKnown).toBe(false);
   }
   const refused = await routes['dweb/app-install']({ appId: 'app-extra', publicationGeneration: generation }, offscreenSender);
   expect(refused.error).toBe('install-reconciliation-required'); expect(writes).toBe(64);
-  const result = await routes['dweb/base/install-address']({ address: `dwapp://content/key/${'0'.repeat(64)}` });
+  const result = await routes['dweb/base/install-address']({ address: `dwapp://content/z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP/${'0'.repeat(64)}` });
   expect(result).toMatchObject({ ok: false, outcomeKnown: false, error: 'install-outcome-unknown' });
   expect(writes).toBe(64);
 });
@@ -1680,7 +1680,7 @@ for (const receipt of [
   { outcomeKnown: false }, { performed: true },
   { outcomeKind: 'effect-completed' }, { outcomeKind: 'host-lost' }, { outcomeKind: 'transport-lost' },
 ]) test(`partial install receipt stays uncertain without a catalog match: ${JSON.stringify(receipt)}`, async () => {
-  const address = `dwapp://content/key/${'a'.repeat(64)}`;
+  const address = `dwapp://content/z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP/${'a'.repeat(64)}`;
   let acquisitions = 0;
   const { deps } = baseDeps({
     ensureDwebFeature: async () => { acquisitions++; },
@@ -1690,7 +1690,7 @@ for (const receipt of [
   });
   const routes = makeDwebRoutes(deps);
   expect(await routes['dweb/app-install']({ appId: 'app-uncertain', files: {},
-    dweb: { uri: `peerd://did:key:key/${'a'.repeat(64)}` }, publicationGeneration: deps.dwebPublicationGeneration() }, offscreenSender))
+    dweb: { uri: `peerd://did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP/${'a'.repeat(64)}` }, publicationGeneration: deps.dwebPublicationGeneration() }, offscreenSender))
     .toMatchObject({ ok: false, ...receipt });
   expect(await routes['dweb/base/install-address']({ address }))
     .toMatchObject({ ok: false, outcomeKnown: false, error: 'install-outcome-unknown' });
@@ -1705,4 +1705,18 @@ test('storage failures keep finite receipt fields and code without admitting uns
     publicationGeneration: deps.dwebPublicationGeneration() }, offscreenSender))
     .toEqual({ ok: false, error: 'not committed', code: 'write-refused', performed: false,
       outcomeKnown: true, retryable: false });
+});
+
+test('policy snapshot is host-only and a persisted user ban refuses detached App storage', async () => {
+  const publisher = 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP';
+  let created = 0;
+  const { deps } = baseDeps({ kv: { get: async () => ({ v: 1, revision: 4, blocked: [publisher] }), set: async () => {} },
+    appClient: { create: async () => { created++; return { id: 'unexpected' }; } } });
+  const routes = makeDwebRoutes(deps);
+  expect(await routes['dweb/peer-policy']({}, { url: 'chrome-extension://peerd/home/home.html' }))
+    .toMatchObject({ ok: false, error: 'offscreen-sender-required' });
+  expect(await routes['dweb/peer-policy']({}, offscreenSender)).toMatchObject({ ok: true, policy: { revision: 4 } });
+  expect(await routes['dweb/app-install']({ appId: 'app-blocked123', dweb: { publisher }, publicationGeneration: 1 }, offscreenSender))
+    .toMatchObject({ ok: false, error: 'publisher-user-blocked' });
+  expect(created).toBe(0);
 });

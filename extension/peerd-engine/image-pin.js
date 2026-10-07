@@ -38,14 +38,8 @@
  */
 export const IMAGE_PIN_HEAD_BYTES = 65_536;
 
-/**
- * chrome.storage.local key for the per-URL TOFU fingerprints
- * ({ [url]: { totalBytes, headSha256, pinnedAt } }). Lives here (not in
- * vm-tab.js) because two shells read it: the vm-tab boot path verifies
- * against it, and the SW's artifact export/import routes carry the pin
- * inside vm-recipe envelopes (DESIGN-10).
- */
-export const IMAGE_PIN_STORAGE_KEY = 'vmImagePins.v1';
+// Keep the shared persistence contract independent of boot-time image checks.
+export { IMAGE_PIN_STORAGE_KEY } from './vm-image-contract.js';
 
 /**
  * Parse the total size out of a Content-Range header

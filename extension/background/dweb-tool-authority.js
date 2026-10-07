@@ -45,9 +45,9 @@ export const createDwebToolAuthority = ({ binding, ctx, signal }) => {
     return !(signal ?? ctx.abortSignal)?.aborted && permission?.mode === 'act';
   };
   return Object.freeze({
-    discoverApps: () => dwebFor('turn.dweb.discover-apps')?.discover()
+    discoverApps: () => dwebFor('turn.dweb.discover-apps')?.discover?.()
       ?? { ok: false, error: 'dweb_unavailable' },
-    readPeers: () => dwebFor('turn.dweb.read-peers')?.peers()
+    readPeers: () => dwebFor('turn.dweb.read-peers')?.peers?.()
       ?? { ok: false, error: 'dweb_unavailable' },
     publishConfirmedApp: async (/** @type {string} */ appId) => {
       const dweb = dwebFor('turn.dweb.publish-confirmed-app');
@@ -81,7 +81,7 @@ export const createDwebToolAuthority = ({ binding, ctx, signal }) => {
     ) => {
       const dweb = dwebFor('turn.dweb.install-confirmed-app');
       if (uri !== String(args?.uri ?? '').trim() || name !== args?.name) throw mismatch();
-      if (!dweb) return { ok: false, error: 'dweb_unavailable' };
+      if (typeof dweb?.install !== 'function') return { ok: false, error: 'dweb_unavailable' };
       const uriDigest = await sha256Hex(uri);
       const displayedUri = uri.length <= 512
         ? uri : `${uri.slice(0, 240)}…${uri.slice(-240)}`;
@@ -110,7 +110,7 @@ export const createDwebToolAuthority = ({ binding, ctx, signal }) => {
     setDiscoveryEnabled: (/** @type {boolean} */ enabled) => {
       const dweb = dwebFor('turn.dweb.set-discovery-enabled');
       if (enabled !== args?.enabled) throw mismatch();
-      return dweb?.setDiscovery({ enabled })
+      return dweb?.setDiscovery?.({ enabled })
         ?? { ok: false, error: 'dweb_unavailable' };
     },
     runMeshProgram: async (

@@ -2,7 +2,7 @@
 // Exact voice authority: human-UI admission is owned by route provenance;
 // this owner holds the media-host lifetime and addresses one physical host.
 
-import { withDeadline } from '/shared/cold-util.js';
+import { withDeadline, makeSerialLane } from '/shared/cold-util.js';
 import { sameDocumentUrlIgnoringHash } from '/shared/sender-trust.js';
 import {
   VOICE_CHANNEL_OFFER, VOICE_CHANNEL_PROTOCOL, VOICE_CHANNEL_RESULT, VOICE_COMMANDS,
@@ -64,12 +64,7 @@ export const createKernelVoiceCustody = ({
   let firefoxRetirement = Promise.resolve();
   /** @type {Promise<{error:Error,retirement:Promise<void>}>|null} */
   let firefoxLifetimeLoss = null;
-  let tail = Promise.resolve();
-  const queue = (/** @type {()=>Promise<any>} */ operation) => {
-    const pending = tail.then(operation, operation);
-    tail = pending.then(() => {}, () => {});
-    return pending;
-  };
+  const queue = makeSerialLane();
   const directFirefoxHost = async () => {
     if (!firefoxHost) {
       if (typeof createFirefoxHost !== 'function') {

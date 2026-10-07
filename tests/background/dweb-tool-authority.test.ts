@@ -138,3 +138,18 @@ describe('exact dweb authority', () => {
     expect(summaries.every((summary) => summary.includes('Requested name: Bundle'))).toBe(true);
   });
 });
+
+test('offline block-only authority refuses other operations without asking for consent', async () => {
+  let prompts = 0;
+  const ctx = { dweb: { block: async () => ({ ok: true }) }, confirm: async () => { prompts++; return true; } };
+  for (const [operation, method, args, values] of [
+    ['turn.dweb.discover-apps', 'discoverApps', {}, []],
+    ['turn.dweb.read-peers', 'readPeers', {}, []],
+    ['turn.dweb.set-discovery-enabled', 'setDiscoveryEnabled', { enabled: true }, [true]],
+    ['turn.dweb.install-confirmed-app', 'installConfirmedApp', { uri: 'peerd://test' }, ['peerd://test', undefined]],
+  ] as const) {
+    const authority: any = createDwebToolAuthority({ binding: { operation, args }, ctx });
+    expect(await authority[method](...values)).toEqual({ ok: false, error: 'dweb_unavailable' });
+  }
+  expect(prompts).toBe(0);
+});

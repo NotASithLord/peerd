@@ -291,3 +291,21 @@ test('publication classifies exact snapshot bytes and reseeding preserves immuta
     await expect(p.base.publishApp({...changed, expectedHash:first.hash})).rejects.toThrow('changed');
   } finally { p.base.close(); }
 });
+
+test('user policy refuses an absent publisher via honest seeders and refuses reseeding verified bytes', async () => {
+  const denied = new Set<string>();
+  const publisher = await spawn('publisher'), seeder = await spawn('seeder');
+  const reader = await spawn('reader', { userBlocked: (did: string) => denied.has(did) });
+  try {
+    await link(publisher, seeder);
+    const shared = await publisher.base.publishApp({ name: 'test', files: { 'index.html': '<h1>test</h1>' }, entry: 'index.html' });
+    const verified = await seeder.base.fetchApp(shared.uri);
+    await seeder.base.seedApp(verified);
+    await link(seeder, reader);
+    expect((await reader.base.fetchApp(shared.uri)).manifest.publisher).toBe(publisher.identity.did);
+    denied.add(publisher.identity.did); reader.base.enforceUserPolicy();
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow('publisher-user-blocked');
+    await expect(reader.base.seedApp(verified)).rejects.toThrow('publisher-user-blocked');
+    expect(reader.mesh.hasLink(seeder.identity.did)).toBe(true);
+  } finally { for (const p of [publisher, seeder, reader]) { p.base.close(); p.mesh.close(); } }
+});

@@ -99,6 +99,7 @@ const QUEUED_PER_MESH = 128;
  *   now?: () => number,
  *   budget?: number,
  *   sparse?: boolean,
+ *   isBlocked?: (did:string)=>boolean,
  *   pingIntervalMs?: number,
  *   idleTimeoutMs?: number,
  *   ctrlRateLimit?: number,
@@ -111,6 +112,7 @@ export const createRoomMesh = ({
   now = Date.now,
   budget = DEFAULT_BUDGET,
   sparse = false,
+  isBlocked = () => false,
   // "Are you still there?" cadence — the BACKSTOP for total silence (when neither
   // a clean data-channel close nor ICE 'disconnected' fired, which is rare). PING
   // is cheap (one signed control frame): ping at 8s, drop after 18s (~2 missed
@@ -431,7 +433,7 @@ export const createRoomMesh = ({
     /** @param {Channel} channel @param {string} did @param {any} [info]
      * @param {{ locallySelected?: boolean }} [ownership] */
     addLink(channel, did, info = {}, { locallySelected = false } = {}) {
-      if (closed || channel.isClosed?.()) { channel.close(); return false; }
+      if (closed || channel.isClosed?.() || isBlocked(did)) { channel.close(); return false; }
       pruneCooldowns();
       if (cooldowns.has(did)) {
         audit?.('peer_cooldown_refused', { did });

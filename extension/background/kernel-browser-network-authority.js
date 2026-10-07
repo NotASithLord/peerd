@@ -1,4 +1,5 @@
 // @ts-check
+import { makeSerialLane, withDeadline } from '/shared/cold-util.js';
 
 import {
   APP_EGRESS_REGEX,
@@ -199,7 +200,7 @@ export const createKernelBrowserNetworkAuthority = ({
   /** @type {Promise<any>|null} */ let quarantineInstalling = null;
   /** @type {Promise<true|false|'removed'>|null} */ let quarantineRestoring = null;
   /** @type {Promise<boolean>|null} */ let quarantineRemoving = null;
-  let quarantineDnrLane = Promise.resolve();
+  const quarantineDnr = makeSerialLane();
   let quarantineActive = false;
   let quarantineStateRead = false;
   let quarantineRevision = 0;
@@ -207,18 +208,9 @@ export const createKernelBrowserNetworkAuthority = ({
   /** @type {ReturnType<typeof setTimeout>|null} */ let quarantineResumeRetry = null;
   /** @type {ReturnType<typeof setTimeout>|null} */ let quarantineUpdateRetry = null;
   const quarantineBounded = (/** @type {Promise<any>} */ operation,
-    /** @type {string} */ code) => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(code)), Math.max(1, quarantineTimeoutMs));
-    operation.then(
-      (value) => { clearTimeout(timer); resolve(value); },
-      (cause) => { clearTimeout(timer); reject(cause); },
-    );
-  });
-  const quarantineDnr = (/** @type {()=>Promise<any>} */ operation) => {
-    const next = quarantineDnrLane.then(operation, operation);
-    quarantineDnrLane = next.then(() => {}, () => {});
-    return next;
-  };
+    /** @type {string} */ code) => withDeadline(
+    () => operation, Math.max(1, quarantineTimeoutMs), () => new Error(code),
+  );
   const quarantineRead = (/** @type {string} */ code) => quarantineDnr(() =>
     quarantineBounded(Promise.resolve(dnr.getSessionRules()), code));
   const externalReady = () => typeof ensureExternalReady === 'function'

@@ -1,6 +1,7 @@
 // @ts-check
 // Gate dependency-injected dweb routes by build and user settings.
 
+import { userPeerPolicy } from '../dweb-peer-policy.js';
 import { withDeadline } from '/shared/cold-util.js';
 import { finiteEffectReceiptFields } from '../host-effect-verdict.js';
 import { appReleaseDescriptorMatches } from '/shared/app-dweb-identity.js';
@@ -205,7 +206,11 @@ export const makeDwebRoutes = (deps) => {
     if (isOffscreenSender?.(sender) !== true) return { ok: false, error: 'offscreen-sender-required' };
     const refusal = await dwebStorageRefusal(message.publicationGeneration);
     if (refusal) return refusal;
-    try { return await operation(message); }
+    try {
+      return message.dweb?.publisher
+        ? await userPeerPolicy(kv).withPublisher(message.dweb.publisher, () => operation(message))
+        : await operation(message);
+    }
     catch (error) {
       if (conflictAware && /** @type {{name?:string}} */ (error)?.name === 'AppDwebAuthorityChangedError') {
         return updateConflict(message.appId);
@@ -223,6 +228,12 @@ export const makeDwebRoutes = (deps) => {
 
   /** @type {ReturnType<typeof makeDwebRoutes>} */
   const routes = {
+    'dweb/peer-policy': async (_message, sender) => {
+      if (isOffscreenSender?.(sender) !== true) return { ok: false, error: 'offscreen-sender-required' };
+      if (!(await dwebReady())) return dwebDisabled();
+      try { return { ok: true, policy: await userPeerPolicy(kv).snapshot() }; }
+      catch (error) { return failureResult(error); }
+    },
     'dweb/app-authority-generations': async (_msg, sender) => {
       if (isOffscreenSender?.(sender) !== true) return { ok: false, error: 'offscreen-sender-required' };
       if (!DWEB_ENABLED) return dwebDisabled();

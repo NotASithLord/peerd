@@ -62,6 +62,9 @@ const newId = () =>
  *   random?: () => number,
  *   timers?: any,
  *   awaitInitialRendezvous?: boolean,
+ *   onMesh?: ((mesh:any)=>()=>void)|null,
+ *   isBlocked?: (did:string)=>boolean,
+ *   admitPeer?: ((did:string)=>Promise<boolean>)|null,
  *   admission?: ReturnType<typeof import('./admission.js').createAdmissionGovernor>,
  * }} opts
  */
@@ -83,9 +86,11 @@ export const joinRoom = async ({
   kind: peerKind,             // 'website' = observe-only visitor (own rendezvous cap pool); omitted/default = extension
   awaitInitialRendezvous = true,
   admission = roomAdmission,
+  isBlocked = () => false, admitPeer = null, onMesh = null,
 } = /** @type {{ roomId: string, identity: import('./mesh.js').Identity }} */ ({})) => {
   const t = transport ?? createWebrtcTransport({ iceServers, RTCPeerConnection });
-  const mesh = createRoomMesh({ roomId, identity, now, budget, audit });
+  const mesh = createRoomMesh({ roomId, identity, now, budget, audit, isBlocked });
+  const releaseMesh = onMesh?.(mesh);
   /** @type {Set<(arg: { rendezvous: string }) => void>} */
   const statusCbs = new Set();
   let rendezvousState = url ? 'connecting' : 'none';
@@ -123,6 +128,12 @@ export const joinRoom = async ({
       audit?.('peer_did_mismatch', { expected: expectedDid, got: remoteDid });
       throw new Error('peer authenticated as a different did than expected');
     }
+    if ((admitPeer && !await admitPeer(remoteDid)) || isBlocked(remoteDid)) {
+      channel.close(); throw new Error('peer-user-blocked');
+    }
+    if (left || signal?.aborted || channel.isClosed?.() || isBlocked(remoteDid)) {
+      channel.close(); throw new Error('room admission retired');
+    }
     if (mesh.hasLink(remoteDid)) {
       dlog('room', `already linked to ${short(remoteDid)} — dropping duplicate channel`);
       channel.close();
@@ -154,6 +165,7 @@ export const joinRoom = async ({
    * expectedDid?: string | null, via: string, signal?: AbortSignal }} opts */
   const attempt = ({ key, direction, routers, routeKey, send, connect, expectedDid = null, via, signal }) =>
     attempts.run(key, direction, async (reservationSignal) => {
+      if (expectedDid && isBlocked(expectedDid)) throw new Error('peer-user-blocked');
       const ac = new AbortController();
       const cancel = () => {
         pipe.close();
@@ -329,7 +341,7 @@ export const joinRoom = async ({
 
   mesh.onRelay(async (/** @type {{ env: any, via: string }} */ { env, via }) => {
     const { kind, sid, payload } = env.body;
-    if (left || typeof sid !== 'string' || sid.length > 512 || typeof env.from !== 'string' || env.from.length > 512) return;
+    if (left || isBlocked(env.from) || typeof sid !== 'string' || sid.length > 512 || typeof env.from !== 'string' || env.from.length > 512) return;
     // why: a session id alone lets another authenticated origin inject ICE
     // into, or replace, a different peer's pending attempt.
     const routeKey = `${env.from}/${sid}`;
@@ -359,6 +371,7 @@ export const joinRoom = async ({
   /** @param {string} via @param {string} targetDid @param {{signal?: AbortSignal}} [opts] */
   const dialViaRelay = async (via, targetDid, { signal } = {}) => {
     if (left || signal?.aborted) throw new AdmissionError('cancelled');
+    if (isBlocked(targetDid)) throw new Error('peer-user-blocked');
     if (mesh.hasLink(targetDid)) return;
     if (typeof targetDid !== 'string' || targetDid.length > 512) throw new AdmissionError('invalid candidate');
     const incoming = attempts.pending(`incoming-did/${targetDid}`);
@@ -502,6 +515,7 @@ export const joinRoom = async ({
     leave() {
       if (left) return;
       left = true;
+      releaseMesh?.();
       lifetime.abort();
       attempts.close();
       timers.clearTimeout(reconnectTimer ?? undefined);
