@@ -4552,14 +4552,50 @@ export const STATES = [
     name: 'sessions-list', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
-      // Two chats so the list has rows to show, then open the chats view.
-      await rpc(ctx.page, { type: 'agent/send', text: 'summarize the three PRs I opened today' });
-      await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
-      await rpc(ctx.page, { type: 'session/reset' });
-      await rpc(ctx.page, { type: 'agent/send', text: 'spin up a linux VM and run uname -a' });
-      await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
+      // why: an old assistant bubble is not completion of the newly requested
+      // turn. Prove each accepted turn persisted before resetting its session.
+      const expected = [];
+      for (const text of ['summarize the three PRs I opened today', 'spin up a linux VM and run uname -a']) {
+        const reset = await rpc(ctx.page, { type: 'session/reset' });
+        if (reset?.ok !== true) throw new Error(`sessions-list reset refused: ${JSON.stringify(reset)}`);
+        const empty = await waitFor(async () => {
+          const state = await rpc(ctx.page, { type: 'state/get' });
+          const view = await probe(ctx);
+          return state?.ok === true && !state.state?.session?.sessionId
+            && !view.userText && !view.assistantText && !view.busy;
+        }, { budgetMs: 20_000 });
+        if (!empty) throw new Error('sessions-list reset did not reach an empty session');
+        const sent = await rpc(ctx.page, { type: 'agent/send', text });
+        rec.check(`session fixture turn accepted: ${text}`, sent?.ok === true, JSON.stringify(sent));
+        if (sent?.ok !== true) throw new Error('sessions-list fixture turn refused');
+        const persisted = await waitFor(async () => {
+          const state = await rpc(ctx.page, { type: 'state/get' });
+          const sessionId = state?.state?.session?.sessionId;
+          const view = await probe(ctx);
+          if (!sessionId || view.busy || view.userText !== text || view.assistantText !== 'noted') return null;
+          const reply = await rpc(ctx.page, { type: 'session/debugBundle', sessionId });
+          const messages = reply?.bundle?.session?.messages ?? [];
+          return reply?.ok === true && messages.some(message => message.role === 'user' && message.content === text)
+            && messages.some(message => message.role === 'assistant' && message.content === 'noted')
+            ? { sessionId, title: text } : null;
+        }, { budgetMs: 20_000 });
+        rec.check(`session fixture turn persisted: ${text}`, !!persisted, JSON.stringify(persisted));
+        if (!persisted) throw new Error('sessions-list exact fixture turn did not persist');
+        expected.push(persisted);
+      }
+      const listed = await rpc(ctx.page, { type: 'session/list' });
+      const complete = listed?.ok === true && new Set(expected.map(row => row.sessionId)).size === 2
+        && expected.every(row => listed.sessions?.some(session => session.sessionId === row.sessionId
+          && session.title === row.title && session.messageCount >= 2 && !session.archived));
+      rec.check('both exact fixture sessions remain in the persisted list', complete, JSON.stringify(listed?.sessions));
+      if (!complete) throw new Error('sessions-list persisted fixture rows are missing');
       await evalIn(ctx.page, `document.querySelector('.topbar-actions button[title="Chats"]')?.click()`);
-      await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.sessions-list .session-row')`), { budgetMs: 8_000, pollMs: 50 });
+      const visible = await waitFor(() => evalIn(ctx.page, `(() => {
+        const titles = [...document.querySelectorAll('.sessions-list .session-title')].map(row => row.textContent.trim());
+        return ${JSON.stringify(expected.map(row => row.title))}.every(title => titles.includes(title));
+      })()`), { budgetMs: 8_000, pollMs: 50 });
+      rec.check('both persisted fixture sessions render before capture', !!visible);
+      if (!visible) throw new Error('sessions-list expected rows did not render');
       await rec.visual('sessions-list');
       // Return to the chat view for later states.
       await evalIn(ctx.page, `document.querySelector('.topbar-actions button[title="Chats"]')?.click()`);
