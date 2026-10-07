@@ -537,11 +537,16 @@ describe('peer-network onboarding consent', () => {
     let completed = 0;
     /** @type {(value:any)=>void} */ let release = () => {};
     const startup = new Promise(resolve => { release = resolve; });
+    /** @type {(value:any)=>void} */ let releaseStatus = () => {};
+    const status = new Promise(resolve => { releaseStatus = resolve; });
+    /** @type {()=>void} */ let statusObserved = () => {};
+    const statusRequested = new Promise(resolve => { statusObserved = () => resolve(undefined); });
     /** @type {()=>void} */ let observed = () => {};
     const persisted = new Promise(resolve => { observed = () => resolve(undefined); });
     const { root, unmount } = mount(PeerNetworkStep, {
       send: async message => {
         sends.push(message);
+        if (message.type === 'bootstrap/ready') { statusObserved(); return status; }
         if (message.type === 'settings/update' && message.patch.dwebEnabled) return startup;
         if (message.type === 'state/get') {
           observed();
@@ -554,6 +559,15 @@ describe('peer-network onboarding consent', () => {
     try {
       need(root, '[data-network-choice="enable"]').click();
       await persisted; await tick(); m.redraw.sync();
+      // Mounting the status child begins another asynchronous read. Observe
+      // that read explicitly; persistence alone does not mean it has settled.
+      await statusRequested;
+      expect(root.textContent).toContain('Connecting to the peer network');
+      releaseStatus({ ok: true });
+      const deadline = performance.now() + 1_000;
+      while (!root.textContent?.includes('offline') && performance.now() < deadline) {
+        await tick(); m.redraw.sync();
+      }
       expect(root.textContent).toContain('offline');
       expect(completed).toBe(0);
       expect(need(root, '[data-network-choice="continue"]', HTMLButtonElement).disabled).toBe(false);
@@ -566,7 +580,7 @@ describe('peer-network onboarding consent', () => {
       release({ ok: true }); await tick(); m.redraw.sync();
       expect(completed).toBe(1);
       expect(root.querySelector('[data-network-choice="continue"]')).toBe(null);
-    } finally { release({ ok: false }); unmount(); }
+    } finally { releaseStatus({ ok: false }); release({ ok: false }); unmount(); }
   });
 
   it('does not treat a legacy enabled default as consent or advance after unmount', async () => {

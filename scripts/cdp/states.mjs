@@ -22,6 +22,7 @@ import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSocket } from 'node:dgram';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -66,6 +67,31 @@ const clickAndSyncRedraw = (page, selector) => evalIn(page, `(async () => {
   m.redraw.sync();
   return true;
 })()`, true);
+
+// why: these scenarios model a user who already made a network choice. Keep
+// the choice local to their fixtures; fresh-profile consent oracles stay untouched.
+const chooseFixtureNetwork = async (ctx, enabled) => {
+  const available = await evalIn(ctx.page, `(async () =>
+    (await import('/shared/channel-config.js')).DWEB_ENABLED)()`, true);
+  if (!available) {
+    if (enabled) throw new Error('peer-network fixture requires a supported host');
+    return;
+  }
+  const reply = await rpc(ctx.page, { type: 'settings/update', patch: { dwebEnabled: enabled } });
+  if (reply?.ok !== true || reply.settings?.dwebEnabled !== enabled
+      || reply.settings?.dwebChoiceMade === false) {
+    throw new Error(`fixture network choice failed: ${JSON.stringify(reply)}`);
+  }
+  if (enabled) {
+    const home = await openExtPage(ctx, 'home/home.html');
+    try {
+      const started = await rpc(home, { type: 'dweb/base/start' });
+      if (started?.ok !== true || started.running !== true || !started.did?.startsWith('did:key:')) {
+        throw new Error(`fixture peer host did not start: ${JSON.stringify(started)}`);
+      }
+    } finally { await home.close(); }
+  }
+};
 
 const SMOKE_TEXT = 'e2e-smoke-ok';
 const TRANSFER_EXPORT_VERSION = 2;
@@ -352,6 +378,7 @@ let lockReportBody = '';
 let lockFixtureUrl = '';
 
 const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPanel = false }) => {
+  await chooseFixtureNetwork(ctx, false);
   const options = await openExtPage(ctx, 'options/options.html');
   let imported;
   try {
@@ -1708,6 +1735,7 @@ export const STATES = [
     name: 'portable-identity', kind: 'functional', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, true);
       const transferPage = await openWidePage(ctx, 'options/options.html#!/transfer', { ready: '#exppass' });
       let exported = await privateTransferRpc(transferPage, { type: 'transfer/export', passphrase: PASSPHRASE });
       if (!exported?.payload?.dweb?.identityRecord) {
@@ -1841,6 +1869,7 @@ export const STATES = [
     name: 'options-transfer-conflict', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, true);
       const seedPage = await openWidePage(ctx, 'options/options.html#!/transfer', { ready: '#exppass' });
       const localExport = await privateTransferRpc(seedPage, { type: 'transfer/export', passphrase: PASSPHRASE });
       let localDid = localExport?.payload?.dweb?.identityRecord?.did ?? null;
@@ -4144,6 +4173,14 @@ export const STATES = [
     name: 'onboarding-network', kind: 'visual', phase: 'pre-unlock',
     responder: null,
     async run(ctx, rec) {
+      if (process.env.PEERD_VISUAL_BASE_RENDER === '1') {
+        const extension = process.argv.find(arg => arg.startsWith('--extension='))?.slice('--extension='.length);
+        if (!extension) throw new Error('base visual render requires an explicit extension tree');
+        if (!existsSync(join(extension, 'sidepanel/components/onboarding-network-step.js'))) {
+          rec.observe('merge-base surface', { present: false, reason: 'network onboarding was introduced on this branch' });
+          return;
+        }
+      }
       try {
         await evalIn(ctx.page, `(async () => {
           const m = (await import('/vendor/mithril/mithril.js')).default;
@@ -4669,6 +4706,7 @@ export const STATES = [
     name: 'home-fulltab', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
       const page = await openWidePage(ctx, 'home/home.html');
       try {
         // Wait past the boot vault-gate/onboarding flash to the home surface.
@@ -4731,6 +4769,7 @@ export const STATES = [
       return { sse: sseText('noted') };
     },
     async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
       let releaseLive = () => {};
       const liveGate = new Promise((resolve) => { releaseLive = resolve; });
       actorOverviewVisualState = { started: false, actorCalls: 0, liveGate };
@@ -6729,6 +6768,7 @@ export const STATES = [
       return { sse: sseText('Delegated to the dweb actor; awaiting its reply.') };
     },
     async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, true);
       dwebActorState = { delegates: 0, actorCalls: 0 };
       const upd = await rpc(ctx.page, { type: 'settings/update', patch: { dwebAgentEnabled: true } });
       rec.check('the dweb agent toggle flips on', !!upd?.ok, JSON.stringify(upd));
@@ -6786,6 +6826,7 @@ export const STATES = [
       return { sse: sseText('Delegated to the dweb actor.') };
     },
     async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, true);
       a2aState = { delegates: 0, actorCalls: 0 };
       const upd = await rpc(ctx.page, { type: 'settings/update', patch: { dwebAgentEnabled: true } });
       rec.check('the dweb agent toggle flips on', !!upd?.ok, JSON.stringify(upd));

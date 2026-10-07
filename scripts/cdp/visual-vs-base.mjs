@@ -120,7 +120,7 @@ const render = ({ extensionDir, artifactsDir }) => {
   // Visual states no longer fail the verify run, so a non-zero exit here is a
   // state that THREW or a functional check inside a visual state. Report it and
   // keep going: whatever did get captured is still worth comparing.
-  const r = spawnSync('bun', args, { cwd: ROOT, stdio: 'inherit', env: process.env });
+  const r = spawnSync('bun', args, { cwd: ROOT, stdio: 'inherit', env: { ...process.env, PEERD_VISUAL_BASE_RENDER: extensionDir ? '1' : '0' } });
   if (r.status !== 0) log(`render exited ${r.status} - comparing whatever it captured`);
 };
 
