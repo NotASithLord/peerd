@@ -287,3 +287,142 @@ test('passive lifecycle diagnostics omit arbitrary messages and lease secrets', 
     status: 'starting', generation: 2, hostEpoch: 'epoch', durable: true,
   } } });
 });
+
+// A paused worker never answers the chosen command; close must cancel its local
+// wait instead of requiring a response from a target that Chrome can retire.
+const teardownObserver = async (blockedMethod: string) => {
+  const { observeHosts, createConsentDiagnostics } = await import('../../scripts/cdp/network-consent-cold.mjs');
+  const listeners = new Set<any>();
+  const calls: { method: string; sessionId?: string; params: any }[] = [];
+  const evidence: any = { phase: 'explicit-enable', events: [], observerErrors: [] };
+  let finish!: (value: any) => void;
+  let fail!: (error: Error) => void;
+  let entered!: () => void;
+  const blocked = new Promise<void>(resolve => { entered = resolve; });
+  let closes = 0;
+  const emit = (method: string, params: any, sessionId?: string) => {
+    for (const listener of [...listeners]) listener(method, params, { sessionId });
+  };
+  const target = (sessionId: string, type = 'worker') => emit('Target.attachedToTarget', {
+    sessionId, targetInfo: { targetId: sessionId, type,
+      url: `chrome-extension://fixture/${type === 'page' ? 'home/home.html' : 'offscreen/controller-worker.js'}` },
+    waitingForDebugger: type !== 'page',
+  });
+  const connection = {
+    events: [], on: (listener: any) => listeners.add(listener), off: (listener: any) => listeners.delete(listener),
+    close() { closes++; },
+    async send(method: string, params: any = {}, sessionId?: string): Promise<any> {
+      calls.push({ method, params, sessionId });
+      if (method === 'Debugger.setInstrumentationBreakpoint') return { breakpointId: 'first' };
+      if (sessionId === 'held' && blockedMethod === 'first-script' && method === 'Runtime.runIfWaitingForDebugger') {
+        entered(); return {}; // The target never reaches the promised first-script pause.
+      }
+      if (sessionId === 'held' && method === blockedMethod) {
+        entered();
+        return new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+      }
+      if (method === 'Target.setAutoAttach' && !sessionId) {
+        if (params.autoAttach) target('home', 'page');
+        else target('late'); // An event already queued when teardown starts.
+      }
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') emit('Runtime.bindingCalled', {
+        name: '__peerdConsentTransportObserved',
+        payload: JSON.stringify({ kind: 'observer-ready', href: 'chrome-extension://fixture/home/home.html' }),
+      }, sessionId);
+      return {};
+    },
+  };
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => Response.json({ webSocketDebuggerUrl: 'fake' }) });
+  try {
+    const observer = await observeHosts({ port: server.port, sw: { id: 'fixture' } }, evidence,
+      createConsentDiagnostics(evidence, () => {}, 100), () => {}, async () => connection);
+    return { observer, evidence, calls, listeners, target, blocked, finish: (value: any) => finish(value),
+      fail: (error: Error) => fail(error), closes: () => closes };
+  } finally { server.stop(true); }
+};
+
+for (const method of ['Debugger.enable', 'Target.setAutoAttach']) test(`observer close fences late continuations after held ${method}`, async () => {
+  const fixture = await teardownObserver(method);
+  fixture.target('held');
+  await fixture.blocked;
+  const closing = fixture.observer.close();
+  expect(fixture.observer.close()).toBe(closing);
+  await closing;
+  expect(fixture.closes()).toBe(1);
+  expect(fixture.listeners.size).toBe(0);
+  expect(fixture.evidence.observerErrors).toEqual([]);
+  expect(fixture.evidence.commands.filter((entry: any) => entry.status === 'cancelled'))
+    .toEqual([expect.objectContaining({ label: `${method} session=held` })]);
+  expect(fixture.evidence.commands.some((entry: any) => ['pending', 'failed'].includes(entry.status))).toBe(false);
+  expect(fixture.evidence.lifecycle).toEqual([expect.objectContaining({
+    method: 'Target.attachedToTarget', sessionId: 'late', targetId: 'late', duringTeardown: true,
+  })]);
+  const finishedCalls = [...fixture.calls];
+  const finishedEvidence = JSON.stringify(fixture.evidence);
+  fixture.finish({});
+  await Promise.resolve(); await Promise.resolve();
+  expect(JSON.stringify(fixture.evidence)).toBe(finishedEvidence);
+  // Cross the original diagnostic deadline: its cancelled timer must not rewrite the report.
+  await new Promise(resolve => setTimeout(resolve, 120));
+  expect(JSON.stringify(fixture.evidence)).toBe(finishedEvidence);
+  expect(fixture.calls).toEqual(finishedCalls);
+  expect(fixture.calls.some(call => call.sessionId === 'late')).toBe(false);
+  expect(fixture.calls.some(call => call.method === 'Runtime.runIfWaitingForDebugger')).toBe(false);
+  if (method === 'Target.setAutoAttach') expect(fixture.calls.some(call => call.method === 'Debugger.enable')).toBe(false);
+  await expect(fixture.observer.barrier()).rejects.toThrow('Consent observer closed');
+  expect(fixture.calls).toEqual(finishedCalls);
+});
+
+test('observer close preserves a real command failure that occurred before cancellation', async () => {
+  const fixture = await teardownObserver('Debugger.enable');
+  fixture.target('held');
+  await fixture.blocked;
+  fixture.fail(new Error('fixture protocol failure'));
+  await expect(fixture.observer.barrier()).rejects.toThrow('fixture protocol failure');
+  await expect(fixture.observer.close()).rejects.toThrow('fixture protocol failure');
+  expect(fixture.evidence.observerErrors).toHaveLength(1);
+  expect(fixture.evidence.commands.some((entry: any) => entry.label === 'Debugger.enable session=held'
+    && entry.status === 'failed' && entry.error.includes('fixture protocol failure'))).toBe(true);
+  expect(fixture.closes()).toBe(1);
+  expect(fixture.listeners.size).toBe(0);
+});
+
+
+test('observer close cancels a first-script event wait and removes its listener without resuming', async () => {
+  const fixture = await teardownObserver('first-script');
+  fixture.target('held');
+  await fixture.blocked;
+  // A barrier queues behind the installation rather than creating another lease.
+  const barrier = fixture.observer.barrier();
+  const rejected = barrier.catch(error => error);
+  await fixture.observer.close();
+  expect((await rejected).message).toBe('Consent observer closed');
+  expect(fixture.listeners.size).toBe(0);
+  expect(fixture.closes()).toBe(1);
+  expect(fixture.evidence.observerErrors).toEqual([]);
+  expect(fixture.calls.some(call => ['Debugger.resume', 'Debugger.disable'].includes(call.method))).toBe(false);
+  expect(fixture.evidence.commands.some((entry: any) => entry.status === 'pending' || entry.status === 'failed')).toBe(false);
+});
+
+
+test('same-turn protocol rejection remains a failure when close follows immediately', async () => {
+  const fixture = await teardownObserver('Debugger.enable');
+  fixture.target('held');
+  await fixture.blocked;
+  fixture.fail(new Error('same-turn protocol failure'));
+  await expect(fixture.observer.close()).rejects.toThrow('same-turn protocol failure');
+  expect(fixture.evidence.observerErrors).toHaveLength(1);
+  expect(fixture.closes()).toBe(1);
+  expect(fixture.listeners.size).toBe(0);
+});
+
+
+test('close fences an installation whose first native dispatch is still queued', async () => {
+  const fixture = await teardownObserver('Debugger.enable');
+  fixture.target('held');
+  await fixture.observer.close();
+  expect(fixture.calls.some(call => call.sessionId === 'held')).toBe(false);
+  expect(fixture.evidence.commands.some((entry: any) => entry.status === 'failed' || entry.status === 'pending')).toBe(false);
+  expect(fixture.evidence.observerErrors).toEqual([]);
+  expect(fixture.listeners.size).toBe(0);
+});
