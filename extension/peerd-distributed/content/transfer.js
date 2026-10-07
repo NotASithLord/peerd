@@ -12,21 +12,32 @@
 //                                   or { t:'NOMANIFEST', hash }
 //   { t:'CHUNK_REQ', hash }         -> { t:'CHUNK', hash, bytes(base64) }
 //                                   or { t:'NOCHUNK', hash }
+// A CHUNK_REQ with requestId opts into bounded CHUNK parts carrying that id,
+// offset and total size. Missing requestId preserves the legacy whole reply.
 
 import {
   manifestHash, verifyManifest, assertBundleWithinLimits, decodeCommittedChunk,
 } from './manifest.js';
-import { sha256hex } from './chunk.js';
+import { CHUNK_SIZE, sha256hex } from './chunk.js';
 import { parsePeerdUri } from './uri.js';
 import { toBase64, concat } from '/shared/bundle/bytes.js';
 import { contentServiceBudget } from './service-budget.js';
 
 const ALPHA = 3; // lookup/transfer parallelism (PROTOCOL §5.1)
+// why: a signed chunk's base64 JSON exceeds SCTP's negotiated message limit.
+// Slice the wire representation, never the immutable manifest/chunk hashes.
+// This also fits the WebRTC default when a peer omits max-message-size in SDP.
+export const CHUNK_PART_BYTES = 48_000;
+
+class ChunkPartError extends Error {
+  constructor() { super('invalid chunk part bounds'); this.name = 'ChunkPartError'; }
+}
 
 /**
  * A wire message in the Phase 0 content protocol — JSON-framed, so every
  * field is wire-decoded and validated at runtime by the switch below.
- * @typedef {{ t: string, hash: string, manifest?: any, bytes?: string }} ContentMsg
+ * @typedef {{ t: string, hash: string, manifest?: any, bytes?: string,
+ *   requestId?: string, offset?: number, size?: number }} ContentMsg
  * @typedef {{
  *   getManifest: (hash: string) => any,
  *   getChunk: (chunkHash: string) => (Uint8Array | null | undefined),
@@ -51,6 +62,14 @@ export const createContentResponder = ({ store, budget = contentServiceBudget })
       }
       case 'CHUNK_REQ': {
         const bytes = store.getChunk(msg.hash);
+        if (typeof msg.requestId === 'string' && msg.requestId.length > 0 && msg.requestId.length <= 64) {
+          if (!bytes) { await send({ t: 'NOCHUNK', hash: msg.hash, requestId: msg.requestId }); return; }
+          for (let offset = 0; offset < bytes.length; offset += CHUNK_PART_BYTES) {
+            await send({ t: 'CHUNK', hash: msg.hash, requestId: msg.requestId, offset, size: bytes.length,
+              bytes: toBase64(bytes.subarray(offset, offset + CHUNK_PART_BYTES)) });
+          }
+          return;
+        }
         await send(bytes ? { t: 'CHUNK', hash: msg.hash, bytes: toBase64(bytes) } : { t: 'NOCHUNK', hash: msg.hash });
         return;
       }
@@ -102,10 +121,15 @@ export const createChannelClient = (channel, timeoutMs) => {
       reject(new Error('duplicate content request')); return;
     }
     let settled = false;
+    const requestId = reqType === 'CHUNK_REQ' ? crypto.randomUUID() : undefined;
+    /** @type {Uint8Array | null} */
+    let parts = null;
+    let received = 0;
     const sending = new AbortController();
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     let timer;
     const cleanup = () => {
+      parts = null;
       clearTimeout(timer);
       for (const rt of respTypes) pending.delete(`${rt}:${h}`);
       cancel.delete(fail);
@@ -115,7 +139,28 @@ export const createChannelClient = (channel, timeoutMs) => {
     /** @param {Error} error */
     const fail = (error) => { if (settled) return; settled = true; cleanup(); reject(error); };
     /** @param {ContentMsg} msg */
-    const settle = (msg) => { if (settled) return; settled = true; cleanup(); resolve(msg); };
+    const settle = (msg) => {
+      if (settled) return;
+      // why: concurrent downloads share a link and may request the same hash.
+      // Their fragment streams must never complete or corrupt each other.
+      if (msg.requestId !== undefined && msg.requestId !== requestId) return;
+      if (msg.t === 'CHUNK' && msg.requestId !== undefined) {
+        const size = msg.size;
+        if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0 || size > CHUNK_SIZE
+          || msg.offset !== received || (parts && parts.length !== size)) {
+          fail(new ChunkPartError()); return;
+        }
+        try {
+          const bytes = decodeCommittedChunk(msg.bytes, Math.min(CHUNK_PART_BYTES, size - received));
+          parts ??= new Uint8Array(size);
+          parts.set(bytes, received);
+          received += bytes.length;
+          if (received < parts.length) return;
+          msg = { t: 'CHUNK', hash: h, bytes: toBase64(parts) };
+        } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); return; }
+      }
+      settled = true; cleanup(); resolve(msg);
+    };
     const abort = () => fail(new Error('content request cancelled'));
     for (const rt of respTypes) pending.set(`${rt}:${h}`, settle);
     cancel.add(fail);
@@ -124,7 +169,7 @@ export const createChannelClient = (channel, timeoutMs) => {
     timer = setTimeout(() => fail(new Error('content send timed out')), 15_000);
     signal?.addEventListener('abort', abort, { once: true });
     try {
-      Promise.resolve(channel.send({ t: reqType, hash: h }, { signal: sending.signal })).then(() => {
+      Promise.resolve(channel.send({ t: reqType, hash: h, ...(requestId ? { requestId } : {}) }, { signal: sending.signal })).then(() => {
         if (settled) return;
         clearTimeout(timer);
         timer = setTimeout(() => fail(new Error('transfer timeout')), timeoutMs);
