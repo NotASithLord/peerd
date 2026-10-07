@@ -19,6 +19,9 @@
 
 import { localSessionBindings } from './channel-binding.js';
 
+/** Locally classified wire faults, never remote-supplied close reasons. @param {unknown} reason */
+export const isRawProtocolClose = (reason) => ['raw-frame-type', 'raw-frame-size', 'raw-frame-json'].includes(/** @type {string} */ (reason));
+
 /**
  * @param {{ send: (msg: any, options?: import('./outgoing.js').SendOptions) => void | Promise<void>, close?: () => void, getSessionBinding?: () => Readonly<import('./channel-binding.js').SessionBinding> }} io
  */
@@ -27,9 +30,11 @@ export const createBufferedChannel = ({ send, close, getSessionBinding } = /** @
   let handler = null;
   let closed = false;
   let transportReleased = false;
+  /** @type {string | undefined} */
+  let closeReason;
   /** @type {any[]} */
   const backlog = [];
-  /** @type {Set<() => void>} */
+  /** @type {Set<(reason?: string) => void>} */
   const closeCbs = new Set();
 
   /** @param {any} msg */
@@ -58,16 +63,16 @@ export const createBufferedChannel = ({ send, close, getSessionBinding } = /** @
     // Install (or clear, with null) the handler. Flushes the backlog.
     /** @param {((msg: any) => void) | null} fn */
     setHandler(fn) {
-      handler = fn;
       if (closed) return;
+      handler = fn;
       if (fn) while (backlog.length && handler) invoke(backlog.shift());
     },
     isClosed: () => closed,
     // Fires once, immediately if already closed. Returns unsubscribe.
-    /** @param {() => void} cb */
+    /** @param {(reason?: string) => void} cb */
     onClose(cb) {
       if (closed) {
-        cb();
+        try { cb(closeReason); } catch { /* observer failure cannot retain transport ownership */ }
         return () => {};
       }
       closeCbs.add(cb);
@@ -80,11 +85,18 @@ export const createBufferedChannel = ({ send, close, getSessionBinding } = /** @
       closed = true;
       backlog.length = 0;
       handler = null;
-      for (const cb of [...closeCbs]) cb();
+      const observers = [...closeCbs];
       closeCbs.clear();
+      for (const cb of observers) {
+        try { cb(closeReason); } catch { /* notify every owner despite a failed observer */ }
+      }
     },
     // Local hang-up: tear down the underlying transport too.
-    close() {
+    /** @param {string} [reason] */
+    close(reason) {
+      // Latch before native close can synchronously notify us. The first close
+      // owns blame; a later caller cannot upgrade an ordinary retirement.
+      if (!closed && !transportReleased && isRawProtocolClose(reason)) closeReason = reason;
       // A transport notification can precede its owner's cleanup. Release the
       // underlying resource once even when signalClose already notified users.
       if (!transportReleased) {

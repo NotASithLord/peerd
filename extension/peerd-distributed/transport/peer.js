@@ -51,10 +51,21 @@ export const DEFAULT_ICE_SERVERS = [
 const DISCONNECT_GRACE_MS = 5_000;
 const MAX_DATA_CHANNEL_FRAME_BYTES = 1_000_000;
 
-/** @param {string | ArrayBuffer | Uint8Array} data */
+class RawFrameError extends Error {
+  /** @param {string} reason */
+  constructor(reason) { super('invalid data-channel frame'); this.reason = reason; }
+}
+
+/** @param {unknown} data */
 const decode = (data) => {
+  if (typeof data !== 'string' && !(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) {
+    throw new RawFrameError('raw-frame-type');
+  }
+  // Bound the allocation before computing exact UTF-8 size. Binary views use
+  // their own byte range, preserving TextDecoder's existing view semantics.
+  if (typeof data === 'string' && data.length > MAX_DATA_CHANNEL_FRAME_BYTES) throw new RawFrameError('raw-frame-size');
   const bytes = typeof data === 'string' ? new TextEncoder().encode(data).byteLength : data.byteLength;
-  if (bytes > MAX_DATA_CHANNEL_FRAME_BYTES) throw new Error('data-channel frame too large');
+  if (bytes > MAX_DATA_CHANNEL_FRAME_BYTES) throw new RawFrameError('raw-frame-size');
   return JSON.parse(typeof data === 'string' ? data : new TextDecoder().decode(data));
 };
 
@@ -217,13 +228,17 @@ export const createPeer = ({
     channel.pc = pc;
     activeChannel = channel;
     dc.onmessage = (e) => {
+      if (released || channel.isClosed()) return;
       // why try/catch: e.data is attacker-controlled bytes from a remote peer;
       // a malformed frame would otherwise throw an uncaught exception out of the
       // event handler. Malformed ingress is rejected before protocol dispatch;
       // outgoing queue failures are reported separately to their producer.
       let m;
       try { m = decode(e.data); }
-      catch { dwarn('webrtc', 'dropping unparseable data-channel frame'); return; }
+      catch (error) {
+        channel.close(error instanceof RawFrameError ? error.reason : 'raw-frame-json');
+        return;
+      }
       channel.deliver(m);
     };
     dc.onopen = () => { if (released) return; dlog('webrtc', '🟢 data channel OPEN: peers connected directly'); resolveChannel(channel); };

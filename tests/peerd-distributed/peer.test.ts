@@ -5,7 +5,7 @@ import { createPeer } from '../../extension/peerd-distributed/transport/peer.js'
 // inbound-robustness logic is unit-testable with a minimal mock: the
 // pre-description ICE buffer must be bounded (a hostile peer cannot trickle
 // unbounded candidates before sending a description), and a malformed
-// data-channel frame must be dropped, not thrown out of the event handler.
+// data-channel frame must close the carrier without throwing out of the handler.
 
 class MockDataChannel {
   readyState = 'connecting';
@@ -46,13 +46,16 @@ describe('createPeer — inbound robustness', () => {
     expect(pc.addIceCalls.length).toBe(64);
   });
 
-  test('a malformed data-channel frame is dropped, not thrown out of the handler', () => {
+  test('a malformed frame closes an unopened carrier and ignores later valid frames', async () => {
     const peer = makePeer();
     const dc = (peer.pc as any).dc;
+    const rejected = peer.channelReady.then(() => null, error => error);
     expect(typeof dc.onmessage).toBe('function');
     expect(() => dc.onmessage({ data: '{ not valid json' })).not.toThrow();
-    expect(() => dc.onmessage({ data: 'garbage' })).not.toThrow();
-    // a well-formed frame still flows (the guard only catches the parse)
-    expect(() => dc.onmessage({ data: JSON.stringify({ ok: 1 }) })).not.toThrow();
+    expect(await rejected).toMatchObject({ message: 'peer transport closed before channel opened' });
+    expect(dc.readyState).toBe('closed');
+    let reads = 0;
+    expect(() => dc.onmessage({ get data() { reads++; return JSON.stringify({ ok: 1 }); } })).not.toThrow();
+    expect(reads).toBe(0);
   });
 });
