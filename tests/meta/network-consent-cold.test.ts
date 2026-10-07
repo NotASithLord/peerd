@@ -93,6 +93,7 @@ const pausedWorker = (injectFails = false) => {
   const listeners = new Set<any>();
   const commands: string[] = [];
   let installed = false;
+  let armed = false;
   let applicationRuns = 0;
   const emit = (method: string, params: any) => {
     for (const listener of listeners) listener(method, params, { sessionId: 'worker' });
@@ -105,14 +106,21 @@ const pausedWorker = (injectFails = false) => {
       if (method === 'Runtime.evaluate') return new Promise(() => {}); // Startup wait has no runnable context.
       if (method === 'Debugger.setInstrumentationBreakpoint') {
         expect(params.instrumentation).toBe('beforeScriptExecution');
+        armed = true;
         return { breakpointId: 'first-script' };
       }
       if (method === 'Runtime.runIfWaitingForDebugger') {
         expect(commands).toContain('Debugger.setInstrumentationBreakpoint');
         emit('Debugger.paused', { reason: 'instrumentation', callFrames: [{ callFrameId: 'first' }] });
       }
+      if (method === 'Debugger.removeBreakpoint') armed = false;
       if (method === 'Debugger.evaluateOnCallFrame') {
+        if (armed) {
+          emit('Debugger.paused', { reason: 'instrumentation', callFrames: [{ callFrameId: 'injected' }] });
+          return new Promise(() => {});
+        }
         expect(params.callFrameId).toBe('first');
+        if (params.expression === '1') return { result: { value: 1 } };
         if (injectFails) return { exceptionDetails: { text: 'injection refused' } };
         installed = true;
         emit('Runtime.bindingCalled', { name: '__peerdConsentTransportObserved', payload: '{"kind":"observer-ready"}' });
@@ -128,7 +136,14 @@ const pausedWorker = (injectFails = false) => {
 test('worker observer installs at its first-script pause before application code runs', async () => {
   const { instrumentPausedTarget, createConsentDiagnostics } = await import('../../scripts/cdp/network-consent-cold.mjs');
   const worker = pausedWorker();
-  await instrumentPausedTarget(worker.connection, 'worker', createConsentDiagnostics({ phase: 'before-choice' }, () => {}));
+  const diagnostic = createConsentDiagnostics({ phase: 'before-choice' }, () => {}, 20);
+  const send = worker.connection.send.bind(worker.connection);
+  worker.connection.send = (method, params) => diagnostic(method, () => send(method, params));
+  const pauses: any[] = [];
+  await instrumentPausedTarget(worker.connection, 'worker', diagnostic, pause => { pauses.push(pause); });
+  expect(pauses).toHaveLength(1);
+  expect(Object.keys(pauses[0])).toEqual(['reason', 'url', 'scriptId', 'lineNumber', 'columnNumber']);
+  expect(worker.commands.indexOf('Debugger.removeBreakpoint')).toBeLessThan(worker.commands.indexOf('Debugger.evaluateOnCallFrame'));
   expect(worker.commands).not.toContain('Runtime.evaluate');
   expect(worker.commands.indexOf('Debugger.evaluateOnCallFrame')).toBeLessThan(worker.commands.indexOf('Debugger.resume'));
   expect(worker.commands).toContain('Debugger.removeBreakpoint');
@@ -199,7 +214,10 @@ test('offscreen current document uses a first-script trap when preload only cove
         // Registering Page preload need not execute in an already-created offscreen document.
         emit('Debugger.paused', { reason: 'instrumentation', callFrames: [{ callFrameId: 'first' }] }, sessionId);
       }
-      if (method === 'Debugger.evaluateOnCallFrame') { instrumented.add(sessionId!); ready(sessionId!); return { result: { value: true } }; }
+      if (method === 'Debugger.evaluateOnCallFrame') {
+        if (params.expression === '1') return { result: { value: 1 } };
+        instrumented.add(sessionId!); ready(sessionId!); return { result: { value: true } };
+      }
       if (method === 'Debugger.resume') expect(instrumented.has(sessionId!)).toBe(true);
       return {};
     },
@@ -210,7 +228,7 @@ test('offscreen current document uses a first-script trap when preload only cove
       createConsentDiagnostics(evidence, () => {}), () => {}, async () => connection);
     await observer.barrier();
     expect(evidence.observerErrors).toEqual([]);
-    expect(calls.filter(call => call.method === 'Debugger.evaluateOnCallFrame')).toHaveLength(5);
+    expect(calls.filter(call => call.method === 'Debugger.evaluateOnCallFrame' && call.params.expression !== '1')).toHaveLength(5);
     expect(calls.filter(call => call.method === 'Target.detachFromTarget')).toHaveLength(3);
     for (const parent of ['home', 'sw', 'offscreen']) {
       expect(evidence.events.some((event: any) => event.sessionId === `${parent}-worker`)).toBe(true);

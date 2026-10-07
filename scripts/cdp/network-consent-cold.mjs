@@ -73,7 +73,7 @@ export async function attachConsentObserver(url, diagnostic, connect = attach) {
 
 // Startup-paused workers and offscreen targets need a first-script trap;
 // inject on that script's call frame before releasing application code.
-export async function instrumentPausedTarget(connection, sessionId, diagnostic) {
+export async function instrumentPausedTarget(connection, sessionId, diagnostic, recordPause = (/** @type {any} */ _pause) => {}) {
   const send = (method, params = {}) => connection.send(method, params, sessionId);
   let pause;
   let ready;
@@ -81,7 +81,14 @@ export async function instrumentPausedTarget(connection, sessionId, diagnostic) 
   const observed = new Promise(resolve => { ready = resolve; });
   const listener = (method, params, message) => {
     if (message.sessionId !== sessionId) return;
-    if (method === 'Debugger.paused') pause(params);
+    if (method === 'Debugger.paused') {
+      const frame = params.callFrames?.[0];
+      recordPause({ reason: String(params.reason).slice(0, 64),
+        url: String(frame?.url ?? '').slice(0, 256),
+        scriptId: String(frame?.location?.scriptId ?? '').slice(0, 64),
+        lineNumber: frame?.location?.lineNumber, columnNumber: frame?.location?.columnNumber });
+      pause(params);
+    }
     if (method === 'Runtime.bindingCalled' && params.name === BINDING) {
       try { if (JSON.parse(params.payload).kind === 'observer-ready') ready(); } catch {}
     }
@@ -97,10 +104,15 @@ export async function instrumentPausedTarget(connection, sessionId, diagnostic) 
     const event = await diagnostic(`target first-script pause session=${sessionId}`, () => paused);
     requireResult(event.reason === 'instrumentation' && event.callFrames?.[0]?.callFrameId,
       'Target did not stop before script execution');
-    const result = await send('Debugger.evaluateOnCallFrame', {
-      callFrameId: event.callFrames[0].callFrameId,
-      expression: `${OBSERVER_SOURCE}; globalThis.__peerdConsentObserverInstalled === true`, returnByValue: true,
-    });
+    // Removing the one-shot trap keeps this frame paused while avoiding a trap in the injected script.
+    await send('Debugger.removeBreakpoint', { breakpointId: breakpoint });
+    breakpoint = null;
+    const evaluate = (stage, expression) => diagnostic(`target ${stage} session=${sessionId}`, () =>
+      send('Debugger.evaluateOnCallFrame', { callFrameId: event.callFrames[0].callFrameId,
+        expression, returnByValue: true }));
+    const probe = await evaluate('call-frame probe', '1');
+    requireResult(!probe.exceptionDetails && probe.result?.value === 1, 'Target call-frame probe failed');
+    const result = await evaluate('observer injection', `${OBSERVER_SOURCE}; globalThis.__peerdConsentObserverInstalled === true`);
     requireResult(!result.exceptionDetails && result.result?.value === true, 'Target observer injection failed');
     await diagnostic(`target observer ready session=${sessionId}`, () => observed);
   } catch (error) { failure = error; throw error; }
@@ -174,7 +186,11 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
         flatten: true, filter: CHILD_TARGET_FILTER });
       if (waitingForDebugger && ['worker', 'shared_worker', 'service_worker', 'other'].includes(targetInfo.type)) {
         waitingForDebugger = false; // The pre-execution trap exclusively owns release.
-        await instrumentPausedTarget(connection, sessionId, diagnostic);
+        await instrumentPausedTarget(connection, sessionId, diagnostic, pause => {
+          evidence.pauses ??= [];
+          if (evidence.pauses.length < 32) evidence.pauses.push({ sessionId, phase: evidence.phase, at: Date.now(), ...pause });
+          persist();
+        });
       } else if (waitingForDebugger) {
         // Page preload is registered before release; evaluating in its startup wait can hang.
         await send('Runtime.runIfWaitingForDebugger');
