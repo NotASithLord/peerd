@@ -69,6 +69,8 @@ describe('manual immutable App addresses', () => {
       expect(calls.map(call => call.type)).toEqual(['dweb/base/inspect-address', 'apps/list']);
       expect(view.root.textContent).toContain('Signed by');
       expect(view.root.textContent).toContain('Decoded files');
+      expect(view.root.textContent).toContain('3 bytes in 1 file');
+      expect(view.root.textContent?.includes('1 files')).toBe(false);
       button(view.root, 'Install and share')?.click(); await settle();
       expect(calls.map(call => call.type)).toEqual(['dweb/base/inspect-address', 'apps/list', 'dweb/base/install-address']);
       expect(sessionStorage.getItem(key)).toBe(null);

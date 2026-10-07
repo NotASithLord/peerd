@@ -2,9 +2,8 @@
 // peerd-distributed/apps/seed.js — the built-in seed app (Q5 pattern).
 //
 // The commons ships INSIDE the preview artifact as ordinary files under
-// apps/commons/ and installs into the engine App runtime on first open —
-// so the App-Store-shaped surface exists before the network does, with
-// no chicken-and-egg. A seed app is just an app whose bytes ship in the
+// apps/commons/ and installs only after an explicit user action;
+// it does not install when Home receives state. A seed app is just an app whose bytes ship in the
 // extension; the same app, published by any member into a room, installs
 // peer-to-peer like any other bundle (beat 1).
 //

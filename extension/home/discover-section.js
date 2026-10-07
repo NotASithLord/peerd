@@ -9,6 +9,7 @@
 // the store build prunes nothing here but it never mounts (DWEB_ENABLED gate).
 
 import m from '/vendor/mithril/mithril.js';
+import { discoveryAddress } from './discovery-address.js';
 import { exploreOrder, EXPLORE_PAGE, EXPLORE_WINDOW } from './explore-order.js';
 
 /** @typedef {import('../options/sections/reset-row.js').Send} Send */
@@ -55,6 +56,8 @@ export const DiscoverSection = (initialVnode) => {
   let limit = EXPLORE_PAGE;
   let offset = 0;
   /** @type {string[]} */ let orderedIds = [];
+  /** @type {{id:string,address:string,status:'pending'|'copied'|'failed'}|null} */
+  let copyState = null;
   let refreshing = false;  // drives the manual ↻ spin (the 4s poll stays silent)
   /** @type {(() => void) | null} */
   let onVisible = null;    // focus/visibility re-sync handler (removed on teardown)
@@ -286,8 +289,23 @@ export const DiscoverSection = (initialVnode) => {
     refreshing = false; if (!dead) m.redraw();
   };
 
+  /** @param {DwebApp} app */
+  const copyAddress = async app => {
+    if (dead || copyState?.status === 'pending' || !app.dwapp_id) return;
+    const address = discoveryAddress(app);
+    if (!address) return;
+    const attempt = { id: app.dwapp_id, address, status: /** @type {'pending'|'copied'|'failed'} */ ('pending') };
+    copyState = attempt;
+    try {
+      await navigator.clipboard.writeText(address);
+      if (!dead && copyState === attempt) attempt.status = 'copied';
+    } catch {
+      if (!dead && copyState === attempt) attempt.status = 'failed';
+    } finally { if (!dead) m.redraw(); }
+  };
+
   // One heard app as a card — same chrome as a Library card (avatar + name +
-  // meta + a single trailing action), so Discover and the Library read as one
+  // meta + explicit actions), so Discover and the Library read as one
   // surface. All the install/update/open/mine logic is unchanged from the old
   // row; only the layout moved into a card.
   /**
@@ -307,6 +325,8 @@ export const DiscoverSection = (initialVnode) => {
     const failed = typeof state === 'string' && !['installing', 'installed', 'updating'].includes(state);
     const uncertain = unconfirmed.has(id);
     const label = app.name || id.slice(0, 12);
+    const address = discoveryAddress(app);
+    const copy = copyState?.id === id && copyState.address === address ? copyState : null;
 
     // the single trailing action (mirrors the prior row's branch ladder)
     let action;
@@ -344,7 +364,18 @@ export const DiscoverSection = (initialVnode) => {
       notices[id] ? m('p.muted', {
         style: 'margin:0;', role: 'status', 'aria-live': 'polite',
       }, notices[id]) : null,
-      m('.disc-actions', [action]),
+      copy && copy.status !== 'pending' ? m('div', { role: 'status', 'aria-live': 'polite' }, [
+        m('p.muted', copy.status === 'copied' ? 'Copied this exact revision. Paste it into Peerd Discover.' : 'Could not copy. Select this address and paste it into Peerd Discover.'),
+        m('code', { style: 'overflow-wrap:anywhere;' }, copy.address),
+      ]) : null,
+      m('.disc-actions', { style: 'flex-wrap:wrap;' }, [action,
+        m('button.disc-open.disc-copy-address', {
+          disabled: !address || copyState?.status === 'pending',
+          title: address ? 'Copy this exact revision for pasting into Peerd Discover.'
+            : 'A matching publisher and immutable revision are required.',
+          onclick: () => copyAddress(app),
+        }, copy?.status === 'pending' ? 'Copying…' : 'Copy immutable address'),
+      ]),
     ]);
   };
 
@@ -383,15 +414,14 @@ export const DiscoverSection = (initialVnode) => {
       ]);
 
       if (loading && !apps.length) {
-        return m('.peerd-disc', [header, m('.peerd-net-empty', 'Listening for apps your peers are running…')]);
+        return m('.peerd-disc', [header, m('.peerd-net-empty', 'Looking for Apps shared by your peers…')]);
       }
       const errorBanner = error
         ? m('p.peerd-disc-err', { role: 'alert', 'aria-live': 'assertive' }, error)
         : null;
       if (!apps.length) {
         return m('.peerd-disc', [header, errorBanner, error ? null : m('.peerd-net-empty',
-          'Nothing shared yet. Share an app from your Library, or ask the agent to build and '
-          + 'share one, and it spreads to your peers. Or wait for one of theirs to arrive.')]);
+          'No peer Apps discovered yet. Try an included starter above, inspect an App address, or share an App from your Library. Peer results appear when signed announcements arrive.')]);
       }
 
       const balanced = exploreOrder(apps, { query, wasm, seed });
@@ -420,7 +450,8 @@ export const DiscoverSection = (initialVnode) => {
           m('button.secondary', { onclick: () => { seed = crypto.getRandomValues(new Uint32Array(1))[0]; limit = EXPLORE_PAGE; offset = 0; orderedIds = []; } }, 'Shuffle'),
         ]),
         m('p.muted', 'WebAssembly hints are publisher-signed, not a safety or compatibility guarantee.'),
-        m('p.muted', {role:'status', 'aria-live':'polite'}, ordered.length ? `Showing ${offset + 1}–${offset + shown.length} of ${ordered.length} Apps` : 'No matching Apps'),
+        m('p.muted', {role:'status', 'aria-live':'polite'}, ordered.length ? `Showing ${offset + 1}–${offset + shown.length} of ${ordered.length} Apps` : 'No matching Apps. Change your search or WebAssembly filter.'),
+        !ordered.length ? m('button.secondary', { onclick: () => { query = ''; wasm = 'all'; orderedIds = []; offset = 0; } }, 'Clear filters') : null,
         shown.length === 0
           ? m('p.muted', 'Nothing matches.')
           : m('.disc-grid', shown.map((app) => card(send, app))),

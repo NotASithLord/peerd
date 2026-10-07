@@ -3,7 +3,7 @@
   commons — the peerd dweb demo dwapp (NORTH-STAR §2).
 
   One room behind one link: a global chat for everyone in the room, plus
-  GENUINELY PRIVATE one-to-one chats between any two participants — all
+  direct one-to-one chats between participants, all
   peer-to-peer through the dwapp bridge (peerd-distributed/apps/bridge.js).
   This file runs SANDBOXED (opaque origin, no extension access, no storage):
   everything it knows arrives over postMessage from the trusted app-tab
@@ -12,14 +12,11 @@
   Two chats, two transports — the point of the demo:
     - GLOBAL chat is the `feed` gossip topic: signed, room-wide flood,
       retained so late joiners backfill. Everyone in the room sees it.
-    - PRIVATE chat is a DIRECT send (bridge `dm-send`, ch=3, PROTOCOL §6.1):
-      the message goes over ONLY the recipient's direct mesh link and is
-      never flooded or relayed. No third peer ever receives the bytes, and
-      the WebRTC link is DTLS-encrypted in transit — so an online 1:1 chat
-      is private at the ROUTING layer with no end-to-end seal. (E2E sealing
-      earns its keep only for store-and-forward to OFFLINE peers, §6.2 — a
-      deliberate next step; this demo is the both-online case.) The signed
-      envelope authenticates the sender, so `from` is unforgeable.
+    - One-to-one chat is a DIRECT send (bridge `dm-send`, ch=3, PROTOCOL §6.1):
+      the message uses the recipient's direct mesh link, not the room feed.
+      The WebRTC link is DTLS-encrypted in transit. Messages are routed directly
+      while both peers are online, without a separate application-level
+      end-to-end seal. The signed envelope authenticates its sending identity.
 
   Consent: you send a chat REQUEST; the other side accepts or declines
   before either of you can message. An unsolicited message from someone you
@@ -129,12 +126,11 @@
 </header>
 
 <section id="join">
-  <p class="muted">A shared space with a chat for everyone, plus genuinely
-  private one-to-one chats with anyone here, all peer-to-peer over the dweb. No
-  server holds any of it.</p>
+  <p class="muted">A shared space with room-wide chat and direct one-to-one messages over the
+  peer network. Join a room, then choose who to message.</p>
   <div><label>your name</label><input id="j-name" maxlength="40" placeholder="ada"></div>
   <div><label>room</label><input id="j-room" maxlength="64" value="peerd-global" placeholder="peerd-global"></div>
-  <div class="hint muted">everyone on <code>peerd-global</code> is together. Pick any other name for a private room.</div>
+  <div class="hint muted">everyone on <code>peerd-global</code> is together. Pick another name for a separate room. Room names do not control access: anyone who knows the name can join.</div>
   <button id="btn-join" class="primary">enter</button>
   <div class="muted" id="j-status"></div>
 </section>
@@ -250,7 +246,7 @@
   const systemLine = (key, text) =>
     addMessage(key, { id: null, from: null, ts: Date.now(), text, system: true });
 
-  // --- private chat: directed sends (bridge `dm-send`, ch=3) ---------------
+  // --- direct chat: directed sends (bridge `dm-send`, ch=3) ---------------
   // No `to` field and no topic: the send IS addressed to one peer, and an
   // inbound `direct` event is, by construction, for us.
   const sendDm = (to, payload) => dweb('dm-send', { to, data: payload });
@@ -267,7 +263,7 @@
     c.status = 'open';
     sendDm(did, { kind: 'accept' }).catch((e) => toast(reachMsg(did, e)));
     if (c.pending?.length) { const buf = c.pending; c.pending = []; for (const p of buf) addMessage(did, p); }
-    systemLine(did, `you're now in a private chat with ${nameOf(did)}.`);
+    systemLine(did, `you're now in a direct chat with ${nameOf(did)}.`);
     renderActive(); renderSidebar();
   };
   const declineChat = (did) => {
@@ -293,7 +289,7 @@
       if (c.status === 'open') return;
       if (c.status === 'outgoing') {            // mutual invite → open both sides
         c.status = 'open';
-        systemLine(from, `you're now in a private chat with ${nameOf(from)}.`);
+        systemLine(from, `you're now in a direct chat with ${nameOf(from)}.`);
         sendDm(from, { kind: 'accept' }).catch(() => {});
       } else {
         c.status = 'incoming';
@@ -396,7 +392,7 @@
   const dmSub = (c, did) => {
     if (c?.status === 'incoming') return 'wants to chat';
     if (c?.status === 'outgoing') return 'invited — waiting';
-    if (c?.status === 'open') return 'private chat';
+    if (c?.status === 'open') return 'direct chat';
     if (c?.status === 'declined') return 'declined';
     return present.has(did) ? pathLabel(did) : 'offline';
   };
@@ -457,7 +453,7 @@
       const e = document.createElement('div'); e.className = 'empty';
       e.textContent = active === 'global'
         ? 'No messages yet. Say something to everyone in the room.'
-        : c.status === 'open' ? `This is the start of your private chat with ${nameOf(active)}. Only the two of you can read it.`
+        : c.status === 'open' ? `This is the start of your direct chat with ${nameOf(active)}. Messages use a direct encrypted WebRTC connection, separate from the room-wide feed.`
         : `No messages yet with ${nameOf(active)}.`;
       root.appendChild(e);
       return;
@@ -484,14 +480,14 @@
     const c = getConvo(active);
 
     if (active === 'global' || c.status === 'open') {
-      composer.setPlaceholder(active === 'global' ? 'message everyone' : `message ${nameOf(active)} privately`);
+      composer.setPlaceholder(active === 'global' ? 'message everyone' : `message ${nameOf(active)} directly`);
       foot.appendChild(composer.wrap);
       return;
     }
     const box = document.createElement('div'); box.className = 'req';
     if (c.status === 'incoming') {
       box.appendChild(Object.assign(document.createElement('div'),
-        { textContent: `${nameOf(active)} wants to start a private chat.` }));
+        { textContent: `${nameOf(active)} wants to start a direct chat.` }));
       const row = document.createElement('div'); row.className = 'row';
       const acc = document.createElement('button'); acc.className = 'primary'; acc.textContent = 'accept';
       acc.addEventListener('click', () => acceptChat(active));
@@ -510,9 +506,9 @@
       box.appendChild(btn);
     } else { // none
       box.appendChild(Object.assign(document.createElement('div'),
-        { textContent: `Start a private chat with ${nameOf(active)}.` }));
+        { textContent: `Start a direct chat with ${nameOf(active)}.` }));
       box.appendChild(Object.assign(document.createElement('div'),
-        { className: 'muted', textContent: 'Sent directly to them, peer-to-peer — nobody else in the room sees it. They accept before either of you can message.' }));
+        { className: 'muted', textContent: 'Sent directly to this peer, separately from the room-wide feed. They accept before either of you can message.' }));
       const btn = document.createElement('button'); btn.className = 'primary'; btn.textContent = 'send chat request';
       btn.disabled = !present.has(active);
       btn.addEventListener('click', () => requestChat(active));

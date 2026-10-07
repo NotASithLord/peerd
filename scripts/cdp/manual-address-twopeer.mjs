@@ -155,8 +155,8 @@ try {
   });
   const baselineApps = await call({ type: 'apps/list' });
   check('catalog readable before inspection', baselineApps?.ok && Array.isArray(baselineApps.apps));
-  // Home can independently finish its built-in Commons seed. Compare user/peer
-  // records so that unrelated first-run housekeeping is not an install receipt.
+  // Compare user/peer records; existing packaged Commons is unrelated to
+  // the exact signed revision whose install receipt this scenario verifies.
   const userApps = apps => apps.filter(app => !app.dweb?.seed).map(app => app.id).sort();
   const baselineIds = userApps(baselineApps.apps);
   const baselineTabs = await appTabs();
@@ -173,7 +173,7 @@ try {
   await click('Inspect App');
   await until('verified inspection rendered', () => evalIn(ctx.page, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Install and share' && !b.disabled)`));
   const inspection = await evaluate(ctx.page, `document.querySelector('section[aria-label="App address"]').textContent`);
-  check('inspection binds exact signer hash and decoded size', inspection.includes(published.publisher) && inspection.includes(published.hash) && inspection.includes(`${published.decodedBytes} bytes in 1 files`), inspection);
+  check('inspection binds exact signer hash and decoded size', inspection.includes(published.publisher) && inspection.includes(published.hash) && inspection.includes(`${published.decodedBytes} bytes in 1 file`), inspection);
   check('inspection does not install a user or peer catalog record', JSON.stringify(userApps((await call({ type: 'apps/list' })).apps)) === JSON.stringify(baselineIds));
   const query = () => invoke(publisher, 'function(did) { return window.manualPublisher.query(did); }', [receiver.did]);
   const before = await query(); evidence.beforeInstallContent = before;

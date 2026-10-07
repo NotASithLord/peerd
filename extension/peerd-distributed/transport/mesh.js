@@ -53,6 +53,11 @@ const newId = () =>
 // why 16: matches the reducer's ROOM_CAP — a full-mesh room never needs
 // more links than members (NORTH-STAR D-9).
 const DEFAULT_BUDGET = 16;
+// One retired cohort plus its replacements fits without an unbounded identity
+// history. This is timing custody, not reputation: cache eviction/new DIDs can
+// still bypass it, so it is not a Sybil defense.
+const RECENT_NEIGHBOR_CAP = DEFAULT_BUDGET * 2;
+const RECENT_NEIGHBOR_TTL_MS = NEIGHBOR_GRACE_MS + TRANSFER_PROTECTION_MS;
 // Local, temporary penalties; rotating a DID is cheap, so this is not a
 // substitute for admission diversity or aggregate resource budgets.
 const ABUSE_WINDOW_MS = 60_000;
@@ -169,6 +174,24 @@ export const createRoomMesh = ({
   };
   /** @type {Map<string, number>} */
   const cooldowns = new Map();
+  /** @type {Map<string, { admittedAt: number, protectedUntil: number, expires: number }>} */
+  const recentNeighbors = new Map();
+  const pruneRecentNeighbors = () => {
+    const time = now();
+    for (const [did, entry] of recentNeighbors) if (entry.expires <= time) recentNeighbors.delete(did);
+  };
+  /** @param {Link} link */
+  const rememberNeighbor = (link) => {
+    if (!sparse || closed) return;
+    pruneRecentNeighbors();
+    recentNeighbors.delete(link.did);
+    if (recentNeighbors.size >= RECENT_NEIGHBOR_CAP) {
+      const oldest = recentNeighbors.keys().next().value;
+      if (oldest !== undefined) recentNeighbors.delete(oldest);
+    }
+    recentNeighbors.set(link.did, { admittedAt: link.admittedAt,
+      protectedUntil: link.protectedUntil, expires: now() + RECENT_NEIGHBOR_TTL_MS });
+  };
 
   const pruneCooldowns = () => {
     const t = now();
@@ -250,6 +273,7 @@ export const createRoomMesh = ({
   const removeLink = (did, why) => {
     const link = links.get(did);
     if (!link) return;
+    rememberNeighbor(link);
     links.delete(did);
     link.retired.abort();
     link.contentHandlers.clear();
@@ -442,6 +466,8 @@ export const createRoomMesh = ({
       }
       if (did === identity.did) { channel.close(); return false; }
       const previous = links.get(did);
+      pruneRecentNeighbors();
+      const timing = previous ?? (sparse ? recentNeighbors.get(did) : undefined);
       if (!previous) {
         const time = now();
         let decision = { allowed: links.size < budget, evict: /** @type {string | undefined} */ (undefined) };
@@ -468,17 +494,20 @@ export const createRoomMesh = ({
       }
       // The room resolves crossing offers before this point. Replacement of
       // the same authenticated neighbor preserves its age and local ownership;
-      // reconnecting cannot renew grace or obtain another protection window.
+      // a short complete disconnect also retains only timing custody. Local
+      // exploration ownership is never inherited from a retired connection.
       if (links.has(did)) removeLink(did, 'replaced');
       /** @type {Link} */
       const link = { did, channel, locallySelected: locallySelected || previous?.locallySelected || false,
-        admittedAt: previous?.admittedAt ?? now(), protectedUntil: previous?.protectedUntil ?? 0, serving: 0, retired: new AbortController(), contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
+        admittedAt: timing?.admittedAt ?? now(), protectedUntil: timing?.protectedUntil ?? 0, serving: 0, retired: new AbortController(), contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
       // Own this exact generation before an already-closed channel can invoke
       // its immediate observer. A close during handoff must not become connected.
+      recentNeighbors.delete(did);
       links.set(did, link);
       link.offClose = channel.onClose((reason) => {
         if (links.get(did) === link) {
           if (isRawProtocolClose(reason)) { penalize(link, /** @type {string} */ (reason), true); return; }
+          rememberNeighbor(link);
           links.delete(did);
           link.retired.abort();
           link.contentHandlers.clear();
@@ -602,6 +631,7 @@ export const createRoomMesh = ({
       stopTimers();
       for (const did of [...links.keys()]) removeLink(did, 'mesh-closed');
       cooldowns.clear();
+      recentNeighbors.clear();
     },
   });
 };

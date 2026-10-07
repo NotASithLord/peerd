@@ -282,7 +282,7 @@ const OptionsApp = {
         onSuggestionsChanged: () => OptionsApp.refreshSuggestions(vnode),
       });
       case 'costs':     return m(CostsSection, { state, send });
-      case 'transfer':  return m(TransferSection, { send });
+      case 'transfer':  return m(TransferSection, { send, starter: m.route.param('starter'), key: m.route.param('starter') ?? 'transfer' });
       case 'contributor-metrics': return CONTRIBUTOR_METRICS_ENABLED
         ? m(ContributorMetricsSection, { send }) : null;
       case 'vault':     return m(VaultSection, { state, send });

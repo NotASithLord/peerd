@@ -6,6 +6,7 @@
 // transfer/export + transfer/inspectImport + transfer/import.
 
 import m from '/vendor/mithril/mithril.js';
+import { StarterReview } from './starter-review.js';
 import { CHANNEL } from '/shared/channel-config.js';
 import { bundleToOtlp } from '/peerd-runtime/options.js';
 import { PrivateTransferPortError } from '../private-transfer-client.js';
@@ -73,8 +74,9 @@ const describeSettingValue = (value) => {
 /** @typedef {import('./reset-row.js').Send} Send */
 
 export const TransferSection = {
-  /** @param {{ state: any, attrs: { send: Send } }} vnode */
+  /** @param {{ state: any, attrs: { send: Send, starter?: unknown } }} vnode */
   oninit(vnode) {
+    if (vnode.attrs.starter !== undefined) return;
     vnode.state.exportPass = '';
     vnode.state.exportConfirm = '';
     vnode.state.exportBusy = false;
@@ -130,8 +132,9 @@ export const TransferSection = {
     vnode.state.loadDebugSessions();
   },
 
-  /** @param {{ attrs: { send: Send }, state: any }} vnode */
-  view: ({ attrs: { send }, state: ui }) => {
+  /** @param {{ attrs: { send: Send, starter?: unknown }, state: any }} vnode */
+  view: ({ attrs: { send, starter }, state: ui }) => {
+    if (starter !== undefined) return m(StarterReview, { send, starter });
     // The debug surface: same route + pure OTel mapper the in-chat chip uses;
     // the options page adds only the session picker (any chat, not just the
     // open one) and this save shell.
