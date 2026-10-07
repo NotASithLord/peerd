@@ -53,10 +53,12 @@ describe('options.dweb live-stop status', () => {
       const alert = root.querySelector('[role="alert"]');
       expect(alert?.textContent).toContain('live network could not be stopped');
       expect(rowState(root).badge).toBe('STILL RUNNING');
-      expect(rowState(root).name).toContain('retry stopping');
-      expect(networkSwitch(root).disabled).toBe(false);
+      const retry = [...root.querySelectorAll('button')]
+        .find((button) => button.textContent === 'Retry stop');
+      expect(!!retry).toBe(true);
+      expect(retry?.disabled).toBe(false);
 
-      networkSwitch(root).click();
+      retry?.click();
       await settle();
       expect(root.querySelector('[role="alert"]')).toBe(null);
       expect(rowState(root).badge).toBe('');

@@ -39,6 +39,7 @@ import { startWebFixtureServer } from './fixtures/web-suite.mjs';
 import { recordNetworkFloorVector, recordPrivateChildFloor, ordinaryProbeReached } from './network-floor-oracle.mjs';
 import { NOTEBOOK_FETCH_STATE } from './notebook-fetch-state.mjs';
 import { WASMER_STATE } from './wasmer-state.mjs';
+import { CONSENT_LOCK_VISUAL_STATES } from './consent-lock-visuals.mjs';
 import { armVaultLockStages } from './vault-lock-stages.mjs';
 
 // A compact transcript probe shared by the functional states.
@@ -528,6 +529,7 @@ let pacingDelegated = false;
 let pacingActorCalled = false;
 
 export const STATES = [
+  ...CONSENT_LOCK_VISUAL_STATES,
   WASMER_STATE,
   {
     name: 'pacing-wait-stop', kind: 'functional', phase: 'post-unlock',
@@ -5746,18 +5748,18 @@ export const STATES = [
           const toggle = document.querySelector('button[role="switch"]');
           return {
             warning: document.querySelector('[role="alert"]')?.textContent ?? '',
-            // The retry affordance is now the switch itself, named for what it
-            // will do. The BADGE is what makes the disagreement legible without
-            // reading the alert - a clean OFF pill would have lied.
-            retry: (toggle?.getAttribute('aria-label') ?? '').includes('retry stopping'),
+            retry: [...document.querySelectorAll('button')].some((button) =>
+              button.textContent === 'Retry stop' && !button.disabled),
+            legacyRetry: (toggle?.getAttribute('aria-label') ?? '').includes('retry stopping')
+              && toggle instanceof HTMLButtonElement && !toggle.disabled,
             badge: row?.querySelector('.set-badge')?.textContent ?? '',
-            enabled: toggle instanceof HTMLButtonElement && !toggle.disabled,
           };
         })()`);
         rec.check('failed live stop stays visible',
           status?.warning.includes('live network could not be stopped'), status?.warning);
         rec.check('failed live stop remains retryable',
-          status?.retry === true && status?.enabled === true, JSON.stringify(status));
+          status?.retry === true || (process.env.PEERD_VISUAL_BASE_RENDER === '1'
+            && status?.legacyRetry === true), JSON.stringify(status));
         rec.check('the row says the network is still running',
           status?.badge === 'STILL RUNNING', status?.badge);
         await rec.visualPage('options-dweb-stop-failed', page);

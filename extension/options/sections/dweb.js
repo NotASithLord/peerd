@@ -45,9 +45,9 @@ export const DwebSection = {
     // The network switch is NOT a plain toggleRow: it has a third state. When
     // the setting persisted Off but the live network refused to stop, the
     // stored value and the running network disagree, and the row has to say
-    // so rather than showing a clean OFF. The switch then RETRIES the stop
-    // instead of flipping - which is why the click target computes its own
-    // target rather than negating `dwebEnabled`.
+    // so rather than showing a clean OFF. An explicit Retry stop button keeps
+    // recovery discoverable and requests Off again rather than negating
+    // `dwebEnabled`.
     const networkBusy = !!ui.dwebBusy;
     const stopFailed = !!ui.dwebStopIncomplete;
     const applyNetwork = async () => {
@@ -120,12 +120,12 @@ export const DwebSection = {
       onToggleWhy: toggleWhy('dweb-network'),
       control: ui.dwebOutcomeUnknown ? m('button.secondary', {
         type: 'button', disabled: networkBusy, onclick: applyNetwork,
-      }, 'Reload dweb status') : toggleSwitch({
+      }, 'Reload dweb status') : stopFailed ? m('button.secondary', {
+        type: 'button', disabled: networkBusy, onclick: applyNetwork,
+      }, 'Retry stop') : toggleSwitch({
         on: dwebEnabled,
         busy: networkBusy,
-        label: stopFailed
-          ? 'Participate in the dweb - retry stopping'
-          : `Participate in the dweb - ${dwebEnabled ? 'on' : 'off'}`,
+        label: `Participate in the dweb - ${dwebEnabled ? 'on' : 'off'}`,
         onclick: applyNetwork,
       }),
       children: networkStatus,

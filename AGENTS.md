@@ -33,7 +33,7 @@ Each maps to one letter and color in the brand wordmark:
 | `e` | red     | `peerd-egress/`       | Security: vault, allowlist (`safeFetch`), denylist, audit |
 | `e` | amber   | `peerd-engine/`       | Execution instances - Sandboxes. FOUR kinds run in their own visible tab: WebVMs (CheerpX Linux), Notebooks (sealed JS worker + OPFS), Pods, Apps (opaque-origin iframe). A fifth, the **headless worker** (`script`), runs the Notebook's sealed worker offscreen with no tab - the agent's own quick compute, and the only kind with no registry because it persists no instances. Also here: browser-native Git (`repository/`, exported from `index.js`). The sandbox is the isolate; a tab is one way to host it (taxonomy in `registry-factory.js`). |
 | `r` | green   | `peerd-runtime/`      | Agent loop, tools + per-environment actors (`message_actor`), sessions, profiles, skills, memory, permissions (Plan/Act), goal mode (autonomous loop), composer, cost, transfer, voice, clock, web tool policy |
-| `d` | magenta | `peerd-distributed/` | The dweb. An always-on P2P base network (offscreen mesh + DHT + gossip), did:key identity, signed content addressing, the dwapp bridge, and a peer-to-peer app store that **users AND the agent** build, share, and run dwapps on. Chrome preview only until Firefox has a mesh host. |
+| `d` | magenta | `peerd-distributed/` | The dweb. An opt-in P2P base network (offscreen mesh + DHT + gossip), did:key identity, signed content addressing, the dwapp bridge, and a peer-to-peer app store that **users AND the agent** build, share, and run dwapps on. Chrome preview only until Firefox has a mesh host. |
 
 The extension *chassis* lives outside these modules: `background/`,
 `offscreen/`, `sidepanel/`, `home/`, `options/`, `engine-tabs/`,
@@ -414,7 +414,7 @@ gotchas to know going in:
 - `peerd-distributed/` — REAL code, well past the Phase 0 primitives
   (Ed25519 did:key identity, codec, content addressing + chunked
   signed-bundle transfer, the pure signaling reducer shared with
-  `signaling-node/`). Now live: an **always-on base network** in the
+  `signaling-node/`). Now live: an **opt-in base network** in the
   offscreen doc (a WebRTC mesh introduced by a bootstrap node, gossip,
   presence, and a Kademlia DHT — the content directory); **dwapps** as
   namespaced sub-protocols on that shared mesh (commons rides it, no
