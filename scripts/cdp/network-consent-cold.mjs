@@ -37,17 +37,57 @@ export const assertNoTransport = (events, label) => {
 
 const requireResult = (condition, message) => { if (!condition) throw new Error(message); };
 
-async function observeHosts(ctx, evidence) {
-  const version = await fetch(`http://127.0.0.1:${ctx.port}/json/version`).then(r => r.json());
-  const connection = await attach(version.webSocketDebuggerUrl);
+// Host deadlines remain effective when a renderer is paused or its socket disappears.
+export const createConsentDiagnostics = (evidence, persist, timeoutMs = 15_000) => {
+  let sequence = 0;
+  evidence.commands = [];
+  return async (label, operation, budgetMs = timeoutMs) => {
+    const entry = { id: ++sequence, label, phase: evidence.phase, started: Date.now(), status: 'pending' };
+    evidence.commands.push(entry);
+    if (evidence.commands.length > 256) evidence.commands.shift();
+    persist();
+    let timer;
+    try {
+      const result = await Promise.race([
+        Promise.resolve().then(operation),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Consent deadline: ${label}`)), budgetMs); }),
+      ]);
+      entry.status = 'complete';
+      return result;
+    } catch (error) {
+      entry.status = 'failed';
+      entry.error = String(error?.stack ?? error);
+      throw error;
+    } finally { clearTimeout(timer); entry.finished = Date.now(); persist(); }
+  };
+};
+
+export async function attachConsentObserver(url, diagnostic, connect = attach) {
+  let attachExpired = false;
+  return diagnostic('observer attach', async () => {
+    const value = await connect(url);
+    if (attachExpired) { value.close(); throw new Error('Consent observer attach expired'); }
+    return value;
+  }).catch(error => { attachExpired = true; throw error; });
+}
+
+export async function observeHosts(ctx, evidence, diagnostic, persist, connect = attach) {
+  const version = await diagnostic('observer browser endpoint', () => fetch(`http://127.0.0.1:${ctx.port}/json/version`, { signal: AbortSignal.timeout(15_000) }).then(r => r.json()));
+  const connection = await attachConsentObserver(version.webSocketDebuggerUrl, diagnostic, connect);
+  const nativeSend = connection.send.bind(connection);
+  connection.send = (method, params = {}, sessionId) => diagnostic(
+    `${method} session=${sessionId ?? 'browser'}`, () => nativeSend(method, params, sessionId));
   const sessions = new Map();
   const installing = new Set();
   let closing = false;
   const origin = `chrome-extension://${ctx.sw.id}/`;
   const ownedUrl = url => String(url ?? '').startsWith(origin) || String(url ?? '').startsWith(`blob:${origin}`);
-  const failed = error => { if (!closing) evidence.observerErrors.push(String(error?.stack ?? error)); };
+  const failed = error => { if (!closing) { evidence.observerErrors.push(String(error?.stack ?? error)); persist(); } };
   const install = async ({ sessionId, targetInfo, waitingForDebugger }) => {
     sessions.set(sessionId, targetInfo);
+    evidence.targets ??= [];
+    evidence.targets.push({ sessionId, targetId: targetInfo.targetId, type: targetInfo.type, url: targetInfo.url, waitingForDebugger });
+    persist();
     const send = (method, params = {}) => connection.send(method, params, sessionId);
     try {
       await send('Runtime.enable');
@@ -68,7 +108,7 @@ async function observeHosts(ctx, evidence) {
     if (method === 'Target.attachedToTarget') {
       const pending = install(params);
       installing.add(pending);
-      pending.finally(() => installing.delete(pending));
+      pending.then(() => installing.delete(pending), error => { installing.delete(pending); failed(error); });
     } else if (method === 'Target.detachedFromTarget') sessions.delete(params.sessionId);
     else if (method === 'Runtime.bindingCalled' && params.name === BINDING) {
       try {
@@ -77,6 +117,7 @@ async function observeHosts(ctx, evidence) {
           const target = sessions.get(message.sessionId);
           if (target) target.url = event.href;
           evidence.events.push({ ...event, sessionId: message.sessionId, phase: evidence.phase });
+          persist();
         }
       } catch (error) { failed(error); }
     } else if (method === 'Network.webSocketCreated') {
@@ -84,16 +125,18 @@ async function observeHosts(ctx, evidence) {
       if (ownedUrl(target?.url)) evidence.events.push({
         kind: 'native-websocket', url: params.url, targetId: target.targetId, phase: evidence.phase,
       });
+      persist();
     }
   };
   connection.on(listener);
+  try {
   await connection.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
-  await Promise.all([...installing]);
+  await diagnostic('observer installations', () => Promise.all([...installing]), 120_000);
   requireResult(await waitFor(() => evidence.events.some(event => event.kind === 'observer-ready'
     && event.href.includes('/home/home.html')), { budgetMs: 10_000, pollMs: 25 }), 'Home observer never armed');
   return {
     async barrier() {
-      await Promise.all([...installing]);
+      await diagnostic('observer installations', () => Promise.all([...installing]), 120_000);
       // Drain CDP events already emitted by each live extension realm.
       for (const [sessionId, target] of sessions) {
         if (ownedUrl(target.url)) await connection.send('Runtime.evaluate', { expression: '0' }, sessionId);
@@ -118,10 +161,15 @@ async function observeHosts(ctx, evidence) {
     },
     async close() {
       closing = true;
-      await connection.send('Target.setAutoAttach', { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }).catch(() => {});
-      connection.off(listener); connection.close();
+      try { await connection.send('Target.setAutoAttach', { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }); }
+      finally { connection.off(listener); connection.close(); }
     },
   };
+  } catch (error) {
+    closing = true;
+    connection.off(listener); connection.close();
+    throw error;
+  }
 }
 
 const click = async (page, selector) => {
@@ -133,21 +181,35 @@ const click = async (page, selector) => {
   await evalIn(page, `document.querySelector(${JSON.stringify(selector)}).click()`);
 };
 
-export async function runColdConsent({ reportPath = REPORT } = {}) {
+export async function runColdConsent({ reportPath = REPORT, launch = launchPeerd, runBudgetMs = 360_000 } = {}) {
   const evidence = { schema: 1, ok: false, phase: 'fresh-locked', checks: [], events: [], observerErrors: [], restart: 'physical-mv3-worker' };
+  const persist = () => {
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, `${JSON.stringify(evidence, null, 2)}\n`);
+  };
+  const diagnostic = createConsentDiagnostics(evidence, persist);
   let ctx, observer;
+  let terminated = false;
   const check = (name, condition, details) => {
     evidence.checks.push({ name, pass: !!condition, ...(details === undefined ? {} : { details }) });
+    persist();
     requireResult(condition, name);
   };
   try {
-    ctx = await launchPeerd({ panelPath: 'home/home.html', interceptModel: false, enforceWebSecurity: true });
+    await diagnostic('consent scenario', async () => {
+    ctx = await launch({ panelPath: 'home/home.html', interceptModel: false, enforceWebSecurity: true });
+    if (terminated) { await ctx.close(); throw new Error('Consent scenario already terminated'); }
+    const nativeSend = ctx.page.send.bind(ctx.page);
+    ctx.page.send = (method, params, sessionId) => diagnostic(`page ${method}`, () => {
+      if (terminated) throw new Error('Consent scenario already terminated');
+      return nativeSend(method, params, sessionId);
+    }, 150_000);
     const fresh = await rpc(ctx.page, { type: 'state/get' });
     check('real fresh profile has no vault', fresh?.state?.vault?.initialized === false);
     const hosts = await evalIn(ctx.page, 'chrome.runtime.getContexts({contextTypes:["OFFSCREEN_DOCUMENT"]})', true);
     check('no preexisting offscreen transport realm before observer installation', Array.isArray(hosts) && hosts.length === 0, hosts);
-    observer = await observeHosts(ctx, evidence);
-    evidence.phase = 'before-choice';
+    observer = await observeHosts(ctx, evidence, diagnostic, persist);
+    evidence.phase = 'before-choice'; persist();
     const initialized = await rpc(ctx.page, { type: 'vault/initialize', passphrase: PASSPHRASE }, { timeoutMs: 120_000 });
     check('vault created and unlocked without completing onboarding', initialized?.ok === true);
     await click(ctx.page, '.onboarding-skip'); // Provider skip: no network choice yet.
@@ -175,7 +237,7 @@ export async function runColdConsent({ reportPath = REPORT } = {}) {
       (await rpc(ctx.page, { type: 'state/get' }))?.state?.profile?.onboardingComplete === true,
     { budgetMs: 20_000, pollMs: 50 }));
     await observer.barrier(); assertNoTransport(evidence.events, 'Not now');
-    evidence.phase = 'reload-off';
+    evidence.phase = 'reload-off'; persist();
     await ctx.page.send('Page.reload', { ignoreCache: true });
     check('Home reload finishes without repeating network onboarding', !!await waitFor(() => evalIn(ctx.page,
       '!!document.querySelector(".home-rail") && !document.querySelector("[data-network-choice=skip]")'),
@@ -184,7 +246,7 @@ export async function runColdConsent({ reportPath = REPORT } = {}) {
     check('explicit off survives real Home reload', reloaded?.state?.settings?.dwebChoiceMade === true
       && reloaded.state.settings.dwebEnabled === false);
     await observer.barrier(); assertNoTransport(evidence.events, 'Home reload after Not now');
-    evidence.phase = 'restart-off';
+    evidence.phase = 'restart-off'; persist();
     check('vault locks before physical restart', (await rpc(ctx.page, { type: 'vault/lock' }))?.ok === true);
     await observer.releaseWorker(ctx.sw.targetId);
     const stopped = await ctx.stopServiceWorker();
@@ -200,7 +262,7 @@ export async function runColdConsent({ reportPath = REPORT } = {}) {
     // Positive control on the same observers: actual user opt-in must produce
     // native signaling construction in the real host. Network reachability is
     // not required; WebSocket creation itself is the observable side effect.
-    evidence.phase = 'explicit-enable';
+    evidence.phase = 'explicit-enable'; persist();
     await evalIn(ctx.page, 'location.hash = "discover"');
     await click(ctx.page, '[data-network-choice=enable]');
     const started = await waitFor(() => evidence.events.find(event => event.kind === 'WebSocket'
@@ -214,14 +276,20 @@ export async function runColdConsent({ reportPath = REPORT } = {}) {
     check('real host RTC observer positive control', evidence.events.some(event => event.kind === 'RTCPeerConnection' && event.phase === 'explicit-enable'));
     // Stop via the ordinary preference route; no host API shim or forced close.
     check('final network disable acknowledged', (await rpc(ctx.page, { type: 'settings/update', patch: { dwebEnabled: false } }, { timeoutMs: 30_000 }))?.ok === true);
+    requireResult(!terminated, 'Consent scenario already terminated');
     evidence.ok = true;
+    }, runBudgetMs);
   } catch (error) {
+    terminated = true;
+    evidence.ok = false;
     evidence.error = String(error?.stack ?? error);
   } finally {
-    await observer?.close().catch(() => {});
-    await ctx?.close().catch(() => {});
-    mkdirSync(dirname(reportPath), { recursive: true });
-    writeFileSync(reportPath, `${JSON.stringify(evidence, null, 2)}\n`);
+    persist();
+    try { if (observer) await diagnostic('observer teardown', () => observer.close(), 20_000); }
+    catch (error) { evidence.ok = false; evidence.cleanupError = String(error); }
+    try { if (ctx) await diagnostic('browser teardown', () => ctx.close(), 10_000); }
+    catch (error) { evidence.ok = false; evidence.cleanupError = String(error); }
+    persist();
   }
   if (!evidence.ok) throw new Error(`Cold consent failed; see ${reportPath}: ${evidence.error}`);
   return evidence;
@@ -229,6 +297,6 @@ export async function runColdConsent({ reportPath = REPORT } = {}) {
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1] ?? '')).href) {
   runColdConsent().then(report => console.log(JSON.stringify(report, null, 2))).catch(error => {
-    console.error(error); process.exitCode = 1;
+    console.error(error); process.exit(1); // launchPeerd exit cleanup reaps Chrome even if launch never returned.
   });
 }
