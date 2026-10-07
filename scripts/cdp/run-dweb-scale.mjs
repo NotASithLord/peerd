@@ -38,13 +38,46 @@ export function connected(rows) {
   return seen.size === rows.length;
 }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Keep startup failures separate from routine room warnings. A busy earlier
+// peer must not evict the module-load evidence for a later, unready context.
+export function startupEvidence(index) {
+  const state = { index, phase: 'created', errors: [], lifecycle: [], requests: 0, completed: 0, pending: {}, droppedRequests: 0 };
+  const error = value => { if (state.errors.length < 16) state.errors.push(value); };
+  const path = value => { try { return new URL(value).pathname.slice(0, 240); } catch { return ''; } };
+  return { state, event(method, params) {
+    const at = Date.now();
+    if (method === 'Runtime.exceptionThrown') error({ at, kind: method, text: String(params.exceptionDetails?.exception?.description ?? params.exceptionDetails?.text).slice(0, 1000) });
+    if (method === 'Runtime.consoleAPICalled' && params.type === 'error') error({ at, kind: method,
+      text: (params.args ?? []).map(arg => String(arg.value ?? arg.description ?? arg.type)).join(' ').slice(0, 1000) });
+    if (method === 'Network.requestWillBeSent' && ['Document', 'Script'].includes(params.type)) {
+      state.requests++;
+      if (Object.keys(state.pending).length < 256) state.pending[params.requestId] = { path: path(params.request?.url), type: params.type };
+      else state.droppedRequests++;
+    }
+    if (method === 'Network.responseReceived' && params.response?.status >= 400) error({ at, kind: method, path: path(params.response.url), status: params.response.status });
+    if (method === 'Network.loadingFailed') error({ at, kind: method, request: state.pending[params.requestId], text: String(params.errorText).slice(0, 240), canceled: !!params.canceled });
+    if (['Network.loadingFinished', 'Network.loadingFailed'].includes(method) && Object.hasOwn(state.pending, params.requestId)) {
+      delete state.pending[params.requestId]; state.completed++;
+    }
+    if (['Page.lifecycleEvent', 'Runtime.executionContextsCleared', 'Runtime.executionContextDestroyed', 'Inspector.targetCrashed', 'Target.targetCrashed', 'Target.targetDestroyed', 'Target.detachedFromTarget'].includes(method)) {
+      state.lifecycle.push({ at, kind: method, name: params.name, contextId: params.executionContextId, status: params.status, errorCode: params.errorCode });
+      if (state.lifecycle.length > 16) state.lifecycle.shift();
+    }
+  } };
+}
+export async function stopScalePeers(peers, invoke) {
+  const initialized = peers.filter(peer => peer.ready);
+  const stops = await Promise.allSettled(initialized.map(peer => invoke(peer, 'stop')));
+  return { uninitialized: peers.filter(peer => !peer.ready).map(peer => ({ index: peer.index, phase: peer.diagnostic.state.phase, productionStartInvoked: false, nativeCleanup: 'unavailable' })),
+    stops: stops.map((result, index) => ({ index: initialized[index].index, ok: result.status === 'fulfilled', error: result.status === 'rejected' ? String(result.reason).slice(0, 400) : undefined })) };
+}
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export async function runScale(options = scaleOptions(process.argv.slice(2))) {
   const output = join(repo, 'artifacts/dweb-scale', `${options.peers}-${options.mode}`);
   mkdirSync(output, { recursive: true });
   const report = { ok: false, options, budgets: SCALE_BUDGETS, acceptance: SCALE_ACCEPTANCE, stage: 'starting', checks: [], samples: [],
     limitation: 'One Chrome process on one machine, isolated browser contexts, localhost ICE with no STUN/TURN. No WAN, NAT, multi-machine throughput, or raised-degree claim.',
-    observedPeaks: { memberships: 0, sockets: 0 }, resourceViolations: [], cleanup: null };
+    observedPeaks: { memberships: 0, sockets: 0 }, resourceViolations: [], startup: [], cleanup: null };
   const save = () => writeFileSync(join(output, 'result.json'), JSON.stringify(report, null, 2));
   let failed = false, retiring = false, ctx, browser, signaling, server, signalPort;
   const peers = [], sockets = new Set();
@@ -82,8 +115,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
       return reply.result?.value;
     } finally { await send('Runtime.releaseObject', { objectId }, peer.sessionId); }
   }, ms);
-  const snapshots = async () => {
-    const rows = await Promise.all(peers.map(peer => invoke(peer, 'report')));
+  const serverSnapshot = () => {
     const serverState = signaling.stats();
     const capped = { connections: 'sockets', rooms: 'rooms', joins: 'processJoins', messages: 'processMessages', ingressBytes: 'processIngressBytes', egressFrames: 'processEgressFrames', egressBytes: 'processEgressBytes' };
     for (const [key, limit] of Object.entries(capped)) if (serverState[key] > BOOTSTRAP_LIMITS[limit] && report.resourceViolations.length < 32) {
@@ -91,6 +123,11 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     }
     report.observedPeaks.memberships = Math.max(report.observedPeaks.memberships, serverState.memberships);
     report.observedPeaks.sockets = Math.max(report.observedPeaks.sockets, serverState.connections);
+    return serverState;
+  };
+  const snapshots = async () => {
+    const rows = await Promise.all(peers.filter(peer => peer.ready).map(peer => invoke(peer, 'report')));
+    const serverState = serverSnapshot();
     report.samples.push({ at: Date.now(), stage: report.stage, signaling: serverState, peers: rows });
     if (report.samples.length > 24) report.samples.shift();
     save(); return rows;
@@ -140,20 +177,45 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
       const attached = await attach(version.webSocketDebuggerUrl);
       if (retiring) { attached.close(); throw new Error('attach retired'); } return attached;
     });
-    browser.on(() => { if (browser.events.length > 64) browser.events.splice(0, browser.events.length - 64); });
+    browser.on((method, params, message) => {
+      if (browser.events.length > 64) browser.events.splice(0, browser.events.length - 64);
+      const peer = peers.find(value => (message.sessionId && value.sessionId === message.sessionId)
+        || (params.targetId && value.targetId === params.targetId)
+        || (method === 'Target.detachedFromTarget' && value.sessionId === params.sessionId));
+      if (peer) {
+        peer.diagnostic.event(method, params);
+        // Persist failures immediately; stage saves retain ordinary request
+        // progress without turning every signaling message into synchronous IO.
+        if (method === 'Runtime.exceptionThrown' || method === 'Network.loadingFailed'
+          || method.endsWith('Crashed') || (method === 'Runtime.consoleAPICalled' && params.type === 'error')) save();
+      }
+    });
+    await send('Target.setDiscoverTargets', { discover: true });
     const createPeer = async index => {
       const { browserContextId } = await send('Target.createBrowserContext', { disposeOnDetach: true });
-      const peer = { index, browserContextId }; peers.push(peer);
+      const diagnostic = startupEvidence(index);
+      const peer = { index, browserContextId, diagnostic, ready: false }; peers.push(peer); report.startup.push(diagnostic.state);
       const target = await send('Target.createTarget', { browserContextId, url: 'about:blank' });
       peer.targetId = target.targetId;
       peer.sessionId = (await send('Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId;
       await send('Runtime.enable', {}, peer.sessionId);
-      await send('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/tests/dweb-scale.html?url=${encodeURIComponent(`ws://127.0.0.1:${signalPort}/rendezvous`)}` }, peer.sessionId);
+      await send('Inspector.enable', {}, peer.sessionId);
+      await send('Page.enable', {}, peer.sessionId);
+      await send('Page.setLifecycleEventsEnabled', { enabled: true }, peer.sessionId);
+      await send('Network.enable', {}, peer.sessionId);
+      diagnostic.state.phase = 'navigating';
+      const navigation = await send('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/tests/dweb-scale.html?url=${encodeURIComponent(`ws://127.0.0.1:${signalPort}/rendezvous`)}` }, peer.sessionId);
+      diagnostic.state.navigation = navigation;
+      if (navigation.errorText) throw new Error(`fixture ${index} navigation: ${navigation.errorText}`);
       await until(`fixture ${index} ready`, async () => {
-        const value = await send('Runtime.evaluate', { expression: '!!globalThis.__DWEB_SCALE__', returnByValue: true }, peer.sessionId);
-        return value.result?.value === true;
+        const value = await send('Runtime.evaluate', { expression: '({fixtureReady:!!globalThis.__DWEB_SCALE__,documentState:document.readyState,path:location.pathname})', returnByValue: true }, peer.sessionId);
+        diagnostic.state.lastProbe = { at: Date.now(), value: value.result?.value, error: value.exceptionDetails?.text };
+        return value.result?.value?.fixtureReady === true;
       }, SCALE_BUDGETS.fixtureMs);
+      peer.ready = true; diagnostic.state.phase = 'starting'; save();
       await invoke(peer, 'start');
+      diagnostic.state.phase = 'started'; diagnostic.state.initial = await invoke(peer, 'report');
+      diagnostic.state.signaling = serverSnapshot(); save();
     };
     stage('joining paced native peers');
     for (let index = 0; index < options.peers; index++) {
@@ -205,9 +267,11 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     retiring = true;
     try {
       await bounded('production peer cleanup', async () => {
-        await Promise.all(peers.filter(peer => peer.sessionId).map(peer => invoke(peer, 'stop')));
+        report.cleanup = await stopScalePeers(peers, invoke);
+        save();
+        for (const result of report.cleanup.stops) if (!result.ok) { failed = true; cleanupErrors.push(result.error); }
         await until('production resources released', async () => {
-          const rows = await snapshots(); report.cleanup = { peers: rows, signaling: signaling.stats() };
+          const rows = await snapshots(); report.cleanup = { ...report.cleanup, peers: rows, signaling: signaling.stats() };
           return rows.every(row => row.resources.pcs === 0 && row.resources.channels === 0 && row.resources.sockets === 0
             && row.resources.admission.active === 0 && row.resources.admission.queued === 0
             && row.resources.outgoing.bytes === 0 && row.resources.outgoing.frames === 0) && signaling.stats().connections === 0;

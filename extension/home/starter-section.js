@@ -42,7 +42,7 @@ export const StarterSection = () => {
     view: ({ attrs: { send, enabled } }) => m('section.card', { style: 'margin:16px;padding:16px;overflow-wrap:anywhere;' }, [
       m('h2', 'Included with Peerd'),
       m('p', 'Start with a packaged example, even with the peer network off. Review it in Settings, add a local copy, then open it from your Library. Nothing runs or is shared automatically.'),
-      ...starterKeys.map(key => { const starter = packagedStarter(key); return m('article', { key, style: 'margin:18px 0;' }, [
+      starterKeys.map(key => { const starter = packagedStarter(key); return m('article', { key, style: 'margin:18px 0;' }, [
         m('h3', starter?.name), m('p', starter?.description), m('p.muted', starter?.runtime),
         m('button.secondary', { onclick: () => openOptions(`transfer?starter=${key}`) }, 'Review starter'),
       ]); }),

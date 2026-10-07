@@ -1,8 +1,18 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { evalIn, waitFor, openExtPage } from './e2e-harness.mjs';
 // Render-only proof. Real composed CSV/WASM execution is in the browser suite.
 export const STARTER_VISUAL_STATES = [false, true].flatMap(narrow => ['home', 'review', 'empty', 'no-results', 'publisher'].map(mode => ({
   name: `discovery-${mode}${narrow ? '-narrow' : ''}`, kind:'visual', phase:'post-unlock', responder:null,
   async run(ctx, rec) {
+    if (process.env.PEERD_VISUAL_BASE_RENDER === '1') {
+      const extension = process.argv.find(arg => arg.startsWith('--extension='))?.slice('--extension='.length);
+      if (!extension) throw new Error('base visual render requires an explicit extension tree');
+      if (!existsSync(join(extension, 'tests/fixtures/starters.html'))) {
+        rec.observe('merge-base surface', { present:false, reason:'these discovery release scenarios were introduced on this branch' });
+        return;
+      }
+    }
     const fixture = mode === 'home' || mode === 'review'
       ? `tests/fixtures/starters.html${mode === 'review' ? '?starter=wasm-image' : ''}`
       : `tests/fixtures/explore.html${mode === 'empty' ? '?empty=1' : ''}`;
@@ -14,7 +24,10 @@ export const STARTER_VISUAL_STATES = [false, true].flatMap(narrow => ['home', 'r
         : mode === 'empty' ? `document.body.textContent.includes('No peer Apps discovered yet')` : `document.querySelectorAll('.disc-card').length === 3`),{budgetMs:8000,pollMs:80});
       if (!ready) throw new Error(`Discovery ${mode} did not render`);
       if (mode === 'no-results') await evalIn(page, `(()=>{const input=document.querySelector('input');input.value='no-such-app';input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
-      if (mode === 'publisher') await evalIn(page, `document.querySelector('details.disc-publisher').open=true`);
+      if (mode === 'publisher') {
+        await evalIn(page, `document.querySelector('details.disc-publisher').open=true`);
+        rec.check('coherent fixture cards expose copyable immutable addresses', await evalIn(page, `(()=>{const buttons=[...document.querySelectorAll('button')].filter(button=>button.textContent==='Copy immutable address');return buttons.length===3&&buttons.every(button=>!button.disabled);})()`));
+      }
       if (mode === 'no-results') {
         const filtered = await waitFor(()=>evalIn(page,`document.body.textContent.includes('No matching Apps') && document.querySelectorAll('.disc-card').length === 0`),{budgetMs:4000,pollMs:50});
         if (!filtered) throw new Error('No-results state did not settle');

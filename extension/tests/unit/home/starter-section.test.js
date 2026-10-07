@@ -2,6 +2,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';
 import { StarterSection } from '/home/starter-section.js';
+import { makeOptionsApp } from '/options/components/options-app-core.js';
 import { StarterReview } from '/options/sections/starter-review.js';
 const flush = async () => { await new Promise(resolve => setTimeout(resolve, 0)); m.redraw.sync(); };
 /** @param {()=>boolean} ready */
@@ -12,6 +13,22 @@ const mount = (component, attrs) => { const root = document.createElement('div')
 const button = (root, text) => [...root.querySelectorAll('button')].find(node => node.textContent === text);
 
 describe('packaged starters', () => {
+  it('keeps starter cards mounted through pending Library and failure redraws', async () => {
+    /** @type {(value:any)=>void} */ let release = () => {};
+    const view = mount(StarterSection, { enabled:false, send:() => new Promise(resolve => { release = resolve; }) });
+    try {
+      const cards = [...view.root.querySelectorAll('article')];
+      expect(cards.length).toBe(3);
+      expect(view.root.querySelectorAll('button').length).toBe(3);
+      expect(button(view.root, 'Add and open Commons')?.disabled).toBe(true);
+      release({ok:false}); await until(() => !!view.root.querySelector('[role="alert"]'));
+      const after = [...view.root.querySelectorAll('article')];
+      expect(after.length).toBe(cards.length);
+      after.forEach((card, index) => expect(card).toBe(cards[index]));
+      expect(view.root.textContent).toContain('Could not read the Library.');
+    } finally { release({ok:false}); view.close(); }
+  });
+
   it('network-off Home shows local examples without enabling, installing or executing, and retains installed Commons', async () => {
     const calls = /** @type {any[]} */ ([]);
     const view = mount(StarterSection, { enabled: false, send: async (/** @type {any} */ message) => { calls.push(message); return { ok: true, apps: [{id:'app-commons',dweb:{seed:'commons'}}] }; } });
@@ -28,6 +45,33 @@ describe('packaged starters', () => {
     const view = mount(StarterSection, { enabled:false, send:async () => ({ok:true,apps:[]}) });
     try { await flush(); expect(button(view.root, 'Add and open Commons')?.disabled).toBe(true); }
     finally { view.close(); }
+  });
+  it('actual Settings shell mounts ordinary transfer and remounts each starter review', async () => {
+    const originalParam = m.route.param;
+    /** @type {string|undefined} */ let starter;
+    m.route.param = () => starter;
+    const calls = /** @type {any[]} */ ([]);
+    /** @type {ReturnType<typeof mount>|undefined} */ let view;
+    try {
+      view = mount(makeOptionsApp(), { section:'transfer', state:{vault:{initialized:true,locked:false}}, send:async (/** @type {any} */ message) => {
+        calls.push(message);
+        return message.type === 'import/inspect' ? {ok:true,summary:{kind:'app',size:93,fileCount:4}} : {ok:true};
+      } });
+      const root = view.root;
+      expect(!!root.querySelector('#exppass')).toBe(true);
+      starter = 'csv-lab'; await flush();
+      await until(() => !!button(root, 'Apply: add local copy'));
+      expect(root.textContent).toContain('CSV Lab');
+      const first = calls.filter(call => call.type === 'import/inspect')[0].envelope;
+      starter = 'wasm-image'; await flush();
+      await until(() => !!button(root, 'Apply: add local copy'));
+      expect(root.textContent).toContain('WebAssembly Image Lab');
+      expect(calls.filter(call => call.type === 'import/inspect').length).toBe(2);
+      expect(calls.filter(call => call.type === 'import/inspect')[1].envelope === first).toBe(false);
+      starter = undefined; await flush();
+      expect(!!view.root.querySelector('#exppass')).toBe(true);
+      expect(calls.some(call => call.type === 'import/apply')).toBe(false);
+    } finally { try { view?.close(); } finally { m.route.param = originalParam; } }
   });
   it('Options inspects packaged data and requires Apply, then a separate Library action', async () => {
     const calls = /** @type {any[]} */ ([]);

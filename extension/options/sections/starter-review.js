@@ -47,7 +47,7 @@ export const StarterReview = () => {
       error ? m('p', { role: 'alert' }, error) : null,
       unknown ? m('p', { role: 'alert' }, `${unknownMutationCopy('adding the starter')} Check your Library before reviewing another copy.`) : null,
       installed ? m('p', { role: 'status' }, 'Local copy added. Open it from your Library when you are ready.') : null,
-      envelope && !installed && !unknown ? m('button', { disabled: busy, onclick: () => apply(send) }, busy ? 'Adding…' : 'Apply: add local copy') : null,
+      envelope && !installed && !unknown ? m('button.secondary', { disabled: busy, onclick: () => apply(send) }, busy ? 'Adding…' : 'Apply: add local copy') : null,
       m('button.secondary', { onclick: () => openHome('library') }, 'View in Library'),
     ]),
   };

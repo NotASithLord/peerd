@@ -452,9 +452,7 @@ export const DiscoverSection = (initialVnode) => {
         m('p.muted', 'WebAssembly hints are publisher-signed, not a safety or compatibility guarantee.'),
         m('p.muted', {role:'status', 'aria-live':'polite'}, ordered.length ? `Showing ${offset + 1}–${offset + shown.length} of ${ordered.length} Apps` : 'No matching Apps. Change your search or WebAssembly filter.'),
         !ordered.length ? m('button.secondary', { onclick: () => { query = ''; wasm = 'all'; orderedIds = []; offset = 0; } }, 'Clear filters') : null,
-        shown.length === 0
-          ? m('p.muted', 'Nothing matches.')
-          : m('.disc-grid', shown.map((app) => card(send, app))),
+        shown.length ? m('.disc-grid', shown.map((app) => card(send, app))) : null,
         m('.disc-controls', [
           offset ? m('button.secondary', {onclick: () => { offset = Math.max(0, offset - EXPLORE_WINDOW); limit = EXPLORE_WINDOW; }}, 'Previous Apps') : null,
           offset + shown.length < ordered.length ? m('button.secondary', {onclick: () => {

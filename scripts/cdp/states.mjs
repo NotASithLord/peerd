@@ -4287,9 +4287,14 @@ export const STATES = [
         const statusVisible = await waitFor(() => evalIn(page,
           `!!document.querySelector('.peer-network-status [role="status"]')`),
         { budgetMs: 15_000, pollMs: 50 });
+        const consentUi = await evalIn(page, `({
+          status: document.querySelector('.peer-network-status [role="status"]')?.textContent?.slice(0, 300) ?? null,
+          turnOffEnabled: !![...document.querySelectorAll('.onboarding-actions button')]
+            .find(button => button.textContent === 'Turn off' && !button.disabled),
+          body: document.body.innerText.slice(0, 3000),
+        })`);
         rec.check('connection status is separate from saved consent and leaves controls usable',
-          !!statusVisible && await evalIn(page, `!![...document.querySelectorAll('.onboarding-actions button')]
-            .find(button => button.textContent === 'Turn off' && !button.disabled)`));
+          !!statusVisible && consentUi.turnOffEnabled, JSON.stringify(consentUi));
         await rec.shotPage('discover-network-enabled', page);
         await page.send('Page.reload', { ignoreCache: true });
         await waitFor(() => evalIn(page, `!!document.querySelector('.home-rail')`),
