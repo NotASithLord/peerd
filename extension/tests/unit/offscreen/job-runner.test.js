@@ -174,29 +174,117 @@ throw new Error('unrelated failure');`,
   });
 
   it('uses one absolute deadline across import resolution and worker execution', async () => {
-    const startedAt = performance.now();
-    const r = await runJob(
-      {
+    // The browser framework awaits each testcase serially. Scope host-only
+    // clock/timer overrides here; the sealed native Worker's realm is unchanged.
+    /** @type {Window} */
+    const host = window;
+    const nativeNow = Date.now;
+    const nativeSetTimeout = host.setTimeout;
+    const nativeClearTimeout = host.clearTimeout;
+    const NativeWorker = globalThis.Worker;
+    const runId = 'absolute-deadline-worker-test';
+    const ownerSessionId = 'absolute-deadline-owner';
+    let logicalNow = nativeNow();
+    const startedAt = logicalNow;
+    /** @type {Array<{id:number, delay:number, execution:boolean, active:boolean, fire:()=>void}>} */
+    const deadlines = [];
+    /** @type {Worker[]} */
+    const workers = [];
+    /** @type {(value: string) => void} */
+    let markerArrived = () => {};
+    const marker = new Promise((resolve) => { markerArrived = resolve; });
+    let nextTimer = -1;
+    let watchdog = 0;
+    const watchdogFailure = new Promise((_, reject) => {
+      // Liveness only: contract assertions below use captured scheduled budgets.
+      watchdog = nativeSetTimeout(() => reject(new Error('native worker deadline probe stalled')), 10000);
+    });
+    /** @type {ReturnType<typeof runJob> | undefined} */
+    let running;
+    let settled = false;
+    let failed = false;
+    let cleanupWatchdog = 0;
+    try {
+      Date.now = () => logicalNow;
+      host.setTimeout = (handler, delay, ...args) => {
+        if (typeof handler === 'function' && (delay === 550 || delay === 200)) {
+          const id = nextTimer--;
+          deadlines.push({ id, delay, execution: workers.length > 0, active: true,
+            fire: () => handler(...args) });
+          return id;
+        }
+        return nativeSetTimeout(handler, delay, ...args);
+      };
+      host.clearTimeout = (id) => {
+        const captured = deadlines.find((timer) => timer.id === id);
+        if (captured) captured.active = false;
+        else nativeClearTimeout(id);
+      };
+      globalThis.Worker = class extends NativeWorker {
+        /** @param {string | URL} url @param {WorkerOptions} [options] */
+        constructor(url, options) {
+          super(url, options);
+          workers.push(this);
+          this.addEventListener('message', ({ data }) => {
+            if (data?.type === 'log' && data.text === 'deadline-import-ready 42') markerArrived(data.text);
+          });
+        }
+      };
+      running = runJob({
         code: [
           "import { value } from 'https://slow.example/value.js';",
-          'await new Promise((resolve) => setTimeout(resolve, 350));',
+          "console.log('deadline-import-ready', value);",
+          'await new Promise(() => {});',
           'return value;',
         ].join('\n'),
-        timeoutMs: 550,
-      },
-      {
+        timeoutMs: 550, runId, ownerSessionId,
+      }, {
         sendToSW: async (type) => {
           if (type !== 'sw/web-fetch') return { ok: false };
-          await new Promise((resolve) => setTimeout(resolve, 350));
+          logicalNow += 350;
           return { ok: true, status: 200, bodyB64: btoa('export const value = 42;') };
         },
-      },
-    );
-    const elapsedMs = performance.now() - startedAt;
-    expect(String(r.error)).toContain('job timed out after 550ms');
-    expect(r.value).toBe(undefined);
-    // The pre-fix runner gave each phase 550ms and returned 42 after ~700ms.
-    expect(elapsedMs < 900).toBe(true);
+      }).finally(() => { settled = true; });
+      expect(await Promise.race([marker, watchdogFailure])).toBe('deadline-import-ready 42');
+      const build = deadlines.filter((timer) => !timer.execution);
+      expect(build.some((timer) => timer.delay === 550)).toBe(true);
+      expect(build.every((timer) => !timer.active)).toBe(true);
+      const execution = deadlines.filter((timer) => timer.execution && timer.active);
+      expect(execution.length).toBe(1);
+      // Resetting a phase's budget to 550 fails this exact scheduling oracle,
+      // independently of browser scheduling or terminal cleanup latency.
+      if (execution[0].delay !== 200) throw new Error(`execution budget reset: ${JSON.stringify(deadlines)}`);
+      expect(execution[0].delay).toBe(200);
+      logicalNow = startedAt + 550;
+      execution[0].fire();
+      const result = await Promise.race([running, watchdogFailure]);
+      expect(String(result.error)).toContain('job timed out after 550ms');
+      expect(result.value).toBe(undefined);
+    } catch (error) {
+      failed = true;
+      throw error;
+    } finally {
+      try {
+        if (running) {
+          if (!settled) abortJob(runId, ownerSessionId);
+          await Promise.race([running, new Promise((_, reject) => {
+            cleanupWatchdog = nativeSetTimeout(() => reject(new Error('owned job cleanup stalled')), 10000);
+          })]);
+        }
+      } catch (cleanupError) {
+        // Keep the original assertion/watchdog failure; restoration is mandatory
+        // even if the owned job cannot acknowledge its abort.
+        if (!failed) throw cleanupError;
+      } finally {
+        nativeClearTimeout(cleanupWatchdog);
+        nativeClearTimeout(watchdog);
+        Date.now = nativeNow;
+        host.setTimeout = nativeSetTimeout;
+        host.clearTimeout = nativeClearTimeout;
+        globalThis.Worker = NativeWorker;
+        for (const worker of workers) worker.terminate();
+      }
+    }
   });
 
   it('reserves compute capacity when page, a2a, and site-client jobs relay outward', async () => {
