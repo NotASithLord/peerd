@@ -356,17 +356,6 @@ jobs:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
         # Real Preview custody/storage and native WebRTC. Only rendezvous is local.
         run: bun scripts/cdp/manual-address-twopeer.mjs
-      - name: Native sparse public network with 16 paced peers
-        env:
-          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
-        # One measured attempt; no larger degree or production budget overrides.
-        run: bun scripts/cdp/run-dweb-scale.mjs --peers=16 --mode=paced
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: dweb-scale-native
-          path: artifacts/dweb-scale/
-          if-no-files-found: warn
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:

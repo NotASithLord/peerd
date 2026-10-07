@@ -22,7 +22,6 @@ import {
 } from '/shared/ui-effects.js';
 import { makeConfirmationAnswer } from '/sidepanel/confirmation-answer.js';
 import { CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
-import { loadDweb } from '/shared/dweb-loader.js';
 import { openOptions } from '/shared/open-options.js';
 import { LibrarySection } from './library-section.js';
 import { NetworkSection } from './network-section.js';
@@ -109,6 +108,15 @@ const loadDiscover = () => {
   import('./discover-section.js').then(mod => { DiscoverSection = mod.DiscoverSection; discoverFailed = false; })
     .catch(() => { discoverFailed = true; })
     .finally(() => { discoverLoading = false; m.redraw(); });
+};
+/** @type {any} */ let StarterSection = null;
+let starterLoading = false, starterFailed = false;
+const loadStarters = () => {
+  if (StarterSection || starterLoading) return;
+  starterLoading = true;
+  import('./starter-section.js').then(mod => { StarterSection = mod.StarterSection; starterFailed = false; })
+    .catch(() => { starterFailed = true; })
+    .finally(() => { starterLoading = false; m.redraw(); });
 };
 /** @type {any} */ let AddressSection = null;
 let addressLoading = false;
@@ -202,7 +210,7 @@ const handlePortMessage = (msg) => {
   const next = reduceChat(currentState, folded);
   if (next === currentState) return msg.type === 'state';
   currentState = next;
-  if (msg.type === 'state') { booted = true; seedDwebApps(); }
+  if (msg.type === 'state') { booted = true; }
   redrawForRuntimeMessage(m.redraw, msg);
   return true;
 };
@@ -408,31 +416,6 @@ function applySidePanelOpen(open) {
   }
   m.redraw();
 }
-
-// Make sure the pre-loaded dwapps (commons) are in the Library. why HERE, not
-// the SW: the SW can't load the dweb module or name its path (the dweb
-// boundary), but this page can. Gated on DWEB_ENABLED + an unlocked vault.
-let seededDweb = false;
-const seedDwebApps = async () => {
-  if (seededDweb || !DWEB_ENABLED) return;
-  if (!currentState?.vault?.initialized || currentState.vault.locked) return;
-  seededDweb = true;
-  try {
-    const client = await loadDweb();
-    if (!client.available || !client.loadSeedApp) return;
-    const seed = await client.loadSeedApp({
-      fetchText: async (p) => {
-        // reading our OWN packaged asset over the extension origin — not
-        // network egress, so safeFetch is the wrong tool.
-        // eslint-disable-next-line no-restricted-globals
-        const res = await fetch(p);
-        if (!res.ok) throw new Error(`seed ${p}: HTTP ${res.status}`);
-        return res.text();
-      },
-    });
-    await send({ type: 'dweb/ensure-seed-app', seed });
-  } catch (e) { console.debug('[home] dweb seed skipped', e); }
-};
 
 // Five-block wordmark — local copy (same construction as the panel/options
 // mark). Replays its type→colorize intro each time the tab becomes visible.
@@ -788,12 +771,16 @@ const content = (showDweb) => {
   if (activeView === 'discover' && DWEB_ENABLED) {
     loadOnboarding();
     if (!addressFailed) loadAddressSection();
+    if (!starterFailed) loadStarters();
     if (showDweb && !discoverFailed) loadDiscover();
     if (!NetworkChoice) return onboardingFailed
       ? m('button', { onclick: loadOnboarding }, 'Retry loading network controls')
       : m('p', { role: 'status' }, 'Loading network controls…');
     return m('div', [
       m(NetworkChoice, { enabled: !!showDweb, send, reconcileState }),
+      StarterSection ? m(StarterSection, { send, enabled: !!showDweb })
+        : starterFailed ? m('button', { onclick: loadStarters }, 'Retry loading starter Apps')
+          : m('p', { role: 'status' }, 'Loading starter Apps…'),
       AddressSection ? m(AddressSection, { send, enabled: !!showDweb })
         : addressFailed ? m('button', { onclick: loadAddressSection }, 'Retry loading App addresses')
           : m('p', { role: 'status' }, 'Loading App addresses…'),

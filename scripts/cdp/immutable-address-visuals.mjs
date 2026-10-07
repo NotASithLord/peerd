@@ -1,10 +1,13 @@
 // Actual component rendering with injected replies; network/install proof is separate.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { evalIn, waitFor } from './e2e-harness.mjs';
+import { evalIn, waitFor, PANEL_METRICS } from './e2e-harness.mjs';
 
-export const IMMUTABLE_ADDRESS_VISUAL_STATES = ['off', 'verified', 'rejected', 'unknown', 'installed'].map(mode => ({
-  name: `manual-app-address-${mode}`, kind: 'visual', phase: 'pre-unlock', responder: null,
+export const IMMUTABLE_ADDRESS_VISUAL_STATES = ['off', 'verified', 'rejected', 'unknown', 'installed', 'verified-narrow'].map(visualMode => {
+const narrow = visualMode === 'verified-narrow';
+const mode = narrow ? 'verified' : visualMode;
+return ({
+  name: `manual-app-address-${visualMode}`, kind: 'visual', phase: 'pre-unlock', responder: null,
   async run(ctx, rec) {
     if (process.env.PEERD_VISUAL_BASE_RENDER === '1') {
       const tree = process.argv.find(arg => arg.startsWith('--extension='))?.slice(12);
@@ -15,6 +18,7 @@ export const IMMUTABLE_ADDRESS_VISUAL_STATES = ['off', 'verified', 'rejected', '
     }
     rec.observe('scope', 'real Home address component with injected signed-summary/catalog replies; render-only proof');
     try {
+      if (narrow) await ctx.page.send('Emulation.setDeviceMetricsOverride', {width:320,height:1100,deviceScaleFactor:1,mobile:false});
       await evalIn(ctx.page, `(async () => {
         const m = (await import('/vendor/mithril/mithril.js')).default;
         const { ImmutableAddressSection } = await import('/home/immutable-address-section.js');
@@ -55,7 +59,8 @@ export const IMMUTABLE_ADDRESS_VISUAL_STATES = ['off', 'verified', 'rejected', '
       rec.check('render performs no network grant, installation or execution', await evalIn(ctx.page,
         `window.__manualAddressCalls.every(message => ['apps/list', 'dweb/base/inspect-address'].includes(message.type))
           && (${['off', 'rejected', 'unknown'].includes(mode)} ? window.__manualAddressCalls.length === 0 : window.__manualAddressCalls.length === 2)`));
-      await rec.visual(`manual-app-address-${mode}`);
+      if (narrow) rec.check('full signed identity and address fit the narrow viewport', await evalIn(ctx.page, `document.querySelector('#e2e-manual-address').scrollWidth <= innerWidth`));
+      await rec.visual(`manual-app-address-${visualMode}`);
     } finally {
       await evalIn(ctx.page, `(async () => {
         const root = document.querySelector('#e2e-manual-address');
@@ -65,6 +70,8 @@ export const IMMUTABLE_ADDRESS_VISUAL_STATES = ['off', 'verified', 'rejected', '
         else sessionStorage.removeItem(key);
         delete window.__manualAddressPrior; delete window.__manualAddressCalls;
       })()`, true);
+      if (narrow) await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
     }
   },
-}));
+});
+});

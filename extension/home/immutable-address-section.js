@@ -112,7 +112,7 @@ export const ImmutableAddressSection = () => {
         m('dl', { style: 'overflow-wrap:anywhere;' }, [
           m('dt', 'Signed by'), m('dd', preview.publisher),
           m('dt', 'Exact revision'), m('dd', preview.hash),
-          m('dt', 'Decoded files'), m('dd', `${preview.decodedBytes} bytes in ${preview.fileCount} files`),
+          m('dt', 'Decoded files'), m('dd', `${preview.decodedBytes} bytes in ${preview.fileCount} ${preview.fileCount === 1 ? 'file' : 'files'}`),
           m('dt', 'Entry file'), m('dd', preview.entryFile),
         ]),
         preview.containsWasm ? m('p', 'Contains a .wasm file. Runtime compatibility has not been tested.') : null,

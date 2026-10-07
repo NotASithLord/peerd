@@ -39,6 +39,7 @@ import { startWebFixtureServer } from './fixtures/web-suite.mjs';
 import { recordNetworkFloorVector, recordPrivateChildFloor, ordinaryProbeReached } from './network-floor-oracle.mjs';
 import { NOTEBOOK_FETCH_STATE } from './notebook-fetch-state.mjs';
 import { WASMER_STATE } from './wasmer-state.mjs';
+import { STARTER_VISUAL_STATES } from './starter-visuals.mjs';
 import { IMMUTABLE_ADDRESS_VISUAL_STATES } from './immutable-address-visuals.mjs';
 import { CONSENT_LOCK_VISUAL_STATES } from './consent-lock-visuals.mjs';
 import { armVaultLockStages } from './vault-lock-stages.mjs';
@@ -532,6 +533,7 @@ let pacingActorCalled = false;
 export const STATES = [
   ...CONSENT_LOCK_VISUAL_STATES,
   ...IMMUTABLE_ADDRESS_VISUAL_STATES,
+  ...STARTER_VISUAL_STATES,
   WASMER_STATE,
   {
     name: 'pacing-wait-stop', kind: 'functional', phase: 'post-unlock',
@@ -4285,9 +4287,14 @@ export const STATES = [
         const statusVisible = await waitFor(() => evalIn(page,
           `!!document.querySelector('.peer-network-status [role="status"]')`),
         { budgetMs: 15_000, pollMs: 50 });
+        const consentUi = await evalIn(page, `({
+          status: document.querySelector('.peer-network-status [role="status"]')?.textContent?.slice(0, 300) ?? null,
+          turnOffEnabled: !![...document.querySelectorAll('.onboarding-actions button')]
+            .find(button => button.textContent === 'Turn off' && !button.disabled),
+          body: document.body.innerText.slice(0, 3000),
+        })`);
         rec.check('connection status is separate from saved consent and leaves controls usable',
-          !!statusVisible && await evalIn(page, `!![...document.querySelectorAll('.onboarding-actions button')]
-            .find(button => button.textContent === 'Turn off' && !button.disabled)`));
+          !!statusVisible && consentUi.turnOffEnabled, JSON.stringify(consentUi));
         await rec.shotPage('discover-network-enabled', page);
         await page.send('Page.reload', { ignoreCache: true });
         await waitFor(() => evalIn(page, `!!document.querySelector('.home-rail')`),
@@ -4726,23 +4733,8 @@ export const STATES = [
         await waitFor(() => evalIn(page,
           `!!document.querySelector('.home-shell, .home-rail, .empty-state--home, .path-menu--home')`),
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
-        // …and then past the FIRST-RUN SEED INSTALL, which is what made this
-        // state flaky. home.js seeds the commons app on first unlock and the
-        // Library re-renders when it lands, so the camera raced it: some runs
-        // photographed "1 app", others "No apps yet", and the 0.78% diff read as
-        // a UI regression when it was a lifecycle race. The seed is a PACKAGED
-        // asset, not a network fetch, so waiting for it is deterministic — it
-        // always arrives; the only question was whether we waited for it.
-        //
-        // Bounded and swallowed on purpose: a build with the dweb pruned (the
-        // store channel) installs nothing, and there an empty Library IS the
-        // settled state. Falling through then is correct, not a miss.
-        //
-        // Known residual: the card carries a relative timestamp ("just now").
-        // It is stable for anything under a minute, which every run is, but a
-        // pathologically slow runner would drift it.
-        await waitFor(() => evalIn(page, `document.querySelectorAll('.library-grid > *').length > 0`),
-          { budgetMs: 10_000, pollMs: 100 }).catch(() => {});
+        // Packaged starters now require an explicit action. Home rendering
+        // must not wait for an automatic Commons installation that no longer occurs.
         // why: live dweb notifications are unrelated to this quiet-instance
         // contract and can arrive between the light and dark captures.
         const pinQuietHome = async () => {

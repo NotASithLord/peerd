@@ -1,6 +1,8 @@
 // @ts-check
 import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';
+import { encodeDidKey } from '/shared/address/did.js';
+import { discoveryAddress } from '/home/discovery-address.js';
 import { DiscoverSection } from '/home/discover-section.js';
 
 const settle = async () => {
@@ -212,4 +214,90 @@ it('preserves existing card nodes and pending effects when a refreshed catalog a
   } finally {finish({ok:false});m.mount(root,null);root.remove();}
 });
 
+});
+
+
+describe('home.discover immutable address copy', () => {
+  const publisher = encodeDidKey(new Uint8Array(32));
+  const hash = 'a'.repeat(64);
+  const originalApp = { dwapp_id: 'copy-app', name: 'Copy App', publisher, version_id: hash,
+    uri: `peerd://${publisher}/${hash}`, slug: 'copy-app', seq: 1 };
+  /** @param {any} clipboard @param {(fixture:any)=>Promise<void>} run */
+  const withCopy = async (clipboard, run) => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    let app = { ...originalApp };
+    /** @type {any[]} */ const calls = [];
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: clipboard });
+    const send = async (/** @type {any} */ message) => {
+      calls.push(message);
+      if (message.type === 'dweb/base/heard') return { ok: true, apps: [app] };
+      if (message.type === 'apps/list') return { ok: true, apps: [] };
+      if (message.type === 'dweb/base/status') return { ok: true, did: null };
+      return { ok: false };
+    };
+    m.mount(root, { view: () => m(DiscoverSection, { send }) });
+    try {
+      await settle();
+      await run({ root, calls, update: (/** @type {any} */ next) => { app = next; } });
+    } finally {
+      m.mount(root, null); root.remove();
+      if (original) Object.defineProperty(navigator, 'clipboard', original);
+      else delete /** @type {any} */ (navigator).clipboard;
+    }
+  };
+
+  it('copies only the exact canonical revision without network or install effects', async () => {
+    /** @type {string[]} */ const writes = [];
+    await withCopy({ writeText: async (/** @type {string} */ text) => { writes.push(text); } }, async ({ root, calls }) => {
+      const before = calls.length;
+      root.querySelector('.disc-copy-address').click(); await settle();
+      expect(writes).toEqual([discoveryAddress(originalApp)]);
+      expect(calls.length).toBe(before);
+      expect(root.textContent).toContain('Paste it into Peerd Discover');
+      expect(root.textContent).toContain(discoveryAddress(originalApp));
+    });
+  });
+
+  for (const clipboard of [undefined, { writeText: async () => { throw new Error('permission denied raw error'); } }]) {
+    it('reports unavailable or rejected clipboard access without claiming success', async () => {
+      await withCopy(clipboard, async ({ root }) => {
+        root.querySelector('.disc-copy-address').click(); await settle();
+        expect(root.textContent).toContain('Could not copy. Select this address');
+        expect(root.textContent.includes('Copied this exact revision')).toBe(false);
+        expect(root.textContent.includes('permission denied raw error')).toBe(false);
+        expect(root.querySelector('.disc-copy-address').disabled).toBe(false);
+      });
+    });
+  }
+
+  it('disables copying when current discovery coordinates disagree', async () => {
+    let writes = 0;
+    await withCopy({ writeText: async () => { writes++; } }, async ({ root, update }) => {
+      update({ ...originalApp, version_id: 'b'.repeat(64) });
+      root.querySelector('.disc-refresh').click(); await settle();
+      expect(root.querySelector('.disc-copy-address').disabled).toBe(true);
+      root.querySelector('.disc-copy-address').click(); await settle();
+      expect(writes).toBe(0);
+    });
+  });
+
+  it('never labels a refreshed revision as copied when an older clipboard request completes', async () => {
+    /** @type {(value?:any)=>void} */ let release = () => {};
+    const pending = new Promise(resolve => { release = resolve; });
+    /** @type {string[]} */ const writes = [];
+    await withCopy({ writeText: async (/** @type {string} */ text) => { writes.push(text); await pending; } }, async ({ root, update }) => {
+      try {
+        root.querySelector('.disc-copy-address').click(); await settle();
+        const revision = 'b'.repeat(64);
+        update({ ...originalApp, seq: 2, version_id: revision, uri: `peerd://${publisher}/${revision}` });
+        root.querySelector('.disc-refresh').click(); await settle();
+        release(); await settle();
+        expect(root.textContent.includes('Copied this exact revision')).toBe(false);
+        root.querySelector('.disc-copy-address').click(); await settle();
+        expect(writes).toEqual([discoveryAddress(originalApp), discoveryAddress({ publisher, version_id: revision, uri: `peerd://${publisher}/${revision}` })]);
+      } finally { release(); }
+    });
+  });
 });
