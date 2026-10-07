@@ -1491,3 +1491,218 @@ describe('App consent update and room custody cutover', () => {
     expect(sent[0].roomSnapshot).toEqual({ ok: true, ...snapshot });
   });
 });
+
+describe('manual immutable addresses before feature acquisition', () => {
+  const address = `dwapp://content/publisher/${'a'.repeat(64)}`;
+  test('off, malformed shape, missing host and invalid parse replies cannot acquire', async () => {
+    for (const scenario of ['off', 'shape', 'absent', 'refused', 'wrong-address']) {
+      let acquired = 0; const messages: any[] = [];
+      const { deps } = baseDeps({
+        settingsStore: { get: () => ({ dwebEnabled: scenario !== 'off' }) },
+        ensureDwebFeature: async () => { acquired++; },
+        browser: { runtime: { sendMessage: async (message: any) => {
+          messages.push(message);
+          if (scenario === 'absent') throw new Error('no receiver');
+          return scenario === 'wrong-address' ? { ok: true, address: 'other' } : { ok: false };
+        } } },
+      });
+      const result = await makeDwebRoutes(deps)['dweb/base/inspect-address']({ address: scenario === 'shape' ? {} : address });
+      expect(result.ok).toBe(false);
+      expect(acquired).toBe(0);
+      expect(messages.every(message => message.type === 'dweb/base-host/parse-address')).toBe(true);
+      if (scenario === 'off' || scenario === 'shape') expect(messages).toEqual([]);
+    }
+  });
+  test('retirement during parse and acquisition cannot reach inspect or install', async () => {
+    for (const retireAt of ['parse', 'acquire']) {
+      let generation = 1; let acquired = 0; const messages: any[] = [];
+      const { deps } = baseDeps({
+        dwebPublicationGeneration: () => generation,
+        ensureDwebFeature: async () => { acquired++; if (retireAt === 'acquire') generation++; },
+        browser: { runtime: { sendMessage: async (message: any) => {
+          messages.push(message); if (retireAt === 'parse') generation++;
+          return { ok: true, address };
+        } } },
+      });
+      const result = await makeDwebRoutes(deps)['dweb/base/install-address']({ address });
+      expect(result.error).toBe('dweb-custody-changed');
+      expect(acquired).toBe(retireAt === 'parse' ? 0 : 1);
+      expect(messages.map(message => message.type)).toEqual(['dweb/base-host/parse-address']);
+    }
+  });
+  test('a late parser reply after its deadline cannot acquire or resume work', async () => {
+    let acquired = 0; let resolve!: (value: any) => void;
+    const { deps } = baseDeps({
+      ensureDwebFeature: async () => { acquired++; },
+      browser: { runtime: { sendMessage: () => new Promise(done => { resolve = done; }) } },
+    });
+    const result = await makeDwebRoutes(deps)['dweb/base/inspect-address']({ address });
+    expect(result.error).toBe('address-host-unavailable');
+    resolve({ ok: true, address });
+    await Promise.resolve(); await Promise.resolve();
+    expect(acquired).toBe(0);
+  });
+  test('validated addresses preserve exact publication fence and ignore caller lineage', async () => {
+    let acquired = 0; const messages: any[] = [];
+    const { deps } = baseDeps({
+      ensureDwebFeature: async () => { acquired++; },
+      browser: { runtime: { sendMessage: async (message: any) => {
+        messages.push(message); return { ok: true, address };
+      } } },
+    });
+    expect((await makeDwebRoutes(deps)['dweb/base/install-address']({ address, dwappId: 'forged', name: 'forged' })).ok).toBe(true);
+    expect(acquired).toBe(1);
+    expect(messages).toEqual([{ type: 'dweb/base-host/parse-address', address }, {
+      type: 'dweb/base-host/install-address', address, publicationGeneration: 1,
+    }]);
+  });
+});
+
+test('retiring an address host after storage dispatch drains old commit and rollback before a second install', async () => {
+  const fence = createDwebPublicationFence();
+  const address = `dwapp://content/key/${'a'.repeat(64)}`;
+  const uri = `peerd://did:key:key/${'a'.repeat(64)}`;
+  let release!: () => void; let entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const records = new Map<string, any>(); let dispatches = 0; let routes: ReturnType<typeof makeDwebRoutes>;
+  const { deps } = baseDeps({
+    withDwebPublication: fence.run, dwebPublicationGeneration: fence.generation,
+    appRegistry: {
+      list: async () => [...records.values()],
+      update: async (id: string, patch: any) => {
+        const record = records.get(id); if (!record) return null;
+        record.dweb = { ...record.dweb, ...patch.dweb }; return record;
+      },
+    },
+    appClient: {
+      create: async (record: any) => {
+        if (record.appId === 'app-1') { entered(); await gate; }
+        const saved = { ...record, id: record.appId }; records.set(saved.id, saved); return saved;
+      },
+      delete: async (id: string) => records.delete(id),
+    },
+    browser: { runtime: { sendMessage: async (message: any) => {
+      if (message.type === 'dweb/base-host/parse-address') return { ok: true, address };
+      if (message.existing) return { ok: true, app: message.existing };
+      dispatches++;
+      return routes['dweb/app-install']({ appId: `app-${dispatches}`, name: 'App', files: {},
+        dweb: { uri, hash: 'a'.repeat(64), publisher: 'did:key:key' },
+        publicationGeneration: message.publicationGeneration }, offscreenSender);
+    } } },
+  });
+  routes = makeDwebRoutes(deps);
+  const first = routes['dweb/base/install-address']({ address }); await started;
+  fence.invalidate();
+  const second = routes['dweb/base/install-address']({ address });
+  await Promise.resolve(); await Promise.resolve();
+  expect(dispatches).toBe(1);
+  release();
+  expect((await first).ok).toBe(false);
+  expect((await second).ok).toBe(true);
+  expect([...records.keys()]).toEqual(['app-2']);
+  expect(dispatches).toBe(2);
+  const repeated = await routes['dweb/base/install-address']({ address });
+  expect(repeated.app.id).toBe('app-2');
+  expect(dispatches).toBe(2);
+});
+
+for (const retire of [false, true]) test(`lost outer host response cannot bypass live SW storage (generation retires: ${retire})`, async () => {
+  const fence = createDwebPublicationFence();
+  const hash = 'a'.repeat(64); const address = `dwapp://content/key/${hash}`; const uri = `peerd://did:key:key/${hash}`;
+  let release!: () => void; let entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const records = new Map<string, any>(); let dispatches = 0; let storage: Promise<any> | undefined;
+  let routes: ReturnType<typeof makeDwebRoutes>;
+  const { deps } = baseDeps({
+    withDwebPublication: fence.run, dwebPublicationGeneration: fence.generation,
+    appRegistry: {
+      list: async () => [...records.values()],
+      update: async (id: string, patch: any) => {
+        const record = records.get(id); if (!record) return null;
+        record.dweb = { ...record.dweb, ...patch.dweb }; return record;
+      },
+    },
+    appClient: {
+      create: async (record: any) => {
+        if (record.appId === 'app-1') { entered(); await gate; }
+        const saved = { ...record, id: record.appId }; records.set(saved.id, saved); return saved;
+      },
+      delete: async (id: string) => records.delete(id),
+    },
+    browser: { runtime: { sendMessage: async (message: any) => {
+      if (message.type === 'dweb/base-host/parse-address') return { ok: true, address };
+      if (message.existing) return { ok: true, app: message.existing };
+      dispatches++;
+      const call = routes['dweb/app-install']({ appId: `app-${dispatches}`, name: 'App', files: {},
+        dweb: { uri, hash, publisher: 'did:key:key' }, publicationGeneration: message.publicationGeneration }, offscreenSender);
+      if (dispatches !== 1) return call;
+      storage = call; await started;
+      throw new Error('outer host died while its SW storage remains alive');
+    } } },
+  });
+  routes = makeDwebRoutes(deps);
+  await expect(routes['dweb/base/install-address']({ address })).rejects.toThrow('outer host died');
+  if (retire) fence.invalidate();
+  let settled = false;
+  const second = routes['dweb/base/install-address']({ address }).finally(() => { settled = true; });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(dispatches).toBe(1); expect(settled).toBe(false);
+  release(); await storage;
+  expect((await second).ok).toBe(true);
+  expect([...records.keys()]).toEqual([retire ? 'app-2' : 'app-1']);
+  expect(dispatches).toBe(retire ? 2 : 1);
+});
+
+test('unknown install rollback stays blocked despite an empty catalog and saturates fail-closed', async () => {
+  let generation = 1; let writes = 0;
+  const { deps } = baseDeps({
+    dwebPublicationGeneration: () => generation,
+    appClient: { create: async (record: any) => { writes++; generation++; return { id: record.appId }; }, delete: async () => false },
+    appRegistry: { list: async () => [] },
+    browser: { runtime: { sendMessage: async (message: any) => ({ ok: true, address: message.address }) } },
+  });
+  const routes = makeDwebRoutes(deps);
+  for (let i = 0; i < 64; i++) {
+    const result = await routes['dweb/app-install']({ appId: `app-${i}`, name: 'App', files: {},
+      dweb: { uri: `peerd://did:key:key/${String(i).padStart(64, '0')}` }, publicationGeneration: generation }, offscreenSender);
+    expect(result.outcomeKnown).toBe(false);
+  }
+  const refused = await routes['dweb/app-install']({ appId: 'app-extra', publicationGeneration: generation }, offscreenSender);
+  expect(refused.error).toBe('install-reconciliation-required'); expect(writes).toBe(64);
+  const result = await routes['dweb/base/install-address']({ address: `dwapp://content/key/${'0'.repeat(64)}` });
+  expect(result).toMatchObject({ ok: false, outcomeKnown: false, error: 'install-outcome-unknown' });
+  expect(writes).toBe(64);
+});
+
+for (const receipt of [
+  { outcomeKnown: false }, { performed: true },
+  { outcomeKind: 'effect-completed' }, { outcomeKind: 'host-lost' }, { outcomeKind: 'transport-lost' },
+]) test(`partial install receipt stays uncertain without a catalog match: ${JSON.stringify(receipt)}`, async () => {
+  const address = `dwapp://content/key/${'a'.repeat(64)}`;
+  let acquisitions = 0;
+  const { deps } = baseDeps({
+    ensureDwebFeature: async () => { acquisitions++; },
+    appClient: { create: async () => { throw Object.assign(new Error('partial receipt'), receipt); } },
+    appRegistry: { list: async () => [] },
+    browser: { runtime: { sendMessage: async (message: any) => ({ ok: true, address: message.address }) } },
+  });
+  const routes = makeDwebRoutes(deps);
+  expect(await routes['dweb/app-install']({ appId: 'app-uncertain', files: {},
+    dweb: { uri: `peerd://did:key:key/${'a'.repeat(64)}` }, publicationGeneration: deps.dwebPublicationGeneration() }, offscreenSender))
+    .toMatchObject({ ok: false, ...receipt });
+  expect(await routes['dweb/base/install-address']({ address }))
+    .toMatchObject({ ok: false, outcomeKnown: false, error: 'install-outcome-unknown' });
+  expect(acquisitions).toBe(0);
+});
+
+test('storage failures keep finite receipt fields and code without admitting unsupported kinds', async () => {
+  const failure = Object.assign(new Error('not committed'), { code: 'write-refused', performed: false,
+    outcomeKnown: true, retryable: false, outcomeKind: 'future-kind' });
+  const { deps } = baseDeps({ appClient: { create: async () => { throw failure; } } });
+  expect(await makeDwebRoutes(deps)['dweb/app-install']({ appId: 'app-refused', files: {},
+    publicationGeneration: deps.dwebPublicationGeneration() }, offscreenSender))
+    .toEqual({ ok: false, error: 'not committed', code: 'write-refused', performed: false,
+      outcomeKnown: true, retryable: false });
+});

@@ -127,6 +127,7 @@ describe('GTM HTTP client', () => {
         calls++;
         return new Response(null, { status: 429, headers: { 'retry-after': '60' } });
       }) as typeof fetch,
+      nowImpl: () => Date.parse('2026-10-06T12:00:00Z'),
       sleepImpl: async (delay) => { sleeps.push(delay); },
       minimumIntervalMs: 0,
       maxAttempts: 2,

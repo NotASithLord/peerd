@@ -78,6 +78,7 @@ export const PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES = Object.freeze([
   // Rich UI loaded only after the minimal vault shell is actionable.
   'sidepanel/sidepanel.js',
   'home/home.js',
+  'home/immutable-address-section.js',
   // Home defers onboarding until profile and explicit network choice are known.
   'sidepanel/components/onboarding-view.js',
 

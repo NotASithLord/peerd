@@ -350,6 +350,17 @@ jobs:
         # converse opens a thread, say continues it, the convId survives real
         # WebRTC end to end. Any failed attempt fails the gate.
         run: bun run test:twopeer:conv
+      - name: Install a signed peer App through actual Home
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        # Real Preview custody/storage and native WebRTC. Only rendezvous is local.
+        run: bun scripts/cdp/manual-address-twopeer.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: manual-address-twopeer
+          path: artifacts/manual-address-twopeer/
+          if-no-files-found: warn
 
   # Additive job — the multi-PROCESS dweb node test (PHASE1-TESTING §A.2),
   # previously run only by hand. Spawns a relay + N real node processes that

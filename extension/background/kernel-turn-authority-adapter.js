@@ -1,5 +1,7 @@
 // @ts-check
 
+import { effectReceiptFields } from './host-effect-verdict.js';
+
 import { createAuthorityEffectScheduler } from './authority-effect-scheduler.js';
 import {
   actorIsolationAvailable,
@@ -3020,12 +3022,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       return {
         ok: detail?.ok === true,
         ...(detail?.ok === true ? fields : { error: detail?.error }),
-        ...(typeof detail?.performed === 'boolean' ? { performed: detail.performed } : {}),
-        ...(typeof detail?.outcomeKnown === 'boolean'
-          ? { outcomeKnown: detail.outcomeKnown } : {}),
-        ...(typeof detail?.outcomeKind === 'string'
-          ? { outcomeKind: detail.outcomeKind } : {}),
-        ...(typeof detail?.retryable === 'boolean' ? { retryable: detail.retryable } : {}),
+        ...effectReceiptFields(detail),
       };
     };
     const meshDispatch = makeMeshDispatch({
@@ -3153,14 +3150,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
           return {
             ok: false,
             error: result?.error ?? 'The mesh operation failed.',
-            ...(typeof result?.performed === 'boolean'
-              ? { performed: result.performed } : {}),
-            ...(typeof result?.outcomeKnown === 'boolean'
-              ? { outcomeKnown: result.outcomeKnown } : {}),
-            ...(typeof result?.outcomeKind === 'string'
-              ? { outcomeKind: result.outcomeKind } : {}),
-            ...(typeof result?.retryable === 'boolean'
-              ? { retryable: result.retryable } : {}),
+            ...effectReceiptFields(result),
           };
         }
         return { ok: true, value: shapeMeshResult(message.method ?? '', result) };
@@ -3168,12 +3158,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         const detail = /** @type {any} */ (cause);
         return {
           ok: false, error: detail?.message ?? String(cause),
-          ...(typeof detail?.performed === 'boolean' ? { performed: detail.performed } : {}),
-          ...(typeof detail?.outcomeKnown === 'boolean'
-            ? { outcomeKnown: detail.outcomeKnown } : {}),
-          ...(typeof detail?.outcomeKind === 'string'
-            ? { outcomeKind: detail.outcomeKind } : {}),
-          ...(typeof detail?.retryable === 'boolean' ? { retryable: detail.retryable } : {}),
+          ...effectReceiptFields(detail),
         };
       }
     };

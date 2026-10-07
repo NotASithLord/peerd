@@ -19,32 +19,20 @@ export class BundleRejectedError extends Error {
 }
 
 /**
- * Validate a fetched bundle and hand it to `install`.
+ * Validate a fetched bundle without installation, publication, or execution.
  *
  * @param {{
  *   uri: string,
  *   manifest: any,
  *   payload: Uint8Array,
- *   install: (app: {
- *     name: string,
- *     files: Record<string, Uint8Array>,
- *     fileKinds: Record<string, 'text' | 'binary'>,
- *     entryFile: string,
- *     dweb: { uri: string, publisher: string | null, hash: string,
- *             version_id: string, dwapp_id?: string, slug?: string, seq?: number,
- *             published_hashes?: string[], previous_version_id?: string,
- *             source_git_oid?: string, changelog?: string, release_entry_file: string,
- *             release_file_kinds: Record<string, 'text' | 'binary'> },
- *   }) => Promise<any>,
  *   name?: string,
  *   dwappId?: string | null,
  *   slug?: string | null,
  *   seq?: number | null,
  *   expectedPublisher?: string | null,
  * }} opts
- * @returns {Promise<any>} whatever `install` resolves to (the app record)
  */
-export const installAppBundle = async ({ uri, manifest, payload, install, name, dwappId = null, slug = null, seq = null, expectedPublisher = null }) => {
+export const prepareAppBundle = async ({ uri, manifest, payload, name, dwappId = null, slug = null, seq = null, expectedPublisher = null }) => {
   // Re-verify the commitment chain even though fetchBundle already did.
   assertBundleWithinLimits(manifest);
   const hash = await manifestHash(manifest);
@@ -122,7 +110,7 @@ export const installAppBundle = async ({ uri, manifest, payload, install, name, 
   const total = Object.values(files).reduce((n, bytes) => n + bytes.byteLength, 0);
   if (total > MAX_TOTAL_BYTES) throw new BundleRejectedError(`bundle too large: ${total} bytes`);
 
-  return install({
+  return {
     name: name ?? manifest.name ?? `peerd app ${hash.slice(0, 8)}`,
     files,
     fileKinds,
@@ -147,5 +135,11 @@ export const installAppBundle = async ({ uri, manifest, payload, install, name, 
       ...(typeof manifest.meta?.release?.changelog === 'string'
         ? { changelog: manifest.meta.release.changelog.slice(0, 1200) } : {}),
     },
-  });
+  };
 };
+
+// why: inspection and installation must validate the identical commitment chain.
+/** @param {Parameters<typeof prepareAppBundle>[0] & {
+ * install: (app: Awaited<ReturnType<typeof prepareAppBundle>>) => Promise<any>
+ * }} opts */
+export const installAppBundle = async ({ install, ...opts }) => install(await prepareAppBundle(opts));

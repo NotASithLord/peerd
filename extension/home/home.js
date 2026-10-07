@@ -101,6 +101,19 @@ const loadOnboarding = () => {
     .finally(() => { onboardingLoading = false; m.redraw(); });
 };
 
+// why: address parsing and details belong only to the explicit Discover surface.
+/** @type {any} */ let AddressSection = null;
+let addressLoading = false;
+let addressFailed = false;
+const loadAddressSection = () => {
+  if (AddressSection || addressLoading) return;
+  addressLoading = true;
+  import('./immutable-address-section.js')
+    .then(mod => { AddressSection = mod.ImmutableAddressSection; addressFailed = false; })
+    .catch(() => { addressFailed = true; })
+    .finally(() => { addressLoading = false; m.redraw(); });
+};
+
 const ALL_VIEWS = new Set(['chat', 'chats', 'actors', 'library', 'eval', 'discover', 'contacts', 'network']);
 /** @param {string | null | undefined} v */
 const isValidView = (v) => !!v && ALL_VIEWS.has(v) && (!DWEB_VIEWS.has(v) || DWEB_ENABLED);
@@ -766,11 +779,15 @@ const content = (showDweb) => {
   }
   if (activeView === 'discover' && DWEB_ENABLED) {
     loadOnboarding();
+    if (!addressFailed) loadAddressSection();
     if (!NetworkChoice) return onboardingFailed
       ? m('button', { onclick: loadOnboarding }, 'Retry loading network controls')
       : m('p', { role: 'status' }, 'Loading network controls…');
     return m('div', [
       m(NetworkChoice, { enabled: !!showDweb, send, reconcileState }),
+      AddressSection ? m(AddressSection, { send, enabled: !!showDweb })
+        : addressFailed ? m('button', { onclick: loadAddressSection }, 'Retry loading App addresses')
+          : m('p', { role: 'status' }, 'Loading App addresses…'),
       showDweb ? m(DiscoverSection, { send }) : null,
     ]);
   }

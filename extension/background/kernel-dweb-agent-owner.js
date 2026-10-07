@@ -1,5 +1,7 @@
 // @ts-check
 
+import { effectReceiptFields } from './host-effect-verdict.js';
+
 import { makeDwebInboundRateCap } from './dweb-inbound-rate-cap.js';
 
 export const DWEB_AGENT_ROOM = 'peerd-agent';
@@ -145,14 +147,7 @@ export const createKernelDwebAgentOwner = (deps) => {
                     type: 'a2a_reply_failed',
                     details: {
                       did, convId: id, error: sent?.error ?? 'mesh reply failed',
-                      ...(typeof sent?.performed === 'boolean'
-                        ? { performed: sent.performed } : {}),
-                      ...(typeof sent?.outcomeKnown === 'boolean'
-                        ? { outcomeKnown: sent.outcomeKnown } : {}),
-                      ...(typeof sent?.outcomeKind === 'string'
-                        ? { outcomeKind: sent.outcomeKind } : {}),
-                      ...(typeof sent?.retryable === 'boolean'
-                        ? { retryable: sent.retryable } : {}),
+                      ...effectReceiptFields(sent),
                     },
                   });
                 }
