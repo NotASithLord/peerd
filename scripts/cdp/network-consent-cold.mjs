@@ -211,7 +211,7 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
       // Blank offscreen/worker URLs can become extension-owned on first script.
       // Root owns service workers; descendants only discover frames and workers.
       if (targetInfo.url && targetInfo.url !== 'about:blank' && !ownedUrl(targetInfo.url)) {
-        if (waitingForDebugger) { await send('Runtime.runIfWaitingForDebugger'); waitingForDebugger = false; }
+        if (waitingForDebugger) await send('Runtime.runIfWaitingForDebugger');
         await connection.send('Target.detachFromTarget', { sessionId });
         sessions.delete(sessionId);
         owners.delete(targetInfo.targetId);
@@ -231,7 +231,7 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
       await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true,
         flatten: true, filter: CHILD_TARGET_FILTER });
       if (waitingForDebugger && ['worker', 'shared_worker', 'service_worker'].includes(targetInfo.type)) {
-        waitingForDebugger = false; // The pre-execution trap exclusively owns release.
+        // The pre-execution trap exclusively owns release.
         await instrumentPausedTarget(connection, sessionId, diagnostic, pause => {
           evidence.pauses ??= [];
           if (evidence.pauses.length < 32) evidence.pauses.push({ sessionId, phase: evidence.phase, at: Date.now(), ...pause });
@@ -241,7 +241,6 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
         await diagnostic(`page observer ready session=${sessionId}`, () => ready);
         if (waitingForDebugger) {
           await send('Runtime.runIfWaitingForDebugger');
-          waitingForDebugger = false;
         }
       } else {
         const result = await send('Runtime.evaluate', { expression: OBSERVER_SOURCE, returnByValue: true });
