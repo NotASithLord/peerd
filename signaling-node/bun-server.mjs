@@ -18,7 +18,7 @@
 
 import {
   signalingStep,
-  initialSignalingState,
+  initialSignalingState, sparsePublicProfile,
 } from '../extension/peerd-distributed/transport/signaling.js';
 
 // PORT unset → the default 8799; PORT=0 → an OS-chosen ephemeral port (the
@@ -62,7 +62,7 @@ const apply = (actions) => {
   }
 };
 const step = (event) => {
-  const r = signalingStep(state, event);
+  const r = signalingStep(state, event, { now: Date.now(), random: Math.random });
   state = r.state;
   apply(r.actions);
   return r.actions;
@@ -98,24 +98,25 @@ const server = Bun.serve({
     if (!key) return new Response('missing ?key', { status: 400 });
     // 'website' = observe-only visitor (own cap pool); omitted/default = extension.
     const kind = url.searchParams.get('kind') === 'website' ? 'website' : 'extension';
-    if (server.upgrade(req, { data: { connId: String(nextId++), key, kind } })) return undefined;
+    const profile = kind === 'website' ? null : sparsePublicProfile(key, url.searchParams.get('profile'));
+    if (server.upgrade(req, { data: { connId: String(nextId++), key, kind, profile } })) return undefined;
     return new Response('expected websocket', { status: 426 });
   },
   websocket: {
     // Reject oversized frames at the runtime layer (before buffering).
     maxPayloadLength: MAX_MSG_BYTES,
     open(ws) {
-      const { connId, key, kind } = ws.data;
+      const { connId, key, kind, profile } = ws.data;
       ws.data.windowStart = Date.now();
       ws.data.msgCount = 0;
       reapDead(); // clear ghosts BEFORE this join is counted
       conns.set(connId, ws);
-      const actions = step({ t: 'join', connId, key, kind });
+      const actions = step({ t: 'join', connId, key, kind, profile });
       const full = actions.some((a) => a.t === 'send' && a.msg?.t === 'full');
       if (full) {
-        console.log(`${T} 🚫 FULL — rejected ${connId} (room "${key}" already at cap with [${roster(key).join(', ')}])`);
+        console.log(`${T} 🚫 FULL: rejected ${connId} (room "${key}" already at cap)`);
       } else {
-        console.log(`${T} ➕ JOIN ${connId} → room "${key}" — now ${roster(key).length}: [${roster(key).join(', ')}]`);
+        console.log(`${T} ➕ JOIN ${connId} → room "${key}": now ${roster(key).length}`);
       }
     },
     message(ws, raw) {
@@ -128,17 +129,15 @@ const server = Bun.serve({
       if (++ws.data.msgCount > MSG_RATE_LIMIT) { ws.close(1008, 'rate limit exceeded'); return; }
       let m;
       try { m = JSON.parse(raw); } catch { return; }
-      if (m && m.t === 'signal') {
-        // `to` is the target member id; the reducer enforces room scoping.
-        console.log(`${T} 🔁 SIGNAL ${ws.data.connId} → ${m.to} (opaque ${typeof m.payload === 'object' && m.payload?.type ? m.payload.type : '?'})`);
-        step({ t: 'signal', connId: ws.data.connId, to: m.to, payload: m.payload });
+      if (m && (m.t === 'signal' || m.t === 'sample')) {
+        step({ t: m.t, connId: ws.data.connId, to: m.to, payload: m.payload, requestId: m.requestId });
       }
     },
     close(ws) {
       const { connId, key } = ws.data;
       step({ t: 'leave', connId });
       conns.delete(connId);
-      console.log(`${T} ➖ LEAVE ${connId} → room "${key}" — now ${roster(key).length}: [${roster(key).join(', ')}]`);
+      console.log(`${T} ➖ LEAVE ${connId} → room "${key}": now ${roster(key).length}`);
     },
   },
 });
@@ -146,4 +145,4 @@ const server = Bun.serve({
 // why server.port (not PORT): a caller may pass PORT=0 for an ephemeral port
 // (the two-peer test harness does) — print the ACTUAL bound port so it can read
 // it back, instead of probing-then-binding (a TOCTOU race on the port).
-console.log(`${T} listening — ws://localhost:${server.port}/rendezvous?key=<room>  (verbose; Ctrl-C to stop)`);
+console.log(`${T} listening: ws://localhost:${server.port}/rendezvous?key=<room>  (verbose; Ctrl-C to stop)`);

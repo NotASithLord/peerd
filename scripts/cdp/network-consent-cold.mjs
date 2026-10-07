@@ -77,6 +77,10 @@ class ObserverClosedError extends Error {
   constructor() { super('Consent observer closed'); this.name = 'ObserverClosedError'; }
 }
 
+class ObserverDetachedError extends ObserverClosedError {
+  constructor(sessionId) { super(); this.message = `Consent observer target detached: ${sessionId}`; this.name = 'ObserverDetachedError'; }
+}
+
 // Host deadlines remain effective when a renderer is paused or its socket disappears.
 export const createConsentDiagnostics = (evidence, persist, timeoutMs = 15_000) => {
   let sequence = 0;
@@ -193,19 +197,29 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
   const lifetime = new AbortController();
   const cancelled = new ObserverClosedError();
   let closing = false;
-  const activeDiagnostic = (label, operation, budgetMs = undefined) => closing
+  const scopes = new Map();
+  const activeDiagnostic = (label, operation, budgetMs = undefined, signal = lifetime.signal) => closing
     ? Promise.reject(cancelled)
-    : diagnostic(label, operation, budgetMs, lifetime.signal);
-  connection.send = (method, params = {}, sessionId) => activeDiagnostic(
+    : diagnostic(label, operation, budgetMs, signal);
+  const scopedDiagnostic = (sessionId, label, operation, budgetMs = undefined, signal = lifetime.signal) => {
+    const scope = scopes.get(sessionId);
+    if (scope?.detached) return Promise.reject(scope.reason);
+    return activeDiagnostic(label, operation, budgetMs, scope ? AbortSignal.any([scope.signal, signal]) : signal);
+  };
+  connection.send = (method, params = {}, sessionId, signal = lifetime.signal) => scopedDiagnostic(sessionId,
     `${method} session=${sessionId ?? 'browser'}`, () => {
       if (closing) throw cancelled;
+      const scope = scopes.get(sessionId);
+      if (scope?.detached) throw scope.reason;
       lifetime.signal.throwIfAborted();
       return nativeSend(method, params, sessionId);
-    });
+    }, undefined, signal);
   const sessions = new Map();
   const owners = new Map();
   const readiness = new Map();
   const installing = new Set();
+  const retirements = new Map();
+  let revision = 0;
   let closePromise;
   const origin = `chrome-extension://${ctx.sw.id}/`;
   const ownedUrl = url => String(url ?? '').startsWith(origin) || String(url ?? '').startsWith(`blob:${origin}`);
@@ -216,13 +230,36 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
     persist();
   };
   // why: closing only explains our own cancellation, never a real protocol failure.
-  const failed = error => { if (error !== cancelled) { evidence.observerErrors.push(String(error?.stack ?? error)); persist(); } };
+  const failed = error => { if (error !== cancelled && !(error instanceof ObserverDetachedError)) { evidence.observerErrors.push(String(error?.stack ?? error)); persist(); } };
+  const retire = (sessionId, destroyed = false) => {
+    const scope = scopes.get(sessionId);
+    if (!scope || scope.excluded || closing) return;
+    if (destroyed) { scope.destroyed = true; scope.destroyedReady(); }
+    if (scope.detached) return;
+    scope.detached = true; revision++;
+    retirements.set(sessionId, scope);
+    if (!scope.ready && !closing) failed(new Error(`Unobserved target detached: ${scope.target.targetId}`));
+    // Preserve already-queued protocol rejections before cancelling this target's waits.
+    const cancelling = new Promise(resolve => setTimeout(resolve, 0)).then(() => scope.controller.abort(scope.reason));
+    installing.add(cancelling);
+    cancelling.finally(() => installing.delete(cancelling));
+    if (owners.get(scope.target.targetId) === sessionId) owners.delete(scope.target.targetId);
+    sessions.delete(sessionId); readiness.delete(sessionId);
+  };
   const install = async ({ sessionId, targetInfo, waitingForDebugger }) => {
     lifetime.signal.throwIfAborted();
     if (owners.has(targetInfo.targetId)) {
       await connection.send('Target.detachFromTarget', { sessionId });
       return;
     }
+    requireResult(scopes.size < 256, 'Consent observer target budget exceeded');
+    const controller = new AbortController();
+    let destroyedReady;
+    const destroyedWait = new Promise(resolve => { destroyedReady = resolve; });
+    scopes.set(sessionId, { controller, signal: AbortSignal.any([lifetime.signal, controller.signal]),
+      reason: new ObserverDetachedError(sessionId), target: targetInfo, ready: false, detached: false,
+      destroyed: false, destroyedReady, destroyedWait, excluded: false });
+    revision++;
     owners.set(targetInfo.targetId, sessionId);
     sessions.set(sessionId, targetInfo);
     let markReady;
@@ -236,11 +273,12 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
       // Blank offscreen/worker URLs can become extension-owned on first script.
       // Root owns service workers; descendants only discover frames and workers.
       if (targetInfo.url && targetInfo.url !== 'about:blank' && !ownedUrl(targetInfo.url)) {
+        scopes.get(sessionId).excluded = true;
         if (waitingForDebugger) await send('Runtime.runIfWaitingForDebugger');
         await connection.send('Target.detachFromTarget', { sessionId });
         sessions.delete(sessionId);
         owners.delete(targetInfo.targetId);
-        readiness.delete(sessionId);
+        readiness.delete(sessionId); scopes.delete(sessionId);
         return;
       }
       await send('Runtime.enable');
@@ -257,13 +295,14 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
         flatten: true, filter: CHILD_TARGET_FILTER });
       if (waitingForDebugger && ['worker', 'shared_worker', 'service_worker'].includes(targetInfo.type)) {
         // The pre-execution trap exclusively owns release.
-        await instrumentPausedTarget(connection, sessionId, activeDiagnostic, pause => {
+        await instrumentPausedTarget(connection, sessionId,
+          (label, operation, budgetMs = undefined) => scopedDiagnostic(sessionId, label, operation, budgetMs), pause => {
           evidence.pauses ??= [];
           if (evidence.pauses.length < 32) evidence.pauses.push({ sessionId, phase: evidence.phase, at: Date.now(), ...pause });
           persist();
         });
       } else if (pageTarget) {
-        await activeDiagnostic(`page observer ready session=${sessionId}`, () => ready);
+        await scopedDiagnostic(sessionId, `page observer ready session=${sessionId}`, () => ready);
         if (waitingForDebugger) {
           await send('Runtime.runIfWaitingForDebugger');
         }
@@ -275,7 +314,10 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
     finally { readiness.delete(sessionId); }
   };
   const listener = (method, params, message) => {
-    if (['Runtime.executionContextDestroyed', 'Runtime.executionContextsCleared', 'Target.targetDestroyed', 'Inspector.detached'].includes(method)) {
+    if (method === 'Target.targetDestroyed') {
+      lifecycle({ method, targetId: params.targetId });
+      for (const [sessionId, scope] of scopes) if (scope.target.targetId === params.targetId) retire(sessionId, true);
+    } else if (['Runtime.executionContextDestroyed', 'Runtime.executionContextsCleared', 'Inspector.detached'].includes(method)) {
       lifecycle({ method, sessionId: message.sessionId, targetId: params.targetId, executionContextId: params.executionContextId });
     } else if (['Runtime.exceptionThrown', 'Runtime.consoleAPICalled'].includes(method)) {
       const labels = lifecycleErrorLabels(method === 'Runtime.exceptionThrown'
@@ -294,14 +336,19 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
     } else if (method === 'Target.detachedFromTarget') {
       const target = sessions.get(params.sessionId);
       lifecycle({ method, sessionId: params.sessionId, targetId: target?.targetId ?? params.targetId });
-      if (target && owners.get(target.targetId) === params.sessionId) owners.delete(target.targetId);
-      sessions.delete(params.sessionId);
-      readiness.delete(params.sessionId);
+      if (target && owners.get(target.targetId) === params.sessionId) retire(params.sessionId);
+      if (scopes.get(params.sessionId)?.excluded) {
+        owners.delete(target?.targetId); sessions.delete(params.sessionId); readiness.delete(params.sessionId);
+      }
     }
     else if (method === 'Runtime.bindingCalled' && params.name === BINDING) {
       try {
         const event = JSON.parse(params.payload);
-        if (event.kind === 'observer-ready') readiness.get(message.sessionId)?.();
+        if (event.kind === 'observer-ready') {
+          const scope = scopes.get(message.sessionId);
+          if (scope && !scope.detached) scope.ready = true;
+          readiness.get(message.sessionId)?.();
+        }
         if (ownedUrl(event.href)) {
           const target = sessions.get(message.sessionId);
           if (target) target.url = event.href;
@@ -335,13 +382,14 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
         requireResult(evidence.observerErrors.length === 0, `Observer failed: ${evidence.observerErrors.join('\n')}`);
       } finally {
         connection.off(listener); connection.close();
-        sessions.clear(); owners.clear(); readiness.clear();
+        sessions.clear(); owners.clear(); readiness.clear(); scopes.clear(); retirements.clear();
       }
     })();
     return closePromise;
   };
   connection.on(listener);
   try {
+    await connection.send('Target.setDiscoverTargets', { discover: true, filter: [{}] });
     await connection.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true, filter: ROOT_TARGET_FILTER });
     await activeDiagnostic('observer installations', async () => {
           while (installing.size) await Promise.all([...installing]);
@@ -350,22 +398,63 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
       && event.href.includes('/home/home.html')), { budgetMs: 10_000, pollMs: 25 }), 'Home observer never armed');
     return {
       async barrier() {
-        await activeDiagnostic('observer installations', async () => {
-          while (installing.size) await Promise.all([...installing]);
-        }, 120_000);
-        // Drain CDP events already emitted by each live extension realm.
-        for (const [sessionId, target] of sessions) {
-          if (ownedUrl(target.url)) await connection.send('Runtime.evaluate', { expression: '0' }, sessionId);
-        }
-        requireResult(evidence.observerErrors.length === 0, `Observer failed: ${evidence.observerErrors.join('\n')}`);
+        const barrierLifetime = new AbortController();
+        const signal = AbortSignal.any([lifetime.signal, barrierLifetime.signal]);
+        const checkActive = () => signal.throwIfAborted();
+        try { await activeDiagnostic('observer stable barrier', async () => {
+          // why: a retired realm cannot answer a drain command. Only browser
+          // destruction evidence discharges that obligation; detach alone never does.
+          for (let pass = 0; pass < 8; pass++) {
+            checkActive();
+            const startRevision = revision;
+            await activeDiagnostic('barrier installations', async () => {
+              while (installing.size) { checkActive(); await Promise.all([...installing]); }
+              checkActive();
+            }, 30_000, signal);
+            checkActive();
+            requireResult(evidence.observerErrors.length === 0, `Observer failed: ${evidence.observerErrors.join('\n')}`);
+            for (const [sessionId, scope] of [...retirements]) {
+              requireResult(scope.ready, `Unobserved target retired: ${scope.target.targetId}`);
+              await activeDiagnostic(`target destruction target=${scope.target.targetId}`, () => scope.destroyedWait, 3_000, signal);
+              checkActive();
+              lifecycle({ method: 'observer.retirementConfirmed', sessionId, targetId: scope.target.targetId });
+              retirements.delete(sessionId); scopes.delete(sessionId);
+            }
+            let changed = false;
+            for (const [sessionId, target] of [...sessions]) {
+              if (!ownedUrl(target.url)) continue;
+              try { await connection.send('Runtime.evaluate', { expression: '0' }, sessionId, signal); }
+              catch (error) {
+                if (!(error instanceof ObserverDetachedError)) throw error;
+                changed = true; break;
+              }
+            }
+            // Explicit all-target inventory is coverage evidence, never a substitute
+            // for the correlated destruction event required above.
+            checkActive();
+            const inventory = await connection.send('Target.getTargets', { filter: [{}] }, undefined, signal);
+            checkActive();
+            requireResult(Array.isArray(inventory.targetInfos), 'Observer target inventory missing');
+            if (changed || revision !== startRevision || installing.size || retirements.size) continue;
+            for (const target of inventory.targetInfos) {
+              if (!ownedUrl(target.url) || !['page', 'iframe', 'other', 'worker', 'shared_worker', 'service_worker'].includes(target.type)) continue;
+              const sessionId = owners.get(target.targetId);
+              requireResult(sessionId && scopes.get(sessionId)?.ready && !scopes.get(sessionId)?.detached,
+                `Live target lacks observer: ${target.targetId}`);
+            }
+            requireResult(evidence.observerErrors.length === 0, `Observer failed: ${evidence.observerErrors.join('\n')}`);
+            return;
+          }
+          throw new Error('Consent observer target churn exceeded barrier budget');
+        }, 30_000, signal); }
+        finally { barrierLifetime.abort(new Error('Consent observer barrier settled')); }
       },
       async releaseWorker(targetId) {
         for (const [sessionId, target] of sessions) {
           if (target.targetId === targetId) {
             await connection.send('Target.detachFromTarget', { sessionId });
-            sessions.delete(sessionId);
-            owners.delete(target.targetId);
-            readiness.delete(sessionId);
+            // The reply may precede detachedFromTarget; keep the destruction obligation.
+            retire(sessionId);
           }
         }
       },

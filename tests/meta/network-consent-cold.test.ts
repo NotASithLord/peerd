@@ -188,6 +188,7 @@ test('enabled Page preload covers the runtime-created current document before of
     on: (listener: any) => listeners.add(listener), off: (listener: any) => listeners.delete(listener), close() {},
     async send(method: string, params: any = {}, sessionId?: string): Promise<any> {
       calls.push({ method, params, sessionId });
+      if (method === 'Target.getTargets') return { targetInfos: [...targets.values()] };
       if (method === 'Target.setAutoAttach' && params.autoAttach) {
         if (!sessionId) {
           target('home', 'home', 'page', `${origin}home/home.html`, false);
@@ -313,6 +314,7 @@ const teardownObserver = async (blockedMethod: string) => {
     close() { closes++; },
     async send(method: string, params: any = {}, sessionId?: string): Promise<any> {
       calls.push({ method, params, sessionId });
+      if (method === 'Target.getTargets') return { targetInfos: [] };
       if (method === 'Debugger.setInstrumentationBreakpoint') return { breakpointId: 'first' };
       if (sessionId === 'held' && blockedMethod === 'first-script' && method === 'Runtime.runIfWaitingForDebugger') {
         entered(); return {}; // The target never reaches the promised first-script pause.
@@ -425,4 +427,191 @@ test('close fences an installation whose first native dispatch is still queued',
   expect(fixture.evidence.commands.some((entry: any) => entry.status === 'failed' || entry.status === 'pending')).toBe(false);
   expect(fixture.evidence.observerErrors).toEqual([]);
   expect(fixture.listeners.size).toBe(0);
+});
+
+
+const retirementObserver = async (barrierBudgetMs = 30_000) => {
+  const { observeHosts, createConsentDiagnostics } = await import('../../scripts/cdp/network-consent-cold.mjs');
+  const listeners = new Set<any>();
+  const targets = new Map<string, any>();
+  const calls: { method: string; sessionId?: string; params: any }[] = [];
+  const evidence: any = { phase: 'before-choice', events: [], observerErrors: [] };
+  let onDrain: (sessionId: string) => any = () => ({});
+  let inventoryFails = false;
+  const emit = (method: string, params: any, sessionId?: string) => {
+    for (const listener of [...listeners]) listener(method, params, { sessionId });
+  };
+  const ready = (sessionId: string) => emit('Runtime.bindingCalled', { name: '__peerdConsentTransportObserved',
+    payload: JSON.stringify({ kind: 'observer-ready', href: targets.get(sessionId).url }) }, sessionId);
+  const target = (sessionId: string) => {
+    const targetInfo = { targetId: sessionId, type: sessionId === 'home' ? 'page' : 'worker',
+      url: `chrome-extension://fixture/${sessionId === 'home' ? 'home/home.html' : 'offscreen/controller-worker.js'}` };
+    targets.set(sessionId, targetInfo);
+    emit('Target.attachedToTarget', { sessionId, targetInfo, waitingForDebugger: false });
+  };
+  const connection = {
+    events: [], on: (listener: any) => listeners.add(listener), off: (listener: any) => listeners.delete(listener), close() {},
+    async send(method: string, params: any = {}, sessionId?: string): Promise<any> {
+      calls.push({ method, sessionId, params });
+      if (method === 'Target.setAutoAttach' && params.autoAttach && !sessionId) target('home');
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') ready(sessionId!);
+      if (method === 'Runtime.evaluate') {
+        if (params.expression === '0') return onDrain(sessionId!);
+        ready(sessionId!);
+      }
+      if (method === 'Target.getTargets') {
+        expect(params.filter).toEqual([{}]);
+        if (inventoryFails) throw new Error('fixture inventory failure');
+        return { targetInfos: [...targets.values()] };
+      }
+      return {};
+    },
+  };
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => Response.json({ webSocketDebuggerUrl: 'fake' }) });
+  try {
+    const diagnostic = createConsentDiagnostics(evidence, () => {}, 50);
+    const observer = await observeHosts({ port: server.port, sw: { id: 'fixture' } }, evidence,
+      (...[label, operation, budget, signal]: Parameters<typeof diagnostic>) =>
+        diagnostic(label, operation, label === 'observer stable barrier' ? barrierBudgetMs : budget, signal),
+      () => {}, async () => connection);
+    return { observer, evidence, calls, emit, target, targets,
+      onDrain: (callback: typeof onDrain) => { onDrain = callback; },
+      failInventory: () => { inventoryFails = true; },
+      retire(sessionId: string, destroyed = true) {
+        emit('Target.detachedFromTarget', { sessionId, targetId: sessionId });
+        if (destroyed) { targets.delete(sessionId); emit('Target.targetDestroyed', { targetId: sessionId }); }
+      } };
+  } finally { server.stop(true); }
+};
+
+test('a destroyed observed target cancels its drain and replacement must pass the reconciled barrier', async () => {
+  const fixture = await retirementObserver();
+  fixture.target('old');
+  await fixture.observer.barrier();
+  let finish!: (value: any) => void;
+  fixture.onDrain(sessionId => {
+    if (sessionId !== 'old') return {};
+    fixture.retire('old'); fixture.target('replacement');
+    return new Promise(resolve => { finish = resolve; });
+  });
+  await fixture.observer.barrier();
+  expect(fixture.calls.some(call => call.method === 'Runtime.evaluate' && call.sessionId === 'replacement' && call.params.expression === '0')).toBe(true);
+  expect(fixture.evidence.lifecycle.some((entry: any) => entry.method === 'observer.retirementConfirmed' && entry.targetId === 'old')).toBe(true);
+  expect(fixture.evidence.commands.some((entry: any) => entry.label === 'Runtime.evaluate session=old' && entry.status === 'cancelled')).toBe(true);
+  const snapshot = JSON.stringify(fixture.evidence);
+  finish({}); await Promise.resolve(); await Promise.resolve();
+  expect(JSON.stringify(fixture.evidence)).toBe(snapshot);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  expect(JSON.stringify(fixture.evidence)).toBe(snapshot);
+  fixture.emit('Runtime.bindingCalled', { name: '__peerdConsentTransportObserved',
+    payload: JSON.stringify({ kind: 'WebSocket', href: 'chrome-extension://fixture/offscreen/controller-worker.js' }) }, 'old');
+  expect(() => assertNoTransport(fixture.evidence.events, 'retired realm')).toThrow('transport before consent');
+  await fixture.observer.close();
+});
+
+test('detached but live target cannot discharge a barrier and failed inventory is not absence', async () => {
+  const live = await retirementObserver();
+  live.target('old'); await live.observer.barrier();
+  live.onDrain(sessionId => {
+    if (sessionId !== 'old') return {};
+    live.retire('old', false); return new Promise(() => {});
+  });
+  await expect(live.observer.barrier()).rejects.toThrow('target destruction target=old');
+  expect(live.targets.has('old')).toBe(true);
+  await live.observer.close();
+  const missing = await retirementObserver();
+  missing.failInventory();
+  await expect(missing.observer.barrier()).rejects.toThrow('fixture inventory failure');
+  await missing.observer.close();
+}, 5_000);
+
+test('a newly live unobserved target and repeated target churn fail closed', async () => {
+  const unseen = await retirementObserver();
+  unseen.targets.set('unseen', { targetId: 'unseen', type: 'worker', url: 'chrome-extension://fixture/worker.js' });
+  await expect(unseen.observer.barrier()).rejects.toThrow('Live target lacks observer: unseen');
+  await unseen.observer.close();
+  const churn = await retirementObserver();
+  let generation = 0;
+  churn.target('worker0'); await churn.observer.barrier();
+  churn.onDrain(sessionId => {
+    if (sessionId === 'home') return {};
+    churn.retire(sessionId); churn.target(`worker${++generation}`); return new Promise(() => {});
+  });
+  await expect(churn.observer.barrier()).rejects.toThrow('target churn exceeded barrier budget');
+  expect(generation).toBe(8);
+  await churn.observer.close();
+});
+
+
+test('duplicate session detach preserves its observed owner, but pre-ready detach is fatal', async () => {
+  const duplicate = await retirementObserver();
+  duplicate.target('old'); await duplicate.observer.barrier();
+  duplicate.emit('Target.attachedToTarget', { sessionId: 'duplicate', targetInfo: duplicate.targets.get('old'), waitingForDebugger: false });
+  duplicate.emit('Target.detachedFromTarget', { sessionId: 'duplicate', targetId: 'old' });
+  await duplicate.observer.barrier();
+  expect(duplicate.evidence.observerErrors).toEqual([]);
+  expect(duplicate.evidence.lifecycle.some((entry: any) => entry.method === 'observer.retirementConfirmed')).toBe(false);
+  await duplicate.observer.close();
+  const unobserved = await retirementObserver();
+  unobserved.target('too-soon'); unobserved.retire('too-soon');
+  await expect(unobserved.observer.barrier()).rejects.toThrow('Unobserved target detached: too-soon');
+  await expect(unobserved.observer.close()).rejects.toThrow('Unobserved target detached: too-soon');
+});
+
+test('same-turn real protocol failure is not erased by target destruction', async () => {
+  const fixture = await retirementObserver();
+  fixture.target('old'); await fixture.observer.barrier();
+  fixture.onDrain(sessionId => {
+    if (sessionId !== 'old') return {};
+    const failure = Promise.reject(new Error('real drain failure'));
+    fixture.retire('old'); return failure;
+  });
+  await expect(fixture.observer.barrier()).rejects.toThrow('real drain failure');
+  expect(fixture.evidence.commands.some((entry: any) => entry.label === 'Runtime.evaluate session=old'
+    && entry.status === 'failed' && entry.error.includes('real drain failure'))).toBe(true);
+  await fixture.observer.close();
+});
+
+
+test('destruction before detach discharges only its exact observed target', async () => {
+  const fixture = await retirementObserver();
+  fixture.target('old'); await fixture.observer.barrier();
+  fixture.onDrain(sessionId => {
+    if (sessionId !== 'old') return {};
+    fixture.targets.delete('old');
+    fixture.emit('Target.targetDestroyed', { targetId: 'old' });
+    fixture.emit('Target.detachedFromTarget', { sessionId: 'old', targetId: 'old' });
+    return new Promise(() => {});
+  });
+  await fixture.observer.barrier();
+  expect(fixture.evidence.lifecycle.filter((entry: any) => entry.method === 'observer.retirementConfirmed')).toHaveLength(1);
+  await fixture.observer.close();
+});
+
+test('explicit worker handoff retains destruction proof even when detach notification follows its reply', async () => {
+  const fixture = await retirementObserver();
+  fixture.target('old'); await fixture.observer.barrier();
+  await fixture.observer.releaseWorker('old');
+  fixture.targets.delete('old'); // Inventory absence alone is not proof.
+  fixture.emit('Target.detachedFromTarget', { sessionId: 'old', targetId: 'old' });
+  await expect(fixture.observer.barrier()).rejects.toThrow('target destruction target=old');
+  fixture.emit('Target.targetDestroyed', { targetId: 'old' });
+  await fixture.observer.close();
+}, 5_000);
+
+test('barrier deadline cancels its pending command and forbids late continuation or report mutation', async () => {
+  const fixture = await retirementObserver(10);
+  fixture.target('held'); await fixture.observer.barrier();
+  let finish!: (value: any) => void;
+  fixture.onDrain(sessionId => sessionId === 'held' ? new Promise(resolve => { finish = resolve; }) : {});
+  await expect(fixture.observer.barrier()).rejects.toThrow('Consent deadline: observer stable barrier');
+  // Permit rejection propagation, not target completion, to finish cancellation bookkeeping.
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const snapshot = JSON.stringify(fixture.evidence);
+  const calls = [...fixture.calls];
+  finish({}); await new Promise(resolve => setTimeout(resolve, 60));
+  expect(fixture.calls).toEqual(calls);
+  expect(JSON.stringify(fixture.evidence)).toBe(snapshot);
+  expect(fixture.evidence.commands.some((entry: any) => entry.status === 'pending')).toBe(false);
+  await fixture.observer.close();
 });

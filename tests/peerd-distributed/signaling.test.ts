@@ -3,7 +3,7 @@ import {
   signalingStep,
   initialSignalingState,
   ROOM_CAP,
-  WEBSITE_CAP,
+  WEBSITE_CAP, PUBLIC_ROOM, SPARSE_PUBLIC_PROFILE, PUBLIC_MEMBERSHIP_CAP, INTRODUCTION_LIMIT, SAMPLE_INTERVAL_MS,
 } from '../../extension/peerd-distributed/transport/signaling.js';
 
 // Drive the pure reducer the way a shell would: thread state through, read
@@ -182,5 +182,89 @@ describe('per-kind caps (real extensions vs website observers)', () => {
     const r = signalingStep(afterLeave.state, { t: 'join', connId: 'w-new', key: 'r', kind: 'website' });
     expect(r.state.rooms.r).toContain('w-new');
     expect(r.actions.find((a: any) => a.connId === 'w-new' && a.msg?.t === 'full')).toBeUndefined();
+  });
+});
+
+
+describe('negotiated sparse public membership', () => {
+  const join = (connId: string, key = PUBLIC_ROOM, profile: string | undefined = SPARSE_PUBLIC_PROFILE, kind = 'extension') =>
+    ({ t: 'join', connId, key, profile, kind });
+  const messages = (actions: ReturnType<typeof signalingStep>['actions']) => actions.flatMap(a => a.t === 'send' ? [a.msg] : []);
+
+  test('production reducer admits a large membership with bounded introduction work and a hard combined ceiling', () => {
+    let state = initialSignalingState();
+    for (let index = 0; index < PUBLIC_MEMBERSHIP_CAP - ROOM_CAP - WEBSITE_CAP; index++) {
+      const result = signalingStep(state, join(`s${index}`), { now: 100, random: () => 0.5 });
+      state = result.state;
+      expect(result.actions.length).toBeLessThanOrEqual(INTRODUCTION_LIMIT + 1);
+      const reply = messages(result.actions)[0];
+      expect(reply).toMatchObject({ t: 'room', profile: SPARSE_PUBLIC_PROFILE,
+        sampleLimit: INTRODUCTION_LIMIT, sampleIntervalMs: SAMPLE_INTERVAL_MS });
+      expect(reply.members.length).toBeLessThanOrEqual(INTRODUCTION_LIMIT);
+      expect(new Set(reply.members).size).toBe(reply.members.length);
+      expect(reply.members).not.toContain(`s${index}`);
+    }
+    expect(messages(signalingStep(state, join('s-over')).actions)).toEqual([{ t: 'full' }]);
+    // Reserve the existing pools: sparse occupants cannot consume their slots.
+    for (const [kind, count] of [['extension', ROOM_CAP], ['website', WEBSITE_CAP]] as const) {
+      for (let index = 0; index < count; index++) {
+        const result = signalingStep(state, join(`${kind}${index}`, PUBLIC_ROOM, 'legacy', kind));
+        state = result.state;
+        expect(messages(result.actions)[0].members.length).toBeLessThanOrEqual(INTRODUCTION_LIMIT);
+        expect(messages(result.actions)[0].profile).toBeUndefined();
+      }
+    }
+    expect(state.rooms[PUBLIC_ROOM]).toHaveLength(PUBLIC_MEMBERSHIP_CAP);
+    expect(messages(signalingStep(state, join('extra')).actions)).toEqual([{ t: 'full' }]);
+    const left = signalingStep(state, { t: 'leave', connId: 's0' });
+    expect(left.actions).toEqual([]);
+    expect(left.state.sparse?.s0).toBeUndefined();
+  });
+
+  test('sampling is correlated, excludes self, stays bounded, and cannot bypass its lease or enrollment', () => {
+    const state = run(Array.from({ length: 40 }, (_, i) => join(`s${i}`))).state;
+    const sample = (requestId: unknown, now: number, current = state, connId = 's0') =>
+      signalingStep(current, { t: 'sample', connId, requestId }, { now, random: () => 0 });
+    for (const requestId of [null, {}, [], 4, '', 'x'.repeat(65), 'bad space', '__bad!']) {
+      expect(sample(requestId, SAMPLE_INTERVAL_MS).actions).toEqual([]);
+    }
+    expect(sample('early', SAMPLE_INTERVAL_MS - 1).actions).toEqual([]);
+    const result = sample('request_1', SAMPLE_INTERVAL_MS);
+    const reply = messages(result.actions)[0];
+    expect(result.actions).toHaveLength(1);
+    expect(reply).toMatchObject({ t: 'sample', requestId: 'request_1' });
+    expect(reply.members).toHaveLength(INTRODUCTION_LIMIT);
+    expect(reply.members).not.toContain('s0');
+    expect(reply.members).toContain('s39'); // injected entropy can introduce later arrivals
+    expect(sample('again', SAMPLE_INTERVAL_MS, result.state).actions).toEqual([]);
+    expect(sample('later', 2 * SAMPLE_INTERVAL_MS, result.state).actions).toHaveLength(1);
+    expect(sample('not-enrolled', 2 * SAMPLE_INTERVAL_MS, state, 'unknown').actions).toEqual([]);
+    expect(state.sparse?.s0).toBe(0); // reducer did not mutate the input
+  });
+
+  test('private/self and unnegotiated public rooms retain complete legacy semantics', () => {
+    for (const key of ['private-code', 'self-device-code', PUBLIC_ROOM]) {
+      const events = Array.from({ length: ROOM_CAP }, (_, i) => join(`l${i}`, key, key === PUBLIC_ROOM ? 'future-profile' : SPARSE_PUBLIC_PROFILE));
+      const { state, log } = run(events);
+      expect(state.sparse).toBeUndefined();
+      expect(log.filter(a => a.msg?.t === 'room').at(-1).msg.members).toHaveLength(ROOM_CAP - 1);
+      expect(messages(signalingStep(state, join('over', key, 'unknown')).actions)).toEqual([{ t: 'full' }]);
+      expect(signalingStep(state, { t: 'sample', connId: 'l0', requestId: 'x' }, { now: SAMPLE_INTERVAL_MS }).actions).toEqual([]);
+      expect(signalingStep(state, { t: 'leave', connId: 'l0' }).actions).toHaveLength(ROOM_CAP - 1);
+    }
+  });
+
+  test('last sparse departure stays bounded and restores only the small legacy roster', () => {
+    let state = run([{ t: 'join', connId: 'legacy', key: PUBLIC_ROOM }, join('sparse')]).state;
+    const result = signalingStep(state, { t: 'leave', connId: 'sparse' });
+    expect(result.actions).toEqual([]);
+    state = result.state;
+    expect(state.sparse).toBeUndefined();
+    const next = signalingStep(state, { t: 'join', connId: 'legacy2', key: PUBLIC_ROOM });
+    expect(messages(next.actions)).toEqual([{ t: 'room', self: 'legacy2', members: ['legacy'] }, { t: 'joined', member: 'legacy2' }]);
+    const cross = run([join('s'), { t: 'join', connId: 'l', key: PUBLIC_ROOM }, { t: 'join', connId: 'private', key: 'private' }]).state;
+    const payload = { arbitrary: 'opaque' };
+    expect(messages(signalingStep(cross, { t: 'signal', connId: 's', to: 'l', payload }).actions)).toEqual([{ t: 'signal', from: 's', payload }]);
+    expect(signalingStep(cross, { t: 'signal', connId: 's', to: 'private', payload }).actions).toEqual([]);
   });
 });
