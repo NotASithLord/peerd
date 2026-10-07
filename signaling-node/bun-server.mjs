@@ -4,145 +4,180 @@
 // SAME signalingStep reducer the browser client and the Cloudflare Worker
 // use (../extension/peerd-distributed/transport/signaling.js). This file
 // is only the shell — it binds a WebSocket, feeds the reducer events, and
-// runs the reducer's actions. Zero signaling logic of its own.
+// runs the reducer's actions. Aggregate admission is Bun process-local.
 //
 //   run:  bun signaling-node/bun-server.mjs        (override: PORT=9000 bun …)
 //   dial: ws://localhost:8799/rendezvous?key=<room>
 //
 // Locally runnable with no cloud account — the exact same reducer that the
-// edge Worker runs, so "test on Bun, deploy on Workers" is one codebase.
+// edge Worker runs. Bun aggregate quotas do not imply Worker budget parity.
 //
-// VERBOSE by default (every join/leave/signal/reap with room sizes) so the
-// terminal IS the troubleshooting view. The Bun node is the easiest way to
-// see what the rendezvous is doing — far more visible than `wrangler tail`.
+// Logs contain only the listening address, never signaling payloads.
 
 import {
   signalingStep,
   initialSignalingState, sparsePublicProfile,
 } from '../extension/peerd-distributed/transport/signaling.js';
 
-// PORT unset → the default 8799; PORT=0 → an OS-chosen ephemeral port (the
-// test harness uses this and reads the real port off the "listening" log line).
-// A bare `|| 8799` would wrongly treat 0 as "unset" and re-pin 8799.
-const PORT = process.env.PORT !== undefined ? Number(process.env.PORT) : 8799;
-const T = '\x1b[35m[dweb-rendezvous]\x1b[0m'; // magenta tag — the d-module color
+import { createAdmissionBudget, validRoomKey } from './admission-budget.js';
 
-// DoS guards (shell-level; the reducer caps a room at ROOM_CAP members).
-// SDP offer/answer blobs are a few KB; 64 KiB is generous. We set it as the
-// runtime maxPayloadLength too, so an oversized frame is rejected before the
-// runtime buffers it (the in-handler check is then belt-and-suspenders /
-// parse-time guard). A peer sending faster than the rate limit is flooding —
-// close it.
 const MAX_MSG_BYTES = 64 * 1024;
-const MSG_RATE_LIMIT = 120;          // messages …
-const MSG_RATE_WINDOW_MS = 10_000;   // … per 10s window, per connection
+const MSG_RATE_LIMIT = 120;
+const MSG_RATE_WINDOW_MS = 10_000;
+const utf8 = new TextEncoder();
+const decoder = new TextDecoder();
 
-let state = initialSignalingState();
-const conns = new Map(); // connId -> ServerWebSocket
-let nextId = 1;
+// Factory injection exists for deterministic policy tests, not remote runtime
+// configuration. Worker hibernation/account-wide quotas are separate work.
+/** @param {{ port?: number, hostname?: string, limits?: any, now?: ()=>number,
+ * random?: ()=>number, parse?: (raw:string)=>any, serve?: typeof Bun.serve, log?: (text:string)=>void }} [options] */
+export const createSignalingServer = ({ port = 8799, hostname, limits, now = Date.now,
+  random = Math.random, parse = JSON.parse, serve = Bun.serve, log = console.log } = {}) => {
+  const budget = createAdmissionBudget({ now, limits });
+  let state = initialSignalingState();
+  const conns = new Map();
+  let nextId = 1, cleanupErrors = 0;
 
-const roster = (key) => state.rooms[key] ?? [];
-
-// Apply the reducer's actions against real sockets. Note we never read the
-// relayed `payload` — same privacy posture as the protocol requires.
-const apply = (actions) => {
-  for (const a of actions) {
-    const ws = conns.get(a.connId);
-    if (!ws) continue;
-    if (a.t === 'send') {
-      ws.send(JSON.stringify(a.msg));
-    } else if (a.t === 'close') {
-      // Drop the shell bookkeeping inline (parity with worker.js): a peer
-      // the reducer kicks (over ROOM_CAP) is never added to a room, so the
-      // reducer state is already clean; if the runtime doesn't fire `close`
-      // on a server-initiated close, this is what frees the conns entry.
-      ws.close();
-      conns.delete(a.connId);
-    }
-  }
-};
-const step = (event) => {
-  const r = signalingStep(state, event, { now: Date.now(), random: Math.random });
-  state = r.state;
-  apply(r.actions);
-  return r.actions;
-};
-
-// Reap connections the runtime already considers closed/closing but whose
-// `close` event never fired (the failure that silently fills a room with
-// dead connIds across reloads). Runs before every new join, so a fresh
-// joiner never inherits a roster full of ghosts. readyState: 0 CONNECTING,
-// 1 OPEN, 2 CLOSING, 3 CLOSED.
-const reapDead = () => {
-  let reaped = 0;
-  for (const [connId, ws] of [...conns]) {
-    const rs = ws.readyState;
-    if (rs === 2 || rs === 3) {
-      step({ t: 'leave', connId });
-      conns.delete(connId);
-      reaped += 1;
-    }
-  }
-  if (reaped) console.log(`${T} 🧹 reaped ${reaped} dead connection(s)`);
-  return reaped;
-};
-
-const server = Bun.serve({
-  port: PORT,
-  fetch(req, server) {
-    const url = new URL(req.url);
-    if (url.pathname !== '/rendezvous') {
-      return new Response('peerd signaling node', { status: 200 });
-    }
-    const key = url.searchParams.get('key');
-    if (!key) return new Response('missing ?key', { status: 400 });
-    // 'website' = observe-only visitor (own cap pool); omitted/default = extension.
-    const kind = url.searchParams.get('kind') === 'website' ? 'website' : 'extension';
-    const profile = kind === 'website' ? null : sparsePublicProfile(key, url.searchParams.get('profile'));
-    if (server.upgrade(req, { data: { connId: String(nextId++), key, kind, profile } })) return undefined;
-    return new Response('expected websocket', { status: 426 });
-  },
-  websocket: {
-    // Reject oversized frames at the runtime layer (before buffering).
-    maxPayloadLength: MAX_MSG_BYTES,
-    open(ws) {
-      const { connId, key, kind, profile } = ws.data;
-      ws.data.windowStart = Date.now();
-      ws.data.msgCount = 0;
-      reapDead(); // clear ghosts BEFORE this join is counted
-      conns.set(connId, ws);
-      const actions = step({ t: 'join', connId, key, kind, profile });
-      const full = actions.some((a) => a.t === 'send' && a.msg?.t === 'full');
-      if (full) {
-        console.log(`${T} 🚫 FULL: rejected ${connId} (room "${key}" already at cap)`);
-      } else {
-        console.log(`${T} ➕ JOIN ${connId} → room "${key}": now ${roster(key).length}`);
+  // Serialization is bounded by the ingress cap and reducer action limits.
+  // Reserve the entire batch before state admission or any recipient sees it.
+  const prepare = (key, actions, control) => {
+    const encoded = actions.map(action => action.t === 'send'
+      ? { ...action, text: JSON.stringify(action.msg) } : action);
+    let frames = 0, bytes = 0;
+    for (const action of encoded) if (action.t === 'send') { frames++; bytes += utf8.encode(action.text).byteLength; }
+    return budget.egress(key, frames, bytes, control) ? encoded : null;
+  };
+  // Failed recipients are retired iteratively. A room-wide departure can
+  // discover more failed sockets, but never recursively grow the JS stack or
+  // retain a quadratic queue of encoded departure batches.
+  const retirements = new Map();
+  let applying = 0, draining = false;
+  const drain = () => {
+    if (applying || draining) return;
+    draining = true;
+    try {
+      while (retirements.size) {
+        const [ws, code] = retirements.entries().next().value;
+        retirements.delete(ws);
+        try { cleanup(ws); }
+        finally { try { ws.close(code, code === 1013 ? 'bootstrap overloaded' : ''); } catch { /* already gone */ } }
       }
-    },
-    message(ws, raw) {
-      const size = typeof raw === 'string' ? raw.length : (raw?.byteLength ?? 0);
-      if (size > MAX_MSG_BYTES) { ws.close(1009, 'message too large'); return; }
-      const now = Date.now();
-      if (now - ws.data.windowStart > MSG_RATE_WINDOW_MS) {
-        ws.data.windowStart = now; ws.data.msgCount = 0;
+    } finally { draining = false; }
+  };
+  const apply = actions => {
+    applying++;
+    try {
+      for (const action of actions) {
+        const ws = conns.get(action.connId);
+        if (!ws || ws.data.retired || retirements.has(ws)) continue;
+        if (action.t === 'send') {
+          // Bun returns zero for a dropped write; -1 means buffered and remains
+          // subject to its independently configured native backpressure limit.
+          try { if (ws.send(action.text) === 0) retire(ws, 1013); }
+          catch { retire(ws, 1013); }
+        } else if (action.t === 'close') retire(ws, 1000);
       }
-      if (++ws.data.msgCount > MSG_RATE_LIMIT) { ws.close(1008, 'rate limit exceeded'); return; }
-      let m;
-      try { m = JSON.parse(raw); } catch { return; }
-      if (m && (m.t === 'signal' || m.t === 'sample')) {
-        step({ t: m.t, connId: ws.data.connId, to: m.to, payload: m.payload, requestId: m.requestId });
+    } finally { applying--; drain(); }
+  };
+  const cleanup = ws => {
+    if (ws.data.retired) return;
+    ws.data.retired = true;
+    conns.delete(ws.data.connId);
+    try {
+      // Departure state always commits, even if its notices lack credit.
+      // Retain accounting custody until the final cleanup batch is reserved.
+      if (ws.data.admitted) {
+        const result = signalingStep(state, { t: 'leave', connId: ws.data.connId });
+        state = result.state;
+        const encoded = prepare(ws.data.key, result.actions, true);
+        if (encoded) apply(encoded);
       }
+    } catch { cleanupErrors++; } // custody release must survive failed notice accounting
+    finally { ws.data.release(); }
+  };
+  const retire = (ws, code) => {
+    if (ws.data.retired || retirements.has(ws)) return;
+    retirements.set(ws, code);
+    drain();
+  };
+  const step = (ws, event) => {
+    const result = signalingStep(state, event, { now: now(), random });
+    const encoded = prepare(ws.data.key, result.actions, event.t === 'join');
+    if (!encoded) { retire(ws, 1013); return; }
+    state = result.state;
+    if (event.t === 'join') ws.data.admitted = (state.rooms[ws.data.key] ?? []).includes(ws.data.connId);
+    apply(encoded);
+  };
+  const reapDead = () => {
+    for (const ws of [...conns.values()]) if (ws.readyState === 2 || ws.readyState === 3) cleanup(ws);
+  };
+  const overloaded = () => new Response('bootstrap overloaded', {
+    status: 503, headers: { 'Retry-After': String(budget.retryAfter()) },
+  });
+  const server = serve({
+    port, ...(hostname ? { hostname } : {}),
+    fetch(req, server) {
+      const url = new URL(req.url);
+      if (url.pathname !== '/rendezvous') return new Response('peerd signaling node');
+      if (req.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return new Response('expected websocket', { status: 426 });
+      const key = url.searchParams.get('key');
+      if (!validRoomKey(key)) return new Response('invalid room key', { status: 400 });
+      // Bound room counter allocation and roster reaping before native upgrade.
+      if (!budget.join(key)) return overloaded();
+      reapDead();
+      const release = budget.reserveSocket(key);
+      if (!release) return overloaded();
+      const kind = url.searchParams.get('kind') === 'website' ? 'website' : 'extension';
+      const profile = kind === 'website' ? null : sparsePublicProfile(key, url.searchParams.get('profile'));
+      let upgraded = false;
+      try {
+        upgraded = server.upgrade(req, { data: { connId: String(nextId++), key, kind, profile,
+          release, retired: false, admitted: false, windowStart: now(), msgCount: 0 } });
+        if (upgraded) return undefined;
+        return new Response('expected websocket', { status: 426 });
+      } finally { if (!upgraded) release(); }
     },
-    close(ws) {
-      const { connId, key } = ws.data;
-      step({ t: 'leave', connId });
-      conns.delete(connId);
-      console.log(`${T} ➖ LEAVE ${connId} → room "${key}": now ${roster(key).length}`);
+    websocket: {
+      maxPayloadLength: MAX_MSG_BYTES,
+      // Native queues are independently bounded; frame/window quotas alone do
+      // not bound a slow recipient's buffered writes.
+      backpressureLimit: 256 * 1024,
+      closeOnBackpressureLimit: true,
+      open(ws) {
+        conns.set(ws.data.connId, ws);
+        step(ws, { t: 'join', connId: ws.data.connId, key: ws.data.key, kind: ws.data.kind, profile: ws.data.profile });
+      },
+      message(ws, raw) {
+        if (ws.data.retired || !ws.data.admitted) return;
+        if (typeof raw !== 'string' && !ArrayBuffer.isView(raw) && !(raw instanceof ArrayBuffer)) { retire(ws, 1003); return; }
+        let size = typeof raw === 'string' ? raw.length : raw.byteLength;
+        if (size > MAX_MSG_BYTES) { retire(ws, 1009); return; }
+        if (typeof raw === 'string') size = utf8.encode(raw).byteLength;
+        if (size > MAX_MSG_BYTES) { retire(ws, 1009); return; }
+        const time = now();
+        if (time - ws.data.windowStart > MSG_RATE_WINDOW_MS) { ws.data.windowStart = time; ws.data.msgCount = 0; }
+        if (++ws.data.msgCount > MSG_RATE_LIMIT) { retire(ws, 1008); return; }
+        // Even malformed/unsupported JSON consumes room AND process credit.
+        // No message parse or dispatch follows refusal; departure cleanup remains.
+        if (!budget.ingress(ws.data.key, size)) { retire(ws, 1013); return; }
+        let message;
+        try { message = parse(typeof raw === 'string' ? raw : decoder.decode(raw)); } catch { return; }
+        if (message && (message.t === 'signal' || message.t === 'sample')) {
+          step(ws, { t: message.t, connId: ws.data.connId, to: message.to, payload: message.payload, requestId: message.requestId });
+        }
+      },
+      close: cleanup,
     },
-  },
+  });
+  log(`[dweb-rendezvous] listening: ws://localhost:${server.port}/rendezvous?key=<room>`);
+  return {
+    server,
+    stats: () => ({ ...budget.stats(), connections: conns.size, cleanupErrors,
+      memberships: Object.values(state.rooms).reduce((sum, members) => sum + members.length, 0) }),
+    stop() { for (const ws of [...conns.values()]) retire(ws, 1001); server.stop(true); },
+  };
+};
+
+if (import.meta.main) createSignalingServer({
+  port: process.env.PORT !== undefined ? Number(process.env.PORT) : 8799,
 });
-
-// why server.port (not PORT): a caller may pass PORT=0 for an ephemeral port
-// (the two-peer test harness does) — print the ACTUAL bound port so it can read
-// it back, instead of probing-then-binding (a TOCTOU race on the port).
-console.log(`${T} listening: ws://localhost:${server.port}/rendezvous?key=<room>  (verbose; Ctrl-C to stop)`);
