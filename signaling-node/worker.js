@@ -8,8 +8,8 @@
 // Topology: each rendezvous `key` maps to one Durable Object instance
 // (idFromName(key)) — DOs are single-instance per id, so every member of a
 // room lands on the same object, which is exactly the rendezvous primitive we
-// need. The room holds up to ROOM_CAP=16 members (the reducer's cap —
-// NORTH-STAR D-9); rooms are ephemeral and low-volume.
+// need. The reducer owns separate legacy and negotiated public membership
+// budgets; rooms remain ephemeral.
 //
 // WebSocket Hibernation (HIBERNATION-SPEC.md): the sockets are handed to the
 // runtime via `ctx.acceptWebSocket`, so the DO can be evicted while idle and
@@ -28,10 +28,10 @@
 // equivalent for local testing (a long-lived process, so no hibernation).
 
 import {
-  signalingStep,
+  signalingStep, sparsePublicProfile, PUBLIC_ROOM,
 } from '../extension/peerd-distributed/transport/signaling.js';
 
-// DoS guards (shell-level; the reducer caps a room at ROOM_CAP members).
+// DoS guards complement the reducer's membership and sampling budgets.
 // SDP blobs are a few KB; flooding faster than the rate limit closes the
 // socket. Mirrors bun-server.mjs. The rate-limit window rides the socket
 // attachment, so it survives hibernation (a wake doesn't reset it).
@@ -60,16 +60,36 @@ export class SignalingRoom {
   #att(ws) { try { return ws.deserializeAttachment() || {}; } catch { return {}; } }
   #connId(ws) { return this.#att(ws).connId; }
   #socket(connId) { const m = this.ctx.getWebSockets(connId); return m && m[0]; }
-  // Per-connection kind ('extension' | 'website') from each OPEN socket's
-  // attachment — the reducer needs it to enforce the per-kind cap on join.
-  #kinds() {
-    const m = {};
-    for (const ws of this.ctx.getWebSockets()) {
-      if (ws.readyState !== 1) continue;
-      const a = this.#att(ws);
-      if (a.connId) m[a.connId] = a.kind || 'extension';
+  // Reconstruct negotiated state only from server-stamped attachments. Old
+  // attachments remain legacy; a profile on a private key is never sufficient.
+  #state(exclude, departed) {
+    const sockets = this.ctx.getWebSockets().filter((ws) => ws.readyState === 1 && this.#connId(ws) !== exclude);
+    if (departed) sockets.push(departed);
+    const attachments = sockets.map((ws) => this.#att(ws)).filter((a) => a.connId && a.admitted !== false);
+    const key = attachments.some((a) => a.key === PUBLIC_ROOM) ? PUBLIC_ROOM : ROOM;
+    const kinds = {}, sparse = {};
+    for (const a of attachments) {
+      kinds[a.connId] = a.kind || 'extension';
+      if (sparsePublicProfile(a.key, a.profile) && a.kind !== 'website') sparse[a.connId] = a.lastSampleAt ?? 0;
     }
-    return m;
+    return { rooms: { [key]: attachments.map((a) => a.connId) }, kinds, sparse };
+  }
+
+  #step(state, event) {
+    const result = signalingStep(state, event, { now: Date.now(), random: Math.random });
+    // Admission and the sampling lease must be durable before a reply escapes.
+    // A failed close cannot enroll a rejected socket. A wake
+    // cannot grant a fresh burst or turn an unacknowledged profile into one.
+    const ws = this.#socket(event.connId);
+    if (ws && event.t === 'join') {
+      const admitted = Object.values(result.state.rooms).some((members) => members.includes(event.connId));
+      ws.serializeAttachment({ ...this.#att(ws), admitted });
+    }
+    if (ws && Object.hasOwn(result.state.sparse ?? {}, event.connId)) {
+      ws.serializeAttachment({ ...this.#att(ws), lastSampleAt: result.state.sparse[event.connId] });
+    }
+    this.#dispatch(result.actions);
+    return result.actions;
   }
 
   // The roster IS the set of OPEN sockets' connIds. Deriving it (rather than
@@ -80,6 +100,7 @@ export class SignalingRoom {
   #roster(exclude) {
     return this.ctx.getWebSockets()
       .filter((ws) => ws.readyState === 1) // 1 = OPEN; drop CONNECTING/CLOSING/CLOSED
+      .filter((ws) => this.#att(ws).admitted !== false)
       .map((ws) => this.#connId(ws))
       .filter((c) => c && c !== exclude);
   }
@@ -102,11 +123,10 @@ export class SignalingRoom {
 
   // Reducer 'leave' for connId: notify the remaining members. We rebuild the
   // room as {remaining ∪ connId} so roomKeyOf finds it, then the reducer drops
-  // connId and emits a 'left' to each survivor.
-  #leave(connId) {
-    const members = [...new Set([...this.#roster(connId), connId])];
-    const { actions } = signalingStep({ rooms: { [ROOM]: members } }, { t: 'leave', connId });
-    this.#dispatch(actions);
+  // connId; only legacy-only rooms broadcast the departure.
+  #leave(ws) {
+    const connId = this.#connId(ws);
+    this.#step(this.#state(connId, ws), { t: 'leave', connId });
   }
 
   // Close + announce sockets workerd already considers closed/closing but whose
@@ -120,7 +140,7 @@ export class SignalingRoom {
       if (rs === 2 || rs === 3) {
         const connId = this.#connId(ws);
         try { ws.close(); } catch { /* no-op */ }
-        if (connId) this.#leave(connId);
+        if (connId) this.#leave(ws);
         reaped += 1;
       }
     }
@@ -132,13 +152,17 @@ export class SignalingRoom {
       return new Response('expected websocket', { status: 426 });
     }
     const u = new URL(req.url);
-    const roomName = u.searchParams.get('key') ?? '?'; // for logs only
+    const roomName = u.searchParams.get('key') ?? '?';
     // 'website' = an observe-only visitor (own small cap pool); anything else
     // (including omitted) is a full extension peer. Stamped on the socket so the
     // per-kind cap survives a hibernation wake.
     const kind = u.searchParams.get('kind') === 'website' ? 'website' : 'extension';
+    const key = roomName === PUBLIC_ROOM ? PUBLIC_ROOM : ROOM;
+    const profile = kind === 'website' ? null : sparsePublicProfile(roomName, u.searchParams.get('profile'));
     const { 0: client, 1: server } = new WebSocketPair();
-    const connId = crypto.randomUUID().slice(0, 8);
+    // Full entropy prevents connection-label collisions at larger occupancy;
+    // this opaque label is not an authenticated peer identity.
+    const connId = crypto.randomUUID();
 
     this.#reapDead(); // clear ghosts BEFORE this join is counted
 
@@ -146,23 +170,21 @@ export class SignalingRoom {
     // connId for O(1) lookup, and stash the per-connection bookkeeping the
     // hibernation handlers will need (they can't close over locals).
     this.ctx.acceptWebSocket(server, [connId]);
-    server.serializeAttachment({ connId, kind, windowStart: Date.now(), msgCount: 0 });
+    server.serializeAttachment({ connId, kind, key, profile, admitted: false, windowStart: Date.now(), msgCount: 0 });
 
     // Existing members = the live roster excluding the socket we just accepted;
-    // their kinds drive the per-kind cap (website ≤ WEBSITE_CAP, extensions ≤ ROOM_CAP).
-    const existing = this.#roster(connId);
-    const { actions } = signalingStep(
-      { rooms: { [ROOM]: existing }, kinds: this.#kinds() },
-      { t: 'join', connId, key: ROOM, kind },
-    );
-    this.#dispatch(actions);
+    // kind/profile drive the independent pools and combined membership cap.
+    const state = this.#state(connId);
+    // A first public join has no attachment from which to recover its key.
+    state.rooms = { [key]: Object.values(state.rooms)[0] };
+    const actions = this.#step(state, { t: 'join', connId, key, kind, profile });
 
     const full = actions.some((a) => a.t === 'send' && a.msg?.t === 'full');
     if (full) {
       console.log(`[dweb-rendezvous] 🚫 FULL — rejected ${kind} ${connId} (room "${roomName}" ${kind} pool at cap)`);
     } else {
       const r = this.#roster();
-      console.log(`[dweb-rendezvous] ➕ JOIN ${connId} → room "${roomName}" — now ${r.length}: [${r.join(', ')}]`);
+      console.log(`[dweb-rendezvous] ➕ JOIN ${connId} → room "${roomName}": now ${r.length}`);
     }
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -172,7 +194,7 @@ export class SignalingRoom {
   async webSocketMessage(ws, data) {
     const att = this.#att(ws);
     const connId = att.connId;
-    if (!connId) return; // not one of ours / lost its tag
+    if (!connId || ws.readyState !== 1 || att.admitted === false) return; // retired / lost its tag
 
     let size = typeof data === 'string' ? data.length : (data?.byteLength ?? 0);
     // UTF-16 code units undercount non-ASCII wire bytes. Reject obviously huge
@@ -181,7 +203,7 @@ export class SignalingRoom {
     if (size > MAX_MSG_BYTES) { try { ws.close(1009, 'message too large'); } catch { /* */ } return; }
 
     // Per-connection rate limit, persisted on the socket so it holds across a
-    // wake. (A wake mid-window only loosens the limit briefly — acceptable.)
+    // wake. Re-instantiation preserves the current window exactly.
     const now = Date.now();
     let windowStart = att.windowStart ?? now;
     let msgCount = att.msgCount ?? 0;
@@ -195,14 +217,8 @@ export class SignalingRoom {
 
     let m;
     try { m = JSON.parse(data); } catch { return; }
-    if (m && m.t === 'signal') {
-      console.log(`[dweb-rendezvous] 🔁 SIGNAL ${connId} → ${m.to}`);
-      const members = [...new Set([...this.#roster(connId), connId])];
-      const { actions } = signalingStep(
-        { rooms: { [ROOM]: members } },
-        { t: 'signal', connId, to: m.to, payload: m.payload },
-      );
-      this.#dispatch(actions);
+    if (m && (m.t === 'signal' || m.t === 'sample')) {
+      this.#step(this.#state(), { t: m.t, connId, to: m.to, payload: m.payload, requestId: m.requestId });
     }
     // {t:'ping'} is answered at the edge by the auto-response — no wake, no work.
   }
@@ -210,14 +226,14 @@ export class SignalingRoom {
   async webSocketClose(ws) {
     const connId = this.#connId(ws);
     if (!connId) return;
-    this.#leave(connId);
+    this.#leave(ws);
     const r = this.#roster(connId);
-    console.log(`[dweb-rendezvous] ➖ LEAVE ${connId} — now ${r.length}: [${r.join(', ')}]`);
+    console.log(`[dweb-rendezvous] ➖ LEAVE ${connId}: now ${r.length}`);
   }
 
   async webSocketError(ws) {
     const connId = this.#connId(ws);
-    if (connId) this.#leave(connId);
+    if (connId) this.#leave(ws);
   }
 }
 
