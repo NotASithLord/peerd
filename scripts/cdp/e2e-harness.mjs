@@ -24,6 +24,7 @@
 // --load-extension (a security restriction), so the extension never loads under
 // it. Point CHROME_PATH at Chrome for Testing (bun run e2e:chrome).
 
+import { createScaleNetLog } from './native-scale-netlog.mjs';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -546,6 +547,7 @@ export async function findPeerdSw(port) {
  *   omitting it is intentionally only migration/dev compatibility.
  * @param {{url:string,certificateSpkiSha256:string}} [opts.proxyServer]
  *   acceptance-only loopback CONNECT proxy and exact fixture TLS identity.
+ * @param {{record:(value:object)=>void}} [opts.nativeScaleNetLog] private bounded native-scale diagnostic owner.
  * @param {boolean} [opts.webRtcLoopbackAcceptance] expose numeric loopback ICE
  *   candidates for a physical same-host multi-profile WebRTC acceptance lane.
  */
@@ -553,7 +555,7 @@ export async function launchPeerd({
   modelResponder, tagsModel = 'qwen3:8b', extensionDir = EXT,
   interceptModel = true, captureBootTimeline = false, beforePanelNavigate,
   panelPath = 'sidepanel/sidepanel.html', expectedBackgroundEntry, proxyServer,
-  webRtcLoopbackAcceptance = false,
+  webRtcLoopbackAcceptance = false, nativeScaleNetLog,
   enforceWebSecurity = false, headless = true,
 } = {}) {
   const launchStartedAt = hostMonotonicMs();
@@ -571,7 +573,22 @@ export async function launchPeerd({
   // dumps it into the REAL ~/Downloads. Send them to a temp dir cleaned on exit.
   const downloadDir = mkdtempSync(join(tmpdir(), 'peerd-dl-'));
 
-  const chrome = spawn(CHROME, [
+  let netlog;
+  let chrome;
+  let closed = false;
+  const cleanup = () => {
+    if (closed) { netlog?.discard(); return; } closed = true;
+    try { chrome?.kill('SIGKILL'); } catch { /* */ }
+    netlog?.discard();
+    try { rmSync(profile, { recursive: true, force: true }); } catch { /* */ }
+    try { rmSync(downloadDir, { recursive: true, force: true }); } catch { /* */ }
+  };
+  process.on('exit', cleanup);
+  process.on('SIGINT', () => { cleanup(); process.exit(130); });
+
+  try {
+  netlog = nativeScaleNetLog ? createScaleNetLog(nativeScaleNetLog.record) : null;
+  chrome = spawn(CHROME, [
     ...(headless ? ['--headless=new'] : []), '--no-first-run', '--no-default-browser-check',
     // Browser-policy fixtures need public-looking names while their local HTTP
     // servers stay deterministic and offline. Reserved .test names preserve the
@@ -609,6 +626,7 @@ export async function launchPeerd({
       `--proxy-server=${acceptanceProxy.url}`,
     ] : []),
     ...DETERMINISM_FLAGS,
+    ...(netlog?.args ?? []),
     `--user-data-dir=${profile}`,
     '--remote-debugging-port=0',
     `--disable-extensions-except=${extensionDir}`,
@@ -617,16 +635,7 @@ export async function launchPeerd({
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   let chromeErr = '';
   chrome.stderr.on('data', (d) => { chromeErr += d; });
-
-  let closed = false;
-  const cleanup = () => {
-    if (closed) return; closed = true;
-    try { chrome?.kill('SIGKILL'); } catch { /* */ }
-    try { rmSync(profile, { recursive: true, force: true }); } catch { /* */ }
-    try { rmSync(downloadDir, { recursive: true, force: true }); } catch { /* */ }
-  };
-  process.on('exit', cleanup);
-  process.on('SIGINT', () => { cleanup(); process.exit(130); });
+  chrome.on('error', error => { chromeErr += String(error); });
 
   let port;
   try {
@@ -952,6 +961,7 @@ export async function launchPeerd({
     await page.send('ServiceWorker.enable');
   };
 
+  let closePromise;
   const context = {
     sw, swConn, page, port, profile, screenshot, extensionDir,
     bootTimeline: Object.freeze({
@@ -963,7 +973,8 @@ export async function launchPeerd({
         ? null : staticShellPaintedAt - launchStartedAt,
       bootModuleReadyMs: bootModuleEvaluatedAt - launchStartedAt,
     }),
-    close: async () => {
+    close: () => closePromise ??= (async () => {
+      const closeStarted = performance.now();
       const exited = chrome.exitCode !== null || chrome.signalCode !== null
         ? Promise.resolve()
         : new Promise((resolve) => chrome.once('exit', resolve));
@@ -975,13 +986,25 @@ export async function launchPeerd({
         try { connection.close(); } catch { /* target already retired */ }
       }
       auxiliaryFetchConnections.clear();
+      // NetLog is finalized only on graceful browser shutdown. Its grace fits
+      // inside the existing process-close budget; forced cleanup still follows.
+      if (nativeScaleNetLog && browserConn) {
+        let timer;
+        try {
+          void Promise.resolve().then(() => browserConn.send('Browser.close')).catch(() => {});
+          await Promise.race([exited, new Promise(resolve => { timer = setTimeout(resolve, 4_000); })]);
+        } finally { clearTimeout(timer); }
+      }
       try { browserConn?.close(); } catch { /* */ }
-      cleanup();
+      try { chrome.kill('SIGKILL'); } catch { /* already exited */ }
       // Fresh-profile performance samples must not overlap a prior Chrome
       // process that is still unwinding after SIGKILL. Overlap can starve the
       // next MV3 worker and turns host contention into a false cold-tail claim.
-      await Promise.race([exited, sleep(5_000)]);
-    },
+      await Promise.race([exited, sleep(Math.max(0, 5_000 - (performance.now() - closeStarted)))]);
+      try {
+        if (chrome.exitCode !== null || chrome.signalCode !== null) netlog?.finish();
+      } finally { cleanup(); }
+    })(),
     modelCallCount: () => modelCalls,
     remoteModuleRequestCount: () => remoteModuleRequests,
     extensionTargetEvents: () => [
@@ -1071,6 +1094,7 @@ export async function launchPeerd({
     },
   };
   return context;
+  } catch (error) { cleanup(); throw error; }
 }
 
 /**

@@ -242,7 +242,9 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
       const host = { index, ctx: undefined, browser: undefined }; hosts.push(host);
       stage(`launch Chrome ${index}`);
       await bounded('launch Chrome', () => acquireScaleOwner(host, 'ctx',
-        () => launchPeerd({ interceptModel: false, enforceWebSecurity: true, webRtcLoopbackAcceptance: true }),
+        () => launchPeerd({ interceptModel: false, enforceWebSecurity: true, webRtcLoopbackAcceptance: true, nativeScaleNetLog: { record: value => {
+          report.netlogs ??= []; report.netlogs[index] = { index, ...value }; save();
+        } } }),
         () => retiring), SCALE_BUDGETS.launchMs);
       const version = await bounded('browser version', async () => (await fetch(`http://127.0.0.1:${host.ctx.port}/json/version`)).json());
       report.browsers ??= []; const provenance = { index, version: version.Browser, pid: null }; report.browsers.push(provenance);
@@ -395,6 +397,7 @@ export async function runScale(options = scaleOptions(process.argv.slice(2))) {
     try { await bounded('browser process cleanup', async () => {
       await closeScaleHosts(hosts);
     }, SCALE_BUDGETS.cleanupMs); } catch (error) { failed = true; cleanupErrors.push(String(error).slice(0, 400)); }
+    if (report.netlogs?.some(row => row.rawCleanup === 'failed')) { failed = true; cleanupErrors.push('raw NetLog deletion failed'); }
     signaling?.stop(); for (const socket of sockets) socket.destroy(); server?.close();
     clearTimeout(watchdog); report.cleanupErrors = cleanupErrors;
     report.ok = !failed; report.stage = failed ? 'failed' : 'complete'; save();

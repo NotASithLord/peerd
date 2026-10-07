@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, openSync, readSync, closeSync } from 'node:fs';
 
 // Diagnostic adapters retain native return values, receiver identity and thrown
 // errors. No headers, signaling messages or WebSocket frames enter the report.
@@ -68,11 +68,117 @@ export function websocketEvidence() {
   } };
 }
 
+const KERNEL_METRIC_BYTES = 16 * 1024;
+
+// why: procfs sizes are often zero, so bound the actual read rather than trusting
+// stat metadata. One extra byte distinguishes a complete metric from truncation.
+function readKernelMetric(path) {
+  const descriptor = openSync(path, 'r');
+  try {
+    const buffer = Buffer.alloc(KERNEL_METRIC_BYTES + 1);
+    const size = readSync(descriptor, buffer, 0, buffer.length, 0);
+    if (size > KERNEL_METRIC_BYTES) throw new Error('metric-too-large');
+    return buffer.subarray(0, size).toString('utf8');
+  } finally { closeSync(descriptor); }
+}
+
+export function hostPressureSnapshot({ read = readKernelMetric } = {}) {
+  const unavailable = [];
+  const metric = (label, path, parse) => {
+    try {
+      const text = read(path);
+      if (typeof text !== 'string' || Buffer.byteLength(text) > KERNEL_METRIC_BYTES) throw new Error('metric-size');
+      return parse(text);
+    } catch { unavailable.push(label); return null; }
+  };
+  const integer = value => {
+    if (!/^\d+$/.test(value ?? '')) throw new Error('metric-integer');
+    const number = Number(value);
+    if (!Number.isSafeInteger(number)) throw new Error('metric-range');
+    return number;
+  };
+  const fields = (text, names, optional = []) => {
+    const lines = text.trim().split('\n').map(line => line.trim().split(/\s+/));
+    return Object.fromEntries(names.map(name => {
+      const matches = lines.filter(line => line[0] === name);
+      if (!matches.length && optional.includes(name)) return [name, null];
+      if (matches.length !== 1 || matches[0].length !== 2) throw new Error('metric-field');
+      return [name, integer(matches[0][1])];
+    }));
+  };
+  const pressure = text => {
+    const result = {};
+    for (const line of text.trim().split('\n')) {
+      const [kind, ...parts] = line.trim().split(/\s+/);
+      if (!['some', 'full'].includes(kind) || Object.hasOwn(result, kind) || parts.length !== 4) throw new Error('metric-pressure');
+      const values = Object.fromEntries(parts.map(part => part.split('=')));
+      const averages = Object.fromEntries(['avg10', 'avg60', 'avg300'].map(key => {
+        if (!/^\d+(?:\.\d+)?$/.test(values[key] ?? '')) throw new Error('metric-average');
+        const value = Number(values[key]);
+        if (!Number.isFinite(value) || value > 100) throw new Error('metric-average-range');
+        return [key, value];
+      }));
+      result[kind] = { ...averages, total: integer(values.total) };
+    }
+    if (!Object.hasOwn(result, 'some')) throw new Error('metric-pressure-missing');
+    return result;
+  };
+  const systemPressure = Object.fromEntries(['cpu', 'memory', 'io'].map(kind =>
+    [kind, metric(`pressure-${kind}`, `/proc/pressure/${kind}`, pressure)]));
+  const memoryKiB = metric('memory', '/proc/meminfo', text => {
+    const lines = text.trim().split('\n');
+    return Object.fromEntries(['MemAvailable', 'MemTotal', 'SwapFree', 'SwapTotal'].map(name => {
+      const matches = lines.filter(line => line.startsWith(`${name}:`));
+      const match = matches.length === 1 && matches[0].match(/^[A-Za-z]+:\s+(\d+)\s+kB$/);
+      if (!match) throw new Error('metric-memory');
+      return [name, integer(match[1])];
+    }));
+  });
+  const vmstat = metric('vmstat', '/proc/vmstat', text => fields(text, ['pgmajfault', 'pswpin', 'pswpout']));
+  const load = metric('load', '/proc/loadavg', text => {
+    const parts = text.trim().split(/\s+/);
+    if (parts.length !== 5) throw new Error('metric-load');
+    const averages = parts.slice(0, 3).map(value => {
+      if (!/^\d+(?:\.\d+)?$/.test(value)) throw new Error('metric-load-average');
+      const number = Number(value);
+      if (!Number.isFinite(number)) throw new Error('metric-load-range');
+      return number;
+    });
+    const counts = parts[3].split('/');
+    if (counts.length !== 2) throw new Error('metric-load-counts');
+    const runnable = integer(counts[0]); const tasks = integer(counts[1]);
+    integer(parts[4]);
+    if (runnable > tasks) throw new Error('metric-load-tasks');
+    return { averages, runnable, tasks };
+  });
+  // why: only the current unified cgroup may supply a metric directory. Never
+  // retain its path, and reject traversal before constructing any filesystem read.
+  const cgroupPath = metric('cgroup-path', '/proc/self/cgroup', text => {
+    const lines = text.replace(/\n$/, '').split('\n');
+    if (lines.some(line => !/^\d+:[^:]*:\//.test(line))) throw new Error('metric-cgroup-row');
+    const rows = lines.filter(line => line.startsWith('0::'));
+    if (rows.length !== 1) throw new Error('metric-cgroup-count');
+    const path = rows[0].slice(3);
+    if (path.length > 2048 || !path.startsWith('/')) throw new Error('metric-cgroup-path');
+    if (path !== '/' && path.slice(1).split('/').some(part => !/^[A-Za-z0-9_.:-]+$/.test(part) || part === '.' || part === '..')) throw new Error('metric-cgroup-segment');
+    return `/sys/fs/cgroup${path === '/' ? '' : path}`;
+  });
+  const cgroup = cgroupPath === null ? null : {
+    memoryCurrentBytes: metric('cgroup-memory-current', `${cgroupPath}/memory.current`, text => integer(text.trim())),
+    memoryMaxBytes: metric('cgroup-memory-max', `${cgroupPath}/memory.max`, text => text.trim() === 'max' ? 'max' : integer(text.trim())),
+    memoryEvents: metric('cgroup-memory-events', `${cgroupPath}/memory.events`, text => fields(text, ['low', 'high', 'max', 'oom', 'oom_kill'])),
+    cpu: metric('cgroup-cpu', `${cgroupPath}/cpu.stat`, text => fields(text,
+      ['usage_usec', 'user_usec', 'system_usec', 'nr_periods', 'nr_throttled', 'throttled_usec'],
+      ['nr_periods', 'nr_throttled', 'throttled_usec'])),
+  };
+  return { pressure: systemPressure, memoryKiB, vmstat, load, cgroup, unavailable };
+}
+
 // Inspect only this harness and descendants, without reading environments or
 // retaining process arguments. Missing /proc evidence stays explicitly unknown.
-export function nativeHostSnapshot({ pid = process.pid, read = readFileSync, list = readdirSync } = {}) {
-  /** @type {{at: number, processes: object[], unavailable: {pid?: number, kind: string}[], truncated: boolean}} */
-  const result = { at: Date.now(), processes: [], unavailable: [], truncated: false };
+export function nativeHostSnapshot({ pid = process.pid, read = readFileSync, list = readdirSync, pressureRead = readKernelMetric } = {}) {
+  /** @type {{at: number, processes: object[], unavailable: {pid?: number, kind: string}[], truncated: boolean, system: ReturnType<typeof hostPressureSnapshot>}} */
+  const result = { at: Date.now(), processes: [], unavailable: [], truncated: false, system: hostPressureSnapshot({ read: pressureRead }) };
   try {
     const ids = list('/proc').filter(name => /^\d+$/.test(name));
     result.truncated = ids.length > 2048;
