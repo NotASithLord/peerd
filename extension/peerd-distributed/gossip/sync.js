@@ -29,6 +29,9 @@
 import { envelopeBytes, verifyEnvelope } from '../transport/envelope.js';
 import { MAX_GOSSIP_ENVELOPE_BYTES } from './topic.js';
 import { createSyncWork } from './sync-work.js';
+import { sendSyncResponse, MAX_SYNC_RESPONSE, SyncWindowRequiredError } from './sync-response.js';
+import { createSyncWindow, WINDOW } from './sync-window.js';
+import { TOPIC_SYNC_WINDOW } from '../transport/capabilities.js';
 
 export const SYNC = Object.freeze({ REQ: 2, RESP: 3 }); // ch=4 typs
 
@@ -36,7 +39,7 @@ export const SYNC = Object.freeze({ REQ: 2, RESP: 3 }); // ch=4 typs
 // means the room outgrew flat-list sync — fail visibly toward the Phase 2
 // upgrade instead of silently truncating forever (the audit names it).
 const MAX_HAVES = 512;
-const MAX_RESP = 256;
+const MAX_RESP = MAX_SYNC_RESPONSE;
 
 // The in-memory store. Same surface an IDB-backed store implements in the
 // host (bridge); injected per the functional-core rule.
@@ -88,10 +91,14 @@ export const createTopicSync = ({
   const ingesting = new WeakSet();
   let closed = false;
   /** @param {string} did */
-  const channelFor = (did) => mesh.peers().find((/** @type {{ did: string }} */ peer) => peer.did === did)?.channel;
+  const peerFor = (did) => mesh.peers().find((/** @type {{ did: string }} */ peer) => peer.did === did);
+  /** @param {string} did */
+  const channelFor = (did) => peerFor(did)?.channel;
+  /** @param {string} did */
+  const supportsWindow = (did) => peerFor(did)?.info?.caps?.includes(TOPIC_SYNC_WINDOW) === true;
   /** @param {string} did @param {object} channel */
   const live = (did, channel) => !closed && channelFor(did) === channel;
-  const offGone = mesh.onPeerGone?.(() => work.retire()) ?? (() => {});
+  const offGone = mesh.onPeerGone?.(() => { work.retire(); window.retire(); }) ?? (() => {});
   // why: only original PUB envelopes for this exact retained topic are history.
   // A valid signature alone does not bind an inner frame to its sync carrier.
   /** @param {any} inner @param {string} topic */
@@ -122,26 +129,62 @@ export const createTopicSync = ({
   // Live publishes on retained topics get stored as they're delivered.
   const offTap = gossip.tap((/** @type {{ env: any }} */ msg, /** @type {string} */ topic) => keep(topic, msg.env));
 
+  /** @param {any[]} envs @param {string} topic @param {string} via
+   * @param {() => boolean} current @param {boolean} [strict] */
+  const acceptEntries = async (envs, topic, via, current, strict = false) => {
+    for (const inner of envs) {
+      if (!current()) return false;
+      if (!admissible(topic, inner)) { if (strict) return false; continue; }
+      const valid = await verify(inner);
+      if (!current()) return false;
+      if (!valid) {
+        audit?.('sync_env_invalid', { topic, via }); if (strict) return false; continue;
+      }
+      if (gossip.isMuted(inner.from)) continue;
+      const nested = ingesting.has(inner);
+      ingesting.add(inner);
+      let fresh;
+      try { fresh = gossip.ingest(inner, via); }
+      finally { if (!nested) ingesting.delete(inner); }
+      if (!current()) return false;
+      if (gossip.isMuted(inner.from)) continue;
+      if (fresh) keep(topic, inner);
+      // A matching, authenticated PUB may already be seen through flooding
+      // before this topic was retained. Only that case reaches this fallback.
+      else if (!store.has(topic, inner.sig)) store.put(topic, inner);
+    }
+    return current();
+  };
+  /** @param {any} haves */
+  const validHaves = (haves) => Array.isArray(haves) && haves.length <= MAX_HAVES
+    && haves.every((sig) => typeof sig === 'string' && /^[A-Za-z0-9+/]{86}==$/.test(sig));
+  const window = createSyncWindow({ work, peer: peerFor, supports: supportsWindow,
+    retained: (topic) => retained.has(topic), history: (topic) => store.list(topic), validHaves, validInner: scopedPublish,
+    accept: (envs, topic, via, current) => acceptEntries(envs, topic, via, current, true),
+    sign: (typ, body) => mesh.sign(4, typ, body),
+    send: (did, env, signal) => mesh.send(did, env, { signal }), audit });
+
   /** @param {string} did @param {string} topic */
   const requestFrom = async (did, topic) => {
     const channel = channelFor(did);
     if (!channel || closed) return;
     const haves = store.ids(topic);
     if (haves.length > MAX_HAVES) audit?.('sync_haves_overflow', { topic, count: haves.length });
+    if (supportsWindow(did)) { window.request(did, topic, haves.slice(-MAX_HAVES)); return; }
     const env = await mesh.sign(4, SYNC.REQ, { topic, haves: haves.slice(-MAX_HAVES) });
     if (live(did, channel)) await mesh.send(did, env);
   };
 
   const offEnvelope = mesh.onEnvelope(async (/** @type {{ env: any, via: any }} */ { env, via }) => {
     if (closed || env.v !== 1 || env.ch !== 4 || env.from !== via) return;
+    if ([WINDOW.REQ, WINDOW.PAGE, WINDOW.ACK].includes(env.typ)) { window.receive(via, env); return; }
     if (env.typ !== SYNC.REQ && env.typ !== SYNC.RESP) return;
     const { topic, haves, envs } = env.body ?? {};
     if (typeof topic !== 'string' || !retained.has(topic)) return;
     // Validate count and shape before allocating a Set, scanning history, or
     // starting inner crypto. Sender-side slicing is not an inbound limit.
     if (env.typ === SYNC.REQ) {
-      if (!Array.isArray(haves) || haves.length > MAX_HAVES
-        || haves.some((sig) => typeof sig !== 'string' || !/^[A-Za-z0-9+/]{86}==$/.test(sig))) {
+      if (!validHaves(haves)) {
         audit?.('sync_request_invalid', { via }); return;
       }
     } else if (!Array.isArray(envs) || envs.length > MAX_RESP
@@ -156,35 +199,16 @@ export const createTopicSync = ({
         const known = new Set(haves);
         const missing = store.list(topic).filter((inner) => scopedPublish(inner, topic) && !known.has(inner.sig));
         if (missing.length > MAX_RESP) audit?.('sync_resp_overflow', { topic, count: missing.length });
-        const resp = await mesh.sign(4, SYNC.RESP, { topic, envs: missing.slice(0, MAX_RESP) });
-        if (current()) await mesh.send(via, resp);
+        await sendSyncResponse({ topic, envs: missing.slice(0, MAX_RESP), current,
+          maxFrameBytes: () => channel.maxFrameBytes?.() ?? Infinity,
+          sign: (body) => mesh.sign(4, SYNC.RESP, body), send: (resp) => mesh.send(via, resp) });
         return;
       }
-      for (const inner of envs) {
-        if (!current()) return;
-        if (!admissible(topic, inner)) continue;
-        const valid = await verify(inner);
-        if (!current()) return;
-        if (!valid) {
-          audit?.('sync_env_invalid', { topic, via }); continue;
-        }
-        if (gossip.isMuted(inner.from)) continue;
-        const nested = ingesting.has(inner);
-        ingesting.add(inner);
-        let fresh;
-        try { fresh = gossip.ingest(inner, via); }
-        finally { if (!nested) ingesting.delete(inner); }
-        if (!current()) return;
-        if (gossip.isMuted(inner.from)) continue;
-        if (fresh) keep(topic, inner);
-        // A matching, authenticated PUB may already be seen through flooding
-        // before this topic was retained. Only that case reaches this fallback.
-        else if (!store.has(topic, inner.sig)) store.put(topic, inner);
-      }
+      await acceptEntries(envs, topic, via, current);
     };
     const done = work.run(channel, current, async () => {
       try { await process(); }
-      catch { audit?.('sync_work_failed', { via }); }
+      catch (error) { audit?.(error instanceof SyncWindowRequiredError ? 'sync_window_required' : 'sync_work_failed', { via }); }
     });
     if (!done) audit?.('sync_work_overloaded', { via });
     else await done;
@@ -222,6 +246,6 @@ export const createTopicSync = ({
     /** @param {string} topic */
     history: (topic) => store.list(topic),
     requestFrom,
-    close() { closed = true; work.close(); offTap(); offEnvelope(); offPeer(); offGone(); retained.clear(); },
+    close() { closed = true; window.close(); work.close(); offTap(); offEnvelope(); offPeer(); offGone(); retained.clear(); },
   });
 };

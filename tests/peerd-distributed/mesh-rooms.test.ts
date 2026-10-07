@@ -7,6 +7,7 @@ import { generateIdentity } from '../../extension/peerd-distributed/identity/key
 import { memoryPair } from '../../extension/peerd-distributed/transport/channel.js';
 import { createSession } from '../../extension/peerd-distributed/transport/session.js';
 import { createRoomMesh, CTRL } from '../../extension/peerd-distributed/transport/mesh.js';
+import { TOPIC_SYNC_WINDOW } from '../../extension/peerd-distributed/transport/capabilities.js';
 import { joinRoom } from '../../extension/peerd-distributed/transport/rooms.js';
 
 const waitFor = async (predicate: () => boolean, timeoutMs = 1_000) => {
@@ -388,4 +389,23 @@ test('cancelled relay dials propagate abort and reject late channels before admi
     expect(closed).toBe(1);
     expect(room.mesh.hasLink(remote.did)).toBe(false);
   } finally { room.leave(); }
+});
+
+
+test('room capabilities require both signed advertisements and preserve the local join snapshot', async () => {
+  const node = createFakeNode();
+  const ether = createFakeEther();
+  const ids = await Promise.all([generateIdentity(), generateIdentity(), generateIdentity()]);
+  const caps = ['content'];
+  const rooms: any[] = [];
+  try {
+    rooms.push(await join('capabilities', ids[0], node, ether, { caps }));
+    caps.push(TOPIC_SYNC_WINDOW); // does not change the first room's advertisement.
+    rooms.push(await join('capabilities', ids[1], node, ether));
+    rooms.push(await join('capabilities', ids[2], node, ether));
+    await waitFor(() => rooms.every(room => room.peers().length === 2));
+    for (const peer of rooms[0].peers()) expect(peer.info.caps).toEqual(['content']);
+    expect(rooms[1].peers().find((peer: any) => peer.did === ids[0].did).info.caps).toEqual(['content']);
+    expect(rooms[1].peers().find((peer: any) => peer.did === ids[2].did).info.caps).toContain(TOPIC_SYNC_WINDOW);
+  } finally { rooms.forEach(room => room.leave()); }
 });
