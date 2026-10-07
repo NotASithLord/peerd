@@ -14,15 +14,25 @@ class Socket {
   close(code?: number, reason?: string) { this.readyState = 3; this.closed.push({ code, reason }); }
 }
 
+// Match the Cloudflare runtime contract so tests exercise the configured
+// keepalive pair instead of disguising its constructor as a zero-argument API.
+class AutoResponsePair {
+  constructor(private request: string, private response: string) {}
+  getRequest() { return this.request; }
+  getResponse() { return this.response; }
+}
+
 // Only the Durable Object/WebSocket runtime shell is faked. The production
 // worker and shared signaling reducer execute, with durable attachments copied
 // on every read/write as in a hibernating runtime.
 const withRuntime = async (run: (ctx: any, join: (room: SignalingRoom, kind?: string) => Promise<Socket>) => Promise<void>) => {
   const sockets: Socket[] = [];
+  let autoResponse: AutoResponsePair | null = null;
   const ctx = {
     acceptWebSocket(socket: Socket, tags: string[]) { socket.tags = tags; sockets.push(socket); },
     getWebSockets(tag?: string) { return tag ? sockets.filter(socket => socket.tags.includes(tag)) : sockets; },
-    setWebSocketAutoResponse() {},
+    setWebSocketAutoResponse(pair: AutoResponsePair) { autoResponse = pair; },
+    getWebSocketAutoResponse() { return autoResponse; },
   };
   const globals = globalThis as any;
   const names = ['WebSocketPair', 'WebSocketRequestResponsePair', 'Response'];
@@ -30,7 +40,7 @@ const withRuntime = async (run: (ctx: any, join: (room: SignalingRoom, kind?: st
   const NativeResponse = Response;
   try {
     globals.WebSocketPair = class { 0 = new Socket(); 1 = new Socket(); };
-    globals.WebSocketRequestResponsePair = class {};
+    globals.WebSocketRequestResponsePair = AutoResponsePair;
     globals.Response = new Proxy(NativeResponse, {
       construct(target, args) {
         return args[1]?.status === 101 ? { status: 101, webSocket: args[1].webSocket } : Reflect.construct(target, args);
@@ -51,6 +61,8 @@ const withRuntime = async (run: (ctx: any, join: (room: SignalingRoom, kind?: st
 
 test('website admission pool survives messages and fresh Durable Object instances', async () => withRuntime(async (ctx, join) => {
   let room = new SignalingRoom(ctx, {});
+  expect(ctx.getWebSocketAutoResponse().getRequest()).toBe('{"t":"ping"}');
+  expect(ctx.getWebSocketAutoResponse().getResponse()).toBe('{"t":"pong"}');
   const websites: Socket[] = [];
   for (let index = 0; index < WEBSITE_CAP; index++) {
     const visitor = await join(room, 'website');
@@ -59,6 +71,7 @@ test('website admission pool survives messages and fresh Durable Object instance
     expect(visitor.deserializeAttachment().kind).toBe('website');
     // New heap, same runtime-owned sockets. No previous instance state survives.
     room = new SignalingRoom(ctx, {});
+    expect(ctx.getWebSocketAutoResponse().getResponse()).toBe('{"t":"pong"}');
   }
   const overflow = await join(room, 'website');
   expect(overflow.sent).toContainEqual({ t: 'full' });
