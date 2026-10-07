@@ -30,7 +30,7 @@ const ALPHA = 3;
  * A wire message in the content protocol — JSON-framed, every field is
  * wire-decoded and validated at runtime (hash + signature checks below).
  * @typedef {{ t: string, hash: string, manifest?: any, bytes?: string }} ContentMsg
- * @typedef {{ send: (m: ContentMsg) => void, setHandler: (h: ((msg: ContentMsg) => void) | null) => void, onClose?: (cb: () => void) => (() => void) }} ContentChannel
+ * @typedef {{ send: (m: ContentMsg, options?: import('../transport/outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: ((msg: ContentMsg) => void) | null) => void, onClose?: (cb: () => void) => (() => void) }} ContentChannel
  */
 
 /** @typedef {ReturnType<typeof createChannelClient>} ChannelClient */

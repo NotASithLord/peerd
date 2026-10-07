@@ -22,6 +22,7 @@ import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSocket } from 'node:dgram';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -38,6 +39,7 @@ import { startWebFixtureServer } from './fixtures/web-suite.mjs';
 import { recordNetworkFloorVector, recordPrivateChildFloor, ordinaryProbeReached } from './network-floor-oracle.mjs';
 import { NOTEBOOK_FETCH_STATE } from './notebook-fetch-state.mjs';
 import { WASMER_STATE } from './wasmer-state.mjs';
+import { armVaultLockStages } from './vault-lock-stages.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -66,6 +68,31 @@ const clickAndSyncRedraw = (page, selector) => evalIn(page, `(async () => {
   m.redraw.sync();
   return true;
 })()`, true);
+
+// why: these scenarios model a user who already made a network choice. Keep
+// the choice local to their fixtures; fresh-profile consent oracles stay untouched.
+const chooseFixtureNetwork = async (ctx, enabled) => {
+  const available = await evalIn(ctx.page, `(async () =>
+    (await import('/shared/channel-config.js')).DWEB_ENABLED)()`, true);
+  if (!available) {
+    if (enabled) throw new Error('peer-network fixture requires a supported host');
+    return;
+  }
+  const reply = await rpc(ctx.page, { type: 'settings/update', patch: { dwebEnabled: enabled } });
+  if (reply?.ok !== true || reply.settings?.dwebEnabled !== enabled
+      || reply.settings?.dwebChoiceMade === false) {
+    throw new Error(`fixture network choice failed: ${JSON.stringify(reply)}`);
+  }
+  if (enabled) {
+    const home = await openExtPage(ctx, 'home/home.html');
+    try {
+      const started = await rpc(home, { type: 'dweb/base/start' });
+      if (started?.ok !== true || started.running !== true || !started.did?.startsWith('did:key:')) {
+        throw new Error(`fixture peer host did not start: ${JSON.stringify(started)}`);
+      }
+    } finally { await home.close(); }
+  }
+};
 
 const SMOKE_TEXT = 'e2e-smoke-ok';
 const TRANSFER_EXPORT_VERSION = 2;
@@ -352,6 +379,7 @@ let lockReportBody = '';
 let lockFixtureUrl = '';
 
 const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPanel = false }) => {
+  await chooseFixtureNetwork(ctx, false);
   const options = await openExtPage(ctx, 'options/options.html');
   let imported;
   try {
@@ -1708,6 +1736,7 @@ export const STATES = [
     name: 'portable-identity', kind: 'functional', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, true);
       const transferPage = await openWidePage(ctx, 'options/options.html#!/transfer', { ready: '#exppass' });
       let exported = await privateTransferRpc(transferPage, { type: 'transfer/export', passphrase: PASSPHRASE });
       if (!exported?.payload?.dweb?.identityRecord) {
@@ -1814,6 +1843,7 @@ export const STATES = [
 
       const homePage = await openWidePage(ctx, 'home/home.html');
       try {
+        await rpc(homePage, { type: 'settings/update', patch: { dwebEnabled: true } });
         const restarted = await rpc(homePage, { type: 'dweb/base/start' });
         rec.check('the peer host starts under the restored identity after lease release',
           restarted?.ok === true && restarted?.running === true && restarted?.did === incoming.did,
@@ -1840,6 +1870,7 @@ export const STATES = [
     name: 'options-transfer-conflict', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, true);
       const seedPage = await openWidePage(ctx, 'options/options.html#!/transfer', { ready: '#exppass' });
       const localExport = await privateTransferRpc(seedPage, { type: 'transfer/export', passphrase: PASSPHRASE });
       let localDid = localExport?.payload?.dweb?.identityRecord?.did ?? null;
@@ -3466,25 +3497,33 @@ export const STATES = [
     name: 'vault-lock', kind: 'functional', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) {
-      const lockStartedAt = Date.now();
-      const lock = await rpc(ctx.page, { type: 'vault/lock' });
-      const lockReplyMs = Date.now() - lockStartedAt;
-      const locked = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.vault-brand') && !document.querySelector('form.input-bar')`), { budgetMs: 8_000 });
-      rec.check('locking flips the panel to the vault gate', !!locked && lock?.ok === true, JSON.stringify(lock));
-      if (!locked || lock?.ok !== true) {
-        await rec.shot('lock-failed');
-        rec.observe('lock failure', {
-          lockReplyMs,
-          elapsedMs: Date.now() - lockStartedAt,
-          kernel: await rpc(ctx.page, { type: 'bootstrap/ready' }),
-          state: await rpc(ctx.page, { type: 'state/get' }),
-          pageEvents: ctx.page.events.slice(-12),
-          targetEvents: ctx.extensionTargetEvents().map(({ targetId, events }) => ({ targetId, events: events.slice(-12) })),
-        });
+      const diagnostics = await armVaultLockStages(ctx);
+      try {
+        const lockStartedAt = Date.now();
+        const lock = await rpc(ctx.page, { type: 'vault/lock' });
+        const lockReplyMs = Date.now() - lockStartedAt;
+        const locked = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.vault-brand') && !document.querySelector('form.input-bar')`), { budgetMs: 8_000 });
+        rec.check('locking flips the panel to the vault gate', !!locked && lock?.ok === true, JSON.stringify(lock));
+        if (!locked || lock?.ok !== true) {
+          await rec.shot('lock-failed');
+          rec.observe('lock failure', {
+            lockReplyMs,
+            stages: await diagnostics.read(),
+            elapsedMs: Date.now() - lockStartedAt,
+            kernel: await rpc(ctx.page, { type: 'bootstrap/ready' }),
+            state: await rpc(ctx.page, { type: 'state/get' }),
+            pageEvents: ctx.page.events.slice(-12),
+            targetEvents: ctx.extensionTargetEvents().map(({ targetId, events }) => ({ targetId, events: events.slice(-12) })),
+          });
+        }
+        rec.observe('lock stages', await diagnostics.read());
+        await rpc(ctx.page, { type: 'vault/unlock', passphrase: PASSPHRASE });
+        const ready = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar')`), { budgetMs: 10_000 });
+        rec.check('unlocking restores the ready composer', !!ready);
+      } finally {
+        try { rec.observe('lock stages final', await diagnostics.read()); }
+        finally { await diagnostics.remove(); }
       }
-      await rpc(ctx.page, { type: 'vault/unlock', passphrase: PASSPHRASE });
-      const ready = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar')`), { budgetMs: 10_000 });
-      rec.check('unlocking restores the ready composer', !!ready);
     },
   },
 
@@ -4139,6 +4178,137 @@ export const STATES = [
     },
   },
 
+  {
+    name: 'onboarding-network', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      if (process.env.PEERD_VISUAL_BASE_RENDER === '1') {
+        const extension = process.argv.find(arg => arg.startsWith('--extension='))?.slice('--extension='.length);
+        if (!extension) throw new Error('base visual render requires an explicit extension tree');
+        if (!existsSync(join(extension, 'sidepanel/components/onboarding-network-step.js'))) {
+          rec.observe('merge-base surface', { present: false, reason: 'network onboarding was introduced on this branch' });
+          return;
+        }
+      }
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { PeerNetworkStep } = await import('/sidepanel/components/onboarding-network-step.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-onboarding-network';
+          host.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);padding:14px;overflow:auto;';
+          document.body.appendChild(host);
+          window.__networkChoices = [];
+          m.mount(host, { view: () => m('.onboarding-view', m('.card.onboarding-card',
+            m(PeerNetworkStep, { send: async (message) => {
+              window.__networkChoices.push(message); return { ok: false };
+            } }))) });
+        })()`, true);
+        const shape = await evalIn(ctx.page, `({
+          heading: document.querySelector('#e2e-onboarding-network h3')?.textContent,
+          choices: [...document.querySelectorAll('#e2e-onboarding-network button')].map(b => b.textContent),
+          sent: window.__networkChoices.length,
+        })`);
+        rec.check('network participation requires an explicit choice',
+          shape?.heading === 'Join the peer network?' && shape.sent === 0
+            && shape.choices.join('|') === 'Enable peer network|Not now', JSON.stringify(shape));
+        await rec.visual('onboarding-network');
+        await clickAndSyncRedraw(ctx.page, '#e2e-onboarding-network [data-network-choice="enable"]');
+        await waitFor(() => evalIn(ctx.page, `!!document.querySelector('#e2e-onboarding-network [role="alert"]')`),
+          { budgetMs: 5_000, pollMs: 50 });
+        rec.check('a failed choice remains visible and does not enable peer-triggered work',
+          await evalIn(ctx.page, `JSON.stringify(window.__networkChoices) === JSON.stringify([
+            { type:'settings/update', patch:{dwebEnabled:true} }
+          ])`));
+        await rec.visual('onboarding-network-save-error');
+      } finally {
+        await evalIn(ctx.page, `(async () => {
+          const host = document.querySelector('#e2e-onboarding-network');
+          if (host) { (await import('/vendor/mithril/mithril.js')).default.mount(host, null); host.remove(); }
+          delete window.__networkChoices;
+        })()`, true);
+      }
+    },
+  },
+  {
+    name: 'onboarding-network-consent', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const available = await evalIn(ctx.page, `(async () =>
+        (await import('/shared/channel-config.js')).DWEB_ENABLED)()`, true);
+      if (!available) { rec.check('unsupported host does not offer network onboarding', true); return; }
+      const reset = await rpc(ctx.page, { type: 'settings/reset', keys: ['dwebEnabled', 'dwebAgentEnabled'] });
+      rec.check('reset leaves participation off', reset?.ok && reset.settings?.dwebEnabled === false,
+        JSON.stringify(reset));
+      const before = await rpc(ctx.page, { type: 'bootstrap/ready' });
+      rec.check('no network lease exists before a choice', before?.ok
+        && before.featureLeases?.leases?.dweb?.status !== 'active', JSON.stringify(before.featureLeases));
+      const page = await openWidePage(ctx, 'home/home.html');
+      try {
+        await waitFor(() => evalIn(page, `!!document.querySelector('[data-network-choice="skip"]')`),
+          { budgetMs: 15_000, pollMs: 50 });
+        rec.check('existing users receive only the missing network step',
+          await evalIn(page, `!!document.querySelector('.onboarding-network')
+            && !document.querySelector('.onb-provider-row, .peer-name-input')`));
+        await clickAndSyncRedraw(page, '[data-network-choice="skip"]');
+        const skipped = await waitFor(async () => {
+          const r = await rpc(page, { type: 'state/get' });
+          return r?.state?.settings?.dwebChoiceMade === true ? r.state.settings : null;
+        }, { budgetMs: 15_000, pollMs: 50 });
+        rec.check('Not now persists an explicit off choice', skipped?.dwebEnabled === false, JSON.stringify(skipped));
+        await page.send('Page.reload', { ignoreCache: true });
+        await waitFor(() => evalIn(page, `!!document.querySelector('.home-rail')`),
+          { budgetMs: 15_000, pollMs: 50 });
+        rec.check('reloading does not replay a completed choice',
+          await evalIn(page, `!document.querySelector('.onboarding-network')`));
+        const after = await rpc(page, { type: 'bootstrap/ready' });
+        rec.check('skip and reload do not start the network', after?.ok
+          && after.featureLeases?.leases?.dweb?.status !== 'active', JSON.stringify(after.featureLeases));
+        await evalIn(page, `location.hash = 'discover'`);
+        const offDiscover = await waitFor(() => evalIn(page,
+          `!!document.querySelector('[data-network-choice="enable"]') && !!document.querySelector('.home-rail')`),
+        { budgetMs: 15_000, pollMs: 50 });
+        rec.check('Discover remains accessible while off and offers explicit enable', !!offDiscover);
+        await rec.shotPage('discover-network-off', page);
+        await clickAndSyncRedraw(page, '[data-network-choice="enable"]');
+        const optedIn = await waitFor(async () => {
+          const r = await rpc(page, { type: 'state/get' });
+          return r?.state?.settings?.dwebChoiceMade === true && r.state.settings.dwebEnabled === true
+            ? r.state.settings : null;
+        }, { budgetMs: 15_000, pollMs: 50 });
+        rec.check('Discover enable persists only network participation, not agent work',
+          optedIn?.dwebEnabled === true && optedIn.dwebAgentEnabled === false, JSON.stringify(optedIn));
+        const statusVisible = await waitFor(() => evalIn(page,
+          `!!document.querySelector('.peer-network-status [role="status"]')`),
+        { budgetMs: 15_000, pollMs: 50 });
+        rec.check('connection status is separate from saved consent and leaves controls usable',
+          !!statusVisible && await evalIn(page, `!![...document.querySelectorAll('.onboarding-actions button')]
+            .find(button => button.textContent === 'Turn off' && !button.disabled)`));
+        await rec.shotPage('discover-network-enabled', page);
+        await page.send('Page.reload', { ignoreCache: true });
+        await waitFor(() => evalIn(page, `!!document.querySelector('.home-rail')`),
+          { budgetMs: 15_000, pollMs: 50 });
+        const reloaded = await rpc(page, { type: 'state/get' });
+        rec.check('explicit enable survives reload without enabling agent execution',
+          reloaded?.state?.settings?.dwebEnabled === true
+            && reloaded.state.settings.dwebChoiceMade === true
+            && reloaded.state.settings.dwebAgentEnabled === false, JSON.stringify(reloaded?.state?.settings));
+        await evalIn(page, `location.hash = 'discover'`);
+        await waitFor(() => evalIn(page, `!!document.querySelector('.onboarding-actions button.secondary')`),
+          { budgetMs: 15_000, pollMs: 50 });
+        await clickAndSyncRedraw(page, '.onboarding-actions button.secondary');
+        const disabled = await waitFor(async () => {
+          const r = await rpc(page, { type: 'state/get' });
+          const host = await rpc(page, { type: 'bootstrap/ready' });
+          return r?.state?.settings?.dwebEnabled === false
+            && !['starting', 'active'].includes(host?.featureLeases?.leases?.dweb?.status);
+        }, { budgetMs: 20_000, pollMs: 50 });
+        rec.check('Discover turn off revokes the network lease', !!disabled);
+
+      } finally { try { page.close(); } catch {} }
+    },
+  },
+
   // --- visual: first-run provider choice -----------------------------------
   // Component-rendered before the harness completes vault bootstrap because
   // normal E2E startup deliberately closes onboarding before post-unlock
@@ -4153,6 +4323,7 @@ export const STATES = [
         await evalIn(ctx.page, `(async () => {
           const m = (await import('/vendor/mithril/mithril.js')).default;
           const { ProviderStep } = await import('/sidepanel/components/onboarding-provider-step.js');
+          const { DWEB_ENABLED } = await import('/shared/channel-config.js');
           const host = document.createElement('div');
           host.id = 'e2e-onboarding-provider';
           host.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);padding:14px;overflow:auto;';
@@ -4176,7 +4347,8 @@ export const STATES = [
                 : { ok: true };
           m.mount(host, { view: () => m('.onboarding-view', m('.card.onboarding-card', [
             m(ProviderStep, { send, onDone: () => {} }),
-            m('.onb-dots', { 'aria-label': 'Step 1 of 4' }, [0, 1, 2, 3].map((i) =>
+            m('.onb-dots', { 'aria-label': DWEB_ENABLED ? 'Step 1 of 5' : 'Step 1 of 4' },
+              (DWEB_ENABLED ? [0, 1, 2, 3, 4] : [0, 1, 2, 3]).map((i) =>
               m('span.onb-dot', { class: i === 0 ? 'is-on' : '', 'aria-current': i === 0 ? 'step' : undefined }))),
           ])) });
         })()`, true);
@@ -4543,6 +4715,7 @@ export const STATES = [
     name: 'home-fulltab', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
       const page = await openWidePage(ctx, 'home/home.html');
       try {
         // Wait past the boot vault-gate/onboarding flash to the home surface.
@@ -4605,6 +4778,7 @@ export const STATES = [
       return { sse: sseText('noted') };
     },
     async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
       let releaseLive = () => {};
       const liveGate = new Promise((resolve) => { releaseLive = resolve; });
       actorOverviewVisualState = { started: false, actorCalls: 0, liveGate };
@@ -5153,11 +5327,11 @@ export const STATES = [
   {
     // The dweb page's HAPPY path had no state at all - the only coverage was
     // the stop-failure fixture, so the shape a user actually meets was
-    // unphotographed. Preview builds default dwebEnabled on, which is what the
-    // harness runs, so the nested agent row renders too.
+    // unphotographed. This fixture explicitly opts in so the nested agent row renders.
     name: 'options-dweb', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
+      await rpc(ctx.page, { type: 'settings/update', patch: { dwebEnabled: true } });
       const page = await openWidePage(ctx, 'options/options.html#!/dweb');
       try {
         await waitFor(() => evalIn(page, `document.querySelectorAll('.set-row').length >= 2`),
@@ -6603,6 +6777,7 @@ export const STATES = [
       return { sse: sseText('Delegated to the dweb actor; awaiting its reply.') };
     },
     async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, true);
       dwebActorState = { delegates: 0, actorCalls: 0 };
       const upd = await rpc(ctx.page, { type: 'settings/update', patch: { dwebAgentEnabled: true } });
       rec.check('the dweb agent toggle flips on', !!upd?.ok, JSON.stringify(upd));
@@ -6660,6 +6835,7 @@ export const STATES = [
       return { sse: sseText('Delegated to the dweb actor.') };
     },
     async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, true);
       a2aState = { delegates: 0, actorCalls: 0 };
       const upd = await rpc(ctx.page, { type: 'settings/update', patch: { dwebAgentEnabled: true } });
       rec.check('the dweb agent toggle flips on', !!upd?.ok, JSON.stringify(upd));

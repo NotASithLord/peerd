@@ -54,6 +54,35 @@ const makeStorage = () => {
 };
 
 describe('sealed vault authority channel', () => {
+  test('locked snapshots remain available after retirement without acquiring another host', async () => {
+    const storage = makeStorage();
+    let acquisitions = 0;
+    const client = makeVaultAuthorityClient({
+      offscreen: true, offscreenUrl, workerUrl,
+      kv: storage.kv, idb: storage.idb, sessionCache: storage.sessionCache,
+      withHost: async (run) => { acquisitions += 1; return run(vaultLease); },
+      listWindowClients: async () => [{ url: offscreenUrl,
+        postMessage: (offer: any, ports: MessagePort[]) => {
+          void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
+        },
+      }],
+    });
+    try {
+      await client.initializeWithPrfOnly({ prfOutput: new Uint8Array(32).fill(5),
+        credentialId: new Uint8Array([1]), prfSalt: new Uint8Array(32).fill(6) });
+      expect(client.snapshot().locked).toBe(false);
+      await client.lock();
+      client.close();
+      const before = acquisitions;
+      const snapshot = client.snapshot();
+      expect(snapshot).toMatchObject({ initialized: true, locked: true, unlockedAt: 0 });
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      expect(client.snapshot()).not.toBe(snapshot);
+      await Promise.resolve();
+      expect(acquisitions).toBe(before);
+    } finally { client.close(); }
+  });
+
   test.each(['lock', 'replace', 'delete'] as const)('prepared credential authority retires before pending %s custody', async (operation) => {
     const storage = makeStorage();
     const client = makeVaultAuthorityClient({

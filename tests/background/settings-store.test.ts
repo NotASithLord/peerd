@@ -21,6 +21,35 @@ const deferred = <T>() => {
 };
 
 describe('settings-store', () => {
+  test('network defaults are not consent, while explicit choices survive restart and restore', async () => {
+    const kv = makeKv();
+    const previous = makeSettingsStore({ kv, key: 'settings.v1', defaults: { dwebEnabled: true } });
+    await previous.load();
+    await previous.update({ devMode: true });
+    expect(previous.stored()).not.toHaveProperty('dwebEnabled');
+    const open = () => makeSettingsStore({ kv, key: 'settings.v1', defaults: {
+      dwebEnabled: false, dwebAgentEnabled: false,
+    } });
+    const migrated = open();
+    await migrated.load();
+    expect(migrated.get().dwebEnabled).toBe(false);
+    expect(migrated.stored()).not.toHaveProperty('dwebEnabled');
+    for (const choice of [true, false]) {
+      await migrated.update({ dwebEnabled: choice });
+      const restarted = open();
+      await restarted.load();
+      expect(restarted.stored().dwebEnabled).toBe(choice);
+      expect(restarted.get().dwebAgentEnabled).toBe(false);
+      const restored = makeSettingsStore({ kv: makeKv(restarted.stored()), key: 'settings.v1',
+        defaults: { dwebEnabled: false, dwebAgentEnabled: false } });
+      await restored.load();
+      expect(restored.get().dwebEnabled).toBe(choice);
+      expect(restored.stored().dwebEnabled).toBe(choice);
+    }
+    await migrated.reset(['dwebEnabled']);
+    expect(migrated.get().dwebEnabled).toBe(false);
+    expect(migrated.stored()).not.toHaveProperty('dwebEnabled');
+  });
   test('get() is defaults before load', () => {
     expect(store().get()).toEqual(defaults);
   });

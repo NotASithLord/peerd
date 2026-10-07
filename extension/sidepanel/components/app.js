@@ -7,7 +7,7 @@
 // focused" (which the DOM tracks for us anyway).
 
 import m from '/vendor/mithril/mithril.js';
-import { VaultGate } from './vault-gate.js';
+import { VaultGate } from './vault-gate-lazy.js';
 import { ChatView } from './chat-view.js';
 import { SessionsView } from './sessions-view.js';
 import { ActorIsolationBanner } from './actor-isolation-banner.js';

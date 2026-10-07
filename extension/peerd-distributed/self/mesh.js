@@ -50,7 +50,7 @@ export const createSelfDeviceMesh = ({
         /** @param {string} toDid @param {any} data */
         async send(toDid, data) {
           const env = await joined.mesh.sign(SELF_DIRECT_CHANNEL, SELF_DIRECT_TYPE, { data });
-          if (!joined.mesh.send(toDid, env)) throw new Error('self-device link is unavailable');
+          if (!await joined.mesh.send(toDid, env)) throw new Error('self-device link is unavailable');
           return true;
         },
         /** @param {(arg: { from: string, data: any, roomId: string }) => void} cb */

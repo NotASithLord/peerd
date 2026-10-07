@@ -114,11 +114,11 @@ export const createDiscovery = ({
   const forward = async (item, exceptVia = null) => {
     if (subscribers.size === 0) return true;
     const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.ITEM, { item });
-    let propagated = true;
-    for (const did of subscribers) {
-      if (!closed && !isBlocked(did) && did !== exceptVia && !mesh.send(did, env)) propagated = false;
-    }
-    return propagated;
+    // Subscriber membership is bounded by live mesh links. Launch separately
+    // so one stalled link cannot hold every healthy subscriber behind it.
+    const results = await Promise.all([...subscribers].filter((did) => !closed && !isBlocked(did) && did !== exceptVia)
+      .map((did) => mesh.send(did, env)));
+    return results.every(Boolean);
   };
 
   /** @param {string} id @param {any} item @param {string | null} via */
@@ -191,7 +191,7 @@ export const createDiscovery = ({
       items,
       ...(page ? { page: { id: request.id, after: request.after, next: page.next } } : {}),
     });
-    if (!closed && subscribers.has(did) && !isBlocked(did)) mesh.send(did, env);
+    if (!closed && subscribers.has(did) && !isBlocked(did)) await mesh.send(did, env);
   };
 
   const offEnvelope = mesh.onEnvelope(async (/** @type {{ env: any, via: string }} */ { env, via }) => {
@@ -304,7 +304,7 @@ export const createDiscovery = ({
     try {
       const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.SUB, { catalog: 1, ...request });
       if (!receiving(did, subscription) || requests.get(did) !== request) return false;
-      const sent = mesh.send(did, env);
+      const sent = await mesh.send(did, env);
       if (!sent) {
         if (!previous && upstreams.get(did) === subscription) upstreams.delete(did);
         if (requests.get(did) === request) requests.delete(did);
@@ -371,7 +371,7 @@ export const createDiscovery = ({
         cursors.clear(); requests.clear(); processing.clear(); snapshotWindows.clear();
         for (const did of dids) {
           mesh.sign(DISCOVERY.CH, DISCOVERY.UNSUB, {}).then((/** @type {any} */ env) => {
-            if (!closed && !upstreams.has(did)) mesh.send(did, env);
+            if (!closed && !upstreams.has(did)) return mesh.send(did, env);
           }).catch(() => {});
         }
       } else this.subscribeAll();

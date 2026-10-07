@@ -46,7 +46,7 @@ export const createDirect = ({ mesh }) => {
     /** @param {string} toDid @param {any} data */
     async send(toDid, data) {
       const env = await mesh.sign(3, MSG, { data });
-      if (!mesh.send(toDid, env)) throw new Error(`no direct link to ${(toDid || '').slice(-8)}`);
+      if (!await mesh.send(toDid, env)) throw new Error(`no direct link to ${(toDid || '').slice(-8)}`);
       return { id: env.id, ts: env.ts };
     },
     /** @param {(msg: DirectMsg) => void} cb */

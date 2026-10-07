@@ -3,7 +3,7 @@
 import {
   type Probe, type Scenario, blocked, leaked, summarize,
 } from '../harness.ts';
-import { makeConfirmAnswerRoute } from '../../../extension/background/routes/vault.js';
+import { makeConfirmAnswerRoute } from '../../../extension/background/kernel-confirmation.js';
 import { makeConfirmCoordinator } from '../../../extension/peerd-egress/confirm/protocol.js';
 import { makeDispatchTracker } from '../../../extension/peerd-runtime/lifecycle/dispatch-tracking.js';
 import { createOperationLog } from '../../../extension/peerd-runtime/lifecycle/operation-log.js';
@@ -20,8 +20,8 @@ const confirmationProbe = async (): Promise<Probe> => {
   } as any);
   const answer = makeConfirmAnswerRoute({
     sessionCache: { sessionGet: async () => 'chat-a' },
-    isActualSidepanelSender: (sender: any) => sender?.surface === 'sidepanel',
-    isActualHomeSender: (sender: any) => sender?.surface === 'home',
+    isSidepanelSender: (sender: any) => sender?.surface === 'sidepanel',
+    isHomeSender: (sender: any) => sender?.surface === 'home',
     confirmCoordinator: coordinator,
   });
   const base = {

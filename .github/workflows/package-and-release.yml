@@ -408,6 +408,12 @@ jobs:
             echo '::error::badges/e2e-chrome.json is stale - run `bun run gen:badge:e2e` and commit it.'
             exit 1
           }
+      - name: Prove fresh-profile peer-network consent
+        env:
+          CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
+        # Observe native signaling/WebRTC before real Home onboarding, after
+        # Not now, and after physical worker restart; no lease-only oracle.
+        run: bun scripts/cdp/network-consent-cold.mjs
       - name: Run cold first-signup passkey regression
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
@@ -454,6 +460,7 @@ jobs:
           path: |
             artifacts/chrome-lifecycle/
             artifacts/e2e/controller-fault-evidence*.json
+            artifacts/e2e/network-consent-cold.json
             scripts/cdp/artifacts/result.json
             scripts/cdp/artifacts/*.png
             badges/e2e-chrome.json

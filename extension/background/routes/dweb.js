@@ -81,12 +81,12 @@ export const makeDwebRoutes = (deps) => {
     const generation = dwebPublicationGeneration();
     return isCurrent() && dwebOn() && publicationCurrent(generation) ? generation : null;
   };
-  /** @param {(isCurrent:()=>boolean)=>Promise<any>} operation */
-  const withReadyPublication = async (operation) => {
+  /** @param {(isCurrent:()=>boolean)=>Promise<any>} operation @param {boolean} [acquire] */
+  const withReadyPublication = async (operation, acquire = true) => {
     if (!(await dwebReady())) return { ok: false, error: 'dweb-disabled' };
     return withDwebPublication(async (/** @type {() => boolean} */ isCurrent) => {
       if (publicationClaim(isCurrent) == null) return { ok: false, error: 'dweb-custody-changed' };
-      await ensureFeature();
+      if (acquire) await ensureFeature();
       if (publicationClaim(isCurrent) == null) return { ok: false, error: 'dweb-custody-changed' };
       return operation(isCurrent);
     });
@@ -764,7 +764,11 @@ export const makeDwebRoutes = (deps) => {
     // The READ surface behind peerd.distributed.{whoami,status,peers,presence} in
     // a Notebook. Side-effect-free: it reports the base host's CURRENT state with
     // rosters; it never STARTS the lobby (maybeStartBaseNetwork does, on unlock).
-    'dweb/distributed/info': async () => withReadyPublication(async () =>
-      browser.runtime.sendMessage({ type: 'dweb/base-host/info' })),
+    'dweb/distributed/info': async () => withReadyPublication(async (isCurrent) => {
+      const info = await browser.runtime.sendMessage({ type: 'dweb/base-host/info' })
+        .catch(() => ({ ok: false, error: 'dweb-status-unavailable', running: false }));
+      return publicationClaim(isCurrent) == null
+        ? { ok: false, error: 'dweb-custody-changed' } : info;
+    }, false),
   };
 };

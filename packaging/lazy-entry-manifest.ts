@@ -40,6 +40,8 @@ export const PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES = Object.freeze([
   'background/direct-actor-host.js',
   'background/repository-local-client.js',
   'peerd-egress/ui.js',
+  'sidepanel/components/vault-gate.js',
+  'sidepanel/components/vault-code-stream.js',
   'offscreen/repository-host.js',
   'offscreen/repository-worker.js',
   'offscreen/repository-app-files.js',
@@ -76,6 +78,8 @@ export const PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES = Object.freeze([
   // Rich UI loaded only after the minimal vault shell is actionable.
   'sidepanel/sidepanel.js',
   'home/home.js',
+  // Home defers onboarding until profile and explicit network choice are known.
+  'sidepanel/components/onboarding-view.js',
 
   // Fixed module Workers spawned by their owning engine tabs.
   'engine-tabs/notebook-tab/linker-worker.js',

@@ -15,6 +15,7 @@
 // Env:    CHROME_PATH or CHROME — explicit Chrome/Chromium binary.
 // Exit:   0 if both peers link AND each hears the other's gossip; 1 otherwise.
 
+import { installPeerTransportDiagnostics } from './peer-transport-diagnostics.mjs';
 import { resolve, join, dirname, extname, delimiter, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -90,7 +91,7 @@ const attach = async (wsUrl) => {
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   let id = 0; const pending = new Map(); const events = [];
   const requests = new Map();
-  const record = (event) => { events.push(event); if (events.length > 64) events.shift(); };
+  const record = (event) => { events.push({ at: Date.now(), event }); if (events.length > 64) events.shift(); };
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); return; }
@@ -121,7 +122,7 @@ const attach = async (wsUrl) => {
   };
   const diagnostics = async () => ({
     page: await evaluate(`({ url: location.href, readyState: document.readyState,
-      boot: window.__DWEB_BOOT__ ?? null, title: document.title })`),
+      boot: window.__DWEB_BOOT__ ?? null, transport: window.__DWEB_TRANSPORT__ ?? [], title: document.title })`),
     requests: [...requests.values()], events,
   });
   return { send, evaluate, close: () => ws.close(), events, diagnostics };
@@ -137,7 +138,8 @@ const openPeer = async (cdpPort, url) => {
   await peer.send('Network.enable');
   await peer.send('Inspector.enable');
   await peer.send('Page.addScriptToEvaluateOnNewDocument', {
-    source: '"use strict"; window.__DWEB_BOOT__ = { stage: "document-created", at: Date.now() };',
+    source: '"use strict"; window.__DWEB_BOOT__ = { stage: "document-created", at: Date.now() };'
+      + `(${installPeerTransportDiagnostics.toString()})();`,
   });
   const navigation = await peer.send('Page.navigate', { url });
   if (navigation.error || navigation.result?.errorText) {

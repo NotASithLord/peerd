@@ -91,7 +91,7 @@ import { validateKernelStateProjection } from '/shared/kernel-state-contract.js'
  * the SW pushes via the 'state' snapshot are merged in wholesale.
  * @typedef {Object} ChatState
  * @property {boolean} hydrated  true only after the surface receives an authoritative SW snapshot
- * @property {{ initialized: boolean, locked: boolean, unlockedAt: number, prfEnrolled: boolean, hasRecovery: boolean, lockReason?: 'idle'|'manual'|null }} vault
+ * @property {{ initialized: boolean, locked: boolean, unlockedAt: number, prfEnrolled: boolean, hasRecovery: boolean, lockReason?: 'idle'|'manual'|null, lockCleanup?: 'pending'|'unconfirmed'|'restart-required' }} vault
  * @property {SessionState} session
  * @property {{ current: string, hasKey: boolean, model: string, configRevision?: number }} providers
  * @property {{ provider: string, model: string, keyless: boolean, credentialReady: boolean, localReady: boolean, ollamaReady?: boolean, canSend: boolean, reason: string|null }} [composer]

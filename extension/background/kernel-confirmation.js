@@ -1,7 +1,27 @@
 // @ts-check
 
 import { makeConfirmCoordinator } from '/peerd-egress/confirm/protocol.js';
-import { makeConfirmAnswerRoute } from './routes/vault.js';
+
+/** @param {Record<string, any>} deps */
+export const makeConfirmAnswerRoute = ({
+  confirmCoordinator, sessionCache, isSidepanelSender, isHomeSender,
+}) => async (/** @type {any} */ {
+  id, answer, ownerSessionId, sessionId, dispatchId,
+}, /** @type {unknown} */ sender) => {
+  const fromSidepanel = isSidepanelSender(sender) === true;
+  const fromHome = isHomeSender(sender) === true;
+  if (!fromSidepanel && !fromHome) {
+    return { ok: false, error: 'confirm-answer-unauthorized-sender' };
+  }
+  const activeOwnerSessionId = await sessionCache.sessionGet('currentSessionId');
+  if ((activeOwnerSessionId ?? null) !== (ownerSessionId ?? null)) {
+    return { ok: false, error: 'confirm-answer-foreign-owner' };
+  }
+  const resolved = confirmCoordinator.resolve({
+    id, ownerSessionId, sessionId, dispatchId,
+  }, answer, fromHome ? 'home' : 'sidepanel');
+  return resolved ? { ok: true } : { ok: false, error: 'confirm-answer-stale-or-foreign' };
+};
 
 /** @param {any} deps */
 export const createKernelConfirmation = (deps) => {
@@ -27,12 +47,7 @@ export const createKernelConfirmation = (deps) => {
       } catch {}
     },
   });
-  const answer = makeConfirmAnswerRoute({
-    confirmCoordinator: coordinator,
-    sessionCache: deps.sessionCache,
-    isActualSidepanelSender: deps.isSidepanelSender,
-    isActualHomeSender: deps.isHomeSender,
-  });
+  const answer = makeConfirmAnswerRoute({ ...deps, confirmCoordinator: coordinator });
   return Object.freeze({
     coordinator,
     routes: Object.freeze({ 'confirm/answer': answer }),

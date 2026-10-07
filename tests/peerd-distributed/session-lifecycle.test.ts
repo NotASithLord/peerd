@@ -102,3 +102,36 @@ test('a valid signature on the wrong control frame cannot authenticate HELLO', a
   a.deliver({ __t: 'HELLO', env });
   expect(await failed).toContain('invalid peer HELLO envelope');
 });
+
+test('terminal HELLO diagnostics are fixed-size, secret-free and preserve cancellation', async () => {
+  const identity = await generateIdentity();
+  const [a] = memoryPair();
+  const ac = new AbortController();
+  const pending = createSession({ channel: a, identity, signal: ac.signal });
+  const failed = pending.catch(error => error);
+  a.deliver({ secret: 'DO-NOT-RETAIN', body: 'private application payload' });
+  ac.abort();
+  const error = await failed;
+  expect(error.message).toBe('peer HELLO cancelled');
+  expect(a.isClosed()).toBe(true);
+  expect(Object.keys(error.helloProgress).sort()).toEqual([
+    'helloReceived', 'helloSent', 'proofReceived', 'proofSent',
+    'stashedBytes', 'stashedFrames', 'verifyingHello', 'verifyingProof',
+  ]);
+  expect(error.helloProgress.stashedFrames).toBe(1);
+  expect(Object.isFrozen(error.helloProgress)).toBe(true);
+  const encoded = JSON.stringify(error.helloProgress);
+  expect(encoded.length).toBeLessThan(256);
+  expect(encoded).not.toContain('DO-NOT-RETAIN');
+  expect(encoded).not.toContain(identity.did);
+});
+
+test('a frozen signing failure keeps its original rejection even when diagnostics cannot attach', async () => {
+  const identity = await generateIdentity();
+  const [a] = memoryPair();
+  const error = Object.freeze(new Error('signer unavailable'));
+  const result = createSession({ channel: a, identity: { did: identity.did,
+    sign: async () => { throw error; } } });
+  expect(await result.catch(cause => cause)).toBe(error);
+  expect(a.isClosed()).toBe(true);
+});

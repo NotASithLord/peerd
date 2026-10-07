@@ -23,7 +23,7 @@ test('recorded HELLO and proof cannot authenticate on a fresh channel', async ()
   const [a, b] = memoryPair();
   const recorded: any[] = [];
   const send = b.send;
-  b.send = (message: any) => { recorded.push(structuredClone(message)); send(message); };
+  b.send = (message: any) => { recorded.push(structuredClone(message)); return send(message); };
   await Promise.all([createSession({ channel: a, identity: alice }), createSession({ channel: b, identity: bob })]);
   a.close();
   expect(recorded.map((message) => message.__t)).toEqual(['HELLO', 'HELLO_PROOF']);

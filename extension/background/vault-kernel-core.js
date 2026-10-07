@@ -35,16 +35,10 @@ const normalizePeerName = (/** @type {unknown} */ value) => {
 const normalizeFacts = (/** @type {unknown} */ value) => {
   if (value == null) return { ok: true, callMe: '', notes: '' };
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false };
-  const facts = /** @type {{callMe?:unknown,notes?:unknown}} */ (value);
-  if ((facts.callMe !== undefined && typeof facts.callMe !== 'string')
-      || (facts.notes !== undefined && typeof facts.notes !== 'string')
-      || String(facts.callMe ?? '').length > MAX_DOC_CHARS
-      || String(facts.notes ?? '').length > MAX_DOC_CHARS) return { ok: false };
-  return {
-    ok: true,
-    callMe: String(facts.callMe ?? '').replace(/\s+/g, ' ').trim(),
-    notes: String(facts.notes ?? '').trim(),
-  };
+  const { callMe = '', notes = '' } = /** @type {{callMe?:unknown,notes?:unknown}} */ (value);
+  if (typeof callMe !== 'string' || typeof notes !== 'string'
+      || callMe.length > MAX_DOC_CHARS || notes.length > MAX_DOC_CHARS) return { ok: false };
+  return { ok: true, callMe: callMe.replace(/\s+/g, ' ').trim(), notes: notes.trim() };
 };
 const validProfile = (/** @type {any} */ value) => value?.id === PROFILE_ID
   && typeof value.peerName === 'string' && value.peerName.length > 0 && value.peerName.length <= 32
@@ -170,7 +164,7 @@ export const buildVaultKernelState = ({
   kernel, status, locked, unlockedAt, lockReason, autoLockMs,
   settings, session, providers, composer, profile = null,
   generation = 1, actorHost = 'offscreen-document-worker', runtimeCapabilities = {},
-  actorProjection = null, actorIsolation = null,
+  actorProjection = null, actorIsolation = null, lockCleanup = null,
 }) => {
   if (!locked && !profile) throw new TypeError('kernel-profile-required');
   const state = {
@@ -183,6 +177,7 @@ export const buildVaultKernelState = ({
       prfEnrolled: status.prfEnrolled,
       hasRecovery: status.hasRecovery,
       lockReason,
+      ...(lockCleanup ? { lockCleanup } : {}),
     },
     session,
     providers,
@@ -283,9 +278,10 @@ export const makeKernelRouteProvenance = ({
   const anyHumanUi = (/** @type {any} */ sender) => humanUi(sender) || optionsUi(sender);
   // why: the Lab consumes only these fixed requests. Its document is not a
   // general Settings surface and cannot select another session or model here.
-  const parameterless = (/** @type {any} */ message) => message !== null
-    && typeof message === 'object' && !Array.isArray(message)
-    && Object.keys(message).length === 1 && Object.hasOwn(message, 'type');
+  const exactKeys = (/** @type {any} */ value, /** @type {string[]} */ keys) => value !== null
+    && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+  const parameterless = (/** @type {any} */ message) => exactKeys(message, ['type']);
   const evalRequest = (/** @type {any} */ sender, /** @type {any} */ message) =>
     evalUi(sender) && parameterless(message);
   add([
@@ -295,12 +291,8 @@ export const makeKernelRouteProvenance = ({
   add(['state/get', 'provider/status', 'models/options'],
     (sender, message) => anyHumanUi(sender) || evalRequest(sender, message));
   add(['settings/update'], (sender, message) => anyHumanUi(sender)
-    || evalUi(sender) && message !== null && typeof message === 'object'
-      && !Array.isArray(message) && Object.keys(message).length === 2
-      && Object.hasOwn(message, 'type') && Object.hasOwn(message, 'patch')
-      && message.patch !== null && typeof message.patch === 'object'
-      && !Array.isArray(message.patch) && Object.keys(message.patch).length === 1
-      && Object.hasOwn(message.patch, 'runnerModel')
+    || evalUi(sender) && exactKeys(message, ['type', 'patch'])
+      && exactKeys(message.patch, ['runnerModel'])
       && typeof message.patch.runnerModel === 'string');
   add(['audit/voice-fetch'], voiceUi);
   add(['voice/init', 'voice/listen', 'voice/stop', 'voice/silence', 'voice/teardown'], voiceUi);
@@ -375,9 +367,8 @@ export const makeVaultKernelRoutes = ({ ready, deps }) => {
 
 /**
  * Keep the nonsecret first-paint index coherent even when a vault mutation
- * rejects after committing part of its storage work. The authority status is
- * still the source of truth; reconciliation failures never replace the
- * original route error.
+ * rejects after partial storage work. Failed lock uses cached authority to
+ * avoid reacquiring its retiring host. Reconciliation preserves the route error.
  *
  * @param {{routes:Record<string,(message?:any)=>Promise<any>>,posture:any,vault:any,pushState:()=>any}} input
  */
@@ -400,7 +391,7 @@ export const makeIndexedVaultRoutes = ({ routes, posture, vault, pushState }) =>
         }
         return result;
       } catch (cause) {
-        try { await posture.write(await vault.status()); }
+        try { await posture.write(name === 'vault/lock' ? vault.snapshot() : await vault.status()); }
         catch (error) { console.error('[kernel] vault posture reconciliation failed', error); }
         try { await Promise.resolve(pushState()); }
         catch (error) { console.error('[kernel] vault state reconciliation failed', error); }
@@ -416,16 +407,13 @@ export const resolveVaultAutoLockMs = (value, fallback) =>
 const KERNEL_OUTCOME_UNKNOWN_MESSAGE = 'Peerd could not confirm whether the requested change '
   + 'finished. Refresh to reconcile before trying again.';
 
+const unknownOutcome = (outcomeKind = 'unknown') => ({
+  error: KERNEL_OUTCOME_UNKNOWN_MESSAGE, outcomeKnown: false, outcomeKind, retryable: false,
+});
+
 /** @param {Record<string, unknown>} reply */
 const normalizeKernelReply = (reply) => reply?.ok === false && reply?.outcomeKnown === false
-  ? {
-      ...reply,
-      error: KERNEL_OUTCOME_UNKNOWN_MESSAGE,
-      outcomeKnown: false,
-      outcomeKind: reply.outcomeKind ?? 'unknown',
-      retryable: false,
-    }
-  : reply;
+  ? { ...reply, ...unknownOutcome(/** @type {string} */ (reply.outcomeKind ?? 'unknown')) } : reply;
 
 /** @param {unknown} cause */
 const kernelRouteFailure = (cause) => {
@@ -437,10 +425,10 @@ const kernelRouteFailure = (cause) => {
     ? error.message.slice(0, 256) : String(cause).slice(0, 256);
   return {
     ok: false,
-    error: error?.outcomeKnown === false ? KERNEL_OUTCOME_UNKNOWN_MESSAGE : message,
+    error: message,
     ...(code ? { code } : {}),
     ...(error?.outcomeKnown === false
-      ? { outcomeKnown: false, outcomeKind: 'unknown', retryable: false }
+      ? unknownOutcome()
       : {}),
   };
 };
@@ -474,11 +462,8 @@ export const makeVaultKernelMessageHandler = ({
   const settle = (/** @type {Record<string, unknown>} */ reply) =>
     Promise.resolve(bindReply(normalizeKernelReply(reply))).then(sendResponse, () => sendResponse({
       ok: false,
-      error: KERNEL_OUTCOME_UNKNOWN_MESSAGE,
       code: 'kernel-generation-retired',
-      outcomeKnown: false,
-      outcomeKind: 'transport-lost',
-      retryable: false,
+      ...unknownOutcome('transport-lost'),
     }));
   // Exact routes refine the immutable browser sender after ingress admission.
   Promise.resolve(route(message, sender)).then(

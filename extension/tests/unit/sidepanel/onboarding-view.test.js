@@ -11,6 +11,8 @@
 import { describe, it, expect } from '../../framework.js';
 import m from '/vendor/mithril/mithril.js';
 import { OnboardingView, needsOnboarding, TEASE, PROMPT_TYPE } from '/sidepanel/components/onboarding-view.js';
+import { PeerNetworkStep, PeerNetworkStatus, needsPeerNetworkChoice } from '/sidepanel/components/onboarding-network-step.js';
+import { DWEB_ENABLED } from '/shared/channel-config.js';
 import { MessageList } from '/sidepanel/components/message-list.js';
 
 /** @typedef {import('/sidepanel/components/onboarding-view.js').ChatState} ChatState */
@@ -76,7 +78,7 @@ const need = (root, sel, _ctor) => {
 /**
  * @param {any} component  a Mithril component (untyped — vendor m is any)
  * @param {{ state?: ChatState, send?: Send, reconcileState?:()=>Promise<any>,
- * messages?: any[], peerName?: string }} attrs
+ * messages?: any[], peerName?: string, onDone?:()=>void }} attrs
  */
 const mount = (component, attrs) => {
   const root = document.createElement('div');
@@ -115,7 +117,8 @@ const skipStep = async (root) => {
 const passProviderStep = async (root) => {
   await tick();          // provider/status resolves
   m.redraw.sync();
-  await skipStep(root);  // provider → greeting
+  await skipStep(root);
+  if (root.querySelector('.onboarding-network')) await skipStep(root);
 };
 
 // The mount stubs answer every route, so raw send counts now include the
@@ -178,7 +181,7 @@ describe('sidepanel.onboarding', () => {
         expect(root.querySelector('#onb-notes')).toBe(null);
         expect(!!root.querySelector('.onboarding-skip')).toBe(true);
         // Progress dots: four steps since §5h; the greeting is the active one.
-        expect(root.querySelectorAll('.onb-dot').length).toBe(4);
+        expect(root.querySelectorAll('.onb-dot').length).toBe(DWEB_ENABLED ? 5 : 4);
         expect(root.querySelectorAll('.onb-dot.is-on').length).toBe(1);
       } finally { unmount(); }
     });
@@ -238,7 +241,7 @@ describe('sidepanel.onboarding', () => {
         expect(root.querySelector('.peer-name-input')).toBe(null);
         expect(!!root.querySelector('.onb-ask')).toBe(true);
         // Two steps behind us now: provider + name.
-        expect(root.querySelectorAll('.onb-dot.is-done').length).toBe(2);
+        expect(root.querySelectorAll('.onb-dot.is-done').length).toBe(DWEB_ENABLED ? 3 : 2);
       } finally { unmount(); }
     });
 
@@ -344,7 +347,7 @@ describe('sidepanel.onboarding', () => {
         await passProviderStep(root);
         await skipStep(root); await skipStep(root); await skipStep(root); await tick();
         expect(completions(sends).length).toBe(1);
-        expect(reconciles).toBe(1);
+        expect(reconciles).toBe(DWEB_ENABLED ? 2 : 1);
       } finally { unmount(); }
     });
 
@@ -364,7 +367,7 @@ describe('sidepanel.onboarding', () => {
         await passProviderStep(root);
         await skipStep(root); await skipStep(root); await skipStep(root); await tick();
         expect(completions(sends).length).toBe(1);
-        expect(reconciles).toBe(1);
+        expect(reconciles).toBe(DWEB_ENABLED ? 2 : 1);
         expect(root.textContent).toContain('could not confirm');
       } finally { unmount(); }
     });
@@ -435,4 +438,228 @@ describe('sidepanel.onboarding', () => {
       } finally { unmount(); }
     });
   });
+});
+
+
+describe('peer-network onboarding consent', () => {
+  it('asks existing profiles only when an explicit network choice is missing', () => {
+    const state = freshProfileState({ settings: { dwebChoiceMade: false } });
+    expect(needsPeerNetworkChoice(state)).toBe(true);
+    expect(needsPeerNetworkChoice(freshProfileState({ settings: { dwebChoiceMade: true } }))).toBe(false);
+    expect(needsPeerNetworkChoice(freshProfileState())).toBe(false);
+    expect(needsPeerNetworkChoice({ ...state, vault: { ...state.vault, locked: true } })).toBe(false);
+  });
+
+  it('does not replay a persisted network decision after interrupted personal setup', async () => {
+    /** @type {Msg[]} */ const sends = [];
+    const { root, unmount } = mount(OnboardingView, {
+      state: freshProfileState({ settings: { dwebChoiceMade: true, dwebEnabled: false } }),
+      send: async message => { sends.push(message); return { ok: true }; },
+    });
+    try {
+      await tick(); m.redraw.sync();
+      await skipStep(root);
+      expect(root.querySelector('.onboarding-network')).toBe(null);
+      expect(!!root.querySelector('.peer-name-input')).toBe(true);
+      expect(sends.filter(message => message.type === 'settings/update')).toEqual([]);
+    } finally { unmount(); }
+  });
+
+  for (const [choice, enabled] of [['enable', true], ['skip', false]]) {
+    it(`persists the explicit ${choice} choice without enabling agent execution`, async () => {
+      /** @type {Msg[]} */ const sends = [];
+      let completed = 0;
+      const { root, unmount } = mount(PeerNetworkStep, {
+        send: async (message) => { sends.push(message); return { ok: true }; },
+        onDone: () => { completed += 1; },
+      });
+      try {
+        await tick(); m.redraw.sync();
+        expect(sends.length).toBe(0);
+        need(root, `[data-network-choice="${choice}"]`).click();
+        await tick(); m.redraw.sync();
+        expect(sends.filter(message => message.type === 'settings/update')).toEqual([
+          { type: 'settings/update', patch: { dwebEnabled: enabled } },
+        ]);
+        expect(completed).toBe(enabled ? 0 : 1);
+        if (enabled) {
+          need(root, '[data-network-choice="continue"]').click();
+          expect(completed).toBe(1);
+        }
+      } finally { unmount(); }
+    });
+  }
+
+  it('waits for persistence and does not advance or double-submit during a pending choice', async () => {
+    let completed = 0;
+    let sends = 0;
+    /** @type {(value:any)=>void} */ let release = () => {};
+    const pending = new Promise((resolve) => { release = resolve; });
+    const { root, unmount } = mount(PeerNetworkStep, {
+      send: async () => { sends += 1; return pending; },
+      onDone: () => { completed += 1; },
+    });
+    try {
+      need(root, '[data-network-choice="enable"]').click();
+      need(root, '[data-network-choice="skip"]').click();
+      await tick(); m.redraw.sync();
+      expect(sends).toBe(1);
+      expect(completed).toBe(0);
+      expect(need(root, '[data-network-choice="enable"]', HTMLButtonElement).disabled).toBe(true);
+      release({ ok: true }); await tick(); m.redraw.sync();
+      expect(completed).toBe(0);
+      need(root, '[data-network-choice="continue"]').click();
+      expect(completed).toBe(1);
+    } finally { release({ ok: false }); unmount(); }
+  });
+
+  it('reconciles failed persistence before permitting another choice', async () => {
+    let completed = 0;
+    let calls = 0;
+    const { root, unmount } = mount(PeerNetworkStep, {
+      send: async (message) => message.type === 'state/get'
+        ? { ok: true, state: { settings: { dwebChoiceMade: false, dwebEnabled: false } } }
+        : { ok: ++calls > 1 },
+      onDone: () => { completed += 1; },
+    });
+    try {
+      need(root, '[data-network-choice="enable"]').click(); await tick(); m.redraw.sync();
+      expect(completed).toBe(0);
+      expect(root.textContent).toContain('could not be confirmed');
+      expect(need(root, '[data-network-choice="skip"]', HTMLButtonElement).disabled).toBe(true);
+      need(root, '.onboarding-network .error + button').click(); await tick(); m.redraw.sync();
+      need(root, '[data-network-choice="skip"]').click(); await tick(); m.redraw.sync();
+      expect(completed).toBe(1);
+    } finally { unmount(); }
+  });
+  it('allows continuing and disabling after persistence while startup remains pending', async () => {
+    /** @type {Msg[]} */ const sends = [];
+    let completed = 0;
+    /** @type {(value:any)=>void} */ let release = () => {};
+    const startup = new Promise(resolve => { release = resolve; });
+    /** @type {(value:any)=>void} */ let releaseStatus = () => {};
+    const status = new Promise(resolve => { releaseStatus = resolve; });
+    /** @type {()=>void} */ let statusObserved = () => {};
+    const statusRequested = new Promise(resolve => { statusObserved = () => resolve(undefined); });
+    /** @type {()=>void} */ let observed = () => {};
+    const persisted = new Promise(resolve => { observed = () => resolve(undefined); });
+    const { root, unmount } = mount(PeerNetworkStep, {
+      send: async message => {
+        sends.push(message);
+        if (message.type === 'bootstrap/ready') { statusObserved(); return status; }
+        if (message.type === 'settings/update' && message.patch.dwebEnabled) return startup;
+        if (message.type === 'state/get') {
+          observed();
+          return { ok: true, state: { settings: { dwebChoiceMade: true, dwebEnabled: true } } };
+        }
+        return { ok: true, running: false };
+      },
+      onDone: () => { completed += 1; },
+    });
+    try {
+      need(root, '[data-network-choice="enable"]').click();
+      await persisted; await tick(); m.redraw.sync();
+      // Mounting the status child begins another asynchronous read. Observe
+      // that read explicitly; persistence alone does not mean it has settled.
+      await statusRequested;
+      expect(root.textContent).toContain('Connecting to the peer network');
+      releaseStatus({ ok: true });
+      const deadline = performance.now() + 1_000;
+      while (!root.textContent?.includes('offline') && performance.now() < deadline) {
+        await tick(); m.redraw.sync();
+      }
+      expect(root.textContent).toContain('offline');
+      expect(completed).toBe(0);
+      expect(need(root, '[data-network-choice="continue"]', HTMLButtonElement).disabled).toBe(false);
+      need(root, '.onboarding-actions button.secondary').click(); await tick(); m.redraw.sync();
+      expect(sends.filter(message => message.type === 'settings/update')).toEqual([
+        { type: 'settings/update', patch: { dwebEnabled: true } },
+        { type: 'settings/update', patch: { dwebEnabled: false } },
+      ]);
+      expect(completed).toBe(1);
+      release({ ok: true }); await tick(); m.redraw.sync();
+      expect(completed).toBe(1);
+      expect(root.querySelector('[data-network-choice="continue"]')).toBe(null);
+    } finally { releaseStatus({ ok: false }); release({ ok: false }); unmount(); }
+  });
+
+  it('does not treat a legacy enabled default as consent or advance after unmount', async () => {
+    /** @type {(value:any)=>void} */ let release = () => {};
+    const startup = new Promise(resolve => { release = resolve; });
+    /** @type {()=>void} */ let observed = () => {};
+    const checked = new Promise(resolve => { observed = () => resolve(undefined); });
+    let completed = 0;
+    const { root, unmount } = mount(PeerNetworkStep, {
+      send: async message => {
+        if (message.type === 'settings/update') return startup;
+        observed();
+        return { ok: true, state: { settings: { dwebChoiceMade: false, dwebEnabled: true } } };
+      },
+      onDone: () => { completed += 1; },
+    });
+    try {
+      need(root, '[data-network-choice="enable"]').click();
+      await checked; await tick(); m.redraw.sync();
+      expect(root.querySelector('[data-network-choice="continue"]')).toBe(null);
+      expect(need(root, '[data-network-choice="enable"]', HTMLButtonElement).disabled).toBe(true);
+    } finally { unmount(); }
+    release({ ok: true }); await tick(); m.redraw.sync();
+    expect(completed).toBe(0);
+  });
+
+  it('checks offline status without starting a host and retries only after a click', async () => {
+    /** @type {Msg[]} */ const sends = [];
+    const { root, unmount } = mount(PeerNetworkStatus, {
+      send: async message => {
+        sends.push(message);
+        return { ok: true, featureLeases: { leases: { dweb: { status: 'idle' } } } };
+      },
+    });
+    try {
+      await tick(); m.redraw.sync();
+      expect(root.textContent).toContain('offline');
+      expect(sends).toEqual([{ type: 'bootstrap/ready' }]);
+      need(root, 'button').click(); await tick(); m.redraw.sync();
+      expect(sends.filter(message => message.type === 'dweb/base/start')).toEqual([
+        { type: 'dweb/base/start' },
+      ]);
+    } finally { unmount(); }
+  });
+
+  it('retains an unknown stop across persisted-off rendering and confirms an explicit stop retry', async () => {
+    let completed = 0;
+    let mutations = 0;
+    let reads = 0;
+    /** @type {(value:any)=>void} */ let release = () => {};
+    const reading = new Promise(resolve => { release = resolve; });
+    const attrs = {
+      enabled: true,
+      send: async (/** @type {Msg} */ message) => {
+        if (message.type === 'settings/update') return { ok: ++mutations > 1 };
+        if (message.type === 'state/get') { reads += 1; return reading; }
+        return { ok: true };
+      },
+      onDone: () => { completed += 1; },
+    };
+    const { root, unmount } = mount(PeerNetworkStep, attrs);
+    try {
+      need(root, '.onboarding-actions button.secondary').click(); await tick(); m.redraw.sync();
+      attrs.enabled = false; m.redraw.sync();
+      expect(root.textContent).toContain('could not be confirmed');
+      expect(need(root, '.onboarding-actions button.secondary', HTMLButtonElement).disabled).toBe(true);
+      need(root, '.error + button').click();
+      need(root, '.error + button').click();
+      expect(reads).toBe(1);
+      release({ ok: true, state: { settings: { dwebChoiceMade: true, dwebEnabled: false } } });
+      await tick(); m.redraw.sync();
+      expect(root.textContent).toContain('shutdown is unconfirmed');
+      expect(completed).toBe(0);
+      expect(need(root, '.onboarding-actions button').textContent).toBe('Retry stopping');
+      need(root, '.onboarding-actions button').click(); await tick(); m.redraw.sync();
+      expect(mutations).toBe(2);
+      expect(completed).toBe(1);
+      expect(root.querySelector('[role="alert"]')).toBe(null);
+    } finally { release({ ok: false }); unmount(); }
+  });
+
 });

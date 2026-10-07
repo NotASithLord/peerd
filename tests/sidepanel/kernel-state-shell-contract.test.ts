@@ -51,6 +51,46 @@ const projected = (generation = 1, authorityEpoch = 'kernel-epoch-0001') => ({
 });
 
 describe('cold shell state contract', () => {
+  test('network consent projection must be a boolean before the shell can adopt it', () => {
+    for (const choice of [true, false]) {
+      const state = { ...projected(), settings: { ...settings, dwebChoiceMade: choice } };
+      expect(normalizeColdStateSnapshot(state)).toEqual(state);
+    }
+    for (const choice of ['true', 1, null, {}]) {
+      expect(normalizeColdStateSnapshot({
+        ...projected(), settings: { ...settings, dwebChoiceMade: choice },
+      })).toBeNull();
+    }
+  });
+
+  test('shared bounded fields preserve exact string and record-map limits', () => {
+    for (const [field, limit] of [['current', 64], ['model', 256], ['defaultRunnerModel', 256]] as const) {
+      for (const [value, valid] of [['', true], ['x'.repeat(limit), true], ['x'.repeat(limit + 1), false], [42, false]] as const) {
+        const state = projected();
+        Object.assign(state.providers, { [field]: value });
+        expect(normalizeColdStateSnapshot(state) !== null).toBe(valid);
+      }
+    }
+    for (const field of ['authorityEpoch', 'actorProjectionEpoch']) {
+      for (const [length, valid] of [[7, false], [8, true], [128, true], [129, false]] as const) {
+        const state: any = projected();
+        (field === 'authorityEpoch' ? state.projection : state)[field] = 'x'.repeat(length);
+        expect(normalizeColdStateSnapshot(state) !== null).toBe(valid);
+      }
+    }
+    for (const field of ['actors', 'sessions', 'asyncTasks']) {
+      for (const count of [256, 257]) {
+        const state: any = projected();
+        (field === 'sessions' ? state.spawned : state)[field] = Object.fromEntries(
+          Array.from({ length: count }, (_, index) => [String(index), field === 'asyncTasks' ? [{}] : {}]));
+        expect(normalizeColdStateSnapshot(state) !== null).toBe(count === 256);
+      }
+      const state: any = projected();
+      (field === 'sessions' ? state.spawned : state)[field] = { invalid: field === 'asyncTasks' ? [null] : [] };
+      expect(normalizeColdStateSnapshot(state)).toBeNull();
+    }
+  });
+
   test('rejects provenance-less legacy snapshots', () => {
     const legacy = { vault, settings, capabilities: { actorExecution } };
     expect(normalizeColdStateSnapshot(legacy)).toBeNull();

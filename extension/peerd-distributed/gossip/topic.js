@@ -117,7 +117,7 @@ export const createGossip = ({
     for (const cb of [...taps]) cb(msg, topic);
   };
 
-  const offEnvelope = mesh.onEnvelope((/** @type {{ env: any, via: any }} */ { env, via }) => {
+  const offEnvelope = mesh.onEnvelope(async (/** @type {{ env: any, via: any }} */ { env, via }) => {
     if (env.ch !== 4 || env.typ !== PUB) return;
     if (!env.body || typeof env.body.topic !== 'string') return;
     if (seen.has(env.sig)) return; // duplicate via another path
@@ -134,7 +134,7 @@ export const createGossip = ({
     if (oversized(env, env.body.topic)) return;
     deliver(env, via);
     // Forward the same signed frame onward — everyone but where it came from.
-    mesh.broadcast(env, via);
+    await mesh.broadcast(env, via);
   });
 
   return Object.freeze({
@@ -145,7 +145,7 @@ export const createGossip = ({
     async publish(topic, data) {
       const env = await mesh.sign(4, PUB, { topic, data });
       markSeen(env.sig); // our own frame must not boomerang back to us
-      mesh.broadcast(env);
+      await mesh.broadcast(env);
       return env;
     },
     /**

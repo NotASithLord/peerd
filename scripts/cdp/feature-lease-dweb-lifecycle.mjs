@@ -371,6 +371,13 @@ export async function runPackagedFeatureLeaseDwebLifecycle({
     // Dweb controls are deliberately Home-owned. The side panel remains the
     // user-visible vault/agent oracle; exercise dweb through its real sender.
     homePage = await openExtPage(ctx, 'home/home.html');
+    const beforeConsent = await rpc(homePage, { type: 'bootstrap/ready' });
+    if (stateBefore.reply?.state?.settings?.dwebEnabled !== false
+        || beforeConsent?.featureLeases?.leases?.dweb?.status === 'active') {
+      throw new Error('fresh install started the peer network before consent');
+    }
+    const optIn = await rpc(homePage, { type: 'settings/update', patch: { dwebEnabled: true } });
+    if (!optIn?.ok) throw new Error(`explicit network opt-in failed: ${JSON.stringify(optIn)}`);
     const dwebBefore = await waitForDweb(homePage);
     if (!dwebBefore) {
       throw new Error(`dweb base did not become ready: ${JSON.stringify(lastDwebStatus)}`);
