@@ -260,7 +260,11 @@ export const createBaseNetwork = async ({
     // share take MINUTES and delayed the discovery announce behind it. Background.
     announceProvider(uri).catch(() => {}); // the publisher is the first provider
     dlog('base', `published app "${name}" → ${uri}`);
-    return { uri, hash, packedBytes, created: manifest.created };
+    // A discovery hint from these exact published bytes, not a compatibility or
+    // safety verdict. Do not add it to the manifest and change immutable hashes.
+    const includesWasm = Object.values(bytes).some(file => file.length >= 8
+      && file[0] === 0 && file[1] === 97 && file[2] === 115 && file[3] === 109);
+    return { uri, hash, packedBytes, created: manifest.created, includesWasm };
   };
 
   // Re-seed bytes we fetched so WE become a provider too (install → seeder). The

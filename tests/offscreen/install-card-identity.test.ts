@@ -67,3 +67,9 @@ describe('discovery-bound install identity', () => {
     })).toBe('discovery-publisher-mismatch');
   });
 });
+
+test('verified row projection exposes signed discovery hints and keeps legacy runtime unknown', () => {
+  const head = {version_id:'a'.repeat(64),content_addr:`peerd://did:key:zPeer/${'a'.repeat(64)}`,size:128};
+  expect(discoveredAppFromRow({head,description:'Signed text'})).toMatchObject({description:'Signed text',size:128,includes_wasm:null});
+  for (const includes_wasm of [true,false]) expect(discoveredAppFromRow({head:{...head,includes_wasm}})).toMatchObject({includes_wasm});
+});

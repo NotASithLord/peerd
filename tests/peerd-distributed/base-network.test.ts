@@ -1,3 +1,4 @@
+import { publishedAppHead } from '../../extension/offscreen/published-app-head.js';
 import { describe, test, expect } from 'bun:test';
 import { generateIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
 import { memoryPair } from '../../extension/peerd-distributed/transport/channel.js';
@@ -269,4 +270,24 @@ test('provider deadlines abort transports before reusing a dial slot', async () 
     expect(peak).toBe(3);
     expect(active).toBe(0);
   } finally { globalThis.setTimeout = original; reader.base.close(); }
+});
+
+test('publication classifies exact snapshot bytes and reseeding preserves immutable version identity', async () => {
+  const p = await spawn('classification');
+  try {
+    const options = { name: 'Not a filename guess', entry: 'index.html', created: 123,
+      files: { 'index.html': '<h1>App</h1>', 'opaque.bin': new Uint8Array([0,97,115,109,1,0,0,0]) } };
+    const first = await p.base.publishApp(options);
+    expect(first.includesWasm).toBe(true);
+    const signed = await p.base.publishMeta({slug:'classification',name:'Module App',seq:1,
+      head:publishedAppHead({...first,size:first.packedBytes})});
+    expect(signed.card.value.head).toMatchObject({version_id:first.hash,includes_wasm:true});
+    expect(p.base.heardDwapps()[0]?.head.includes_wasm).toBe(true);
+    const reseed = await p.base.publishApp({...options, expectedHash:first.hash});
+    expect(reseed.hash).toBe(first.hash); expect(reseed.includesWasm).toBe(true);
+    expect(publishedAppHead({...reseed,size:reseed.packedBytes})).toEqual(signed.card.value.head);
+    const changed = {...options,files:{'index.html':'<h1>App</h1>','misleading.wasm':new Uint8Array([1,2,3])}};
+    expect((await p.base.publishApp(changed)).includesWasm).toBe(false);
+    await expect(p.base.publishApp({...changed, expectedHash:first.hash})).rejects.toThrow('changed');
+  } finally { p.base.close(); }
 });

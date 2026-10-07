@@ -4859,6 +4859,28 @@ export const STATES = [
     },
   },
 
+  // Real Explore component with a controlled catalog. Both themes and widths
+  // show the signed-hint caveat and the legacy unknown state.
+  ...[false, true].map(narrow => ({
+    name: narrow ? 'home-explore-narrow' : 'home-explore', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const page = await openExtPage(ctx, 'tests/fixtures/explore.html');
+      try {
+        if (narrow) await page.send('Emulation.setDeviceMetricsOverride', {width:320,height:900,deviceScaleFactor:1,mobile:false});
+        const ready = await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 3`), {budgetMs:8000,pollMs:80});
+        rec.check('Explore renders all publisher claims including legacy unknown', ready === true);
+        await rec.visualPage(narrow ? 'home-explore-narrow' : 'home-explore', page);
+        await evalIn(page, `(() => {const filter=document.querySelector('select');filter.value='yes';filter.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+        const filtered = await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 1 && document.querySelector('.disc-name')?.textContent === 'Orbit lab'`), {budgetMs:4000,pollMs:50});
+        rec.check('WebAssembly filter selects the declared module App', filtered === true);
+        await rec.visualPage(narrow ? 'home-explore-wasm-narrow' : 'home-explore-wasm', page);
+        const fits = await evalIn(page, `document.documentElement.scrollWidth <= innerWidth`);
+        rec.check('Explore controls and cards fit the viewport', fits === true);
+      } finally { try {page.close();} catch { /* */ } }
+    },
+  })),
+
   // Functional rendered coverage for committed success warnings. This takes a
   // screenshot without creating a local visual authority baseline. CI remains
   // the only source of Linux pixel baselines.

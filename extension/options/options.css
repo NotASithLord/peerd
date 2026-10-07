@@ -352,6 +352,11 @@
    hue per app, set inline), and update badge. Discover-specific bits: a
    monospace publisher line and a single trailing install/update/open action.
    (The flat .peerd-disc-row list below is now Contacts-only.) */
+.disc-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.disc-controls select { min-width: 0; max-width: 100%; }
+.disc-publisher { overflow-wrap: anywhere; }
+.disc-publisher summary { cursor: pointer; }
+.disc-description { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
 .disc-search { width: 100%; margin: 0 0 14px; font-size: 13px; }
 .disc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
 .disc-card {

@@ -26,7 +26,6 @@ import { loadDweb } from '/shared/dweb-loader.js';
 import { openOptions } from '/shared/open-options.js';
 import { LibrarySection } from './library-section.js';
 import { NetworkSection } from './network-section.js';
-import { DiscoverSection } from './discover-section.js';
 import { ContactsSection } from './contacts-section.js';
 import { ActorsSection } from './actors-section.js';
 // EvalSection (the Lab) is LAZY-loaded — see loadEvalSection below.
@@ -102,6 +101,15 @@ const loadOnboarding = () => {
 };
 
 // why: address parsing and details belong only to the explicit Discover surface.
+/** @type {any} */ let DiscoverSection = null;
+let discoverLoading = false, discoverFailed = false;
+const loadDiscover = () => {
+  if (DiscoverSection || discoverLoading) return;
+  discoverLoading = true;
+  import('./discover-section.js').then(mod => { DiscoverSection = mod.DiscoverSection; discoverFailed = false; })
+    .catch(() => { discoverFailed = true; })
+    .finally(() => { discoverLoading = false; m.redraw(); });
+};
 /** @type {any} */ let AddressSection = null;
 let addressLoading = false;
 let addressFailed = false;
@@ -780,6 +788,7 @@ const content = (showDweb) => {
   if (activeView === 'discover' && DWEB_ENABLED) {
     loadOnboarding();
     if (!addressFailed) loadAddressSection();
+    if (showDweb && !discoverFailed) loadDiscover();
     if (!NetworkChoice) return onboardingFailed
       ? m('button', { onclick: loadOnboarding }, 'Retry loading network controls')
       : m('p', { role: 'status' }, 'Loading network controls…');
@@ -788,7 +797,9 @@ const content = (showDweb) => {
       AddressSection ? m(AddressSection, { send, enabled: !!showDweb })
         : addressFailed ? m('button', { onclick: loadAddressSection }, 'Retry loading App addresses')
           : m('p', { role: 'status' }, 'Loading App addresses…'),
-      showDweb ? m(DiscoverSection, { send }) : null,
+      showDweb ? DiscoverSection ? m(DiscoverSection, { send })
+        : discoverFailed ? m('button', {onclick: loadDiscover}, 'Retry loading Explore')
+          : m('p', {role:'status'}, 'Loading Explore…') : null,
     ]);
   }
   if (activeView === 'contacts' && showDweb) return m(ContactsSection, { send });

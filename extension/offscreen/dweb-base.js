@@ -3,6 +3,7 @@
 // why: The network must survive tab closure. The store build stays inert.
 // Keep detailed logs because WebRTC and offscreen lifecycles require live diagnosis.
 
+import { publishedAppHead } from './published-app-head.js';
 import { createImmutableInstallOwner } from './immutable-install-owner.js';
 import { immutableAppRoot } from '/shared/address/immutable-app-root.js';
 import browser from '/shared/browser-api.js';
@@ -1048,19 +1049,9 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
               unserveTrackedHash(h, publicationOwnerId, published.hash);
             }
           };
-          const announce = (/** @type {any} */ {
-            uri, hash, size,
-          }) => h.base.publishMeta({
+          const announce = (/** @type {any} */ published) => h.base.publishMeta({
               slug, name: msg.name, description: msg.description ?? '',
-              head: {
-                version_id: hash, content_addr: uri, size,
-                ...(msg.release?.previousVersionId
-                  ? { previous_version_id: msg.release.previousVersionId } : {}),
-                ...(msg.release?.gitCommitOid
-                  ? { git_commit_oid: msg.release.gitCommitOid } : {}),
-                ...(msg.release?.changelog
-                  ? { changelog: msg.release.changelog } : {}),
-              },
+              head: publishedAppHead(published, msg.release),
               // why: A reseed reuses its signed version identity.
               ...(Number.isInteger(msg.seq) ? { seq: msg.seq } : {}),
             });
