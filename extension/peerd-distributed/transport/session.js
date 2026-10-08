@@ -31,7 +31,7 @@ const validEnvelope = (env, typ) => exactKeys(env, ['v', 'ch', 'typ', 'from', 'b
  *   identity: {did:string,sign:(bytes:Uint8Array)=>Promise<Uint8Array>},
  *   caps?:string[], now?:()=>number, timeoutMs?:number, signal?:AbortSignal, timers?:any,
  * }} opts
- * @returns {Promise<{remoteDid:string}>}
+ * @returns {Promise<{remoteDid:string,remoteCaps:readonly string[]}>}
  */
 export const createSession = ({ channel, identity, caps = ['content'], now = Date.now,
   timeoutMs = 10_000, signal, timers = globalThis,
@@ -71,7 +71,7 @@ export const createSession = ({ channel, identity, caps = ['content'], now = Dat
     } else {
       for (const msg of stashed) channel.deliver(msg);
       stashed.length = 0;
-      resolve({ remoteDid: remoteHello.from });
+      resolve({ remoteDid: remoteHello.from, remoteCaps: Object.freeze([...remoteHello.body.caps]) });
     }
   };
   const complete = () => { if (helloSent && proofSent && proofReceived) finish(null); };

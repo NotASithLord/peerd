@@ -23,8 +23,8 @@ test('HELLO resolves both peers even when remote verification wins before local 
   await started.promise;
   ca.deliver({ t: 'early-content' });
   signing.release();
-  expect(await pa).toEqual({ remoteDid: b.did });
-  expect(await pb).toEqual({ remoteDid: a.did });
+  expect(await pa).toEqual({ remoteDid: b.did, remoteCaps: ['content'] });
+  expect(await pb).toEqual({ remoteDid: a.did, remoteCaps: ['content'] });
   const received: any[] = [];
   ca.setHandler((msg) => received.push(msg));
   expect(received).toEqual([{ t: 'early-content' }]);

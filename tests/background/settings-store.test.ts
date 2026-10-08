@@ -175,3 +175,99 @@ describe('settings-store', () => {
     expect(s.stored()).toEqual({ b: 20, c: 30 });
   });
 });
+
+test('explicit discovery choice persists across restart without changing transport consent', async () => {
+  const kv = makeKv(); const defaults = { dwebEnabled: false, dwebDiscoveryEnabled: true };
+  const open = () => makeSettingsStore({ kv, key: 'settings.v1', defaults });
+  const settings = open(); await settings.load();
+  for (const enabled of [true, false]) {
+    await settings.update({ dwebDiscoveryEnabled: enabled });
+    expect(kv._peek().dwebDiscoveryEnabled).toBe(enabled);
+    const restarted = open(); await restarted.load();
+    expect(restarted.get()).toEqual({ dwebEnabled: false, dwebDiscoveryEnabled: enabled });
+  }
+});
+
+test('settings mutation checks its authority after queueing and hydration before persistence', async () => {
+  for (const phase of ['queue', 'hydrate']) {
+    const gate = deferred<void>(); let writes = 0; let current = true;
+    const kv = { get: async () => { if (phase === 'hydrate') await gate.promise; return undefined; },
+      set: async () => { writes++; if (phase === 'queue' && writes === 1) await gate.promise; } };
+    const settings = makeSettingsStore({ kv, key: 'settings.v1', defaults: {} });
+    const held = phase === 'queue' ? settings.update({ unrelated: true }) : Promise.resolve();
+    const pending = settings.update({ dwebDiscoveryEnabled: false }, () => current);
+    await Promise.resolve(); await Promise.resolve(); current = false; gate.resolve(); await held;
+    await expect(pending).rejects.toThrow('settings-authority-retired');
+    expect(writes).toBe(phase === 'queue' ? 1 : 0);
+    expect(settings.stored()).not.toHaveProperty('dwebDiscoveryEnabled');
+  }
+});
+
+test('discovery refresh never creates a host and distinguishes inactive from failed live enforcement', async () => {
+  const { refreshDiscoverySetting } = await import('../../extension/background/dweb-peer-policy.js');
+  let settings: Record<string, any> = { dwebEnabled: false, dwebDiscoveryEnabled: true };
+  let contexts: any[] = [], sends = 0, probes = 0;
+  let reply: any = { ok: true, enabled: true };
+  const browser = { runtime: { getContexts: async () => { probes++; return contexts; },
+    sendMessage: async (message: any) => { sends++; expect(message).toEqual({ type: 'dweb/base-host/set-discovery' }); return reply; } } };
+  const deps = { browser, settingsStore: { get: () => settings } };
+  expect(await refreshDiscoverySetting(deps)).toEqual({ ok: true, inactive: true, enabled: true });
+  expect(probes).toBe(1); expect(sends).toBe(0);
+  settings.dwebEnabled = true;
+  expect(await refreshDiscoverySetting(deps)).toMatchObject({ ok: true, inactive: true });
+  expect(sends).toBe(0);
+  contexts = [{}];
+  expect(await refreshDiscoverySetting(deps)).toEqual(reply);
+  for (reply of [{ ok: false }, { ok: true, enabled: false }, undefined]) {
+    await expect(refreshDiscoverySetting(deps)).rejects.toThrow('discovery-enforcement-unconfirmed');
+  }
+  settings = { dwebEnabled: false, dwebDiscoveryEnabled: 'true' };
+  await expect(refreshDiscoverySetting(deps)).rejects.toThrow('discovery-enforcement-unconfirmed');
+  contexts = [];
+  expect(await refreshDiscoverySetting(deps)).toMatchObject({ enabled: false, inactive: true });
+});
+
+test('late discovery acknowledgment cannot confirm a superseded preference or retired authority', async () => {
+  const { refreshDiscoverySetting } = await import('../../extension/background/dweb-peer-policy.js');
+  for (const change of ['preference', 'authority']) {
+    const gate = deferred<any>(); const entered = deferred<void>(); let current = true;
+    const settings = { dwebEnabled: true, dwebDiscoveryEnabled: false };
+    const pending = refreshDiscoverySetting({ settingsStore: { get: () => settings }, browser: { runtime: {
+      getContexts: async () => [{}], sendMessage: async () => { entered.resolve(); return gate.promise; },
+    } } }, () => current);
+    await entered.promise;
+    if (change === 'preference') settings.dwebDiscoveryEnabled = true; else current = false;
+    gate.resolve({ ok: true, enabled: false });
+    await expect(pending).rejects.toThrow('discovery-enforcement-unconfirmed');
+  }
+});
+
+test('timed-out context discovery cannot dispatch a late refresh command', async () => {
+  const { refreshDiscoverySetting } = await import('../../extension/background/dweb-peer-policy.js');
+  const contexts = deferred<any[]>(); let sends = 0;
+  const pending = refreshDiscoverySetting({ settingsStore: { get: () => ({ dwebEnabled: true, dwebDiscoveryEnabled: false }) },
+    browser: { runtime: { getContexts: () => contexts.promise, sendMessage: async () => { sends++; } } } });
+  await expect(pending).rejects.toThrow('discovery-enforcement-timeout');
+  contexts.resolve([{}]); await Promise.resolve(); await Promise.resolve();
+  expect(sends).toBe(0);
+}, 8_000);
+
+test('combined master-off settings await teardown before discovery refresh', async () => {
+  const source = await Bun.file(new URL('../../extension/background/vault-kernel.js', import.meta.url)).text();
+  const start = source.indexOf('const onKernelSettingsChanged =');
+  const end = source.indexOf('const lockLifecycle =', start);
+  const gate = deferred<void>(); const events: string[] = [];
+  const lifecycle = new Function('featureHost',
+    source.slice(start, end) + '\nreturn onKernelSettingsChanged;')(
+    { runtime: { disable: async () => { events.push('stopping'); await gate.promise; events.push('stopped'); } } });
+  const demand = await Bun.file(new URL('../../extension/background/kernel-demand-plane.js', import.meta.url)).text();
+  const wrapperStart = demand.indexOf('  const onSettingsChanged =');
+  const wrapperEnd = demand.indexOf('  const authorityScheduler =', wrapperStart);
+  const changed = new Function('deps', 'refreshDiscoverySetting',
+    demand.slice(wrapperStart, wrapperEnd) + '\nreturn onSettingsChanged;')(
+    { dwebEnabled: true, onSettingsChanged: lifecycle }, async () => { events.push('refresh'); });
+  const pending = changed({ dwebEnabled: false, dwebDiscoveryEnabled: false });
+  await Promise.resolve(); expect(events).toEqual(['stopping']);
+  gate.resolve(); await pending;
+  expect(events).toEqual(['stopping', 'stopped', 'refresh']);
+});

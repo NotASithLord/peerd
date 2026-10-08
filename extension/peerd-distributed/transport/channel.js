@@ -23,9 +23,9 @@ import { localSessionBindings } from './channel-binding.js';
 export const isRawProtocolClose = (reason) => ['raw-frame-type', 'raw-frame-size', 'raw-frame-json'].includes(/** @type {string} */ (reason));
 
 /**
- * @param {{ send: (msg: any, options?: import('./outgoing.js').SendOptions) => void | Promise<void>, close?: () => void, getSessionBinding?: () => Readonly<import('./channel-binding.js').SessionBinding> }} io
+ * @param {{ send: (msg: any, options?: import('./outgoing.js').SendOptions) => void | Promise<void>, close?: () => void, maxFrameBytes?: () => number, getSessionBinding?: () => Readonly<import('./channel-binding.js').SessionBinding> }} io
  */
-export const createBufferedChannel = ({ send, close, getSessionBinding } = /** @type {{ send: (msg: any) => void }} */ ({})) => {
+export const createBufferedChannel = ({ send, close, getSessionBinding, maxFrameBytes } = /** @type {{ send: (msg: any) => void }} */ ({})) => {
   /** @type {((msg: any) => void) | null} */
   let handler = null;
   let closed = false;
@@ -44,6 +44,7 @@ export const createBufferedChannel = ({ send, close, getSessionBinding } = /** @
   };
 
   const chan = {
+    maxFrameBytes: () => closed ? 0 : maxFrameBytes?.() ?? Infinity,
     getSessionBinding: () => closed ? null : getSessionBinding?.() ?? null,
     /** @param {any} msg @param {import('./outgoing.js').SendOptions} [options] */
     send: async (msg, options) => {

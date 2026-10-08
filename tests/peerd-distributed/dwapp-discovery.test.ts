@@ -38,6 +38,7 @@ const spawn = async (over: any = {}) => {
     ...(over.now ? { now: over.now } : {}),
     ...(over.caps ? { caps: over.caps } : {}),
     ...(over.admitMeta ? { admitMeta: over.admitMeta } : {}),
+    ...(over.isEnabled ? { isEnabled: over.isEnabled } : {}),
   });
   return {
     identity, mesh, library, discovery, blocked,
@@ -502,4 +503,32 @@ for (const mode of ['continue', 'quota', 'unsubscribe', 'disable', 'ban', 'close
     release(); source.discovery.close(); sink.discovery.close();
     source.mesh.close(); sink.mesh.close();
   }
+});
+
+test('hydrated disabled preference refuses first SUB and live assembly races while preserving serving', async () => {
+  let enabled = false;
+  let subscriptions = 0;
+  const receiver = await spawn({ isEnabled: () => enabled,
+    signHook: (channel: number, type: number, _body: any, sign: () => Promise<any>) => {
+      if (channel === DISCOVERY.CH && type === DISCOVERY.SUB) subscriptions++;
+      return sign();
+    } });
+  const publisher = await spawn();
+  try {
+    await publisher.discovery.announce(await ownCard(publisher, 'remote'));
+    await link(receiver, publisher);
+    receiver.discovery.subscribeAll();
+    await tick();
+    expect(subscriptions).toBe(0);
+    expect(receiver.library.size()).toBe(0);
+    // Receiving is paused; already-consented remote subscribers still get our apps.
+    await receiver.discovery.announce(await ownCard(receiver, 'local'));
+    await waitFor(() => publisher.library.size() === 2);
+    expect(publisher.library.size()).toBe(2);
+    enabled = true;
+    receiver.discovery.setEnabled(true);
+    await waitFor(() => receiver.library.size() === 2);
+    expect(receiver.library.size()).toBe(2);
+    expect(subscriptions).toBeGreaterThan(0);
+  } finally { for (const peer of [receiver, publisher]) { peer.discovery.close(); peer.mesh.close(); } }
 });

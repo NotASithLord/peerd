@@ -2,11 +2,12 @@
 // production WebRTC carries every tested peer message and content byte.
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { dirname, join, resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
+import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const extension = join(root, 'extension');
@@ -38,16 +39,6 @@ process.once('SIGINT', () => void finish(130));
 setTimeout(() => void finish(1), 10 * 60_000).unref();
 
 const fingerprint = () => {
-  const hash = createHash('sha256');
-  const visit = directory => {
-    for (const entry of readdirSync(join(root, directory), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-      const path = `${directory}/${entry.name}`;
-      if (entry.isDirectory()) visit(path);
-      else if (entry.isFile()) { hash.update(path); hash.update('\0'); hash.update(readFileSync(join(root, path))); }
-    }
-  };
-  visit('extension');
-  for (const name of ['dweb-cluster-node.mjs', 'dweb-cluster-page.js']) hash.update(readFileSync(join(root, 'scripts/cdp', name)));
   let machine;
   if (process.platform === 'darwin') {
     const output = execFileSync('/usr/sbin/ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice'], { encoding: 'utf8' });
@@ -55,7 +46,7 @@ const fingerprint = () => {
   } else if (process.platform === 'linux') machine = readFileSync('/etc/machine-id', 'utf8').trim();
   if (!machine) throw new Error('Cannot establish physical machine identity');
   return { host: hostname(), platform: process.platform, arch: process.arch,
-    machine: createHash('sha256').update(machine).digest('hex'), source: hash.digest('hex'),
+    machine: createHash('sha256').update(machine).digest('hex'), source: sourceFingerprint(root), ...gitMetadata(root),
     runtime: Bun.version };
 };
 

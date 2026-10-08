@@ -50,5 +50,6 @@ export const CHANNEL_DEFAULTS = Object.freeze({
   auditLogMaxEntries: 20000,
   autoUpdateEnabled: true,
   dwebEnabled: false,
+  dwebDiscoveryEnabled: true,
   dwebAgentEnabled: false,
 });

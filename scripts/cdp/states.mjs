@@ -4552,14 +4552,59 @@ export const STATES = [
     name: 'sessions-list', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
-      // Two chats so the list has rows to show, then open the chats view.
-      await rpc(ctx.page, { type: 'agent/send', text: 'summarize the three PRs I opened today' });
-      await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
-      await rpc(ctx.page, { type: 'session/reset' });
-      await rpc(ctx.page, { type: 'agent/send', text: 'spin up a linux VM and run uname -a' });
-      await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
+      // why: an old assistant bubble is not completion of the newly requested
+      // turn. Prove each accepted turn persisted before resetting its session.
+      const expected = [];
+      for (const text of ['summarize the three PRs I opened today', 'spin up a linux VM and run uname -a']) {
+        const reset = await rpc(ctx.page, { type: 'session/reset' });
+        if (reset?.ok !== true) throw new Error(`sessions-list reset refused: ${JSON.stringify(reset)}`);
+        const empty = await waitFor(async () => {
+          const state = await rpc(ctx.page, { type: 'state/get' });
+          const view = await probe(ctx);
+          return state?.ok === true && !state.state?.session?.sessionId
+            && !view.userText && !view.assistantText && !view.busy;
+        }, { budgetMs: 20_000 });
+        if (!empty) throw new Error('sessions-list reset did not reach an empty session');
+        const sent = await rpc(ctx.page, { type: 'agent/send', text });
+        rec.check(`session fixture turn accepted: ${text}`, sent?.ok === true, JSON.stringify(sent));
+        if (sent?.ok !== true) throw new Error('sessions-list fixture turn refused');
+        let lastObservation = null;
+        const persisted = await waitFor(async () => {
+          const state = await rpc(ctx.page, { type: 'state/get' });
+          const sessionId = state?.state?.session?.sessionId;
+          const view = await probe(ctx);
+          // The user container also includes the visible role label "you".
+          // Match the message bubble itself, just as the assistant probe does.
+          const userText = await evalIn(ctx.page, `document.querySelector('.message-user .bubble')?.textContent.trim() ?? null`);
+          lastObservation = { stateOk: state?.ok === true, sessionId, busy: view.busy,
+            userMatches: userText === text, assistantMatches: view.assistantText === 'noted',
+            errorPresent: !!view.errorText };
+          if (!sessionId || view.busy || userText !== text || view.assistantText !== 'noted') return null;
+          const reply = await rpc(ctx.page, { type: 'session/debugBundle', sessionId });
+          const messages = reply?.bundle?.session?.messages ?? [];
+          const userPersisted = messages.some(message => message.role === 'user' && message.content === text);
+          const assistantPersisted = messages.some(message => message.role === 'assistant' && message.content === 'noted');
+          lastObservation = { ...lastObservation, bundleOk: reply?.ok === true,
+            messageCount: messages.length, userPersisted, assistantPersisted };
+          return reply?.ok === true && userPersisted && assistantPersisted ? { sessionId, title: text } : null;
+        }, { budgetMs: 20_000 });
+        rec.check(`session fixture turn persisted: ${text}`, !!persisted, JSON.stringify(lastObservation));
+        if (!persisted) throw new Error('sessions-list exact fixture turn did not persist');
+        expected.push(persisted);
+      }
+      const listed = await rpc(ctx.page, { type: 'session/list' });
+      const complete = listed?.ok === true && new Set(expected.map(row => row.sessionId)).size === 2
+        && expected.every(row => listed.sessions?.some(session => session.sessionId === row.sessionId
+          && session.title === row.title && session.messageCount >= 2 && !session.archived));
+      rec.check('both exact fixture sessions remain in the persisted list', complete, JSON.stringify(listed?.sessions));
+      if (!complete) throw new Error('sessions-list persisted fixture rows are missing');
       await evalIn(ctx.page, `document.querySelector('.topbar-actions button[title="Chats"]')?.click()`);
-      await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.sessions-list .session-row')`), { budgetMs: 8_000, pollMs: 50 });
+      const visible = await waitFor(() => evalIn(ctx.page, `(() => {
+        const titles = [...document.querySelectorAll('.sessions-list .session-title')].map(row => row.textContent.trim());
+        return ${JSON.stringify(expected.map(row => row.title))}.every(title => titles.includes(title));
+      })()`), { budgetMs: 8_000, pollMs: 50 });
+      rec.check('both persisted fixture sessions render before capture', !!visible);
+      if (!visible) throw new Error('sessions-list expected rows did not render');
       await rec.visual('sessions-list');
       // Return to the chat view for later states.
       await evalIn(ctx.page, `document.querySelector('.topbar-actions button[title="Chats"]')?.click()`);
@@ -4874,6 +4919,30 @@ export const STATES = [
         const filtered = await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 1 && document.querySelector('.disc-name')?.textContent === 'Orbit lab'`), {budgetMs:4000,pollMs:50});
         rec.check('WebAssembly filter selects the declared module App', filtered === true);
         await rec.visualPage(narrow ? 'home-explore-wasm-narrow' : 'home-explore-wasm', page);
+        // The head harness also captures older merge-base extension surfaces.
+        // Only that explicit baseline run may lack the newly added control.
+        const libraryPresent = await evalIn(page, `!!document.querySelector('[aria-label="Library filter"]')`);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1' && !libraryPresent) {
+          rec.check('Merge-base Explore predates the Library filter', true);
+        } else {
+          const libraryReady = await waitFor(() => evalIn(page,
+            `document.querySelector('[aria-label="Library filter"]')?.disabled === false`), {budgetMs:4000,pollMs:50});
+          rec.check('Library filter is ready after reading local Apps', libraryReady === true);
+          if (libraryReady) {
+            await evalIn(page, `(() => {
+              const wasm=document.querySelector('[aria-label="WebAssembly content"]');
+              wasm.value='all';wasm.dispatchEvent(new Event('change',{bubbles:true}));
+              const library=document.querySelector('[aria-label="Library filter"]');
+              library.value='uninstalled';library.dispatchEvent(new Event('change',{bubbles:true}));
+            })()`);
+            const unfamiliar = await waitFor(() => evalIn(page, `(() => {
+              const names=[...document.querySelectorAll('.disc-name')].map(node=>node.textContent);
+              return names.length===2 && names.includes('Field notes') && names.includes('Pixel garden');
+            })()`), {budgetMs:4000,pollMs:50});
+            rec.check('Library filter excludes the locally installed App', unfamiliar === true);
+            await rec.visualPage(narrow ? 'home-explore-uninstalled-narrow' : 'home-explore-uninstalled', page);
+          }
+        }
         const fits = await evalIn(page, `document.documentElement.scrollWidth <= innerWidth`);
         rec.check('Explore controls and cards fit the viewport', fits === true);
       } finally { try {page.close();} catch { /* */ } }

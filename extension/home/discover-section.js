@@ -52,6 +52,9 @@ export const DiscoverSection = (initialVnode) => {
   let dead = false;
   let query = '';          // client-side filter over the heard list (name / peer)
   let wasm = 'all';
+  let libraryFilter = 'all';
+  let localReady = false;
+  let localFailed = false;
   let seed = initialVnode?.attrs?.initialSeed ?? crypto.getRandomValues(new Uint32Array(1))[0];
   let limit = EXPLORE_PAGE;
   let offset = 0;
@@ -105,6 +108,8 @@ export const DiscoverSection = (initialVnode) => {
       }
       installedByUri = byUri;
       installedByDwappId = byId;
+      localReady = true;
+      localFailed = false;
       for (const [id, target] of unconfirmed) {
         const local = byId.get(id);
         const identityMatches = !!local
@@ -123,8 +128,8 @@ export const DiscoverSection = (initialVnode) => {
         // on an empty poll can mint duplicate installs with fresh App ids.
       }
       return true;
-      } catch { return false; /* best effort; leave prior values */ }
-      finally { localInFlight = null; }
+      } catch { localFailed = true; return false; /* retain the last confirmed Library */ }
+      finally { localInFlight = null; if (!dead) m.redraw(); }
     })();
     return localInFlight;
   };
@@ -330,7 +335,7 @@ export const DiscoverSection = (initialVnode) => {
 
     // the single trailing action (mirrors the prior row's branch ladder)
     let action;
-    if (mine) action = m('span.peerd-disc-done', 'in your Library');
+    if (mine && installed) action = m('span.peerd-disc-done', 'in your Library');
     else if (installed && updatable) action = m('button.disc-open', {
       disabled: state === 'updating' || uncertain,
       onclick: () => update(send, app, /** @type {string} */ (localId)),
@@ -424,7 +429,15 @@ export const DiscoverSection = (initialVnode) => {
           'No peer Apps discovered yet. Try an included starter above, inspect an App address, or share an App from your Library. Peer results appear when signed announcements arrive.')]);
       }
 
-      const balanced = exploreOrder(apps, { query, wasm, seed });
+      // why: a pending mutation must remain visible until its receipt resolves,
+      // even if polling already finds it in the Library. Unknown is not absent.
+      const candidates = libraryFilter === 'all' ? apps : apps.filter(app => {
+        const id = app.dwapp_id;
+        if (id && (unconfirmed.has(id) || notices[id] || ['installing', 'updating'].includes(busy[id]))) return true;
+        return !(id && installedByDwappId.has(id))
+          && !(app.uri && installedByUri.has(app.uri));
+      });
+      const balanced = exploreOrder(candidates, { query, wasm, seed });
       const byId = new Map(balanced.map(app => [app.dwapp_id, app]));
       orderedIds = orderedIds.filter(id => byId.has(id));
       const known = new Set(orderedIds);
@@ -447,11 +460,20 @@ export const DiscoverSection = (initialVnode) => {
             onchange: (/** @type {{target: HTMLSelectElement}} */ e) => { wasm = e.target.value; limit = EXPLORE_PAGE; offset = 0; orderedIds = []; },
           }, [m('option', {value:'all'}, 'All Apps'), m('option', {value:'yes'}, 'Includes WebAssembly'),
             m('option', {value:'no'}, 'No detected WebAssembly files'), m('option', {value:'unknown'}, 'Not specified')]),
+          m('select', { 'aria-label': 'Library filter', value: libraryFilter, disabled: !localReady,
+            onchange: (/** @type {{target: HTMLSelectElement}} */ e) => {
+              libraryFilter = e.target.value; limit = EXPLORE_PAGE; offset = 0; orderedIds = [];
+            },
+          }, [m('option', {value:'all'}, 'All Apps'), m('option', {value:'uninstalled'}, 'Not in my Library')]),
           m('button.secondary', { onclick: () => { seed = crypto.getRandomValues(new Uint32Array(1))[0]; limit = EXPLORE_PAGE; offset = 0; orderedIds = []; } }, 'Shuffle'),
         ]),
+        !localReady || localFailed && libraryFilter !== 'all' ? m('p.muted', {role:'status'},
+          !localFailed ? 'Checking your Library…' : localReady
+            ? 'Could not refresh your Library. Filtering uses the last confirmed Library. Refresh to try again.'
+            : 'Could not read your Library. Refresh to enable the Library filter.') : null,
         m('p.muted', 'WebAssembly hints are publisher-signed, not a safety or compatibility guarantee.'),
-        m('p.muted', {role:'status', 'aria-live':'polite'}, ordered.length ? `Showing ${offset + 1}–${offset + shown.length} of ${ordered.length} Apps` : 'No matching Apps. Change your search or WebAssembly filter.'),
-        !ordered.length ? m('button.secondary', { onclick: () => { query = ''; wasm = 'all'; orderedIds = []; offset = 0; } }, 'Clear filters') : null,
+        m('p.muted', {role:'status', 'aria-live':'polite'}, ordered.length ? `Showing ${offset + 1}–${offset + shown.length} of ${ordered.length} Apps` : 'No matching Apps. Change your search or filters.'),
+        !ordered.length ? m('button.secondary', { onclick: () => { query = ''; wasm = 'all'; libraryFilter = 'all'; orderedIds = []; offset = 0; } }, 'Clear filters') : null,
         shown.length ? m('.disc-grid', shown.map((app) => card(send, app))) : null,
         m('.disc-controls', [
           offset ? m('button.secondary', {onclick: () => { offset = Math.max(0, offset - EXPLORE_WINDOW); limit = EXPLORE_WINDOW; }}, 'Previous Apps') : null,

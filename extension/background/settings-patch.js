@@ -127,6 +127,7 @@ export const normalizeSettingsPatch = (patch, {
   if (dwebEnabled && typeof patch.dwebEnabled === 'boolean') {
     next.dwebEnabled = patch.dwebEnabled;
   }
+  if (dwebEnabled && typeof patch.dwebDiscoveryEnabled === 'boolean') next.dwebDiscoveryEnabled = patch.dwebDiscoveryEnabled;
   if (dwebEnabled && typeof patch.dwebAgentEnabled === 'boolean') {
     next.dwebAgentEnabled = patch.dwebAgentEnabled;
   }

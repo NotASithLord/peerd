@@ -121,8 +121,12 @@ export const createOutgoingWriter = ({ dc, governor = outgoingGovernor, maxMessa
     for (const frame of [...queue]) finish(frame, new SendError('closed'));
     unregister();
   };
+  // why: producers must size whole protocol frames against the same negotiated
+  // ceiling enforced below; local frame policy alone may exceed SCTP's limit.
+  const maxFrameBytes = () => Math.min(limits.frameBytes, limits.nativeBytes, maxMessageSize() || Infinity);
   return {
     close,
+    maxFrameBytes,
     /** @param {any} message @param {SendOptions} [options] @returns {Promise<void>} */
     send(message, { signal, priority = 'bulk' } = {}) {
       if (closed || dc.readyState === 'closed' || dc.readyState === 'closing') return Promise.reject(new SendError('closed'));
@@ -135,8 +139,7 @@ export const createOutgoingWriter = ({ dc, governor = outgoingGovernor, maxMessa
       catch { return Promise.reject(new SendError('not serializable')); }
       if (typeof encoded !== 'string' || encoded.length > limits.frameBytes) return Promise.reject(new SendError('frame too large'));
       const bytes = new TextEncoder().encode(encoded).byteLength;
-      const nativeLimit = maxMessageSize();
-      if (bytes > Math.min(limits.frameBytes, limits.nativeBytes, nativeLimit || Infinity)
+      if (bytes > maxFrameBytes()
         || (control && bytes > limits.controlBytes)) return Promise.reject(new SendError('frame too large'));
       if (!governor.available(state, bytes, control)) return Promise.reject(new SendError('overloaded'));
       return new Promise((resolve, reject) => {

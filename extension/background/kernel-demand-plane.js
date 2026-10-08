@@ -27,6 +27,7 @@ import { HARDCODED_ALLOWLIST, makeSafeFetch } from '/peerd-egress/background.js'
 import { costOf, hasPricing } from '/peerd-provider/background.js';
 import { createAuthorityEffectScheduler } from './authority-effect-scheduler.js';
 import { createAppDwebAuthority } from './app-dweb-authority.js';
+import { refreshDiscoverySetting } from './dweb-peer-policy.js';
 
 const OPTIONAL_CONTROLLER_ROUTES = new Set([
   'provider/test', 'models/options', 'openrouter/models',
@@ -35,6 +36,14 @@ const OPTIONAL_CONTROLLER_ROUTES = new Set([
 
 /** @param {Record<string,any>} deps */
 export const createKernelDemandPlane = (deps) => {
+  // why: discovery belongs to the demand owner. Shared kernel startup must not
+  // load Chrome-only peer policy into Firefox's otherwise inert cold graph.
+  const onSettingsChanged = async (/** @type {Record<string,any>} */ patch) => {
+    await deps.onSettingsChanged?.(patch);
+    if (deps.dwebEnabled && Object.hasOwn(patch, 'dwebDiscoveryEnabled')) {
+      await refreshDiscoverySetting({ browser: deps.browser, settingsStore: deps.settingsStore });
+    }
+  };
   const authorityScheduler = createAuthorityEffectScheduler();
   /** @type {ReturnType<typeof createAppDwebAuthority>|null} */
   let appDwebAuthority = null;
@@ -158,6 +167,7 @@ export const createKernelDemandPlane = (deps) => {
   };
   const support = createKernelDemandSupport({
     ...deps,
+    onSettingsChanged,
     testProvider: (/** @type {any} */ message) => semanticRoutes['provider/test'](message),
     withAppDwebAuthority,
     denylist: deps.denylist,
@@ -215,6 +225,7 @@ export const createKernelDemandPlane = (deps) => {
     let sourceProjectionRevision = 0;
     const runtime = await deps.controllerGateway.withRun(() => deps.createProductionRuntime({
       ...deps,
+      onSettingsChanged,
       appDwebAuthority: getAppDwebAuthority(),
       authorityScheduler,
       seams,

@@ -92,12 +92,16 @@ export const createPresence = ({
   };
 
   const beacon = () => gossip.publish(topic, { meta: meta() });
+  // why: autonomous liveness is best effort and retries on the next heartbeat.
+  // Its owner must settle shutdown/signing failures; explicit announce callers
+  // retain the original Promise so a requested publication failure is visible.
+  const scheduledBeacon = () => { Promise.resolve().then(beacon).catch(() => {}); };
 
   return Object.freeze({
     start() {
       if (beat) return;
-      beacon(); // announce immediately — joins should feel instant
-      beat = setInterval(beacon, heartbeatMs);
+      scheduledBeacon(); // announce immediately; joins should feel instant
+      beat = setInterval(scheduledBeacon, heartbeatMs);
       sweepTimer = setInterval(sweep, Math.max(1, Math.floor(expireMs / 3)));
     },
     stop() {

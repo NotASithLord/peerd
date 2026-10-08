@@ -1,15 +1,16 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { createPeerPolicyView } from '../../extension/offscreen/peer-policy.js';
+import { createDiscoverySettings } from '../../extension/offscreen/discovery-settings.js';
 import { withDeadline } from '../../extension/shared/cold-util.js';
 import { encodeDidKey } from '../../extension/shared/address/did.js';
 const source = readFileSync(new URL('../../extension/offscreen/dweb-base.js', import.meta.url), 'utf8');
 const did = encodeDidKey(new Uint8Array(32));
 const slice = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
-const policyBoundary = (send: () => Promise<any>) => new Function('createPeerPolicyView', 'withDeadline', 'browser',
+const policyBoundary = (send: () => Promise<any>) => new Function('createPeerPolicyView', 'createDiscoverySettings', 'withDeadline', 'browser',
   'let handle=null;' + slice('const peerPolicy =', '// Renderer-local mesh generation.') +
-  'return { peerPolicy, policyMeshes, refreshPeerPolicy, enforcePeerPolicy };')(
-    createPeerPolicyView, withDeadline, { runtime: { sendMessage: send } });
+  'return { peerPolicy, discoverySettings, policyMeshes, refreshPeerPolicy, enforcePeerPolicy };')(
+    createPeerPolicyView, createDiscoverySettings, withDeadline, { runtime: { sendMessage: send } });
 
 test('policy hydration owns in-construction meshes, closes banned links and fails closed on refetch corruption', async () => {
   let reply: any = { ok: true, policy: { v: 1, revision: 1, blocked: [] } };
@@ -33,8 +34,8 @@ test('actual base creation cannot allocate a room before its policy read succeed
   const client = { available: true, identityMaterial: async () => 'material', identityFromMaterial: async () => ({ did }),
     joinBaseNetwork: async () => { joins++; return {}; } };
   const body = slice('  create: async () => {', '\n  activate: (candidate) =>').trim().replace(/^create: /, '').replace(/,$/, '');
-  const create = new Function('loadDweb', 'refreshPeerPolicy', 'peerPolicy', 'policyMeshes', 'log', 'warn', 'callKernelEffect', 'swCall',
-    `return (${body});`)(async () => client, b.refreshPeerPolicy, b.peerPolicy, b.policyMeshes, () => {}, () => {}, () => {}, () => {});
+  const create = new Function('loadDweb', 'refreshPeerPolicy', 'peerPolicy', 'discoverySettings', 'policyMeshes', 'log', 'warn', 'callKernelEffect', 'swCall',
+    `return (${body});`)(async () => client, b.refreshPeerPolicy, b.peerPolicy, b.discoverySettings, b.policyMeshes, () => {}, () => {}, () => {}, () => {});
   const pending = create(); pending.catch(() => {});
   await reading; expect(joins).toBe(0);
   release(); await expect(pending).rejects.toThrow('peer-policy-unavailable'); expect(joins).toBe(0);

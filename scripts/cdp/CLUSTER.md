@@ -10,7 +10,7 @@ This is a transport and protocol integration lane. The modules run on a
 loopback-served browser fixture, not inside the extension service worker; the
 extension lifecycle lane remains `test:e2e:dweb-lifecycle`.
 
-Stage the same `extension/` tree and `scripts/cdp/dweb-cluster-{node.mjs,page.js}`
+Stage the same `extension/` tree and `scripts/cdp/dweb-cluster-{node.mjs,page.js,source.mjs}`
 on each machine. Supply Bun and the same Chrome for Testing binary on every host.
 The coordinator uses the repository's signaling server over authenticated SSH
 reverse forwards; HTTP and debugging endpoints bind only to loopback. WebRTC
@@ -44,16 +44,19 @@ Example private configuration (keep addresses, sockets and credentials outside G
 }
 ```
 
-SSH aliases may select jump hosts and existing authenticated control sockets.
-`sshOptions` accepts an argument array for an existing socket; `signalingPort`
-can select a free remote loopback port. No SSH master is stopped. Run only on
+SSH aliases may select jump hosts and existing key or agent authentication.
+The runner uses dedicated connections and does not reuse or mutate shared control
+sockets. `sshOptions` accepts ordinary SSH arguments; control-socket options are
+rejected. `signalingPort` can select a free remote loopback port. No SSH master is stopped. Run only on
 available machines: the runner does not reserve shared infrastructure, install
 software, alter network settings or terminate unrelated browsers.
 
 Each run writes `scripts/cdp/artifacts/cluster-result.json` (override with
 `output`). Evidence includes hashed hardware identities, source fingerprints,
-browser versions, per-check outcomes, content hashes, selected candidate pairs
-and byte counters. It fails on duplicate hardware, mixed source/browser versions,
+browser and Bun versions, separate coordinator/host Git revisions and dirty
+status (unknown for staged snapshots), per-check outcomes, content hashes,
+selected candidate pairs and byte counters. It fails on duplicate hardware,
+source bytes differing from the coordinator, mixed browser or Bun versions,
 missing peers, loopback/relay candidates or absent bidirectional traffic. Reports
 contain private network addresses: keep them local or redact before sharing.
 

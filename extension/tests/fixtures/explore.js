@@ -15,7 +15,7 @@ const apps = [
 /** @param {{type:string}} message */
 const send = async message => {
   if (message.type === 'dweb/base/heard') return {ok:true,apps:empty ? [] : apps};
-  if (message.type === 'apps/list') return {ok:true,apps:[]};
+  if (message.type === 'apps/list') return {ok:true,apps:[{id:'local-orbit',dweb:{uri:apps[0].uri}}]};
   if (message.type === 'dweb/base/status') return {ok:true,did:null};
   throw new Error('Visual fixture has no mutation authority');
 };

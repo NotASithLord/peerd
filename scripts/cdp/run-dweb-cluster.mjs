@@ -2,13 +2,15 @@
 // Usage: bun run test:cluster /absolute/private-config.json [--local]
 // --local is explicitly a rehearsal and never reports a physical-Mac pass.
 import assert from 'node:assert/strict';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { createSignalingServer } from '../../signaling-node/bun-server.mjs';
 import { validateHosts, validatePaths } from './dweb-cluster-checks.mjs';
+import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
+import { sshArguments } from './dweb-cluster-ssh.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const configPath = process.argv[2];
@@ -16,13 +18,11 @@ if (!configPath || configPath.startsWith('--')) throw new Error('Pass a private 
 const config = JSON.parse(readFileSync(configPath, 'utf8'));
 const local = process.argv.includes('--local');
 const output = resolve(config.output ?? join(root, 'scripts/cdp/artifacts/cluster-result.json'));
-// why: a cluster node may run a staged source snapshot without Git metadata.
-// Its content fingerprint remains the authority; never invent a revision.
-let revision = null;
-try { revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
-catch { /* staged snapshot */ }
+// why: remote agreement alone could certify identical but stale staged trees.
+const expectedSource = sourceFingerprint(root);
+const coordinator = { ...gitMetadata(root), source: expectedSource, runtime: Bun.version };
 const report = { ok: false, lane: local ? 'local-rehearsal' : 'physical-macs',
-  startedAt: new Date().toISOString(), revision,
+  startedAt: new Date().toISOString(), coordinator,
   hosts: [], checks: [] };
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -54,8 +54,7 @@ const check = async (name, run) => {
 const startWorker = (target, port) => {
   const remotePort = target.signalingPort ?? port;
   const forwarding = `127.0.0.1:${remotePort}:127.0.0.1:${port}`;
-  const ssh = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'ExitOnForwardFailure=yes',
-    '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=2', ...(target.sshOptions ?? [])];
+  const ssh = sshArguments(target.sshOptions);
   const command = [target.bun ?? 'bun', join(target.directory ?? root, 'scripts/cdp/dweb-cluster-node.mjs')];
   const child = target.ssh ? spawn('ssh', [...ssh, '-R', forwarding, target.ssh, command.map(quote).join(' ')], { stdio: ['pipe', 'pipe', 'pipe'] })
     : spawn(command[0], command.slice(1), { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -101,12 +100,6 @@ const cleanup = async () => {
       await new Promise(resolve => worker.child.once('exit', resolve));
       clearTimeout(force);
     }
-    // why: a shared ControlMaster can retain a forward after its child exits.
-    // Cancel our exact forward, never the shared master.
-    if (worker.target.ssh) {
-      try { execFileSync('ssh', [...worker.ssh, '-O', 'cancel', '-R', worker.forwarding, worker.target.ssh], { stdio: 'ignore', timeout: 5000 }); }
-      catch { /* non-multiplexed SSH already removed its own forward */ }
-    }
   }));
 };
 process.once('SIGINT', async () => { await cleanup(); process.exit(130); });
@@ -120,7 +113,7 @@ try {
   report.hosts = await Promise.all(workers.map(async worker => ({ name: worker.target.name,
     ...await worker.call('launch', { chrome: worker.target.chrome, mdns: config.mdns !== false,
       allInterfaces: config.allInterfaces === true }) })));
-  await check(local ? 'matching source and browser (rehearsal)' : 'identical source on distinct Macs', async () => { validateHosts(report.hosts, { local }); return report.hosts; });
+  await check(local ? 'matching source and browser (rehearsal)' : 'identical source on distinct Macs', async () => { validateHosts(report.hosts, { local, expectedSource, expectedRuntime: coordinator.runtime }); return report.hosts; });
   const roomId = `cluster-${crypto.randomUUID()}`;
   const start = (worker, id = roomId) => worker.call('start', { roomId: id, signaling: worker.signaling, name: worker.target.name });
   const identities = await Promise.all(workers.map(worker => start(worker)));

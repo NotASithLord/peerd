@@ -24,6 +24,7 @@ import { openRendezvous, DEFAULT_SIGNALING } from './signaling-client.js';
 import { createWebrtcTransport } from './transports/webrtc.js';
 import { createRoomMesh } from './mesh.js';
 import { createSession } from './session.js';
+import { TOPIC_SYNC_WINDOW } from './capabilities.js';
 import { connectionPath } from './ice.js';
 import { AdmissionError, roomAdmission, MAX_ADMISSION_CANDIDATES } from './admission.js';
 import { createSignalingBuffer } from './signaling-buffer.js';
@@ -82,12 +83,15 @@ export const joinRoom = async ({
   profile,
   audit = null,
   budget,
-  caps = ['content', 'pubsub'],
+  caps = ['content', 'pubsub', TOPIC_SYNC_WINDOW],
   kind: peerKind,             // 'website' = observe-only visitor (own rendezvous cap pool); omitted/default = extension
   awaitInitialRendezvous = true,
   admission = roomAdmission,
   isBlocked = () => false, admitPeer = null, onMesh = null,
 } = /** @type {{ roomId: string, identity: import('./mesh.js').Identity }} */ ({})) => {
+  // why: protocol support is mutual and fixed for this room lifetime; a
+  // caller-owned capabilities array must not change negotiation after joining.
+  const sessionCaps = [...caps];
   const t = transport ?? createWebrtcTransport({ iceServers, RTCPeerConnection });
   const mesh = createRoomMesh({ roomId, identity, now, budget, audit, isBlocked });
   const releaseMesh = onMesh?.(mesh);
@@ -121,7 +125,7 @@ export const joinRoom = async ({
    */
   const admit = async (channel, expectedDid = null, via = null, signal, locallySelected = false) => {
     if (left || signal?.aborted || channel.isClosed?.()) { channel.close(); throw new Error('room dial cancelled or channel closed'); }
-    const { remoteDid } = await createSession({ channel, identity, caps, now, signal, timers });
+    const { remoteDid, remoteCaps } = await createSession({ channel, identity, caps: sessionCaps, now, signal, timers });
     if (left || signal?.aborted || channel.isClosed?.()) { channel.close(); throw new Error('room dial cancelled or channel closed'); }
     if (expectedDid && remoteDid !== expectedDid) {
       channel.close();
@@ -139,7 +143,7 @@ export const joinRoom = async ({
       channel.close();
       return remoteDid;
     }
-    if (!mesh.addLink(channel, remoteDid, {}, { locallySelected })) throw new Error('room peer admission refused');
+    if (!mesh.addLink(channel, remoteDid, { caps: remoteCaps.filter((cap) => sessionCaps.includes(cap)) }, { locallySelected })) throw new Error('room peer admission refused');
     if (via) mesh.tagLink(remoteDid, { via });
     dlog('room', `✅ CONNECTED to peer ${short(remoteDid)} — data channel open, in the mesh`);
     // Path telemetry for the HUD (D-5): best-effort, after stats settle.

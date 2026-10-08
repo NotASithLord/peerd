@@ -1720,3 +1720,11 @@ test('policy snapshot is host-only and a persisted user ban refuses detached App
     .toMatchObject({ ok: false, error: 'publisher-user-blocked' });
   expect(created).toBe(0);
 });
+
+test('host policy projects malformed discovery values false without invalidating peer bans', async () => {
+  for (const enabled of [true, false, undefined, null, 'true', 1]) {
+    const { deps } = baseDeps({ settingsStore: { get: () => ({ dwebEnabled: true, dwebDiscoveryEnabled: enabled }) } });
+    const result = await makeDwebRoutes(deps)['dweb/peer-policy']({}, offscreenSender);
+    expect(result).toMatchObject({ ok: true, discoveryEnabled: enabled === true, policy: { revision: 0, blocked: [] } });
+  }
+});

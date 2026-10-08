@@ -1,23 +1,7 @@
 // @ts-check
-// background/routes/settings.js — settings update/reset + the settings export
-// half of transfer (dual-distribution §10).
-//
-// Unblocked by background/settings-store.js: these read/replaced the reassigned
-// settings singletons, so they had to stay inline. Now they take settingsStore
-// and call .get()/.stored()/.update()/.reset(). The pure patch normalizer
-// (settings-patch.js) and the one vault side effect (auto-lock) ride deps.
-// Imports nothing.
-
-/** @param {string} code @param {string} action @param {Record<string, unknown>} settings */
-const settingsEffectFailure = (code, action, settings) => ({
-  ok: false,
-  error: `Peerd could not confirm whether ${action} finished. Refresh settings before trying again.`,
-  code,
-  outcomeKnown: false,
-  outcomeKind: 'unknown',
-  retryable: false,
-  settings,
-});
+// Private settings export remains here; mutation routes belong to the native
+// authority owner in settings-patch.js. The transfer router selects this export
+// capability explicitly, so it cannot mint a second settings mutation surface.
 
 /**
  * @param {Record<string, any>} deps
@@ -25,12 +9,10 @@ const settingsEffectFailure = (code, action, settings) => ({
  */
 export const makeSettingsRoutes = (deps) => {
   const {
-    vault, auditLog, pushState, kv, memory, settingsStore,
-    normalizeSettingsPatch, normalizeVariant, normalizeEngine, listProviders,
-    REASONING_EFFORT_LEVELS, DWEB_ENABLED, DEFAULT_SETTINGS,
+    vault, auditLog, kv, memory, settingsStore,
     buildExport, CHANNEL, exportHooks, skillRegistry, dwebTransfer,
     EXPORT_PASSPHRASE_MIN_LENGTH, isCustodySecretName,
-    onSettingsChanging, onSettingsChanged, privateTransferAuthorization, ensureSettingsReady,
+    privateTransferAuthorization, ensureSettingsReady,
   } = deps;
   const awaitSettings = async () => {
     try { await ensureSettingsReady?.(); return true; }
@@ -38,77 +20,6 @@ export const makeSettingsRoutes = (deps) => {
   };
 
   return {
-    // --- settings ---
-    'settings/update': async ({ patch }) => {
-      if (!(await awaitSettings())) return { ok: false, error: 'settings-unavailable' };
-      if (!patch || typeof patch !== 'object') {
-        return { ok: false, error: 'invalid-patch' };
-      }
-      // Pure whitelist/clamp/coerce of the patch (background/settings-patch.js)
-      // — the only logic that isn't IO, lifted out so it's unit-tested.
-      const next = normalizeSettingsPatch(patch, {
-        knownProviderNames: listProviders().map((/** @type {{ name: string }} */ p) => p.name),
-        reasoningEffortLevels: REASONING_EFFORT_LEVELS,
-        dwebEnabled: DWEB_ENABLED,
-        // Preview-only key: its presence in this package's defaults IS the
-        // channel gate (no separate build flag, unlike dweb).
-        autoUpdateAvailable: Object.hasOwn(DEFAULT_SETTINGS, 'autoUpdateEnabled'),
-        normalizeVariant,
-        normalizeEngine,
-      });
-      if (Object.keys(next).length === 0) {
-        return { ok: false, error: 'no-known-keys-in-patch' };
-      }
-      try {
-        onSettingsChanging?.(next);
-        await settingsStore.update(next);
-        // Master OFF is a lifecycle transition, not just a preference write. Wait
-        // for its host stop so the acknowledgement is an actual network fence.
-        await onSettingsChanged?.(next);
-        pushState();
-        return { ok: true, settings: { ...settingsStore.get() } };
-      } catch (error) {
-        void error;
-        pushState();
-        return settingsEffectFailure(
-          'settings-update-outcome-unknown', 'the settings update', { ...settingsStore.get() },
-        );
-      }
-    },
-
-    // Reset keys to channel defaults by deleting the STORED values —
-    // CHANNEL_DEFAULTS then applies and tracks future releases (§11: the
-    // explicit migration path for picking up new defaults).
-    'settings/reset': async ({ keys }) => {
-      if (!(await awaitSettings())) return { ok: false, error: 'settings-unavailable' };
-      if (!Array.isArray(keys) || keys.length === 0) {
-        return { ok: false, error: 'keys-required' };
-      }
-      const known = keys.filter((k) => Object.hasOwn(DEFAULT_SETTINGS, k));
-      if (known.length === 0) return { ok: false, error: 'no-known-keys' };
-      const resetsDweb = known.includes('dwebEnabled');
-      const resetDwebEnabled = Boolean(DEFAULT_SETTINGS.dwebEnabled);
-      // Reset is only an OFF fence when this channel's default is actually OFF.
-      // Preview resets to ON, so invalidating an admitted publication there
-      // would report a failure even though neither the setting nor host stopped.
-      try {
-        if (resetsDweb && !resetDwebEnabled) {
-          onSettingsChanging?.({ dwebEnabled: false });
-        }
-        await settingsStore.reset(known);
-        const changed = Object.fromEntries(known.map((key) => [key, settingsStore.get()[key]]));
-        if (Object.keys(changed).length > 0) await onSettingsChanged?.(changed);
-        pushState();
-        return { ok: true, settings: { ...settingsStore.get() } };
-      } catch (error) {
-        void error;
-        pushState();
-        return settingsEffectFailure(
-          'settings-reset-outcome-unknown', 'resetting settings', { ...settingsStore.get() },
-        );
-      }
-    },
-
     // --- transfer: explicit settings export (dual-distribution §10) ---
     //
     // The ONLY migration path between installs (store ↔ preview). No background

@@ -309,3 +309,101 @@ test('user policy refuses an absent publisher via honest seeders and refuses res
     expect(reader.mesh.hasLink(seeder.identity.did)).toBe(true);
   } finally { for (const p of [publisher, seeder, reader]) { p.base.close(); p.mesh.close(); } }
 });
+
+describe('verified catalog contribution hints', () => {
+  test('only successful content retrieval credits the exact catalog head; close clears evidence', async () => {
+    const publisher = await spawn('publisher');
+    const reader = await spawn('reader');
+    try {
+      await link(publisher, reader);
+      const shared = await publisher.base.publishApp({ name: 'evidence', entry: 'index.html', files: { 'index.html': 'hello' } });
+      const { card } = await publisher.base.publishMeta({ slug: 'evidence', name: 'evidence', head: {
+        version_id: shared.hash, content_addr: shared.uri, size: shared.packedBytes,
+      } });
+      await reader.base.discovery.ingest(card);
+      const count = () => reader.base.heardDwapps()[0]?.providers;
+      expect(count()).toBe(0);
+      await publisher.base.announceProvider(shared.uri);
+      await reader.base.findProviders(shared.uri);
+      expect(count()).toBe(0); // signed ads are still not successful transfers
+      publisher.base.node.content.unannounce(shared.hash);
+      await expect(reader.base.fetchApp(shared.uri, { timeoutMs: 100 })).rejects.toThrow();
+      expect(count()).toBe(0);
+      // Republish deterministic bytes, then exercise the actual content path.
+      const next = await publisher.base.publishApp({ name: 'evidence', entry: 'index.html', files: { 'index.html': 'hello' }, created: shared.created });
+      expect(next.hash).toBe(shared.hash);
+      const result = await reader.base.fetchApp(shared.uri);
+      expect(result.verifiedContributors).toEqual([publisher.identity.did]);
+      expect(count()).toBe(1);
+      await reader.base.fetchApp(shared.uri, { onProgress: (progress: any) => {
+        if (progress.phase === 'chunk') reader.base.close();
+      } });
+      expect(count()).toBe(0); // late completion cannot restore a closed host's history
+    } finally { publisher.base.close(); reader.base.close(); }
+  });
+
+  test('ban and unban during a verified fetch cannot recreate older contribution evidence', async () => {
+    const publisher = await spawn('publisher');
+    const reader = await spawn('reader');
+    try {
+      await link(publisher, reader);
+      const shared = await publisher.base.publishApp({ name: 'fenced', entry: 'index.html', files: { 'index.html': 'hello' } });
+      const { card } = await publisher.base.publishMeta({ slug: 'fenced', name: 'fenced', head: {
+        version_id: shared.hash, content_addr: shared.uri, size: shared.packedBytes,
+      } });
+      await reader.base.discovery.ingest(card);
+      // An unrelated ban still conservatively fences all older observations;
+      // the fetch itself remains usable and is not reclassified as a failure.
+      const result = await reader.base.fetchApp(shared.uri, { onProgress: (progress: any) => {
+        if (progress.phase === 'chunk') {
+          reader.base.ban('did:key:other', 'test');
+          reader.base.unblock('did:key:other');
+        }
+      } });
+      expect(result.verifiedContributors).toEqual([publisher.identity.did]);
+      expect(reader.base.heardDwapps()[0].providers).toBe(0);
+    } finally { publisher.base.close(); reader.base.close(); }
+  });
+});
+
+
+test('durable policy refresh fences an absent contributor before late verified completion', async () => {
+  const blocked = new Set<string>();
+  const publisher = await spawn('publisher');
+  const seeder = await spawn('seeder');
+  const reader = await spawn('reader', { userBlocked: (did: string) => blocked.has(did) });
+  try {
+    await link(publisher, seeder);
+    const shared = await publisher.base.publishApp({ name: 'policy-fence', entry: 'index.html', files: { 'index.html': 'hello' } });
+    const content = await seeder.base.fetchApp(shared.uri);
+    await seeder.base.seedApp(content);
+    const { card } = await publisher.base.publishMeta({ slug: 'policy-fence', name: 'policy-fence', head: {
+      version_id: shared.hash, content_addr: shared.uri, size: shared.packedBytes,
+    } });
+    await reader.base.discovery.ingest(card);
+    await link(seeder, reader);
+    await reader.base.fetchApp(shared.uri);
+    expect(reader.base.heardDwapps()[0].providers).toBe(1);
+    reader.mesh.removeLink(seeder.identity.did);
+    blocked.add(seeder.identity.did);
+    reader.base.enforceUserPolicy();
+    blocked.delete(seeder.identity.did);
+    reader.base.enforceUserPolicy();
+    // No caller reads the catalog during the blocked interval. The policy
+    // boundary's existing rows projection must itself purge older history.
+    expect(reader.base.heardDwapps()[0].providers).toBe(0);
+    await link(seeder, reader);
+    const result = await reader.base.fetchApp(shared.uri, { onProgress: (progress: any) => {
+      if (progress.phase !== 'chunk') return;
+      reader.mesh.removeLink(seeder.identity.did);
+      expect(reader.base.peers().some((peer: any) => peer.did === seeder.identity.did)).toBe(false);
+      expect(reader.base.heardDwapps().some((row: any) => row.publisher === seeder.identity.did)).toBe(false);
+      blocked.add(seeder.identity.did);
+      reader.base.enforceUserPolicy();
+      blocked.delete(seeder.identity.did);
+      reader.base.enforceUserPolicy();
+    } });
+    expect(result.verifiedContributors).toEqual([seeder.identity.did]);
+    expect(reader.base.heardDwapps()[0].providers).toBe(0);
+  } finally { publisher.base.close(); seeder.base.close(); reader.base.close(); }
+});

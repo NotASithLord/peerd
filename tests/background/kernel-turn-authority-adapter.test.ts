@@ -2292,12 +2292,17 @@ test('actual tool context has only exact peer policy control offline and never s
     runtimeSendMessage: async () => { sends++; throw new Error('must not send'); } });
   h.settings.dwebEnabled = false;
   const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
-  expect(Object.keys(ctx.dweb)).toEqual(['block']);
+  expect(Object.keys(ctx.dweb)).toEqual(['block', 'setDiscovery']);
   const did = 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP';
   expect(await ctx.dweb.block({ did })).toMatchObject({ ok: true, durable: true, inactive: true });
   expect(h.kvState.get('dweb.userPeerPolicy').blocked).toEqual([did]);
   expect(await ctx.dweb.block({ did, block: false })).toMatchObject({ ok: true });
   expect(h.kvState.get('dweb.userPeerPolicy').blocked).toEqual([]);
+  expect(await ctx.dweb.setDiscovery({ enabled: false })).toMatchObject({ ok: true, durable: true, inactive: true });
+  expect(h.settings.dwebDiscoveryEnabled).toBe(false);
+  expect(h.settings.dwebEnabled).toBe(false);
+  expect(await ctx.dweb.setDiscovery({ enabled: 'false' })).toMatchObject({ ok: false });
+  expect(h.settings.dwebDiscoveryEnabled).toBe(false);
   expect(starts).toBe(0); expect(sends).toBe(0);
 });
 
