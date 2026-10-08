@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { sourceFingerprint, gitMetadata } from '../../scripts/cdp/dweb-cluster-source.mjs';
 import { sshArguments } from '../../scripts/cdp/dweb-cluster-ssh.mjs';
 import { validateHosts, validatePaths } from '../../scripts/cdp/dweb-cluster-checks.mjs';
+import { settleResponse } from '../../scripts/cdp/dweb-cluster-rpc.mjs';
 
 const hosts = () => [1, 2].map(number => ({ machine: String(number).repeat(64), source: 'a'.repeat(64),
   platform: 'darwin', browser: 'Chrome/test', runtime: 'test-runtime' }));
@@ -77,7 +78,7 @@ describe('cluster run provenance and SSH ownership', () => {
         mkdirSync(join(stage, 'extension'), { recursive: true });
         mkdirSync(join(stage, 'scripts/cdp'), { recursive: true });
         for (const name of index ? ['z.js', 'a.js'] : ['a.js', 'z.js']) writeFileSync(join(stage, 'extension', name), name);
-        for (const name of ['dweb-cluster-node.mjs', 'dweb-cluster-page.js', 'dweb-cluster-source.mjs']) writeFileSync(join(stage, 'scripts/cdp', name), name);
+        for (const name of ['dweb-cluster-node.mjs', 'dweb-cluster-page.js', 'dweb-cluster-rpc.mjs', 'dweb-cluster-source.mjs']) writeFileSync(join(stage, 'scripts/cdp', name), name);
       }
       const first = stages[0]!;
       const second = stages[1]!;
@@ -100,5 +101,28 @@ describe('cluster run provenance and SSH ownership', () => {
     for (const options of [['-S', '/private/socket'], ['-S/private/socket'], ['-O', 'cancel'], ['-M'], ['-o', 'ControlPath=/private/socket'], ['-oControlMaster=yes']]) {
       expect(() => sshArguments(options)).toThrow('dedicated connection');
     }
+  });
+});
+
+describe('cluster CDP response dispatch', () => {
+  test('rejects malformed, unknown and method-shaped IDs without consuming a request', () => {
+    let calls = 0;
+    const pending = new Map([[1, { settle: () => { calls++; } }]]);
+    for (const message of [null, [], {}, { id: '1' }, { id: 0 }, { id: -1 },
+      { id: 1.5 }, { id: Number.MAX_SAFE_INTEGER + 1 }, { id: 'constructor' },
+      { id: '__proto__' }, { id: 2 }]) expect(settleResponse(pending, message)).toBe(false);
+    expect(calls).toBe(0);
+    expect(pending.size).toBe(1);
+  });
+  test('settles only the correlated request once, removing it before callback execution', () => {
+    const seen: unknown[] = [];
+    const pending = new Map<number, { settle: (message: unknown) => void }>();
+    pending.set(1, { settle(message) { expect(pending.has(1)).toBe(false); seen.push(message); } });
+    pending.set(2, { settle: () => { throw new Error('Wrong request'); } });
+    const reply = { id: 1, result: { value: 'ok' } };
+    expect(settleResponse(pending, reply)).toBe(true);
+    expect(settleResponse(pending, reply)).toBe(false);
+    expect(seen).toEqual([reply]);
+    expect(pending.has(2)).toBe(true);
   });
 });

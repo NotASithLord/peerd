@@ -24,7 +24,7 @@ export const sourceFingerprint = root => {
     }
   };
   visit('extension');
-  for (const name of ['dweb-cluster-node.mjs', 'dweb-cluster-page.js', 'dweb-cluster-source.mjs']) add(`scripts/cdp/${name}`);
+  for (const name of ['dweb-cluster-node.mjs', 'dweb-cluster-page.js', 'dweb-cluster-rpc.mjs', 'dweb-cluster-source.mjs']) add(`scripts/cdp/${name}`);
   return hash.digest('hex');
 };
 

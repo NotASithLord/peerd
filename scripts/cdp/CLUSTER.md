@@ -10,7 +10,7 @@ This is a transport and protocol integration lane. The modules run on a
 loopback-served browser fixture, not inside the extension service worker; the
 extension lifecycle lane remains `test:e2e:dweb-lifecycle`.
 
-Stage the same `extension/` tree and `scripts/cdp/dweb-cluster-{node.mjs,page.js,source.mjs}`
+Stage the same `extension/` tree and `scripts/cdp/dweb-cluster-{node.mjs,page.js,rpc.mjs,source.mjs}`
 on each machine. Supply Bun and the same Chrome for Testing binary on every host.
 The coordinator uses the repository's signaling server over authenticated SSH
 reverse forwards; HTTP and debugging endpoints bind only to loopback. WebRTC

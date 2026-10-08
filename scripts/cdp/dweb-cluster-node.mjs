@@ -8,6 +8,7 @@ import { dirname, join, resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
+import { settleResponse } from './dweb-cluster-rpc.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const extension = join(root, 'extension');
@@ -53,11 +54,11 @@ const fingerprint = () => {
 const send = (method, params = {}) => new Promise((resolve, reject) => {
   const id = ++sequence;
   const timeout = setTimeout(() => { pending.delete(id); reject(new Error(`CDP timeout: ${method}`)); }, 45_000);
-  pending.set(id, message => {
+  pending.set(id, { settle(message) {
     clearTimeout(timeout);
     if (message.error) reject(new Error(message.error.message));
     else resolve(message.result);
-  });
+  } });
   socket.send(JSON.stringify({ id, method, params }));
 });
 const evaluate = async expression => {
@@ -105,8 +106,10 @@ const launch = async ({ chrome, mdns = true, allInterfaces = false }) => {
   }
   if (!socket) throw new Error(`Browser readiness deadline: ${errors.join('')}`);
   socket.onmessage = ({ data }) => {
-    const message = JSON.parse(data);
-    if (message.id) { pending.get(message.id)?.(message); pending.delete(message.id); }
+    let message;
+    try { message = JSON.parse(data); } catch { return; }
+    if (!message || typeof message !== 'object' || Array.isArray(message)) return;
+    settleResponse(pending, message);
     if (message.method === 'Runtime.exceptionThrown') errors.push(JSON.stringify(message.params));
     if (message.method === 'Runtime.consoleAPICalled') {
       errors.push(message.params.args.map(arg => arg.value ?? arg.description).join(' '));
@@ -114,7 +117,7 @@ const launch = async ({ chrome, mdns = true, allInterfaces = false }) => {
     }
   };
   socket.onclose = () => {
-    for (const settle of pending.values()) settle({ error: { message: 'CDP closed' } });
+    for (const request of pending.values()) request.settle({ error: { message: 'CDP closed' } });
     pending.clear();
   };
   await send('Runtime.enable');

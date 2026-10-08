@@ -553,7 +553,21 @@ export async function runColdConsent({ reportPath = REPORT, launch = launchPeerd
         && reloaded.state.settings.dwebEnabled === false);
       await observer.barrier(); assertNoTransport(evidence.events, 'Home reload after Not now');
       evidence.phase = 'restart-off'; persist();
-      check('vault locks before physical restart', (await rpc(ctx.page, { type: 'vault/lock' }))?.ok === true);
+      const lockStarted = performance.now();
+      const lockReceipt = await rpc(ctx.page, { type: 'vault/lock' });
+      // why: distinguish a timed-out reply from a refused lock without retaining
+      // arbitrary error text or vault data. The deadline and success gate stay exact.
+      const receiptCode = value => typeof value === 'string'
+        ? (/^[a-zA-Z0-9:_-]{1,96}$/.test(value) ? value : 'non-code-text') : null;
+      check('vault locks before physical restart', lockReceipt?.ok === true, {
+        elapsedMs: Math.round(performance.now() - lockStarted),
+        ok: typeof lockReceipt?.ok === 'boolean' ? lockReceipt.ok : null,
+        error: receiptCode(lockReceipt?.error),
+        code: receiptCode(lockReceipt?.code),
+        outcomeKnown: typeof lockReceipt?.outcomeKnown === 'boolean' ? lockReceipt.outcomeKnown : null,
+        performed: typeof lockReceipt?.performed === 'boolean' ? lockReceipt.performed : null,
+        noResponse: lockReceipt?._noResponse === true,
+      });
       await observer.releaseWorker(ctx.sw.targetId);
       const stopped = await ctx.stopServiceWorker();
       const next = await ctx.restartServiceWorker(stopped);
