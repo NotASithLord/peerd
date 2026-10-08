@@ -3,6 +3,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';
 import { DwebSection } from '/options/sections/dweb.js';
+import browser from '/shared/browser-api.js';
 
 const settle = async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -26,6 +27,38 @@ const rowState = (root) => ({
 });
 
 describe('options.dweb live-stop status', () => {
+  it('routes Commons to an explicit Discover choice without changing network consent', async () => {
+    const root = document.createElement('div'); document.body.appendChild(root);
+    const state = {settings:{dwebEnabled:true,dwebAgentEnabled:false}};
+    let writes = 0;
+    let opened = '';
+    // The HTTP runner provides runtime.getURL, but no tabs namespace. Own the
+    // minimal namespace for this test and restore its original absence too.
+    const api = /** @type {any} */ (browser);
+    const originalTabs = Object.getOwnPropertyDescriptor(api, 'tabs');
+    const tabs = api.tabs ?? {};
+    const originalQuery = tabs.query, originalCreate = tabs.create;
+    try {
+      if (!api.tabs) api.tabs = tabs;
+      tabs.query = async () => [];
+      tabs.create = async (/** @type {{url:string}} */ options) => {opened=options.url; return {id:1};};
+      m.mount(root,{view:()=>m(DwebSection,{state,send:async()=>{writes++;return {ok:true};},loadStatus:async()=>null})});
+      expect(root.textContent).toContain('Add and open Commons');
+      expect(root.textContent).toContain('same named room');
+      expect(root.textContent.includes('pre-loaded')).toBe(false);
+      /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')].find(button=>button.textContent==='Open Discover')).click();
+      await settle();
+      expect(opened).toBe(`${browser.runtime.getURL('home/home.html')}#discover`);
+      expect(writes).toBe(0);
+      expect(rowState(root).checked).toBe('true');
+    } finally {
+      tabs.query = originalQuery; tabs.create = originalCreate;
+      if (originalTabs) Object.defineProperty(api, 'tabs', originalTabs);
+      else delete api.tabs;
+      m.mount(root,null);root.remove();
+    }
+  });
+
   it('reports an incomplete stop and keeps the retry explicit', async () => {
     const root = document.createElement('div');
     document.body.appendChild(root);
