@@ -32,12 +32,17 @@ describe('options.dweb live-stop status', () => {
     const state = {settings:{dwebEnabled:true,dwebAgentEnabled:false}};
     let writes = 0;
     let opened = '';
-    const tabs = /** @type {any} */ (browser.tabs);
+    // The HTTP runner provides runtime.getURL, but no tabs namespace. Own the
+    // minimal namespace for this test and restore its original absence too.
+    const api = /** @type {any} */ (browser);
+    const originalTabs = Object.getOwnPropertyDescriptor(api, 'tabs');
+    const tabs = api.tabs ?? {};
     const originalQuery = tabs.query, originalCreate = tabs.create;
-    tabs.query = async () => [];
-    tabs.create = async (/** @type {{url:string}} */ options) => {opened=options.url; return {id:1};};
-    m.mount(root,{view:()=>m(DwebSection,{state,send:async()=>{writes++;return {ok:true};},loadStatus:async()=>null})});
     try {
+      if (!api.tabs) api.tabs = tabs;
+      tabs.query = async () => [];
+      tabs.create = async (/** @type {{url:string}} */ options) => {opened=options.url; return {id:1};};
+      m.mount(root,{view:()=>m(DwebSection,{state,send:async()=>{writes++;return {ok:true};},loadStatus:async()=>null})});
       expect(root.textContent).toContain('Add and open Commons');
       expect(root.textContent).toContain('same named room');
       expect(root.textContent.includes('pre-loaded')).toBe(false);
@@ -48,6 +53,8 @@ describe('options.dweb live-stop status', () => {
       expect(rowState(root).checked).toBe('true');
     } finally {
       tabs.query = originalQuery; tabs.create = originalCreate;
+      if (originalTabs) Object.defineProperty(api, 'tabs', originalTabs);
+      else delete api.tabs;
       m.mount(root,null);root.remove();
     }
   });
