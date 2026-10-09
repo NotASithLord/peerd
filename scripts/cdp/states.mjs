@@ -6258,6 +6258,7 @@ export const STATES = [
           && location.href === ${JSON.stringify(target.url)}
           && document.getElementById('boot')?.classList.contains('is-hidden')
           && !document.getElementById('boot')?.classList.contains('is-failed')
+          && !!document.getElementById('mode-toggle')
           && document.getElementById('editor-panel')?.hidden === true
         `).catch(() => false), { budgetMs: 15_000, pollMs: 100 });
         rec.check('View replaces a consent-retired document through the exact App host URL', !!renewed);
