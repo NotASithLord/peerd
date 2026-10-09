@@ -116,6 +116,11 @@ window.cluster = {
       size: bytes.length, chunks: manifest.chunks.length, publisher: identity.did };
   },
   providers: ({ uri }) => base.findProviders(uri),
+  drop({ did }) {
+    const existed = room.mesh.hasLink(did);
+    room.mesh.removeLink(did);
+    return { existed, linked: room.mesh.hasLink(did) };
+  },
   async fetch({ uri, provider }) {
     // why: this lane qualifies production behavior across real links; a tighter
     // harness-only deadline misclassifies healthy WAN transfer as product loss.

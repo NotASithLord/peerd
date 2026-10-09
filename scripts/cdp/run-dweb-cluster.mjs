@@ -225,6 +225,13 @@ try {
     signaling = null;
     await waitUntil(reports, states => states.every(state => state.rendezvous !== 'up'), 'signaling disconnect');
     await gossip();
+    const dropDid = adjacency[0][0];
+    const dropIndex = dids.indexOf(dropDid);
+    assert(dropIndex > 0, 'Coordinator needs a linked peer for offline fault injection');
+    const dropped = await workers[0].call('drop', { did: dropDid });
+    assert.deepEqual(dropped, { existed: true, linked: false });
+    await waitUntil(reports, states => states[0].peers.some(peer => peer.did === dropDid && peer.linked)
+      && states[dropIndex].peers.some(peer => peer.did === dids[0] && peer.linked), 'offline peer-link repair');
     verify(await workers[0].call('fetch', { uri: published.uri }));
     const outagePaths = await paths();
     signaling = createSignalingServer({ hostname: '127.0.0.1', port, log: () => {} });

@@ -226,6 +226,12 @@ describe('rooms over the rendezvous (fake node, real reducer)', () => {
     expect(ra.rendezvous()).toBe('connecting'); // reconnecting with backoff (was 'down') — mesh survives meanwhile
     expect(didsOf(ra)).toEqual([b.did, c.did].sort()); // links untouched
 
+    // If one of those links then dies, the remaining authenticated neighbor
+    // supplies its roster and relays a replacement without the server.
+    ra.mesh.removeLink(b.did);
+    await waitFor(() => ra.mesh.hasLink(b.did), 2_000);
+    expect(ra.mesh.hasLink(b.did)).toBe(true);
+
     // D arrives with ONE link to A (out-of-band — the invite-code shape),
     // then crawls the room through it: roster + relayed dials, no server.
     const rd = await joinRoom({ roomId: 'r3', identity: d, url: null, transport: ether.makeTransport() });
