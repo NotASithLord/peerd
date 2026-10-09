@@ -1,24 +1,11 @@
 // @ts-check
-// eval/tasks — the task suite peerd is scored against.
-//
-// Each task is a real, repeatable web/agent task with an OBJECTIVE check
-// run against the END STATE (final tab URL/title/text + the agent's final
-// answer + which tools ran). End-state checks are path-independent: we
-// don't care HOW the agent got there, only that it did.
-//
-// Keep these stable + deterministic. Add an LLM-judge variant later for
-// open-ended tasks; this MVP is all hard checks so the score is objective.
-//
-// state passed to check():
-//   { tabUrl, tabTitle, tabText, answer, steps, tools[], toolResults[], tokens, durationMs, error }
+// eval/tasks scores real tasks with end-state and tool-result checks.
+// Keep checks stable. Actor evidence stays separate from main tool metrics.
 
 import { includesCI, ok, no, usedAny } from './score.js';
 
 /**
- * The end-state a task's check() scores — exactly the shape eval-engine's
- * runTask builds (every field always present; `error` is the run's failure
- * string or null). Mirrors the doc comment at the top of this file.
- * @typedef {{ tabUrl: string, tabTitle: string, tabText: string, answer: string, steps: number, tools: string[], toolResults: Array<{ name: string, ok: boolean }>, tokens: number, durationMs: number, error: string | null }} State
+ * @typedef {{ tabUrl: string, tabTitle: string, tabText: string, answer: string, steps: number, tools: string[], toolResults: Array<{ name: string, ok: boolean }>, actorToolResults?: Array<{ actorSessionId: string, name: string, input: any, content: string, ok: boolean }>, tokens: number, durationMs: number, error: string | null }} State
  * @typedef {{ pass: boolean, detail?: string }} CheckResult
  * @typedef {{ id: string, title: string, startUrl?: string | null, prompt: string, timeoutMs?: number, check: (s: State) => CheckResult }} Task
  */
@@ -181,14 +168,13 @@ export const SIMPLE_TASKS = [
   },
   {
     id: 'get-example-heading',
-    title: 'get the page heading (ultra-stable page)',
-    startUrl: 'https://example.com/',
-    // why: example.com's H1 ("Example Domain") never changes — the most
-    // drift-proof extraction probe in the suite.
+    title: 'Read the form heading',
+    startUrl: SELENIUM_FORM,
+    // why: example.com no longer has the heading this task expects.
     prompt: 'Read this page and tell me the exact text of its main heading.',
     timeoutMs: 120_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['message_actor']) && includesCI(s.answer, 'Example Domain'))
+      : (s.toolResults.some((r) => r.name === 'message_actor' && r.ok) && includesCI(s.answer, 'Web form'))
           ? ok(`web actor reported the heading: "${(s.answer || '').slice(0, 60)}"`)
           : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
@@ -335,14 +321,11 @@ export const SIMPLE_TASKS = [
     id: 'read-memory',
     title: 'Memory — read path (no confirm gate)',
     startUrl: null,
-    // why: tests the READ side of memory only. We deliberately don't probe
-    // `remember` (writes are confirm-gated and this headless runner can't
-    // answer a confirmation prompt — it would stall). The verdict is the tool
-    // trace; the yes/no just shows the agent reported a result.
-    prompt: 'Use your read_memory tool to check whether any project memory is currently saved, and answer yes or no.',
+    // why: user memory needs no workspace. A failed read does not prove absence.
+    prompt: 'Use your read_memory tool with scope "user" to check whether any user memory is currently saved, and answer yes or no.',
     timeoutMs: 90_000,
     check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['read_memory']) && /\b(yes|no|none|empty|no memory)\b/i.test(s.answer || ''))
+      : (s.toolResults.some((r) => r.name === 'read_memory' && r.ok) && /\b(yes|no|none|empty|no memory)\b/i.test(s.answer || ''))
           ? ok(`used read_memory; answered "${(s.answer || '').slice(0, 40)}"`)
           : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 60)}"`),
   },
@@ -462,16 +445,24 @@ export const SIMPLE_TASKS = [
     id: 'edit-file-flow',
     title: 'edit_file round-trip (create → run → edit → re-run)',
     startUrl: null,
-    // why: the only end-to-end probe of edit_file. It names the tool, so the
-    // contract is the tool trace AND the second run's output: the edit must
-    // actually take effect (alpha → omega). A genuine multi-step integration
-    // across the Notebook substrate + the SEARCH/REPLACE editor.
+    // why: copied constants can print the answer without running the edited file.
     prompt: 'In a JavaScript notebook, create a file that sets `const WORD = "alpha";` and logs WORD, then run it (it should print "alpha"). Next, use the edit_file tool to change "alpha" to "omega" in that file, run it again, and tell me exactly what it prints the second time.',
     timeoutMs: 220_000,
-    check: (s) => s.error ? no(`errored: ${s.error}`)
-      : (usedAny(s.tools, ['edit_file']) && includesCI(s.answer, 'omega'))
-          ? ok('edit_file took effect: second run printed omega')
-          : no(`tools=${s.tools.join(',')} answer="${(s.answer || '').slice(0, 80)}"`),
+    check: (s) => {
+      if (s.error) return no(`errored: ${s.error}`);
+      const calls = (s.actorToolResults ?? []).filter((call) => call.ok);
+      const runs = calls.map((call, index) => ({
+        index, actorSessionId: call.actorSessionId,
+        path: call.name === 'js_notebook' ? /^\s*import\s+(['"])(.*?)\1\s*;?\s*$/.exec(call.input?.code)?.[2].replace(/^\.\//, '') : null,
+        output: !call.content.includes('[ERROR]') ? /\[CONSOLE\]\s+(alpha|omega)\s*(?:\[|$)/.exec(call.content)?.[1] : null,
+      }));
+      const changed = calls.some((call, index) => call.name === 'edit_file' && call.input?.kind === 'notebook' && includesCI(call.input.edits, 'omega')
+        && runs.some((run) => run.index < index && run.actorSessionId === call.actorSessionId && run.path === call.input.path && run.output === 'alpha')
+        && runs.some((run) => run.index > index && run.actorSessionId === call.actorSessionId && run.path === call.input.path && run.output === 'omega'));
+      return changed && includesCI(s.answer, 'omega')
+        ? ok('edit_file took effect: file imports printed alpha, then omega')
+        : no(`missing successful file edit and imports: answer="${(s.answer || '').slice(0, 80)}"`);
+    },
   },
 
   // --- ADVERSARIAL: honest partial/failure reporting -------------------------

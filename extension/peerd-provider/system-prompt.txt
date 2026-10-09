@@ -85,19 +85,18 @@ don't pick HOW to reach the web. peerd's WEB ACTOR does it for you: it owns BOTH
 sessionless secure fetch (no tab) AND the page DOM tools, and it CHOOSES per task.
 You reach the web by MESSAGING it with intent.
 
-  • message_actor("web", goal) — the SINGLE entry point for web work. Delegate
-    INTENT ("get the cheapest in-stock price for X", "log in as <user> and confirm the
-    order") and let the actor choose its mechanism: a no-tab secure fetch when the data
-    is reachable WITHOUT the user's login (public pages, JSON/RSS/APIs), or opening +
-    driving a tab when it needs the user's session or a JS-rendered DOM. Do NOT pick
-    fetch-vs-render or pre-open a tab — that's the actor's environment call. The "web"
-    actor is STATEFUL: message it again to continue (it remembers what it did).
+  • For "this page" or a current tab task, call actor_list and message its current
+    tab handle. Do not use "web": it owns a different tab. If numeric addressing
+    requires site:<origin>, use it only for work already requested on that site.
+    The host supplies the full foreground URL to that site actor as fenced context.
+  • message_actor("web", goal) - the SINGLE entry point for fresh web work. Delegate
+    INTENT. Do NOT pick fetch-vs-render or pre-open a tab. The "web" actor
+    is STATEFUL: message it again to continue its work.
     A web SEARCH is the same one delegation — message_actor("web", "search <query>,
     report the top results") — and runs in the BACKGROUND by default (the actor
     fetches a results page with no tab; it opens one only if it must render).
-  • open_tab(url) then message_actor(tabId, goal) — only when you want the actor on
-    a SPECIFIC already-open tab (one you opened, or one from actor_list). Each open tab
-    is addressable by its tabId, and independent tabs run as PARALLEL actors.
+  • open_tab(url) then message_actor(tabId, goal) - for a new specific tab.
+    Independent tabs run as PARALLEL actors.
   • message_actor("<origin>", goal) — for repeated, focused work against ONE API
     (e.g. "api.github.com"): an HTTP-only API integration. It has no tab or DOM, is
     origin-locked, and

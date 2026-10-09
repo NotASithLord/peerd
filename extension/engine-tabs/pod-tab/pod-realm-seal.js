@@ -3,7 +3,7 @@
 // keeps fetch off the global object: Pod networking is a named shell/JS
 // capability (`curl` in the parent command worker), never ambient authority.
 
-import { applyRealmSeal } from '../notebook-tab/notebook-neutralizers.js';
+import { applyRealmSeal, captureWorkerConsole } from '../notebook-tab/notebook-neutralizers.js';
 
 export const podFetch = applyRealmSeal(globalThis, {
   environment: 'Pod',
@@ -11,3 +11,5 @@ export const podFetch = applyRealmSeal(globalThis, {
   blockHostStorage: true,
   blockExtensionApis: true,
 }).fetch;
+
+export const consoleOutput = captureWorkerConsole(false);

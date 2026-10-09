@@ -20,7 +20,7 @@ import { sleep } from '/shared/util.js';
 
 /**
  * @typedef {{ inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number, cost?: number }} Usage
- * @typedef {{ session: any, tools: string[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, lastActivityAt: number, runnerUsd: number, outstandingActors: number }} Turn
+ * @typedef {{ session: any, tools: { toolUseId: string, name: string, ok?: boolean }[], actorStates: Map<string, any>, tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, lastActivityAt: number, runnerUsd: number, outstandingActors: number }} Turn
  */
 
 // The runner's own $ for a task — 'local' is FREE, a cloud runner is priced from
@@ -80,42 +80,15 @@ let turn = fresh();
 // scorecard stays honest (main is low, the actor's spend appears — not "free").
 // The bucket keeps the `runner` name for continuity with the runnerModel A/B.
 /** @returns {Turn} */
-function fresh() { return { session: null, tools: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: null, started: false, resolveDone: null, lastActivityAt: 0, runnerUsd: 0, outstandingActors: 0 }; }
+function fresh() { return { session: null, tools: [], actorStates: new Map(), tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, error: null, started: false, resolveDone: null, lastActivityAt: 0, runnerUsd: 0, outstandingActors: 0 }; }
 
-// 'eval' (not 'sidepanel') so an open home page doesn't think the side panel
-// popped out — joins uiPorts for turn/* all the same. See service-worker onConnect.
-// A task is "done" only when the WHOLE flow has gone quiet — not on the first
-// idle. why: peerd's web work is an ASYNC actor round-trip (the orchestrator
-// delegates via message_actor, its turn ends on the ack, the web actor drives
-// the page in its OWN session, then its reply wakes the orchestrator to report).
-// The old "resolve on the first streaming:false" scored that intermediate ack —
-// so a delegated task's answer was "I've asked the web actor…", never the real
-// result (and the REAL answer then bled into the NEXT task's window). Instead we
-// watch for a QUIET-SETTLE window: any activity event resets the timer, and we
-// only score after SETTLE_MS of total silence across the orchestrator AND its
-// actor. Bounded by the task's timeoutMs (runTask races this against a sleep).
-// why 15s: a delegated task has real inter-event gaps — the ack-idle before the
-// actor spins up, and a snapshot-heavy actor step whose model call is slow. 15s
-// clears the largest event-to-event gap; a stuck turn still bails on the task's
-// own timeoutMs, and durationMs is measured to LAST ACTIVITY so the idle wait
-// doesn't inflate it. why NOT larger: the ONE gap 15s couldn't cover is the web
-// actor's own reply-SYNTHESIS — after its last page op the actor goes silent for
-// a full model call (~20-40s on a slow model) before its reply-wake re-enters
-// the orchestrator with the real answer. A blanket bump to 60s "fixed" it (score
-// 33%→41% at full-300, McNemar p=0.011) but taxed EVERY task +45s. The precise
-// fix instead: HOLD the settle while a web-actor delegation is in flight (see
-// outstandingActors below) so that synthesis gap can't trigger capture, and keep
-// the window tight at 15s once no actor is outstanding. Fast tasks settle in 15s;
-// async tasks wait for the actor, not a fixed padding.
+// why: the eval port receives the real turn stream without opening the panel.
+// Wait until all actors finish and the stream stays quiet. The first idle event
+// can precede the actor's reply. Each task's timeout bounds this wait.
 const SETTLE_MS = 15_000;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let settleTimer = null;
-// Reset the settle countdown on activity; when it elapses with no new event AND
-// no web-actor delegation is still in flight, the round-trip is finished →
-// resolve the task's done promise. If an actor is outstanding (started, not yet
-// done) the window elapsing is the synthesis-gap false alarm — reschedule instead
-// of resolving. Bounded by the task's own timeoutMs even if an actor never
-// reports done (a hung actor).
+// why: a silent actor can still be waiting for its model response.
 const bumpSettle = () => {
   if (!turn.started || !turn.resolveDone) return;   // no active task / not begun
   turn.lastActivityAt = Date.now();                 // for the work-time duration metric
@@ -132,11 +105,13 @@ port.onMessage.addListener((/** @type {any} */ msg) => {
   switch (msg?.type) {
     case 'turn/state': turn.session = msg.session; turn.started = true; bumpSettle(); break;
     case 'turn/delta': turn.started = true; bumpSettle(); break;
-    case 'turn/tool-use': turn.started = true; turn.tools.push(msg.name); om2w?.onToolUse(msg); bumpSettle(); break;
-    // OM2W trajectory capture: a page action becomes a step when its RESULT
-    // lands (post-execution state → the after-action screenshot). Also a real
-    // activity signal for the settle window.
-    case 'turn/tool-result': om2w?.onToolResult(msg); bumpSettle(); break;
+    case 'turn/tool-use': turn.started = true; turn.tools.push({ toolUseId: msg.toolUseId, name: msg.name }); om2w?.onToolUse(msg); bumpSettle(); break;
+    // why: tool names alone let failed calls pass the task check.
+    case 'turn/tool-result': {
+      const call = turn.tools.find((entry) => entry.toolUseId === msg.toolUseId);
+      if (call) call.ok = msg.result?.ok === true;
+      om2w?.onToolResult(msg); bumpSettle(); break;
+    }
     // The CODE surface's real page actions: each settled page.* op inside a
     // page_code call, reported as 'page/op'. Without
     // these a code-arm trajectory records as [navigate, answer] — no work for
@@ -177,7 +152,10 @@ port.onMessage.addListener((/** @type {any} */ msg) => {
     // orchestrator's intermediate ack. clamp at 0 so a missed start can't wedge.
     case 'turn/actor-start': turn.outstandingActors++; bumpSettle(); break;
     case 'turn/actor-done': turn.outstandingActors = Math.max(0, turn.outstandingActors - 1); bumpSettle(); break;
-    case 'turn/actor-state': bumpSettle(); break;
+    case 'turn/actor-state':
+      if (!turn.session?.sessionId || msg.parentSessionId !== turn.session.sessionId) break;
+      turn.actorStates.set(msg.parentToolUseId, msg);
+      bumpSettle(); break;
     case 'turn/error': turn.error = msg.error; bumpSettle(); break;
     // streaming:true = the orchestrator (or a wake) is producing output → keep
     // waiting. streaming:false = it went idle → START the settle countdown (a
@@ -411,19 +389,30 @@ async function runTask(task, runnerCfg) {
   const durationMs = (turn.lastActivityAt || Date.now()) - start;
   const timedOut = !!turn.resolveDone;
   turn.resolveDone = null;
-  // Stop the settle timer either way: on the timeout path it's still pending, and
-  // a late fire must never bleed into the next task's donePromise.
+  // why: a late timer or live turn must not reach the next task.
   if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
-  if (timedOut) log('  ⏱ timed out (still scoring end state)');
+  if (timedOut) {
+    log('  ⏱ timed out (still scoring end state)');
+    await browser.runtime.sendMessage({ type: 'agent/stop' }).catch(() => {});
+  }
 
   await settleSubject();
-  // Resolve the tab the agent actually ended on — NEVER the runner's own page
-  // (see resolveEndTab), which otherwise scores a chrome-extension:// URL.
   const end = await resolveEndTab();
   const tabInfo = await readTab(end?.id ?? subjId);
+  const actorToolResults = [...turn.actorStates.values()].flatMap(({ session, fromIndex }) => {
+    /** @type {any[]} */
+    const messages = session.messages.slice(fromIndex);
+    const results = messages.flatMap((message) => message.toolResults ?? []);
+    return messages.flatMap((message) => message.toolUses ?? []).flatMap((call) => {
+      const result = results.find((entry) => entry?.tool_use_id === call.id);
+      return result ? [{ actorSessionId: session.sessionId, name: call.name, input: call.input, content: result.content, ok: result.is_error === false }] : [];
+    });
+  });
   const state = {
     tabUrl: tabInfo.url, tabTitle: tabInfo.title, tabText: tabInfo.text,
-    answer: finalAnswer(turn.session), steps: turn.tools.length, tools: turn.tools,
+    answer: finalAnswer(turn.session), steps: turn.tools.length, tools: turn.tools.map((entry) => entry.name),
+    toolResults: turn.tools.filter((entry) => typeof entry.ok === 'boolean').map((entry) => ({ name: entry.name, ok: entry.ok === true })),
+    actorToolResults,
     tokens: turn.tokens, durationMs, error: turn.error || (timedOut ? 'timeout' : null),
   };
   let res;
