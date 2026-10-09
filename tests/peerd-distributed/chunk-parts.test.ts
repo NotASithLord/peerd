@@ -95,3 +95,47 @@ test('a stalled partial chunk times out and link closure cancels partial state',
     client.close();
   }
 });
+
+test('valid chunk progress renews the idle deadline without weakening stalled-part failure', async () => {
+  let handler: any;
+  let request: any;
+  const bytes = new Uint8Array(CHUNK_PART_BYTES * 2 + 1).fill(7);
+  const client = createChannelClient({
+    setHandler: value => { handler = value; },
+    send: value => { request = value; },
+  }, 20);
+  const result = client.chunk('hash');
+  try {
+    for (const offset of [0, CHUNK_PART_BYTES, CHUNK_PART_BYTES * 2]) {
+      await Bun.sleep(12);
+      const length = Math.min(CHUNK_PART_BYTES, bytes.length - offset);
+      handler({ t: 'CHUNK', hash: 'hash', requestId: request.requestId, offset,
+        size: bytes.length, bytes: toBase64(bytes.subarray(offset, offset + length)) });
+    }
+    expect(fromBase64((await result).bytes!)).toEqual(bytes);
+  } finally { client.close(); }
+});
+
+test('progress on a shared ordered channel keeps a queued chunk request alive', async () => {
+  let handler: any;
+  const requests = new Map<string, any>();
+  const client = createChannelClient({
+    setHandler: value => { handler = value; },
+    send: value => { requests.set(value.hash, value); },
+  }, 20);
+  const first = client.chunk('first');
+  const second = client.chunk('second');
+  try {
+    await Bun.sleep(12);
+    handler({ t: 'CHUNK', hash: 'first', requestId: requests.get('first').requestId, offset: 0,
+      size: CHUNK_PART_BYTES + 1, bytes: toBase64(new Uint8Array(CHUNK_PART_BYTES)) });
+    await Bun.sleep(12);
+    handler({ t: 'CHUNK', hash: 'first', requestId: requests.get('first').requestId, offset: CHUNK_PART_BYTES,
+      size: CHUNK_PART_BYTES + 1, bytes: toBase64(new Uint8Array(1)) });
+    await Bun.sleep(12);
+    handler({ t: 'CHUNK', hash: 'second', requestId: requests.get('second').requestId, offset: 0,
+      size: 1, bytes: toBase64(new Uint8Array([2])) });
+    expect(fromBase64((await first).bytes!).length).toBe(CHUNK_PART_BYTES + 1);
+    expect(fromBase64((await second).bytes!)).toEqual(new Uint8Array([2]));
+  } finally { client.close(); }
+});

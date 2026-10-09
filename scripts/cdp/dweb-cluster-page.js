@@ -1,6 +1,7 @@
 // Browser-only fixture; served by dweb-cluster-node.mjs, never packaged.
 import { generateIdentity, joinRoom, sha256hex, unpackTransportBundle } from '/peerd-distributed/index.js';
 import { createBaseNetwork } from '/peerd-distributed/base-network.js';
+import { makeDhtDialer } from '/peerd-distributed/transport/dht-dialer.js';
 import { makeMeshDispatch } from '/peerd-runtime/actor/a2a-dispatch.js';
 import { createConversationRegistry } from '/peerd-runtime/actor/conversation-registry.js';
 
@@ -32,14 +33,15 @@ const stop = () => {
 };
 
 window.cluster = {
-  async start({ roomId, signaling, name }) {
+  async start({ roomId, signaling, name, budget, profile }) {
     stop();
     messages = [];
     // why: only rendezvous crosses SSH. ICE has no STUN/TURN server or tunnel;
     // the selected pair below proves the actual cross-host data path.
     room = await joinRoom({ roomId, identity, url: signaling, iceServers: [], audit: recordAudit,
-      RTCPeerConnection: ObservedConnection });
-    base = await createBaseNetwork({ identity, mesh: room.mesh, meta: () => ({ name }), audit: recordAudit });
+      RTCPeerConnection: ObservedConnection, budget, profile });
+    base = await createBaseNetwork({ identity, mesh: room.mesh, meta: () => ({ name }),
+      dial: makeDhtDialer(room), audit: recordAudit });
     originalChunk = base.node.content.getChunk;
     base.node.gossip.subscribe(topic, ({ from, data }) => {
       messages.push({ from, data });
@@ -114,15 +116,29 @@ window.cluster = {
       size: bytes.length, chunks: manifest.chunks.length, publisher: identity.did };
   },
   providers: ({ uri }) => base.findProviders(uri),
+  drop({ did }) {
+    const existed = room.mesh.hasLink(did);
+    room.mesh.removeLink(did);
+    return { existed, linked: room.mesh.hasLink(did) };
+  },
   async fetch({ uri, provider }) {
-    const result = provider ? await base.mesh.fetchFrom(provider, uri, { timeoutMs: 5000 })
-      : await base.fetchApp(uri, { timeoutMs: 5000 });
+    // why: this lane qualifies production behavior across real links; a tighter
+    // harness-only deadline misclassifies healthy WAN transfer as product loss.
+    const result = provider ? await base.mesh.fetchFrom(provider, uri)
+      : await base.fetchApp(uri);
     const decoded = await unpackTransportBundle(result);
     received.set(uri, result);
     return { digest: await sha256hex(decoded.files['payload.bin']), size: decoded.files['payload.bin'].length,
       publisher: result.manifest.publisher, chunks: result.manifest.chunks.length };
   },
-  seed: ({ uri }) => base.seedApp(received.get(uri)),
+  async seed({ uri }) {
+    const hash = await base.seedApp(received.get(uri));
+    // seedApp intentionally announces in the background for product latency;
+    // acceptance needs the replacement-provider record durably observed before
+    // removing the publisher, rather than racing that background effect.
+    const announcement = await base.announceProvider(uri);
+    return { hash, announcement };
+  },
   fetchMany: ({ uri, count }) => Promise.all(Array.from({ length: count }, () => window.cluster.fetch({ uri }))),
   unshare: ({ hash }) => base.unshareApp({ hash }),
   corrupt({ enabled }) {

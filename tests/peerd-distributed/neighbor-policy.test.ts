@@ -65,6 +65,22 @@ test('legacy/private meshes retain complete budget and never pressure-rotate a q
   } finally { f.close(); }
 });
 
+test('a rendezvous outage freezes destructive sparse rotation but keeps free-slot admission', async () => {
+  const f = await fixture(true, 3);
+  try {
+    f.add('stable-a', true); f.add('stable-b', true);
+    f.mesh.setSparseRotation(false);
+    expect(f.add('free-slot')).toBe(true);
+    f.advance(NEIGHBOR_GRACE_MS + NEIGHBOR_ROTATION_MS);
+    expect(f.add('replacement', true)).toBe(false);
+    expect(f.mesh.peers().map(peer => peer.did).sort()).toEqual(['free-slot', 'stable-a', 'stable-b']);
+    expect(f.audit.some(entry => entry.detail?.why === 'neighbor-rotation')).toBe(false);
+    f.mesh.setSparseRotation(true);
+    expect(f.add('replacement', true)).toBe(true);
+    expect(f.audit.some(entry => entry.detail?.why === 'neighbor-rotation')).toBe(true);
+  } finally { f.close(); }
+});
+
 test('same-DID replacement cannot renew grace or erase local exploration ownership', async () => {
   const f = await fixture();
   try {

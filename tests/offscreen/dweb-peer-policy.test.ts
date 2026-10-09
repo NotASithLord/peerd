@@ -83,21 +83,16 @@ test('supervisor admits only the exact SW policy command without an active dweb 
   expect(loads).toBe(1); expect(claims).toBe(1); expect(starts).toBe(0);
 });
 
-test('existing discovery tick ignores a retired handle and continues after failed policy reads', async () => {
-  const timerSource = slice('      resubTimer = setInterval(() => {', '\n    }\n    // Same-user device');
-  let tick!: () => void, release!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  let reads = 0, subscriptions = 0;
-  let subscribed!: () => void;
-  const recovered = new Promise<void>(resolve => { subscribed = resolve; });
-  const host = { base: { discovery: { subscribeAll: () => { subscriptions++; subscribed(); } } } };
-  const replace = new Function('refreshPeerPolicy', 'setInterval', 'initial',
-    `let handle=initial,resubTimer; ${timerSource}; return next => { handle=next; };`)(
-    async () => { if (++reads === 1) await gate; else if (reads === 2) throw new Error('policy unavailable'); },
-    (callback: () => void) => { tick = callback; return 1; }, host);
-  tick(); replace(null); release(); await gate;
-  expect(subscriptions).toBe(0);
-  tick(); // rejected read is contained; it cannot poison the existing timer
-  replace({ ...host }); tick(); await recovered;
-  expect(reads).toBe(3); expect(subscriptions).toBe(1);
+test('the policy tick continues after a failed policy read', async () => {
+  const timerSource = slice('    if (!policyTimer) policyTimer = setInterval', '\n    // Same-user device');
+  let tick!: () => void, recovered!: () => void;
+  const recovery = new Promise<void>(resolve => { recovered = resolve; });
+  let reads = 0;
+  new Function('refreshPeerPolicy', 'setInterval',
+    `let policyTimer; ${timerSource};`)(
+    async () => { if (++reads === 1) throw new Error('policy unavailable'); recovered(); },
+    (callback: () => void) => { tick = callback; return 1; });
+  tick(); await Promise.resolve(); // the rejection is contained by the timer
+  tick(); await recovery;
+  expect(reads).toBe(2);
 });

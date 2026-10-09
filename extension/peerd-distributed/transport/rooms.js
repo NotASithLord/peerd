@@ -104,6 +104,8 @@ export const joinRoom = async ({
   const lifetime = new AbortController();
   const sparseRequested = peerKind !== 'website' && !!sparsePublicProfile(roomId, profile);
   const attempts = admission.createScope();
+  /** @type {Set<string>} */
+  const repairTargets = new Set();
 
   /** @param {string} s */
   const setStatus = (s) => {
@@ -144,6 +146,7 @@ export const joinRoom = async ({
       return remoteDid;
     }
     if (!mesh.addLink(channel, remoteDid, { caps: remoteCaps.filter((cap) => sessionCaps.includes(cap)) }, { locallySelected })) throw new Error('room peer admission refused');
+    repairTargets.delete(remoteDid);
     if (via) mesh.tagLink(remoteDid, { via });
     dlog('room', `✅ CONNECTED to peer ${short(remoteDid)} — data channel open, in the mesh`);
     // Path telemetry for the HUD (D-5): best-effort, after stats settle.
@@ -291,8 +294,12 @@ export const joinRoom = async ({
       // rendezvous can't be DISCOVERED by new joiners (RELAY only bridges peers
       // who already share a link), so for the always-on lobby we RECONNECT with
       // backoff rather than going dark. setStatus('connecting') reflects that.
+      if (sparseRequested) mesh.setSparseRotation(false);
       audit?.('rendezvous_lost', { roomId });
       scheduleReconnect();
+      // A data channel can report its close just before the WebSocket reports
+      // the outage. Recover that ordering exactly as if the link died later.
+      if (repairTargets.size > 0) scheduleOfflineRepair(true);
     });
 
     /** @param {string} member @param {any} did */
@@ -409,6 +416,57 @@ export const joinRoom = async ({
     }
   };
 
+  // A rendezvous outage must not turn a single data-channel loss into a
+  // permanent partition. Crawl every surviving authenticated neighbor and
+  // relay-dial peers from its roster. Three bounded rounds cover simultaneous
+  // channel teardown without creating an unbounded background protocol.
+  const REPAIR_DELAYS_MS = [250, 1_000, 3_000];
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let repairTimer = null;
+  let repairEpoch = 0;
+  let repairRound = 0;
+
+  const stopOfflineRepair = () => {
+    repairEpoch += 1;
+    repairRound = 0;
+    timers.clearTimeout(repairTimer ?? undefined);
+    repairTimer = null;
+  };
+
+  /** @param {boolean} [restart] */
+  const scheduleOfflineRepair = (restart = false) => {
+    if (left || rendezvousState === 'up' || mesh.peers().length === 0) return;
+    if (restart) stopOfflineRepair();
+    if (repairTimer || repairRound >= REPAIR_DELAYS_MS.length) return;
+    const epoch = repairEpoch;
+    const delay = REPAIR_DELAYS_MS[repairRound];
+    repairTimer = timers.setTimeout(async () => {
+      repairTimer = null;
+      if (left || rendezvousState === 'up' || epoch !== repairEpoch) return;
+      const peers = mesh.peers().map(({ did }) => did);
+      for (const did of repairTargets) if (mesh.hasLink(did)) repairTargets.delete(did);
+      const targets = [...repairTargets];
+      const target = targets[repairRound % targets.length];
+      const broker = peers[repairRound % peers.length];
+      audit?.('offline_mesh_repair', { round: repairRound + 1, peers: peers.length, targets: targets.length });
+      if (broker && target) await dialViaRelay(broker, target).catch(error => {
+        audit?.('offline_mesh_repair_failed', { error: error?.message });
+      });
+      if (target && mesh.hasLink(target)) repairTargets.delete(target);
+      if (left || rendezvousState === 'up' || epoch !== repairEpoch) return;
+      repairRound += 1;
+      scheduleOfflineRepair();
+    }, delay);
+  };
+
+  const stopRepairObserver = mesh.onPeerGone(({ did }) => {
+    const oldest = repairTargets.size >= MAX_ADMISSION_CANDIDATES
+      ? repairTargets.values().next().value : undefined;
+    if (oldest) repairTargets.delete(oldest);
+    repairTargets.add(did);
+    if (rendezvousState !== 'up') scheduleOfflineRepair(true);
+  });
+
   // ---- rendezvous connect + reconnect (always-on lobby) -------------------
   // The first connect blocks the join (throws if the node is unreachable —
   // unchanged). After that, a DROP triggers reconnect-with-backoff: re-open the
@@ -439,6 +497,8 @@ export const joinRoom = async ({
       profile: sparsePublicProfile(roomId, profile) ?? undefined, signal: lifetime.signal, now, timers });
     if (left) { s.close(); return; }                    // left() raced the connect — abandon it
     session = s;
+    stopOfflineRepair();
+    if (sparseRequested) mesh.setSparseRotation(true);
     setStatus('up');
     backoffMs = 2_000;                                  // reset on a clean connect
     // If we'd warned this was a real outage, close the loop now that it's back.
@@ -520,6 +580,8 @@ export const joinRoom = async ({
       if (left) return;
       left = true;
       releaseMesh?.();
+      stopRepairObserver();
+      stopOfflineRepair();
       lifetime.abort();
       attempts.close();
       timers.clearTimeout(reconnectTimer ?? undefined);

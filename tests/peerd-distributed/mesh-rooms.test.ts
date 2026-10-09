@@ -226,6 +226,12 @@ describe('rooms over the rendezvous (fake node, real reducer)', () => {
     expect(ra.rendezvous()).toBe('connecting'); // reconnecting with backoff (was 'down') — mesh survives meanwhile
     expect(didsOf(ra)).toEqual([b.did, c.did].sort()); // links untouched
 
+    // If one of those links then dies, the remaining authenticated neighbor
+    // supplies its roster and relays a replacement without the server.
+    ra.mesh.removeLink(b.did);
+    await waitFor(() => ra.mesh.hasLink(b.did), 2_000);
+    expect(ra.mesh.hasLink(b.did)).toBe(true);
+
     // D arrives with ONE link to A (out-of-band — the invite-code shape),
     // then crawls the room through it: roster + relayed dials, no server.
     const rd = await joinRoom({ roomId: 'r3', identity: d, url: null, transport: ether.makeTransport() });
@@ -351,6 +357,27 @@ describe('mesh boundary rules', () => {
     await tick(200);
     ma.close();
     expect(gone.map((g) => g.why)).toContain('idle-timeout');
+  });
+
+  test('valid content traffic keeps an authenticated slow link alive', async () => {
+    const identity = await generateIdentity();
+    const mesh = createRoomMesh({ roomId: 'content-liveness', identity,
+      pingIntervalMs: 50, idleTimeoutMs: 500 });
+    let handler: any;
+    const link = { send: () => {}, setHandler: (value: any) => { handler = value; },
+      onClose: () => () => {}, close: () => {}, isClosed: () => false };
+    const did = 'did:key:zSlowContentPeer';
+    mesh.addLink(link as any, did);
+    mesh.start();
+    try {
+      for (let index = 0; index < 7; index++) {
+        await Bun.sleep(100);
+        handler({ t: index % 2 ? 'CHUNK_REQ' : 'NOCHUNK', hash: 'a'.repeat(64) });
+      }
+      expect(mesh.hasLink(did)).toBe(true);
+      await Bun.sleep(600);
+      expect(mesh.hasLink(did)).toBe(false);
+    } finally { mesh.close(); }
   });
 
   test('budget refuses links past the cap', async () => {

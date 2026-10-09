@@ -60,7 +60,7 @@ export const createBaseNetwork = async ({
   const node = await createPeerNode({ identity, mesh, meta, dial, audit, now });
   let closed = false;
   /** @type {ReturnType<typeof setInterval> | null} */
-  let providerTimer = null;
+  let maintenanceTimer = null;
   /** @type {Map<string, number>} */
   const providerRenewals = new Map();
   let renewingProviders = false;
@@ -376,10 +376,10 @@ export const createBaseNetwork = async ({
       }
       return { manifest, payload, providers: [identity.did], verifiedContributors: [] };
     }
-    if (publisher === identity.did) {
-      // why: a local generation still rebuilding its served bytes cannot fetch
-      // them from itself through mesh/DHT. Refuse before any effect so a caller
-      // may retry after the background reseed announces this exact hash.
+    if (publisher === identity.did && node.mesh.peers().length === 0) {
+      // An isolated local generation cannot fetch from itself. With peers, keep
+      // going: another seeder may hold this immutable signed version after the
+      // original publisher unshared or restarted.
       throw Object.assign(new Error('local shared App bytes are not available yet'), {
         code: 'dweb-local-content-unavailable',
         performed: false,
@@ -627,7 +627,13 @@ export const createBaseNetwork = async ({
 
     start: () => {
       if (closed) return;
-      if (!providerTimer) providerTimer = setInterval(() => { refreshProviders().catch(() => {}); }, 30_000);
+      if (!maintenanceTimer) maintenanceTimer = setInterval(() => {
+        // A SUB may race link admission or replacement. Reconcile here, at the
+        // reusable base-network owner, so every client self-heals rather than
+        // relying on an offscreen-host-only timer.
+        discovery.subscribeAll();
+        refreshProviders().catch(() => {});
+      }, 12_000);
       refreshProviders().catch(() => {});
       dlog('base', 'base network ONLINE (presence + liveness started)');
       node.start();
@@ -636,6 +642,6 @@ export const createBaseNetwork = async ({
       // subscribe to current peers too, or a late starter's Library stays empty.
       discovery.subscribeAll();
     },
-    close: () => { closed = true; library.clearContributors(); for (const ac of operations) ac.abort(); if (providerTimer) clearInterval(providerTimer); providerRenewals.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
+    close: () => { closed = true; library.clearContributors(); for (const ac of operations) ac.abort(); if (maintenanceTimer) clearInterval(maintenanceTimer); providerRenewals.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
   });
 };

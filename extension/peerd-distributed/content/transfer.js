@@ -89,6 +89,8 @@ export const createChannelClient = (channel, timeoutMs) => {
   const pending = new Map(); // `${t}:${hash}` -> settle
   /** @type {Set<(error: Error) => void>} */
   const cancel = new Set();
+  /** @type {Set<() => void>} */
+  const deadlines = new Set();
   let closed = false;
   let offClose = () => {};
   const close = () => {
@@ -128,11 +130,16 @@ export const createChannelClient = (channel, timeoutMs) => {
     const sending = new AbortController();
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     let timer;
+    const armResponseDeadline = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => fail(new Error('transfer timeout')), timeoutMs);
+    };
     const cleanup = () => {
       parts = null;
       clearTimeout(timer);
       for (const rt of respTypes) pending.delete(`${rt}:${h}`);
       cancel.delete(fail);
+      deadlines.delete(armResponseDeadline);
       signal?.removeEventListener('abort', abort);
       sending.abort();
     };
@@ -144,6 +151,10 @@ export const createChannelClient = (channel, timeoutMs) => {
       // why: concurrent downloads share a link and may request the same hash.
       // Their fragment streams must never complete or corrupt each other.
       if (msg.requestId !== undefined && msg.requestId !== requestId) return;
+      // The reliable ordered channel can make one of several concurrent chunk
+      // requests wait behind another. Any correlated response proves that the
+      // shared path is progressing, so none of this client's requests is idle.
+      for (const arm of deadlines) arm();
       if (msg.t === 'CHUNK' && msg.requestId !== undefined) {
         const size = msg.size;
         if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0 || size > CHUNK_SIZE
@@ -155,7 +166,10 @@ export const createChannelClient = (channel, timeoutMs) => {
           parts ??= new Uint8Array(size);
           parts.set(bytes, received);
           received += bytes.length;
-          if (received < parts.length) return;
+          // why: a bounded, valid part proves forward progress. A single
+          // absolute deadline turns a healthy high-latency chunk into failure;
+          // the fixed part count still bounds how long a malicious drip can live.
+          if (received < parts.length) { armResponseDeadline(); return; }
           msg = { t: 'CHUNK', hash: h, bytes: toBase64(parts) };
         } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); return; }
       }
@@ -164,6 +178,7 @@ export const createChannelClient = (channel, timeoutMs) => {
     const abort = () => fail(new Error('content request cancelled'));
     for (const rt of respTypes) pending.set(`${rt}:${h}`, settle);
     cancel.add(fail);
+    deadlines.add(armResponseDeadline);
     // Queue wait has its own bound. The response clock starts only once the
     // request reaches the native transport; synchronous responses still win.
     timer = setTimeout(() => fail(new Error('content send timed out')), 15_000);
@@ -171,8 +186,7 @@ export const createChannelClient = (channel, timeoutMs) => {
     try {
       Promise.resolve(channel.send({ t: reqType, hash: h, ...(requestId ? { requestId } : {}) }, { signal: sending.signal })).then(() => {
         if (settled) return;
-        clearTimeout(timer);
-        timer = setTimeout(() => fail(new Error('transfer timeout')), timeoutMs);
+        armResponseDeadline();
       }, (error) => fail(error instanceof Error ? error : new Error(String(error))));
     } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); }
   });
