@@ -90,7 +90,7 @@ const reseedNotifier = createDwebReseedNotifier({
 const contentOwnership = createContentOwnership();
 const shareRollbacks = createShareRollbackStore();
 /** @type {ReturnType<typeof setInterval> | null} */
-let resubTimer = null; // periodic re-subscribe — self-heals a missed onPeer SUB
+let policyTimer = null;
 
 // A publisher-chosen, stable app slug from the app name (the dwapp_id is
 // H(publisher‖slug), so the slug only needs to be stable + ≤64 chars).
@@ -398,15 +398,7 @@ const baseLifecycle = makeStartStopBarrier({
     startNotifications(candidate);
     // Late joiners discover through the sovereign subscription plane.
     candidate.base.onDwappAnnounce((/** @type {any} */ a) => log('discovery card:', a?.dwapp_id?.slice(0, 12), `from …${String(a?.publisher).slice(-8)}`));
-    // Self-heal discovery if the initial subscription races WebRTC readiness.
-    if (!resubTimer) {
-      resubTimer = setInterval(() => {
-        const current = handle;
-        void refreshPeerPolicy().then(() => {
-          if (handle === current) return current?.base?.discovery?.subscribeAll();
-        }).catch(() => {});
-      }, 12_000);
-    }
+    if (!policyTimer) policyTimer = setInterval(() => { refreshPeerPolicy().catch(() => {}); }, 12_000);
     // Same-user device discovery rides the mesh that just came up. It stays
     // INERT on an install that has not been enrolled into a person's device
     // set, so this is safe to attempt unconditionally.
@@ -433,7 +425,7 @@ const baseLifecycle = makeStartStopBarrier({
     roomLiveness.clear();
     contentOwnership.clear();
     shareRollbacks.clear();
-    if (resubTimer) { clearInterval(resubTimer); resubTimer = null; }
+    if (policyTimer) { clearInterval(policyTimer); policyTimer = null; }
     handle = null;
     log('base network stopped');
   },

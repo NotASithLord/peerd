@@ -353,6 +353,27 @@ describe('mesh boundary rules', () => {
     expect(gone.map((g) => g.why)).toContain('idle-timeout');
   });
 
+  test('valid content traffic keeps an authenticated slow link alive', async () => {
+    const identity = await generateIdentity();
+    const mesh = createRoomMesh({ roomId: 'content-liveness', identity,
+      pingIntervalMs: 50, idleTimeoutMs: 500 });
+    let handler: any;
+    const link = { send: () => {}, setHandler: (value: any) => { handler = value; },
+      onClose: () => () => {}, close: () => {}, isClosed: () => false };
+    const did = 'did:key:zSlowContentPeer';
+    mesh.addLink(link as any, did);
+    mesh.start();
+    try {
+      for (let index = 0; index < 7; index++) {
+        await Bun.sleep(100);
+        handler({ t: index % 2 ? 'CHUNK_REQ' : 'NOCHUNK', hash: 'a'.repeat(64) });
+      }
+      expect(mesh.hasLink(did)).toBe(true);
+      await Bun.sleep(600);
+      expect(mesh.hasLink(did)).toBe(false);
+    } finally { mesh.close(); }
+  });
+
   test('budget refuses links past the cap', async () => {
     const a = await generateIdentity();
     const ma = createRoomMesh({ roomId: 'r', identity: a, budget: 1 });

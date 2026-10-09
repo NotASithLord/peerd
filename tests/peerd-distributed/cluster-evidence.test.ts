@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sourceFingerprint, gitMetadata } from '../../scripts/cdp/dweb-cluster-source.mjs';
 import { sshArguments } from '../../scripts/cdp/dweb-cluster-ssh.mjs';
-import { validateHosts, validatePaths } from '../../scripts/cdp/dweb-cluster-checks.mjs';
+import { validateHosts, validateMesh, validatePaths, pathsReady } from '../../scripts/cdp/dweb-cluster-checks.mjs';
 import { settleResponse } from '../../scripts/cdp/dweb-cluster-rpc.mjs';
 
 const hosts = () => [1, 2].map(number => ({ machine: String(number).repeat(64), source: 'a'.repeat(64),
@@ -59,6 +59,23 @@ describe('physical cluster evidence cannot silently pass a local rehearsal', () 
       { ...path(), remote: path().local },
     ];
     for (const value of invalid) expect(() => validatePaths([value], ['peer'])).toThrow();
+    expect(() => validatePaths([{ ...path(), remote: { address: '', protocol: 'udp', type: 'prflx' } }], ['peer'])).not.toThrow();
+  });
+  test('treats selected ICE pairs as ready only after every host has succeeded', () => {
+    expect(pathsReady([[{ ...path(), state: 'in-progress' }]], [['peer']])).toBe(false);
+    expect(pathsReady([[path()]], [['peer']])).toBe(true);
+  });
+  test('distinguishes a connected sparse mesh from a full mesh', () => {
+    const dids = ['a', 'b', 'c'];
+    const states = [
+      { did: 'a', peers: [{ did: 'b', linked: true }] },
+      { did: 'b', peers: [{ did: 'a', linked: true }, { did: 'c', linked: true }] },
+      { did: 'c', peers: [{ did: 'b', linked: true }] },
+    ];
+    expect(validateMesh(states, dids, { topology: 'connected' })).toEqual([['b'], ['a', 'c'], ['b']]);
+    expect(() => validateMesh(states, dids)).toThrow('Full mesh incomplete');
+    expect(() => validateMesh([{ ...states[0], peers: [] }, states[1], states[2]], dids, { topology: 'connected' })).toThrow();
+    expect(() => validateMesh([{ ...states[0], peers: [{ did: 'c', linked: true }] }, states[1], states[2]], dids, { topology: 'connected' })).toThrow('symmetric');
   });
 });
 

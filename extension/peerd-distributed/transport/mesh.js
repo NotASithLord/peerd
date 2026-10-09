@@ -134,6 +134,7 @@ export const createRoomMesh = ({
   /** @type {Map<string, Link>} */
   const links = new Map(); // did -> { channel, lastSeen, ctrl: {windowStart, count}, offClose }
   let lastRotation = -Infinity;
+  let sparseRotation = sparse;
   /** @type {Set<(arg: any) => void>} */
   const peerCbs = new Set();
   /** @type {Set<(arg: any) => void>} */
@@ -367,12 +368,17 @@ export const createRoomMesh = ({
       if (typeof msg.hash !== 'string' || !/^[0-9a-f]{64}$/.test(msg.hash)) {
         penalize(link, 'malformed-content-request'); return;
       }
+      // why: content rides the authenticated DTLS/SCTP link without a signed
+      // envelope. Valid transfer traffic is still peer activity; ignoring it
+      // lets the idle sweeper sever a healthy slow transfer.
+      link.lastSeen = now();
       link.serving++;
       try { await respondContent?.(msg, (out) => sendOnLink(link, out), link); }
       finally { link.serving--; }
       return;
     }
     if (typeof msg.t === 'string' && CONTENT_RESP.has(msg.t)) {
+      if (typeof msg.hash === 'string' && /^[0-9a-f]{64}$/.test(msg.hash)) link.lastSeen = now();
       for (const handler of [...link.contentHandlers]) handler(msg);
       return;
     }
@@ -450,7 +456,12 @@ export const createRoomMesh = ({
     // Enabled only after the room owner observes a negotiated public profile.
     // Sticky for this room lifetime: reconnect fallback must not erase local
     // ownership/reservations while authenticated links survive the outage.
-    enableSparseAdmission: () => { sparse = true; },
+    enableSparseAdmission: () => { sparse = true; sparseRotation = true; },
+    // A rendezvous outage removes the only authoritative source of fresh
+    // candidates. Keep accepting into free slots, but never evict a healthy
+    // link for a replacement that may partition the remaining overlay.
+    /** @param {boolean} enabled */
+    setSparseRotation: (enabled) => { sparseRotation = sparse && !!enabled; },
     locallySelectedCount: () => [...links.values()].filter((link) => link.locallySelected).length,
 
     // Admit an AUTHENTICATED link (HELLO already done — did is proven).
@@ -471,7 +482,7 @@ export const createRoomMesh = ({
       if (!previous) {
         const time = now();
         let decision = { allowed: links.size < budget, evict: /** @type {string | undefined} */ (undefined) };
-        if (sparse) {
+        if (sparse && sparseRotation) {
           const values = [...links.values()];
           const pressure = links.size >= budget || (!locallySelected
             && values.filter((link) => !link.locallySelected).length >= budget - Math.min(2, Math.max(0, budget - 1)));

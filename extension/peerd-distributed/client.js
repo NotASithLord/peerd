@@ -27,7 +27,7 @@ import { installAppBundle } from './apps/loader.js';
 import { createDwebBridge, iframeTransport } from './apps/bridge.js';
 import { loadSeedApp, COMMONS_SEED } from './apps/seed.js';
 import { DEFAULT_SIGNALING } from './transport/signaling-client.js';
-import { dlog } from './log.js';
+import { makeDhtDialer } from './transport/dht-dialer.js';
 import { createSelfDeviceCoordinator } from './self/coordinator.js';
 import { createSelfDeviceMesh } from './self/mesh.js';
 import { createSyncSource, createSyncReceiver } from './self/host.js';
@@ -37,25 +37,6 @@ import { loadCoordinatorInputs } from './self/custody.js';
 // topic gossip + sync, the dwapp bridge, the commons. Research-grade; may
 // change without notice (that's what "preview" means).
 export const PHASE = 1;
-
-// The DHT per-hop dialer (peer-node.js's `dial`). Kademlia's lookup walks toward
-// a key by querying nodes closer to it — nodes we may not link. To query one we
-// don't link, relay-dial it through the peer who vouched for it (the lookup tags
-// each contact with hints.broker = the responder that returned it; since that
-// responder answered us, it's directly linked, so the one-hop relay rule holds).
-// No broker we link → no path this hop: return false and the lookup drops the
-// contact and moves on. (For a small full-mesh lobby every contact is already
-// linked, so this never fires — it's the scale-out path beyond the mesh budget.)
-/** @typedef {Awaited<ReturnType<typeof joinRoom>>} Room */
-/** @param {Room} room */
-const makeDhtDialer = (room) => /** @param {{ did: string, hints?: { broker?: string } }} contact */ async (contact, { signal } = /** @type {{signal?: AbortSignal}} */ ({})) => {
-  if (room.mesh.hasLink(contact.did)) return true;
-  const broker = contact?.hints?.broker;
-  if (!broker || !room.mesh.hasLink(broker)) return false;
-  try { await room.dialVia(broker, contact.did, { signal }); }
-  catch (e) { dlog('dht', `relay-dial of ${contact.did.slice(-8)} via ${broker.slice(-8)} failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`); return false; }
-  return room.mesh.hasLink(contact.did);
-};
 
 /** @typedef {import('/shared/dweb-interface.js').DwebClient} DwebClient */
 

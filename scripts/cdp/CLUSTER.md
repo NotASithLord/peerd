@@ -64,3 +64,17 @@ For a local rehearsal, omit `ssh`, point both entries at the local checkout and
 pass `--local`. Such a report is explicitly labeled `local-rehearsal`; it cannot
 qualify the physical-Mac lane. The runner removes only its temporary profiles
 and forwards. A host watchdog also closes its browser after an abandoned run.
+
+The default `topology` is `"all-pairs"`. Use `"connected"` to qualify a
+multi-hop physical graph when some host pairs have no direct route; every host
+must still belong to one symmetric connected component, fresh signed gossip
+must traverse the whole graph, and every actual link must expose a selected
+direct, non-relay UDP pair. Chrome may report the remote side as peer-reflexive
+with a redacted address; the reciprocal host report still has to pass. An optional integer `budget` passes the production
+per-peer link cap into each room for fixed-degree experiments. Neither setting
+changes a production profile or browser default.
+
+`roomId` and `profile` may be supplied together to exercise a negotiated
+rendezvous profile, such as the production sparse public room, without changing
+the server or extension defaults. Keep private runs on an isolated signaling
+server as shown above.

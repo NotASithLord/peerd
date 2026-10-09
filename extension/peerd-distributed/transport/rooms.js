@@ -291,6 +291,7 @@ export const joinRoom = async ({
       // rendezvous can't be DISCOVERED by new joiners (RELAY only bridges peers
       // who already share a link), so for the always-on lobby we RECONNECT with
       // backoff rather than going dark. setStatus('connecting') reflects that.
+      if (sparseRequested) mesh.setSparseRotation(false);
       audit?.('rendezvous_lost', { roomId });
       scheduleReconnect();
     });
@@ -439,6 +440,7 @@ export const joinRoom = async ({
       profile: sparsePublicProfile(roomId, profile) ?? undefined, signal: lifetime.signal, now, timers });
     if (left) { s.close(); return; }                    // left() raced the connect — abandon it
     session = s;
+    if (sparseRequested) mesh.setSparseRotation(true);
     setStatus('up');
     backoffMs = 2_000;                                  // reset on a clean connect
     // If we'd warned this was a real outage, close the loop now that it's back.

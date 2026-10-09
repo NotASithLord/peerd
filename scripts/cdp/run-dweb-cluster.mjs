@@ -8,7 +8,7 @@ import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { createSignalingServer } from '../../signaling-node/bun-server.mjs';
-import { validateHosts, validatePaths } from './dweb-cluster-checks.mjs';
+import { validateHosts, validateMesh, pathsReady } from './dweb-cluster-checks.mjs';
 import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
 import { sshArguments } from './dweb-cluster-ssh.mjs';
 
@@ -108,25 +108,39 @@ process.once('SIGTERM', async () => { await cleanup(); process.exit(143); });
 try {
   assert(Array.isArray(config.hosts) && config.hosts.length >= 2, 'Configure at least two hosts');
   assert.equal(new Set(config.hosts.map(host => host.name)).size, config.hosts.length, 'Host names must be unique');
+  const topology = config.topology ?? 'all-pairs';
+  assert(['all-pairs', 'connected'].includes(topology), 'topology must be all-pairs or connected');
   signaling = createSignalingServer({ hostname: '127.0.0.1', port: 0, log: () => {} });
   for (const target of config.hosts) startWorker(target, signaling.server.port);
   report.hosts = await Promise.all(workers.map(async worker => ({ name: worker.target.name,
     ...await worker.call('launch', { chrome: worker.target.chrome, mdns: config.mdns !== false,
       allInterfaces: config.allInterfaces === true }) })));
   await check(local ? 'matching source and browser (rehearsal)' : 'identical source on distinct Macs', async () => { validateHosts(report.hosts, { local, expectedSource, expectedRuntime: coordinator.runtime }); return report.hosts; });
-  const roomId = `cluster-${crypto.randomUUID()}`;
-  const start = (worker, id = roomId) => worker.call('start', { roomId: id, signaling: worker.signaling, name: worker.target.name });
+  const roomId = config.roomId ?? `cluster-${crypto.randomUUID()}`;
+  assert(typeof roomId === 'string' && roomId.length > 0, 'roomId must be a non-empty string');
+  const start = (worker, id = roomId) => worker.call('start', { roomId: id, signaling: worker.signaling,
+    name: worker.target.name, budget: config.budget, profile: config.profile });
   const identities = await Promise.all(workers.map(worker => start(worker)));
   const dids = identities.map(identity => identity.did);
   assert.equal(new Set(dids).size, workers.length, 'Each browser must own a distinct identity');
   const reports = () => Promise.all(workers.map(worker => worker.call('report')));
-  const meshReady = () => waitUntil(reports, states => states.every((state, index) =>
-    dids.filter(did => did !== dids[index]).every(did => state.peers.some(peer => peer.did === did && peer.linked))), 'authenticated mesh');
-  await check('authenticated all-pairs mesh', meshReady);
+  let adjacency;
+  const meshReady = () => waitUntil(reports, states => {
+    try { adjacency = validateMesh(states, dids, { topology }); return true; }
+    catch { return false; }
+  }, 'authenticated mesh').then(states => ({ states, adjacency }));
+  await check(`authenticated ${topology} mesh`, meshReady);
   const paths = async () => {
-    const values = await Promise.all(workers.map(worker => worker.call('paths')));
-    values.forEach((value, index) => validatePaths(value, dids.filter(did => did !== dids[index]), { local }));
-    return values;
+    // why: the authenticated channel may carry application bytes before the
+    // selected ICE pair's stats transition from in-progress to succeeded.
+    const evidence = await waitUntil(async () => {
+      const states = await reports();
+      let expected;
+      try { expected = validateMesh(states, dids, { topology }); } catch { return null; }
+      return { values: await Promise.all(workers.map(worker => worker.call('paths'))), expected };
+    }, value => value && pathsReady(value.values, value.expected, { local }), 'selected direct UDP paths');
+    adjacency = evidence.expected;
+    return evidence.values;
   };
   const gossip = async () => {
     const nonce = crypto.randomUUID();
@@ -139,7 +153,7 @@ try {
   await check('selected direct UDP paths', paths);
   await check('two-turn A2A conversations in both directions', async () => {
     const results = [];
-    for (const [index, worker] of workers.entries()) for (const did of dids.filter(did => did !== dids[index])) {
+    for (const [index, worker] of workers.entries()) for (const did of adjacency[index]) {
       const nonce = crypto.randomUUID();
       const result = await worker.call('conversation', { did, nonce });
       assert.equal(result.first.ok, true);
@@ -150,6 +164,8 @@ try {
     }
     return results;
   });
+  const seederIndex = dids.indexOf(adjacency[0][0]);
+  assert(seederIndex > 0, 'Publisher needs a directly linked seeder');
   const published = await check('publish a signed multi-chunk app', async () => {
     const value = await workers[0].call('publish', { slug: `cluster-${crypto.randomUUID()}` });
     assert(value.chunks > 1, 'Payload must exercise multiple chunks');
@@ -157,7 +173,7 @@ try {
   });
   await check('discovery and DHT provider records cross hosts', async () => {
     await waitUntil(reports, states => states.slice(1).every(state => state.cards.some(card => card.dwapp_id === published.dwappId)), 'discovery');
-    return waitUntil(() => workers[1].call('providers', { uri: published.uri }), providers => providers.includes(dids[0]), 'DHT provider');
+    return waitUntil(() => workers[seederIndex].call('providers', { uri: published.uri }), providers => providers.includes(dids[0]), 'DHT provider');
   });
   const verify = value => {
     assert.equal(value.digest, published.digest);
@@ -166,21 +182,21 @@ try {
     assert.equal(value.chunks, published.chunks);
     return value;
   };
-  await check('signed multi-chunk download verifies every byte', async () => verify(await workers[1].call('fetch', { uri: published.uri })));
+  await check('signed multi-chunk download verifies every byte', async () => verify(await workers[seederIndex].call('fetch', { uri: published.uri })));
   await check('parallel downloads verify every byte', async () =>
-    (await workers[1].call('fetchMany', { uri: published.uri, count: 3 })).map(verify));
+    (await workers[seederIndex].call('fetchMany', { uri: published.uri, count: 3 })).map(verify));
   await check('corrupt serving peer is rejected', async () => {
     await workers[0].call('corrupt', { enabled: true });
     try {
-      await assert.rejects(workers[1].call('fetch', { uri: published.uri, provider: dids[0] }), /chunk hash mismatch/);
+      await assert.rejects(workers[seederIndex].call('fetch', { uri: published.uri, provider: dids[0] }), /chunk hash mismatch/);
       return { rejected: true };
     } finally { await workers[0].call('corrupt', { enabled: false }); }
   });
-  await check('healthy transfer recovers after corruption', async () => verify(await workers[1].call('fetch', { uri: published.uri })));
+  await check('healthy transfer recovers after corruption', async () => verify(await workers[seederIndex].call('fetch', { uri: published.uri })));
   await check('unsharing stops remote content serving', async () => {
-    await workers[1].call('seed', { uri: published.uri });
+    await workers[seederIndex].call('seed', { uri: published.uri });
     await workers[0].call('unshare', { hash: published.hash });
-    await assert.rejects(workers[1].call('fetch', { uri: published.uri, provider: dids[0] }), /peer does not hold/);
+    await assert.rejects(workers[seederIndex].call('fetch', { uri: published.uri, provider: dids[0] }), /peer does not hold/);
     return { rejected: true };
   });
   await check('peer leave removes authenticated links', async () => {
@@ -202,14 +218,18 @@ try {
     return gossip();
   });
   await check('original bytes remain available from another seeder', async () =>
-    verify(await workers[0].call('fetch', { uri: published.uri, provider: dids[1] })));
-  await check('mesh survives signaling shutdown', async () => {
+    verify(await workers[0].call('fetch', { uri: published.uri })));
+  await check('mesh survives signaling outage and recovery', async () => {
+    const port = signaling.server.port;
     signaling.stop();
     signaling = null;
     await waitUntil(reports, states => states.every(state => state.rendezvous !== 'up'), 'signaling disconnect');
     await gossip();
-    verify(await workers[0].call('fetch', { uri: published.uri, provider: dids[1] }));
-    return paths();
+    verify(await workers[0].call('fetch', { uri: published.uri }));
+    const outagePaths = await paths();
+    signaling = createSignalingServer({ hostname: '127.0.0.1', port, log: () => {} });
+    await waitUntil(reports, states => states.every(state => state.rendezvous === 'up'), 'signaling recovery');
+    return { outagePaths, recovered: await gossip() };
   });
   report.ok = true;
 } catch (error) {
