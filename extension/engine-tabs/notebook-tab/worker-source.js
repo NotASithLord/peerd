@@ -112,28 +112,10 @@ export const buildWorkerSource = async (userCode, {
   }
   /** @param {string} capability */
   const capabilityBlocked = (capability) => remoteModuleCapabilityBlockedMessage(capability);
-  const source = `${podCommand
-    ? `import ${JSON.stringify(POD_SEAL_MODULE_URL)};`
-    : `import ${JSON.stringify(SEAL_MODULE_URL)};`} // realm seal: MUST stay the first import
+  const source = `import { consoleOutput } from ${JSON.stringify(podCommand
+    ? POD_SEAL_MODULE_URL : SEAL_MODULE_URL)}; // realm seal: MUST stay the first import
 ${imports}
 const NOTEBOOK_ID = ${JSON.stringify(notebookId)};
-const consoleOutput = [];
-
-const stringify = (v) => {
-  if (typeof v === 'string') return v;
-  if (v instanceof Error) return v.stack || (v.name + ': ' + v.message);
-  try { return JSON.stringify(v); } catch { return String(v); }
-};
-
-const captureConsole = (level) => (...args) => {
-  const text = args.map(stringify).join(' ');
-  ${podCommand ? '// Pod host captures bounded log messages as they stream.' : 'consoleOutput.push({ level, text });'}
-  postMessage({ type: 'log', level, text });
-};
-console.log = captureConsole('info');
-console.info = captureConsole('info');
-console.warn = captureConsole('warn');
-console.error = captureConsole('error');
 
 // --- display sink ---
 // Posts a value to the host's output (rendered by output-render.js: a table /

@@ -233,15 +233,16 @@ describe('notebook-tab realm seal (real worker realm)', () => {
     } finally { worker.terminate(); }
   });
 
-  it('seals BEFORE a statically-imported module body runs (the old prologue gap)', async () => {
+  it('seals and captures console output before a static import runs', async () => {
     const worker = spawnFixture('seal-order-entry.js');
     try {
-      const { result } = await nextMessage(worker, 'order-result');
+      const { result, consoleOutput } = await nextMessage(worker, 'order-result');
       expect(result.webSocket.threw).toBe(true);
       expect(result.webSocket.name).toBe('NotebookEgressBlockedError');
       expect(result.webSocket.message).toContain('peerd.egress.fetch');
       expect(result.xhr.threw).toBe(true);
       expect(result.fetchIsBridge).toBe(true);
+      expect(consoleOutput[0].text).toBe(JSON.stringify(result));
     } finally { worker.terminate(); }
   });
 

@@ -7,11 +7,12 @@
 // declaration order, so the leak attempt must already find a sealed
 // realm.
 
-import '/engine-tabs/notebook-tab/realm-seal.js';
+import { consoleOutput } from '/engine-tabs/notebook-tab/realm-seal.js';
 import './seal-order-leaky.js';
 
 postMessage({
   type: 'order-result',
+  consoleOutput,
   result: /** @type {{ __peerdSealOrderProbe: unknown }} */ (
     /** @type {unknown} */ (globalThis)
   ).__peerdSealOrderProbe,
