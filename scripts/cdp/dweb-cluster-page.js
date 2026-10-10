@@ -11,8 +11,7 @@ let messages = [];
 const received = new Map();
 const audit = [];
 const connections = [];
-// why: failed ICE attempts never reach mesh.peers(); retain their native
-// candidates too so a failed physical run explains which path was attempted.
+// why: keep candidate evidence for ICE attempts that do not enter the mesh.
 class ObservedConnection extends RTCPeerConnection {
   constructor(config) {
     super(config);
@@ -70,7 +69,7 @@ window.cluster = {
     state: pc.connectionState, ice: pc.iceConnectionState,
     local: pc.localDescription?.sdp, remote: pc.remoteDescription?.sdp,
     stats: [...(await pc.getStats()).values()].filter(stat =>
-      ['candidate-pair', 'local-candidate', 'remote-candidate'].includes(stat.type)),
+      ['transport', 'data-channel', 'candidate-pair', 'local-candidate', 'remote-candidate'].includes(stat.type)),
   }))),
   report() {
     return { did: identity.did, online: !!base, rendezvous: room?.rendezvous(),
@@ -86,7 +85,8 @@ window.cluster = {
         return value && { address: value.address ?? value.ip, port: value.port,
           protocol: value.protocol, type: value.candidateType };
       };
-      return { did, maxMessageSize: channel.pc.sctp?.maxMessageSize, state: pair?.state, bytesSent: pair?.bytesSent, bytesReceived: pair?.bytesReceived,
+      // why: traffic can move between candidate pairs on the same transport.
+      return { did, pair, transport, maxMessageSize: channel.pc.sctp?.maxMessageSize, state: pair?.state, bytesSent: transport?.bytesSent, bytesReceived: transport?.bytesReceived,
         local: candidate(pair?.localCandidateId), remote: candidate(pair?.remoteCandidateId) };
     }));
   },
