@@ -532,3 +532,32 @@ test('hydrated disabled preference refuses first SUB and live assembly races whi
     expect(subscriptions).toBeGreaterThan(0);
   } finally { for (const peer of [receiver, publisher]) { peer.discovery.close(); peer.mesh.close(); } }
 });
+
+
+test('discovery diagnostics distinguish metadata convergence from payload requests and preserve consent', async () => {
+  const a = await spawn(), b = await spawn();
+  try {
+    await link(a, b);
+    await waitFor(() => a.discovery.subscriberCount() === 1 && b.discovery.subscriberCount() === 1);
+    const card = await ownCard(a, 'metrics');
+    await a.discovery.announce(card);
+    await waitFor(() => b.library.size() === 1);
+    expect(a.discovery.stats().originals).toBe(1);
+    expect(a.discovery.stats().maxDestinations).toBe(1);
+    expect(b.discovery.stats().fresh).toBe(1);
+    await b.discovery.ingest(card, a.identity.did);
+    expect(b.discovery.stats().known).toBeGreaterThan(0);
+    for (const peer of [a, b]) {
+      expect(peer.mesh.stats().sends.contentRequest.attempted).toBe(0);
+      expect(peer.mesh.stats().sends.contentResponse.attempted).toBe(0);
+    }
+    b.discovery.setEnabled(false);
+    const before = b.discovery.stats();
+    b.discovery.subscribeAll();
+    await b.discovery.ingest(await ownCard(a, 'disabled'), a.identity.did);
+    expect(b.discovery.stats().reconcileCalls).toBe(before.reconcileCalls);
+    expect(b.discovery.stats().fresh).toBe(before.fresh);
+    before.fresh = 99;
+    expect(b.discovery.stats().fresh).toBe(1);
+  } finally { for (const peer of [a, b]) { peer.discovery.close(); peer.mesh.close(); } }
+});

@@ -10,6 +10,7 @@ import {
   exportFilename,
   inspectEnvelope,
   openEnvelope,
+  decodeAppSeedHandoff,
 } from '/peerd-engine/artifact.js';
 import {
   ARTIFACT_CHANNEL_PROTOCOL,
@@ -25,6 +26,7 @@ const OPERATIONS = Object.freeze({
   buildNotebookExport,
   buildVmRecipeExport,
   openEnvelope,
+  decodeAppSeedHandoff,
   inspectEnvelope,
   exportFilename,
 });

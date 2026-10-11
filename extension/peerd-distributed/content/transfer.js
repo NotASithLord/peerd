@@ -20,7 +20,7 @@ import {
 } from './manifest.js';
 import { CHUNK_SIZE, sha256hex } from './chunk.js';
 import { parsePeerdUri } from './uri.js';
-import { toBase64, concat } from '/shared/bundle/bytes.js';
+import { toBase64, concat, base64ByteLength } from '/shared/bundle/bytes.js';
 import { contentServiceBudget } from './service-budget.js';
 
 const ALPHA = 3; // lookup/transfer parallelism (PROTOCOL §5.1)
@@ -42,7 +42,7 @@ class ChunkPartError extends Error {
  *   getManifest: (hash: string) => any,
  *   getChunk: (chunkHash: string) => (Uint8Array | null | undefined),
  * }} ContentStore
- * @typedef {{ send: (m: ContentMsg, options?: import('../transport/outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: ((msg: ContentMsg) => void) | null) => void, onClose?: (cb: () => void) => (() => void) }} ContentChannel
+ * @typedef {{ send: (m: ContentMsg, options?: import('../transport/outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: ((msg: ContentMsg) => boolean | void) | null) => void, onClose?: (cb: () => void) => (() => void) }} ContentChannel
  */
 
 // Publisher side: a handler (msg, send) the channel routes inbound
@@ -83,12 +83,15 @@ export const createContentResponder = ({ store, budget = contentServiceBudget })
 /**
  * @param {ContentChannel} channel
  * @param {number} timeoutMs
+ * @param {{ setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout }} [timers]
  */
-export const createChannelClient = (channel, timeoutMs) => {
-  /** @type {Map<string, (msg: ContentMsg) => void>} */
+export const createChannelClient = (channel, timeoutMs, timers = globalThis) => {
+  /** @type {Map<string, (msg: ContentMsg) => boolean>} */
   const pending = new Map(); // `${t}:${hash}` -> settle
   /** @type {Set<(error: Error) => void>} */
   const cancel = new Set();
+  /** @type {Set<() => void>} */
+  const deadlines = new Set();
   let closed = false;
   let offClose = () => {};
   const close = () => {
@@ -99,9 +102,9 @@ export const createChannelClient = (channel, timeoutMs) => {
     for (const fail of [...cancel]) fail(new Error('content client closed'));
   };
   channel.setHandler((msg) => {
-    if (!msg || typeof msg.t !== 'string') return;
+    if (!msg || typeof msg.t !== 'string') return false;
     const settle = pending.get(`${msg.t}:${msg.hash}`);
-    if (settle) settle(msg);
+    return settle?.(msg) ?? false;
   });
   // why: a lost link is already a known miss; do not hold its requests until
   // their timeout. Closed channels may notify synchronously on subscription.
@@ -128,11 +131,22 @@ export const createChannelClient = (channel, timeoutMs) => {
     const sending = new AbortController();
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     let timer;
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let lifetimeTimer;
+    let sent = false;
+    const armResponseDeadline = () => {
+      if (!sent || settled) return;
+      timers.clearTimeout(timer);
+      timer = timers.setTimeout(() => fail(new Error('transfer timeout')), timeoutMs);
+    };
     const cleanup = () => {
       parts = null;
-      clearTimeout(timer);
+      timers.clearTimeout(timer);
+      timers.clearTimeout(sendTimer);
+      timers.clearTimeout(lifetimeTimer);
       for (const rt of respTypes) pending.delete(`${rt}:${h}`);
       cancel.delete(fail);
+      deadlines.delete(armResponseDeadline);
       signal?.removeEventListener('abort', abort);
       sending.abort();
     };
@@ -140,39 +154,62 @@ export const createChannelClient = (channel, timeoutMs) => {
     const fail = (error) => { if (settled) return; settled = true; cleanup(); reject(error); };
     /** @param {ContentMsg} msg */
     const settle = (msg) => {
-      if (settled) return;
+      if (settled) return false;
       // why: concurrent downloads share a link and may request the same hash.
       // Their fragment streams must never complete or corrupt each other.
-      if (msg.requestId !== undefined && msg.requestId !== requestId) return;
+      if (msg.requestId !== undefined && msg.requestId !== requestId) return false;
       if (msg.t === 'CHUNK' && msg.requestId !== undefined) {
         const size = msg.size;
         if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0 || size > CHUNK_SIZE
           || msg.offset !== received || (parts && parts.length !== size)) {
-          fail(new ChunkPartError()); return;
+          fail(new ChunkPartError()); return false;
         }
         try {
           const bytes = decodeCommittedChunk(msg.bytes, Math.min(CHUNK_PART_BYTES, size - received));
           parts ??= new Uint8Array(size);
           parts.set(bytes, received);
           received += bytes.length;
-          if (received < parts.length) return;
+          // why: validated forward progress may unblock other requests on the
+          // same ordered link. It cannot extend their send queue or lifetime.
+          for (const arm of deadlines) arm();
+          if (received < parts.length) return true;
           msg = { t: 'CHUNK', hash: h, bytes: toBase64(parts) };
-        } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); return; }
+        } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); return false; }
       }
+      // why: mesh liveness only follows a correlated, structurally valid reply.
+      // The owner still verifies signatures/hashes before accepting content;
+      // this receipt grants neither verified contribution nor peer reputation.
+      let progress = true;
+      try {
+        if (msg.t === 'MANIFEST') assertBundleWithinLimits(msg.manifest);
+        if (msg.t === 'CHUNK') {
+          const size = typeof msg.bytes === 'string' ? base64ByteLength(msg.bytes) : 0;
+          progress = size > 0 && size <= CHUNK_SIZE;
+        }
+      } catch { progress = false; }
       settled = true; cleanup(); resolve(msg);
+      return progress;
     };
     const abort = () => fail(new Error('content request cancelled'));
     for (const rt of respTypes) pending.set(`${rt}:${h}`, settle);
     cancel.add(fail);
+    deadlines.add(armResponseDeadline);
     // Queue wait has its own bound. The response clock starts only once the
     // request reaches the native transport; synchronous responses still win.
-    timer = setTimeout(() => fail(new Error('content send timed out')), 15_000);
+    const sendTimer = timers.setTimeout(() => fail(new Error('content send timed out')), 15_000);
     signal?.addEventListener('abort', abort, { once: true });
     try {
       Promise.resolve(channel.send({ t: reqType, hash: h, ...(requestId ? { requestId } : {}) }, { signal: sending.signal })).then(() => {
         if (settled) return;
-        clearTimeout(timer);
-        timer = setTimeout(() => fail(new Error('transfer timeout')), timeoutMs);
+        sent = true;
+        timers.clearTimeout(sendTimer);
+        // why: tolerate one full production batch ahead of a chunk on an
+        // ordered channel, but never let a provider pin a missing chunk by
+        // continually answering other requests. The bound is per request and
+        // independent of bundle size and future requests on this client.
+        const responseWindows = reqType === 'CHUNK_REQ' ? ALPHA * Math.ceil(CHUNK_SIZE / CHUNK_PART_BYTES) : 1;
+        lifetimeTimer = timers.setTimeout(() => fail(new Error('transfer lifetime exceeded')), timeoutMs * responseWindows);
+        armResponseDeadline();
       }, (error) => fail(error instanceof Error ? error : new Error(String(error))));
     } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); }
   });
@@ -193,13 +230,13 @@ export const createChannelClient = (channel, timeoutMs) => {
  *
  * @param {{
  *   uri: string,
- *   channel: { send: (msg: any, options?: import('../transport/outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: ((msg: ContentMsg) => void) | null) => void },
+ *   channel: { send: (msg: any, options?: import('../transport/outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: ((msg: ContentMsg) => boolean | void) | null) => void },
  *   onProgress?: (p: { phase: string, done?: number, total?: number, publisher?: string | null }) => void,
  *   timeoutMs?: number,
  * }} opts
  * @returns {Promise<{ manifest: any, payload: Uint8Array }>}
  */
-export const fetchBundle = async ({ uri, channel, onProgress, timeoutMs = 15000 } = /** @type {{ uri: string, channel: { send: (msg: any, options?: import('../transport/outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: ((msg: ContentMsg) => void) | null) => void } }} */ ({})) => {
+export const fetchBundle = async ({ uri, channel, onProgress, timeoutMs = 15000 } = /** @type {{ uri: string, channel: { send: (msg: any, options?: import('../transport/outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: ((msg: ContentMsg) => boolean | void) | null) => void } }} */ ({})) => {
   const { hash } = parsePeerdUri(uri);
 
   const client = createChannelClient(channel, timeoutMs);

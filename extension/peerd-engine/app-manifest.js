@@ -77,5 +77,9 @@ export const parseAppManifest = (text) => {
     entry: value.entry,
     agent,
     capabilities: Object.freeze(capabilities),
+    // Preserve the declaration verbatim in this cold authority parser. It does
+    // not grant authority; publication, bundle admission and runner delivery
+    // normalize and enforce it through the warm shared runtime contract.
+    ...(value.runtime !== undefined ? { runtime: value.runtime } : {}),
   });
 };

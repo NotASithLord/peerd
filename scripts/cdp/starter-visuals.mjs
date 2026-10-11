@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { evalIn, waitFor, openExtPage } from './e2e-harness.mjs';
 // Render-only proof. Real composed CSV/WASM execution is in the browser suite.
-export const STARTER_VISUAL_STATES = [false, true].flatMap(narrow => ['home', 'review', 'empty', 'no-results', 'publisher'].map(mode => ({
+export const STARTER_VISUAL_STATES = [false, true].flatMap(narrow => ['home', 'review', 'empty', 'no-results', 'publisher', 'suggestion'].map(mode => ({
   name: `discovery-${mode}${narrow ? '-narrow' : ''}`, kind:'visual', phase:'post-unlock', responder:null,
   async run(ctx, rec) {
     if (process.env.PEERD_VISUAL_BASE_RENDER === '1') {
@@ -24,6 +24,17 @@ export const STARTER_VISUAL_STATES = [false, true].flatMap(narrow => ['home', 'r
         : mode === 'empty' ? `document.body.textContent.includes('No peer Apps discovered yet')` : `document.querySelectorAll('.disc-card').length === 3`),{budgetMs:8000,pollMs:80});
       if (!ready) throw new Error(`Discovery ${mode} did not render`);
       if (mode === 'no-results') await evalIn(page, `(()=>{const input=document.querySelector('input');input.value='no-such-app';input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+      if (mode === 'suggestion') {
+        const available = await evalIn(page, `!![...document.querySelectorAll('button')].find(button=>button.textContent==='Surprise me')`);
+        if (!available && process.env.PEERD_VISUAL_BASE_RENDER === '1') {
+          rec.observe('merge-base surface', {present:false,reason:'Surprise me was introduced on this branch'});
+        } else {
+          if (!available) throw new Error('Surprise me control did not render');
+          await evalIn(page, `([...document.querySelectorAll('button')].find(button=>button.textContent==='Surprise me')).click()`);
+          const selected = await waitFor(()=>evalIn(page, `document.activeElement?.getAttribute('data-suggested') === 'true' && document.body.textContent.includes('Availability is not checked')`), {budgetMs:4000,pollMs:50});
+          rec.check('suggestion focuses an unfamiliar App without installing it', !!selected);
+        }
+      }
       if (mode === 'publisher') {
         await evalIn(page, `document.querySelector('details.disc-publisher').open=true`);
         rec.check('coherent fixture cards expose copyable immutable addresses', await evalIn(page, `(()=>{const buttons=[...document.querySelectorAll('button')].filter(button=>button.textContent==='Copy immutable address');return buttons.length===3&&buttons.every(button=>!button.disabled);})()`));

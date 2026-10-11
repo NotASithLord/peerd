@@ -41,7 +41,8 @@ export const ImmutableAddressSection = () => {
         preview = reply.summary;
         appId = catalog.apps.find((/** @type {any} */ app) => app.dweb?.uri === target.uri
           && app.dweb?.hash === target.hash && app.dweb?.publisher === target.publisher)?.id ?? null;
-      } else error = 'Could not verify this App. Check the address and peer-network connection, then try again.';
+      } else error = ['app-runtime-invalid', 'app-runtime-unsupported', 'app-runtime-mismatch'].includes(reply?.code)
+        ? reply.error : 'Could not verify this App. Check the address and peer-network connection, then try again.';
     } catch {
       if (requestEpoch === epoch) error = 'Could not inspect this App. Try again when the peer network is available.';
     } finally { busy = ''; redraw(); }
@@ -66,7 +67,8 @@ export const ImmutableAddressSection = () => {
       } else if (reply?.ok === false && reply?.outcomeKnown !== false && reply?.performed !== true
           && !['effect-completed', 'host-lost', 'transport-lost'].includes(reply?.outcomeKind)) {
         forgetPending();
-        error = 'Could not install this App. Its bytes or network availability may have changed. Inspect it again.';
+        error = ['app-runtime-invalid', 'app-runtime-unsupported', 'app-runtime-mismatch'].includes(reply?.code)
+          ? reply.error : 'Could not install this App. Its bytes or network availability may have changed. Inspect it again.';
         preview = null;
       }
     } catch { /* no receipt: keep the exact pending address fenced */ }
@@ -115,7 +117,8 @@ export const ImmutableAddressSection = () => {
           m('dt', 'Decoded files'), m('dd', `${preview.decodedBytes} bytes in ${preview.fileCount} ${preview.fileCount === 1 ? 'file' : 'files'}`),
           m('dt', 'Entry file'), m('dd', preview.entryFile),
         ]),
-        preview.containsWasm ? m('p', 'Contains a .wasm file. Runtime compatibility has not been tested.') : null,
+        preview.containsWasm ? m('p', 'Contains a WebAssembly file.') : null,
+        m('p', preview.runtimeCompatibility?.message ?? 'Runtime requirements not specified.'),
         m('p', 'Installing also shares this exact revision with peers while the peer network is enabled. It does not run the App.'),
       ]);
       return m('section.card', { 'aria-label': 'App address', style: 'margin:12px 0;padding:14px;overflow-wrap:anywhere;' }, [

@@ -4,8 +4,19 @@ import { createDwebRollbackGuard } from '../../extension/background/dweb-rollbac
 import { createDwebPublicationFence } from '../../extension/background/dweb-publication-fence.js';
 import { createAppQuiescence } from '../../extension/background/app-quiescence.js';
 import { appReleaseDescriptorMatches } from '../../extension/background/app-client.js';
+import { appSeedHandoff, decodeAppSeedHandoff } from '../../extension/shared/app-seed-handoff.js';
+import { packBundle } from '../../extension/shared/bundle/bundle.js';
+import { buildManifest } from '../../extension/peerd-distributed/content/manifest.js';
+import { generateIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
 
 const offscreenSender = { url: 'moz-extension://peerd/offscreen/offscreen.html' };
+
+const signedSeed = async () => {
+  const files = { 'index.html': new TextEncoder().encode('<h1>App</h1>') };
+  const payload = packBundle({ entry: 'index.html', files });
+  const { manifest, hash } = await buildManifest({ payload, identity: await generateIdentity() });
+  return { files, hash, handoff: appSeedHandoff({ files, dweb: { hash, publisher: manifest.publisher } }, manifest, payload) };
+};
 
 const makeLane = () => {
   let tail = Promise.resolve();
@@ -38,6 +49,7 @@ const baseDeps = (over: any = {}) => {
     auditLog: { append: async (e: any) => { audits.push(e); } },
     kv: { get: async () => null, set: async () => {} },
     ensureDwebFeature: async () => {},
+    decodeAppSeedHandoff,
     dwebPublicationGeneration: () => 1,
     browser: { runtime: { sendMessage: async (m: any) => { sent.push(m); return over._reply ?? { ok: true }; } } },
     appRegistry: { get: async () => ({ id: 'a1', name: 'A', entryFile: 'i.html', dweb: { git_oid: 'base' } }), list: async () => [], update: async (id: any, p: any) => ({ id, ...p }) },
@@ -314,6 +326,83 @@ describe('dweb app store', () => {
     expect(res.app.dweb).toMatchObject({ release_entry_file: 'i.html', release_file_kinds: {} });
     expect(audits.at(-1)).toMatchObject({ type: 'dweb_app_installed', details: { uri: 'u', publisher: 'did:key:z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP' } });
   });
+  test('seed-only install derives executable files before storage and persists the original bytes', async () => {
+    const f = await signedSeed();
+    const saved: any[] = [];
+    let created: any;
+    const { deps } = baseDeps({
+      idb: { get: async () => null, put: async (_store: string, value: any) => { saved.push(value); } },
+      appClient: { create: async (args: any) => { created = args; return { id: args.appId, ...args }; } },
+    });
+    const result = await makeDwebRoutes(deps)['dweb/app-install']({
+      appId: 'app-seed-test', ...f.handoff, publicationGeneration: 1,
+      files: { 'forged.html': 'not signed' }, entryFile: 'forged.html',
+    }, offscreenSender);
+    expect(result.ok).toBe(true);
+    expect(created.files).toEqual(f.files);
+    expect(created.entryFile).toBe('index.html');
+    expect(saved[0].value[f.hash]).toEqual(f.handoff.seedBundle);
+    expect(result.app.dweb.seed_hash).toBe(f.hash);
+  });
+  test('corrupt seed install and update have no storage or editor effects', async () => {
+    const f = await signedSeed();
+    let effects = 0;
+    const { deps } = baseDeps({
+      idb: { get: async () => { effects++; }, put: async () => { effects++; } },
+      appClient: { create: async () => { effects++; }, replaceVersionedFilesUnlocked: async () => { effects++; } },
+      appQuiescence: { runUnlocked: async () => { effects++; } },
+    });
+    const routes = makeDwebRoutes(deps);
+    for (const route of ['dweb/app-install', 'dweb/app-update']) {
+      const result = await routes[route]({
+        appId: 'app-seed-test', ...f.handoff, publicationGeneration: 1,
+        dweb: { ...f.handoff.dweb, hash: '0'.repeat(64) },
+      }, offscreenSender);
+      expect(result).toMatchObject({ ok: false, error: 'dweb-seed-hash-mismatch' });
+    }
+    expect(effects).toBe(0);
+  });
+  test('custody retirement during isolated seed decoding prevents storage and editor effects', async () => {
+    const f = await signedSeed();
+    for (const route of ['dweb/app-install', 'dweb/app-update']) {
+      let locked = false;
+      let effects = 0;
+      const { deps } = baseDeps({
+        vault: { isLocked: () => locked },
+        decodeAppSeedHandoff: async (seed: any, dweb: any) => {
+          const decoded = await decodeAppSeedHandoff(seed, dweb);
+          locked = true;
+          return decoded;
+        },
+        idb: { get: async () => { effects++; }, put: async () => { effects++; } },
+        appClient: { create: async () => { effects++; } },
+        appQuiescence: { runUnlocked: async () => { effects++; } },
+      });
+      const result = await makeDwebRoutes(deps)[route]({
+        appId: 'app-seed-test', ...f.handoff, publicationGeneration: 1,
+      }, offscreenSender);
+      expect(result).toMatchObject({ ok: false, error: 'dweb-custody-changed' });
+      expect(effects).toBe(0);
+    }
+  });
+  test('a failed update retains the active seed alongside its uncommitted candidate', async () => {
+    const f = await signedSeed();
+    const previous = { manifest: { previous: true }, payload: 'old signed bytes' };
+    let saved: any;
+    const { deps } = baseDeps({
+      idb: {
+        get: async () => ({ value: { old: previous, stale: {} } }),
+        put: async (_store: string, value: any) => { saved = value; },
+      },
+      appRegistry: { get: async () => ({ id: 'app-seed-test', dweb: { git_oid: 'base', seed_hash: 'old' } }) },
+      appClient: { replaceVersionedFilesUnlocked: async () => { throw new Error('repository refused'); } },
+    });
+    const result = await makeDwebRoutes(deps)['dweb/app-update']({
+      appId: 'app-seed-test', ...f.handoff, publicationGeneration: 1,
+    }, offscreenSender);
+    expect(result).toMatchObject({ ok: false, error: 'repository refused' });
+    expect(saved.value).toEqual({ old: previous, [f.hash]: f.handoff.seedBundle });
+  });
   test('durable discovery history rejects a lower-sequence fresh install after restart', async () => {
     const values = new Map<string, any>();
     const kv = {
@@ -528,6 +617,7 @@ describe('dweb app store', () => {
       files: { 'index.html': { base64: 'PGgxPng8L2gxPg==' } },
     });
     expect(replacement.metadataForOid('new-base', { dweb: { git_oid: 'base' } }, { 'index.html': 'text' })).toEqual({
+      shared: true,
       dweb: {
         version_id: 'v2', git_oid: 'new-base', release_entry_file: 'index.html',
         release_file_kinds: { 'index.html': 'text' }, published_hashes: [],

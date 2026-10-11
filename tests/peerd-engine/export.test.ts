@@ -230,3 +230,16 @@ describe('export filenames', () => {
     expect(exportFilename('a/b\\c', 'notebook')).toBe('a-b-c-notebook.peerd');
   });
 });
+
+test('App exports commit runtime declarations and enforce them on import', async () => {
+  const runtime = { schema: 1, target: 'browser-app', requires: ['wasm-core'] };
+  const envelope = await buildAppExport({ record: { name: 'WASM', entryFile: 'index.html' }, files: {
+    'index.html': 'WASM', 'peerd.json': JSON.stringify({ runtime }),
+  } });
+  expect((envelope.manifest.meta as any).runtime).toEqual(runtime);
+  expect((await openEnvelope(envelope)).meta.runtime).toEqual(runtime);
+  const incompatible = await buildAppExport({ record: { name: 'WASI', entryFile: 'index.html' }, files: {
+    'index.html': 'WASI', 'peerd.json': JSON.stringify({ runtime: { ...runtime, target: 'wasi' } }),
+  } });
+  await expect(openEnvelope(incompatible)).rejects.toThrow('Unsupported App runtime target');
+});

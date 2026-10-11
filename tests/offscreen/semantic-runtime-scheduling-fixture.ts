@@ -34,10 +34,19 @@ export const makeLaneProbe = () => {
       readActive += 1;
       state.maxReadActive = Math.max(state.maxReadActive, readActive);
       if (readStarted === 2) releaseReads();
-      await Promise.race([
-        bothReadsStarted,
-        sleep(300).then(() => { state.readTimedOut = true; }),
-      ]);
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          bothReadsStarted,
+          new Promise<void>((resolve) => {
+            deadline = setTimeout(() => { state.readTimedOut = true; resolve(); }, 300);
+          }),
+        ]);
+      } finally {
+        // why: the losing timer must not rewrite successful overlap evidence
+        // while the other runtime finishes its scenario.
+        clearTimeout(deadline);
+      }
       await sleep(5);
       readActive -= 1;
       return [];

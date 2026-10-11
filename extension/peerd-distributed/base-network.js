@@ -33,6 +33,7 @@ import { createLibrary } from './apps/library.js';
 import { createDiscovery } from './apps/discovery.js';
 import { buildMeta, dwappId, verifyMeta } from './apps/meta.js';
 import { dlog } from './log.js';
+import { AppRuntimeError, assertAppRuntime, assertAppRuntimeAgreement, appRuntimeFromFiles } from '/shared/app-runtime.js';
 
 /** @param {string} s */
 const sha256hex = async (s) => toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', utf8(s))));
@@ -60,7 +61,7 @@ export const createBaseNetwork = async ({
   const node = await createPeerNode({ identity, mesh, meta, dial, audit, now });
   let closed = false;
   /** @type {ReturnType<typeof setInterval> | null} */
-  let providerTimer = null;
+  let maintenanceTimer = null;
   /** @type {Map<string, number>} */
   const providerRenewals = new Map();
   let renewingProviders = false;
@@ -237,6 +238,7 @@ export const createBaseNetwork = async ({
     for (const [path, content] of Object.entries(files)) {
       bytes[path] = typeof content === 'string' ? utf8(content) : new Uint8Array(content);
     }
+    const runtime = appRuntimeFromFiles(bytes);
     const { payload, descriptor } = await packTransportBundle({ entry, files: bytes, fileKinds });
     const packedBytes = assertBundlePayloadWithinLimits(payload, maxBundleBytes);
     const manifestCreated = typeof created === 'number' && Number.isFinite(created) ? created : null;
@@ -246,7 +248,7 @@ export const createBaseNetwork = async ({
       entry,
       identity,
       bundle: descriptor,
-      ...(release ? { meta: { release } } : {}),
+      ...((release || runtime) ? { meta: { ...(release ? { release } : {}), ...(runtime ? { runtime } : {}) } } : {}),
       ...(manifestCreated !== null ? { now: () => manifestCreated } : {}),
     });
     assertBundleWithinLimits(manifest);
@@ -265,7 +267,7 @@ export const createBaseNetwork = async ({
     // safety verdict. Do not add it to the manifest and change immutable hashes.
     const includesWasm = Object.values(bytes).some(file => file.length >= 8
       && file[0] === 0 && file[1] === 97 && file[2] === 115 && file[3] === 109);
-    return { uri, hash, packedBytes, created: manifest.created, includesWasm };
+    return { uri, hash, packedBytes, created: manifest.created, includesWasm, ...(runtime ? { runtime } : {}) };
   };
 
   // Re-seed bytes we fetched so WE become a provider too (install → seeder). The
@@ -339,17 +341,16 @@ export const createBaseNetwork = async ({
   /** @param {string} hash */
   const unserveContent = revokeProvider;
 
-  // Fetch a bundle. The uri NAMES its publisher (peerd://<publisher>/<hash>), who
-  // is the canonical server — so try THEM ALONE first. why: swarming across every
-  // linked peer made a simple install crawl — in a roomful of base-network peers,
-  // the manifest/chunk requests detour through neighbours that don't have the
-  // bundle (or are slow to answer) before reaching the publisher. The direct path
-  // (you're linked to the author) is then one fast round-trip. Only if the
-  // publisher can't serve do we widen to other linked seeders, then the bounded DHT.
-  /** @param {string} uri @param {{ timeoutMs?: number, onProgress?: (p: any) => void }} [opts] */
-  const fetchAllowedApp = async (uri, { timeoutMs = 15_000, onProgress } = {}) => {
+  // Fetch only on request. Prefer the named publisher while qualifying other
+  // linked seeders concurrently; unrelated neighbors never delay useful chunks.
+  /** @param {string} uri @param {{ timeoutMs?: number, onProgress?: (p: any) => void, expectedRuntime?: {value:unknown} }} [opts] */
+  const fetchAllowedApp = async (uri, { timeoutMs = 15_000, onProgress, expectedRuntime } = {}) => {
     /** @param {string} did */
     const channelFor = (did) => isBlocked(did) ? null : node.mesh.contentChannel(did);
+    const acceptManifest = (/** @type {any} */ manifest) => {
+      if (expectedRuntime) assertAppRuntimeAgreement(expectedRuntime.value, manifest.meta?.runtime);
+      assertAppRuntime(manifest.meta?.runtime);
+    };
     /** @type {string | null | undefined} */
     let publisher = null;
     let localHash = null;
@@ -363,6 +364,7 @@ export const createBaseNetwork = async ({
         throw new Error('local manifest hash mismatch');
       }
       assertBundleWithinLimits(manifest);
+      acceptManifest(manifest);
       const chunks = manifest.chunks.map((/** @type {{hash:string}} */ chunk) =>
         node.content.getChunk(chunk.hash));
       if (chunks.some((chunk) => !(chunk instanceof Uint8Array))) {
@@ -376,10 +378,10 @@ export const createBaseNetwork = async ({
       }
       return { manifest, payload, providers: [identity.did], verifiedContributors: [] };
     }
-    if (publisher === identity.did) {
-      // why: a local generation still rebuilding its served bytes cannot fetch
-      // them from itself through mesh/DHT. Refuse before any effect so a caller
-      // may retry after the background reseed announces this exact hash.
+    if (publisher === identity.did && node.mesh.peers().length === 0) {
+      // An isolated local generation cannot fetch from itself. With peers, keep
+      // going: another seeder may hold this immutable signed version after the
+      // original publisher unshared or restarted.
       throw Object.assign(new Error('local shared App bytes are not available yet'), {
         code: 'dweb-local-content-unavailable',
         performed: false,
@@ -390,16 +392,11 @@ export const createBaseNetwork = async ({
     }
     const linked = node.mesh.peers().map((/** @type {{ did: string }} */ p) => p.did);
 
-    // 1. Fast path: the named publisher, if we're linked to them.
-    if (publisher && channelFor(publisher)) {
-      try { return await swarmFetch({ uri, providers: [publisher], channelFor, timeoutMs, onProgress }); }
-      catch (e) { dlog('base', `publisher fetch failed (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}); widening to other seeders`); }
-    }
-    // 2. Other linked seeders (parallel swarm).
-    const others = linked.filter((/** @type {string} */ d) => d !== publisher);
-    if (others.length) {
-      try { return await swarmFetch({ uri, providers: others, channelFor, timeoutMs, onProgress }); }
-      catch (e) { dlog('base', `seeder fetch failed (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}); trying DHT providers (bounded)`); }
+    const isAllowed = (/** @type {string} */ did) => !closed && !isBlocked(did);
+    const preferred = [...new Set([...(publisher ? [publisher] : []), ...linked])];
+    if (linked.length) {
+      try { return await swarmFetch({ uri, providers: preferred, channelFor, timeoutMs, onProgress, isAllowed, acceptManifest }); }
+      catch (e) { if (e instanceof AppRuntimeError) throw e; dlog('base', `linked seeder fetch failed (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}); trying DHT providers (bounded)`); }
     }
     // Retain the DHT responder as the signaling broker for each provider.
     // Bound both lookup and dialing; unavailable referrals must not hang an install.
@@ -423,15 +420,16 @@ export const createBaseNetwork = async ({
     const provided = candidates.map((/** @type {any} */ contact) => contact.did);
     const providers = [...new Set([...provided, ...linked])];
     if (!providers.length) throw new Error(`no peer is serving ${uri} right now — the peer may have dropped; try again`);
-    return swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress });
+    return swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress, isAllowed, acceptManifest });
   };
 
-  /** @param {string} uri @param {{timeoutMs?:number,onProgress?:(p:any)=>void}} [options] */
+  /** @param {string} uri @param {{timeoutMs?:number,onProgress?:(p:any)=>void,expectedRuntime?:{value:unknown}}} [options] */
   const fetchApp = async (uri, options) => {
     const { did, hash } = parsePeerdUri(uri);
     const generation = contributionGeneration;
     if (did && isBlocked(did)) throw new Error('publisher-user-blocked');
     const result = await fetchAllowedApp(uri, options);
+    if (closed) throw new Error('base network closed');
     if (isBlocked(result.manifest.publisher)) throw new Error('publisher-user-blocked');
     // why: a ban/unban during a transfer cannot resurrect pre-policy history.
     // Evidence is local to the exact verified version and the live host lifetime.
@@ -627,7 +625,13 @@ export const createBaseNetwork = async ({
 
     start: () => {
       if (closed) return;
-      if (!providerTimer) providerTimer = setInterval(() => { refreshProviders().catch(() => {}); }, 30_000);
+      if (!maintenanceTimer) maintenanceTimer = setInterval(() => {
+        // A SUB may race link admission or replacement. Reconcile here, at the
+        // reusable base-network owner, so every client self-heals rather than
+        // relying on an offscreen-host-only timer.
+        discovery.subscribeAll();
+        refreshProviders().catch(() => {});
+      }, 12_000);
       refreshProviders().catch(() => {});
       dlog('base', 'base network ONLINE (presence + liveness started)');
       node.start();
@@ -636,6 +640,6 @@ export const createBaseNetwork = async ({
       // subscribe to current peers too, or a late starter's Library stays empty.
       discovery.subscribeAll();
     },
-    close: () => { closed = true; library.clearContributors(); for (const ac of operations) ac.abort(); if (providerTimer) clearInterval(providerTimer); providerRenewals.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
+    close: () => { closed = true; library.clearContributors(); for (const ac of operations) ac.abort(); if (maintenanceTimer) clearInterval(maintenanceTimer); providerRenewals.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
   });
 };

@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "kind": "app",
+  "entry": "index.html",
+  "agent": { "kind": "bound-app", "profile": "developer", "surface": "code" },
+  "capabilities": [],
+  "runtime": { "schema": 1, "target": "browser-app", "requires": ["wasm-core"] }
+}

@@ -40,6 +40,7 @@ import { recordNetworkFloorVector, recordPrivateChildFloor, ordinaryProbeReached
 import { NOTEBOOK_FETCH_STATE } from './notebook-fetch-state.mjs';
 import { WASMER_STATE } from './wasmer-state.mjs';
 import { STARTER_VISUAL_STATES } from './starter-visuals.mjs';
+import { APP_RUNTIME_STATES } from './app-runtime-state.mjs';
 import { IMMUTABLE_ADDRESS_VISUAL_STATES } from './immutable-address-visuals.mjs';
 import { CONSENT_LOCK_VISUAL_STATES } from './consent-lock-visuals.mjs';
 import { armVaultLockStages } from './vault-lock-stages.mjs';
@@ -534,6 +535,7 @@ export const STATES = [
   ...CONSENT_LOCK_VISUAL_STATES,
   ...IMMUTABLE_ADDRESS_VISUAL_STATES,
   ...STARTER_VISUAL_STATES,
+  ...APP_RUNTIME_STATES,
   WASMER_STATE,
   {
     name: 'pacing-wait-stop', kind: 'functional', phase: 'post-unlock',
@@ -6258,6 +6260,7 @@ export const STATES = [
           && location.href === ${JSON.stringify(target.url)}
           && document.getElementById('boot')?.classList.contains('is-hidden')
           && !document.getElementById('boot')?.classList.contains('is-failed')
+          && !!document.getElementById('mode-toggle')
           && document.getElementById('editor-panel')?.hidden === true
         `).catch(() => false), { budgetMs: 15_000, pollMs: 100 });
         rec.check('View replaces a consent-retired document through the exact App host URL', !!renewed);

@@ -29,6 +29,7 @@ const STORAGE_KEY = 'apps.v1';
  *   manifest_created?: number,
  *   local?: boolean,
  *   seed?: string,
+ *   seed_hash?: string,
  *   git_oid?: string,
  *   source_git_oid?: string,
  *   previous_version_id?: string,
