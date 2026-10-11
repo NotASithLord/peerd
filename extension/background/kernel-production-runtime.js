@@ -210,6 +210,7 @@ export const createKernelProductionRuntime = async (deps) => {
         vault: deps.vault,
         auditLog: deps.auditLog,
         kv: deps.kv,
+        idb: deps.idb,
         browser: deps.browser,
         currentDwebHostEpoch: () => {
           const lease = deps.featureHost.runtime.snapshot().leases.dweb;

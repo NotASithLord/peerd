@@ -6,6 +6,7 @@ import { fetchImmutableApp, immutableAppSummary } from '../../extension/peerd-di
 import { generateIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
 import { buildManifest } from '../../extension/peerd-distributed/content/manifest.js';
 import { packBundle } from '../../extension/peerd-distributed/content/bundle.js';
+import { fromBase64, toBase64 } from '../../extension/shared/bundle/bytes.js';
 import { createImmutableInstallOwner } from '../../extension/offscreen/immutable-install-owner.js';
 import { runPublishTransaction, publishFailureError } from '../../extension/shared/publish-transaction.js';
 
@@ -26,7 +27,7 @@ const fixture = async () => {
   } };
   const host = new Function('manualInstalls', 'immutableAppRoot', 'start', 'loadDweb', 'handle', 'mintAppId',
     'appContentOwner', 'runPublishTransaction', 'trackServedHash', 'swEffectCall', 'jsonSafeFiles',
-    'publishFailureError', 'unserveTrackedHash', `return {
+    'publishFailureError', 'unserveTrackedHash', 'toBase64', `return {
       retire: () => { handle = null; },
       dispatch: async (msg) => { let reply; const sendResponse = value => { reply = value; };
         await (async () => { switch(msg.type) { ${cases} } })(); return reply;
@@ -35,8 +36,8 @@ const fixture = async () => {
     async () => ({ fetchImmutableApp, immutableAppSummary }), h, () => 'app-manual',
     () => 'owner', runPublishTransaction, () => true,
     async (type: string, payload: any) => { counts.storage++; writes.push({ type, ...payload }); return { ok: true, app: { id: payload.appId } }; },
-    (files: any) => files, publishFailureError, () => { counts.rollback++; });
-  return { host, counts, writes, address, hash, setDuringFetch: (fn: () => void) => { duringFetch = fn; } };
+    (files: any) => files, publishFailureError, () => { counts.rollback++; }, toBase64);
+  return { host, counts, writes, address, hash, manifest, payload, setDuringFetch: (fn: () => void) => { duringFetch = fn; } };
 };
 
 test('existing-host parse and inspect neither publish, install nor execute', async () => {
@@ -60,6 +61,8 @@ test('manual install propagates custody and ignores forged mutable lineage', asy
   expect(f.writes[0].name).not.toBe('Spoof');
   expect(f.writes[0].dweb.dwapp_id).toBeUndefined();
   expect(f.writes[0].dweb.seq).toBeUndefined();
+  expect(f.writes[0].seedBundle.manifest).toEqual(f.manifest);
+  expect(fromBase64(f.writes[0].seedBundle.payload)).toEqual(f.payload);
 });
 
 test('host retirement while bytes arrive prevents seed and storage', async () => {

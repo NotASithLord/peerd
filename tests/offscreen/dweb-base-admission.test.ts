@@ -2,6 +2,12 @@ import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { createAppRoomAuthority, AppRoomAuthorityChangedError } from '../../extension/offscreen/app-room-authority.js';
 import { publishFailureError } from '../../extension/shared/publish-transaction.js';
+import { generateIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
+import { buildManifest } from '../../extension/peerd-distributed/content/manifest.js';
+import { packBundle } from '../../extension/peerd-distributed/content/bundle.js';
+import { formatPeerdUri } from '../../extension/peerd-distributed/content/uri.js';
+import { prepareAppBundle } from '../../extension/peerd-distributed/apps/loader.js';
+import { fromBase64, toBase64 } from '../../extension/shared/bundle/bytes.js';
 
 const source = readFileSync(new URL('../../extension/offscreen/dweb-base.js', import.meta.url), 'utf8');
 // Exercise the authored boundary functions with finite injected host effects;
@@ -49,6 +55,11 @@ test('room startup cannot open a membership after consent generation rotates', a
 });
 
 test('offscreen update carries exact conflict and publication receipts and trusts callback cleanup only', async () => {
+  const identity = await generateIdentity();
+  const files = { 'index.html': readFileSync(new URL('../../extension/tests/runner.html', import.meta.url)) };
+  const payload = packBundle({ entry: 'index.html', files });
+  const { manifest, hash } = await buildManifest({ payload, type: 'app', identity });
+  const app = await prepareAppBundle({ uri: formatPeerdUri({ did: identity.did, hash }), manifest, payload });
   const update = source.slice(source.indexOf("case 'dweb/base-host/update-app':"));
   const callback = section('install: async', '\n              },', update)
     .replace(/^install: /, '') + '\n}';
@@ -58,22 +69,24 @@ test('offscreen update carries exact conflict and publication receipts and trust
     appId: 'a', strategy: 'replace', conflictToken: 7, publicationGeneration: 11,
     previousHash: 'forged-old', pendingHashes: ['forged-pending'],
   };
-  const boundary = new Function('msg', 'swEffectCall', 'jsonSafeFiles', 'publishFailureError',
+  const boundary = new Function('msg', 'swEffectCall', 'jsonSafeFiles', 'publishFailureError', 'manifest', 'payload', 'toBase64',
     'let cleanupHashes = []; return { install: ' + callback + ', cleanup: () => cleanupHashes };',
   )(message, async (type: string, args: any) => { calls.push({ type, ...args }); return reply; },
-    (files: any) => files, publishFailureError);
-  await boundary.install({ files: {}, dweb: { hash: 'new' } });
+    (files: any) => files, publishFailureError, manifest, payload, toBase64);
+  await boundary.install(app);
   expect(calls[0]).toMatchObject({
     type: 'dweb/app-update', appId: 'a', strategy: 'replace',
     conflictToken: 7, publicationGeneration: 11,
   });
-  expect(calls[0].dweb).toEqual({ hash: 'new' });
+  expect(calls[0].dweb).toEqual(app.dweb);
+  expect(calls[0].seedBundle.manifest).toEqual(manifest);
+  expect(fromBase64(calls[0].seedBundle.payload)).toEqual(payload);
   expect(boundary.cleanup()).toEqual(['old']);
   reply = {
     ok: false, error: 'conflict', conflictToken: 8, requiresAction: true,
     performed: true, outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
   };
-  await expect(boundary.install({ files: {} })).rejects.toMatchObject({
+  await expect(boundary.install(app)).rejects.toMatchObject({
     message: 'conflict', conflictToken: 8, requiresAction: true,
     performed: true, outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
   });

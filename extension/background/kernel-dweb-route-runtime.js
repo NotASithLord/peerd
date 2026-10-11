@@ -136,6 +136,7 @@ export const createKernelDwebRouteOwner = (deps) => {
       vault: deps.vault,
       auditLog: deps.auditLog,
       kv: deps.kv,
+      idb: deps.idb,
       ensureDwebFeature: deps.ensureDwebFeature,
       browser: deps.browser,
       appRegistry: engine.appRegistry,
@@ -176,6 +177,8 @@ export const createKernelDwebRouteOwner = (deps) => {
     active,
     locked: deps.vault.isLocked,
     appRegistry: engine.appRegistry,
+    readSeedBundle: async (/** @type {string} */ appId, /** @type {string} */ hash) =>
+      (await deps.idb.get('apps', `dweb-seed:${appId}`))?.value?.[hash],
     withDwebReseedPublication: engine.withDwebReseedPublication,
     withAppLifecycle: engine.withAppLifecycle,
     repositories: engine.repositories,

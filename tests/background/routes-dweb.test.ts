@@ -528,6 +528,7 @@ describe('dweb app store', () => {
       files: { 'index.html': { base64: 'PGgxPng8L2gxPg==' } },
     });
     expect(replacement.metadataForOid('new-base', { dweb: { git_oid: 'base' } }, { 'index.html': 'text' })).toEqual({
+      shared: true,
       dweb: {
         version_id: 'v2', git_oid: 'new-base', release_entry_file: 'index.html',
         release_file_kinds: { 'index.html': 'text' }, published_hashes: [],

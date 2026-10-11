@@ -25,6 +25,7 @@ import {
   identityForDiscoveredUri,
 } from '/offscreen/install-card-identity.js';
 import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
+import { MAX_NETWORK_BUNDLE_BYTES } from '/shared/bundle/bundle.js';
 import { publishFailureError, runPublishTransaction } from '/shared/publish-transaction.js';
 import { createSelfDeviceHost } from '/offscreen/dweb-self.js';
 import { createAppRoomLiveness } from '/offscreen/app-room-liveness.js';
@@ -810,6 +811,7 @@ const handleRoomOpUnlocked = async (msg, current = () => true) => {
         install: async (/** @type {any} */ a) => {
           const r = await swEffectCall('dweb/app-install', {
             appId, ...a, files: jsonSafeFiles(a.files),
+            seedBundle: { manifest, payload: toBase64(payload) },
             publicationGeneration: msg.publicationGeneration,
           });
           if (!r?.ok) throw publishFailureError(r, 'install failed');
@@ -979,6 +981,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
                 const a = verified.app;
                 const result = await swEffectCall('dweb/app-install', {
                   appId, ...a, name: summary.name ?? a.name, files: jsonSafeFiles(a.files),
+                  seedBundle: { manifest: verified.manifest, payload: toBase64(verified.payload) },
                   publicationGeneration: msg.publicationGeneration,
                 });
                 if (!result?.ok) throw publishFailureError(result, 'install failed');
@@ -1077,6 +1080,49 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
           );
           if (!reseedCurrent()) {
             sendResponse({ ok: false, error: 'dweb-generation-retired' });
+            return;
+          }
+          if (reseed && msg.seedBundle) {
+            // why: Edited App files cannot reproduce the original signed bytes.
+            const client = /** @type {any} */ (await loadDweb());
+            const { manifest, payload: encodedPayload } = msg.seedBundle;
+            if (typeof encodedPayload !== 'string'
+                || encodedPayload.length > 4 * Math.ceil(MAX_NETWORK_BUNDLE_BYTES / 3)
+                || base64ByteLength(encodedPayload) > MAX_NETWORK_BUNDLE_BYTES) {
+              throw new Error('dweb-seed-payload-invalid');
+            }
+            const payload = fromBase64(encodedPayload);
+            const verified = await client.installAppBundle({
+              uri: msg.seedUri, expectedPublisher: msg.seedPublisher,
+              manifest, payload,
+              install: async (/** @type {any} */ app) => app,
+            });
+            if (verified.dweb.hash !== msg.expectedHash) {
+              throw new Error('dweb-seed-hash-mismatch');
+            }
+            const stableOwnerId = appContentOwner(msg.appId, 'seed');
+            const ownerId = `${stableOwnerId}:reseed:${reseedAttemptId}`;
+            const rollback = (/** @type {{hash:string,ownershipAdded:boolean}} */ published) => {
+              if (published.ownershipAdded) unserveTrackedHash(h, ownerId, published.hash);
+            };
+            await runDwebReseedPublication({
+              current: reseedCurrent,
+              publish: async () => {
+                const hash = await h.base.seedApp({ manifest, payload });
+                return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
+              },
+              // why: Only the original publisher can sign a discovery card.
+              announce: async () => null,
+              rollbackBytes: rollback,
+              compensate: rollback,
+              commit: (published) => {
+                if (published.ownershipAdded
+                    && !contentOwnership.transfer(ownerId, stableOwnerId, published.hash)) {
+                  throw new Error('dweb-reseed-ownership-transfer-failed');
+                }
+              },
+            });
+            sendResponse({ ok: true, hash: verified.dweb.hash, uri: msg.seedUri });
             return;
           }
           // The UI passes an edited namespace on FIRST share (and the stored slug on
@@ -1315,6 +1361,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
               install: async (/** @type {any} */ a) => {
                 const r = await swEffectCall('dweb/app-install', {
                   appId, ...a, files: jsonSafeFiles(a.files),
+                  seedBundle: { manifest, payload: toBase64(payload) },
                   publicationGeneration: msg.publicationGeneration,
                 });
                 if (!r?.ok) throw publishFailureError(r, 'install failed');
@@ -1378,6 +1425,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
                     : {}),
                   ...a,
                   files: jsonSafeFiles(a.files),
+                  seedBundle: { manifest, payload: toBase64(payload) },
                 });
                 if (!r?.ok) throw Object.assign(publishFailureError(r, 'update failed'), {
                   conflictToken: r?.conflictToken,

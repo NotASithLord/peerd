@@ -12,7 +12,7 @@ import { appReleaseDescriptorMatches } from '/shared/app-dweb-identity.js';
  */
 export const makeDwebRoutes = (deps) => {
   const {
-    vault, auditLog, kv, ensureDwebFeature, browser,
+    vault, auditLog, kv, idb, ensureDwebFeature, browser,
     appRegistry, appClient, appTabTracker, appQuiescence, settingsStore, shareLocalApp,
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady, repositories,
@@ -25,6 +25,16 @@ export const makeDwebRoutes = (deps) => {
   }
   const ensureFeature = ensureDwebFeature;
   const rollbackGuard = createDwebRollbackGuard({ kv });
+  /** @param {string} appId @param {string|undefined} currentHash
+   * @param {string} hash @param {any} bundle */
+  const saveSeedBundle = async (appId, currentHash, hash, bundle) => {
+    const key = `dweb-seed:${appId}`;
+    const previous = (await idb.get('apps', key))?.value?.[currentHash ?? ''];
+    // why: Retain at most the active seed and one uncommitted candidate.
+    await idb.put('apps', { key, value: {
+      ...(previous && currentHash ? { [currentHash]: previous } : {}), [hash]: bundle,
+    } });
+  };
   /** @param {string} appId */
   const updateConflict = (appId) => ({
     ok: false, error: 'local-changes', requiresAction: true,
@@ -281,7 +291,7 @@ export const makeDwebRoutes = (deps) => {
     // in the calling page (fetchBundle + installAppBundle); this route is
     // the storage arm. Files cross runtime messaging as JSON-safe base64
     // envelopes, then appClient applies the same byte limits as local imports.
-    'dweb/app-install': storageRoute(async ({ appId, name, files, entryFile, fileKinds, dweb, publicationGeneration }) => {
+    'dweb/app-install': storageRoute(async ({ appId, name, files, entryFile, fileKinds, dweb, seedBundle, publicationGeneration }) => {
       if (typeof appId !== 'string' || !appId.startsWith('app-')) {
         return { ok: false, error: 'appId-required' };
       }
@@ -298,14 +308,19 @@ export const makeDwebRoutes = (deps) => {
         if (!publicationActive(publicationGeneration)) {
           throw new Error('dweb-custody-changed');
         }
+        if (seedBundle) await saveSeedBundle(record.id, undefined, dweb.hash, seedBundle);
         const repository = await repositories.statusApp(record.id);
         // Local history and signed publisher provenance are different lineages:
         // git_oid is our safe-update baseline; source_git_oid came from the peer.
-        record = await appRegistry.update(record.id, { dweb: {
-          git_oid: repository.oid,
-          release_entry_file: record.entryFile,
-          release_file_kinds: { ...(record.fileKinds ?? {}) },
-        } });
+        record = await appRegistry.update(record.id, {
+          shared: true,
+          dweb: {
+            ...(seedBundle ? { seed_hash: dweb.hash } : {}),
+            git_oid: repository.oid,
+            release_entry_file: record.entryFile,
+            release_file_kinds: { ...(record.fileKinds ?? {}) },
+          },
+        });
         if (!record) throw new Error('app disappeared while recording install lineage');
         if (!publicationActive(publicationGeneration)) {
           throw new Error('dweb-custody-changed');
@@ -334,7 +349,7 @@ export const makeDwebRoutes = (deps) => {
     // OPFS dir first, then write the new set; otherwise stale files linger and can
     // shadow the new entry. The dweb slot is MERGED so version_id/uri/seq advance
     // while publisher/slug/dwapp_id stay put. The open tab reloads to show the update.
-    'dweb/app-update': storageRoute(async ({ appId, files, entryFile, fileKinds, dweb, strategy, conflictToken, publicationGeneration }) => {
+    'dweb/app-update': storageRoute(async ({ appId, files, entryFile, fileKinds, dweb, seedBundle, strategy, conflictToken, publicationGeneration }) => {
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
       const resolvesConflict = strategy === 'replace' || strategy === 'fork';
       if (resolvesConflict && (!Number.isSafeInteger(conflictToken) || conflictToken < 0)) {
@@ -420,6 +435,7 @@ export const makeDwebRoutes = (deps) => {
         let auditWarning = null;
         let committed;
         try {
+          if (seedBundle) await saveSeedBundle(appId, rec.dweb?.seed_hash, dweb.hash, seedBundle);
           committed = await appClient.replaceVersionedFilesUnlocked({
             appId,
             files: files || {},
@@ -427,9 +443,11 @@ export const makeDwebRoutes = (deps) => {
             fileKinds,
             message: `update from dweb ${dweb?.version_id?.slice?.(0, 10) ?? ''}`,
             metadataForOid: (/** @type {string | null} */ oid, /** @type {any} */ oldRecord, /** @type {Record<string, 'text'|'binary'>} */ releaseFileKinds = {}) => ({
+              shared: true,
               ...(dweb && typeof dweb === 'object' ? {
                 dweb: {
                   ...nextDweb,
+                  ...(seedBundle ? { seed_hash: dweb.hash } : {}),
                   git_oid: oid,
                   release_entry_file: entryFile,
                   release_file_kinds: { ...releaseFileKinds },

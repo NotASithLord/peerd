@@ -1327,8 +1327,11 @@ describe('operation-lazy offscreen repository split', () => {
     await expect(client.commit(ref, { message: 'checkpoint' })).rejects.toMatchObject({
       code: 'repository-host-timeout', outcomeKnown: false,
     });
-    expect(messages.filter((entry) => entry.type === 'repository/host-call'))
-      .toHaveLength(1);
+    await expect(client.rollbackWorkingTree(ref, { to: 'HEAD', files: {} })).rejects.toMatchObject({
+      code: 'repository-host-timeout', outcomeKnown: false,
+    });
+    expect(messages.filter((entry) => entry.type === 'repository/host-call')
+      .map((entry) => entry.method)).toEqual(['commit', 'rollbackWorkingTree']);
   });
 
   test('a timed-out mutation terminates its exact Worker before the keyed lane reopens', async () => {
