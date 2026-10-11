@@ -6256,7 +6256,8 @@ export const STATES = [
           document.getElementById('mode-toggle').click();
         })()`);
         const renewed = await waitFor(() => evalIn(page, `
-          globalThis.__retiredAppDocument === undefined
+          document.readyState === 'complete'
+          && globalThis.__retiredAppDocument === undefined
           && location.href === ${JSON.stringify(target.url)}
           && document.getElementById('boot')?.classList.contains('is-hidden')
           && !document.getElementById('boot')?.classList.contains('is-failed')
@@ -6266,8 +6267,26 @@ export const STATES = [
         rec.check('View replaces a consent-retired document through the exact App host URL', !!renewed);
         await rec.shotPage('fresh-consent-document', page);
         await evalIn(page, `document.getElementById('mode-toggle').click()`);
-        await waitFor(() => evalIn(page, `!!document.querySelector('#editor-panel:not([hidden]) .cm-content')`),
-          { budgetMs: 10_000, pollMs: 100 });
+        // Wait for the exact interactive target after the new document boots.
+        // An ignored readiness timeout otherwise becomes an opaque null.click.
+        const editorReady = await waitFor(() => evalIn(page, `
+          document.readyState === 'complete'
+          && !!document.querySelector('#editor-panel:not([hidden]) .cm-content')
+          && !!document.querySelector('#editor-panel .pe-node[data-path="notes.txt"]')
+        `), { budgetMs: 10_000, pollMs: 100 });
+        if (!editorReady) {
+          const diagnostic = await evalIn(page, `({
+            url: location.href,
+            readyState: document.readyState,
+            mode: document.body.className,
+            toggle: document.getElementById('mode-toggle')?.textContent,
+            boot: document.getElementById('boot')?.className,
+            bootMessage: document.getElementById('boot-msg')?.textContent,
+            editorHidden: document.getElementById('editor-panel')?.hidden,
+            files: [...document.querySelectorAll('.pe-node[data-path]')].map((node) => node.dataset.path),
+          })`);
+          throw new Error(`The renewed App editor did not expose notes.txt: ${JSON.stringify(diagnostic)}`);
+        }
         await evalIn(page, `document.querySelector('.pe-node[data-path="notes.txt"]').click()`);
         await waitFor(() => evalIn(page,
           `document.querySelector('.pe-node.is-active')?.dataset.path === 'notes.txt'`),
