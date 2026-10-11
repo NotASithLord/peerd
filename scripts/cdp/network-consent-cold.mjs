@@ -423,9 +423,18 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
             let changed = false;
             for (const [sessionId, target] of [...sessions]) {
               if (!ownedUrl(target.url)) continue;
+              const scope = scopes.get(sessionId);
               try { await connection.send('Runtime.evaluate', { expression: '0' }, sessionId, signal); }
               catch (error) {
-                if (!(error instanceof ObserverDetachedError)) throw error;
+                if (!(error instanceof ObserverDetachedError)) {
+                  // why: a queued native rejection can beat the deferred detach abort.
+                  // Only this exact ready realm's browser-proven retirement may
+                  // discharge a missing-session drain; error text is not evidence.
+                  if (!(error instanceof Error)
+                      || error.message !== 'Runtime.evaluate: Session with given id not found.'
+                      || !scope?.ready || !scope.detached || !scope.destroyed
+                      || scopes.get(sessionId) !== scope) throw error;
+                }
                 changed = true; break;
               }
             }

@@ -573,6 +573,66 @@ test('same-turn real protocol failure is not erased by target destruction', asyn
 });
 
 
+for (const delayed of [false, true]) {
+  test(`missing-session drain requires its observed retirement (${delayed ? 'later' : 'same-turn'} destruction)`, async () => {
+    const fixture = await retirementObserver();
+    fixture.target('old'); await fixture.observer.barrier();
+    fixture.onDrain(sessionId => {
+      if (sessionId !== 'old') return {};
+      const failure = Promise.reject(new Error('Runtime.evaluate: Session with given id not found.'));
+      fixture.retire('old', !delayed);
+      if (delayed) setTimeout(() => {
+        fixture.targets.delete('old');
+        fixture.emit('Target.targetDestroyed', { targetId: 'old' });
+      }, 5);
+      fixture.target('replacement');
+      return failure;
+    });
+    if (delayed) {
+      await expect(fixture.observer.barrier()).rejects.toThrow('Session with given id not found');
+      // Later destruction cannot retroactively turn a protocol failure into success.
+      await new Promise(resolve => setTimeout(resolve, 10));
+    } else {
+      await fixture.observer.barrier();
+      expect(fixture.evidence.lifecycle.some((entry: any) => entry.method === 'observer.retirementConfirmed'
+        && entry.targetId === 'old')).toBe(true);
+      expect(fixture.calls.some(call => call.method === 'Runtime.evaluate'
+        && call.params.expression === '0' && call.sessionId === 'replacement')).toBe(true);
+    }
+    expect(fixture.evidence.commands.some((entry: any) => entry.label === 'Runtime.evaluate session=old'
+      && entry.status === 'failed' && entry.error.includes('Session with given id not found'))).toBe(true);
+    await fixture.observer.close();
+  });
+}
+
+test('missing-session text without observed retirement remains a protocol failure', async () => {
+  const fixture = await retirementObserver();
+  fixture.target('live'); await fixture.observer.barrier();
+  fixture.onDrain(sessionId => {
+    if (sessionId === 'live') throw new Error('Runtime.evaluate: Session with given id not found.');
+    return {};
+  });
+  await expect(fixture.observer.barrier()).rejects.toThrow('Session with given id not found');
+  expect(fixture.evidence.lifecycle?.some((entry: any) => entry.method === 'observer.retirementConfirmed')).not.toBe(true);
+  await fixture.observer.close();
+});
+
+test('missing-session drain cannot use destruction of an unrelated target', async () => {
+  const fixture = await retirementObserver();
+  fixture.target('old'); fixture.target('other'); await fixture.observer.barrier();
+  fixture.onDrain(sessionId => {
+    if (sessionId !== 'old') return {};
+    const failure = Promise.reject(new Error('Runtime.evaluate: Session with given id not found.'));
+    fixture.retire('old', false);
+    fixture.retire('other');
+    return failure;
+  });
+  await expect(fixture.observer.barrier()).rejects.toThrow('Session with given id not found');
+  fixture.targets.delete('old');
+  fixture.emit('Target.targetDestroyed', { targetId: 'old' });
+  await fixture.observer.close();
+}, 5_000);
+
 test('destruction before detach discharges only its exact observed target', async () => {
   const fixture = await retirementObserver();
   fixture.target('old'); await fixture.observer.barrier();
