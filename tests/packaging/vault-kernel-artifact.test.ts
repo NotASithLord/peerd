@@ -112,7 +112,11 @@ describe('test-only vault kernel package target', () => {
     expect(packageAt).toBeGreaterThan(stampAt);
   });
 
-  test('release packaging preserves modular Chrome and Firefox entries', async () => {
+  // Each artifact owns its fixture and test deadline; this checks graph shape,
+  // not combined two-browser packaging throughput on a particular host.
+  // Full artifact construction uses the same bounded harness allowance as the
+  // controller build-identity packaging test; product budgets stay in packaging.
+  for (const browser of ['chrome', 'firefox'] as const) test(`release packaging preserves modular ${browser} entry`, async () => {
     const root = mkdtempSync(join(tmpdir(), 'peerd-native-package-path-'));
     const sourceRoot = join(root, 'source');
     const artifactRoot = join(root, 'artifacts');
@@ -130,38 +134,36 @@ describe('test-only vault kernel package target', () => {
       base.background.service_worker = 'background/vault-kernel-chrome.js';
       writeFileSync(basePath, `${JSON.stringify(base, null, 2)}\n`);
 
-      for (const browser of ['chrome', 'firefox'] as const) {
-        await packageArtifact({
-          sourceRoot, artifactRoot, channel: 'store', browser,
-          version: '0.7.3', sign: false, verify: false, minify: true,
-        });
-        const staging = join(artifactRoot, 'staging', `store-${browser}`);
-        const manifest = JSON.parse(readFileSync(join(staging, 'manifest.json'), 'utf8'));
-        const entryRelative = browser === 'chrome'
-          ? manifest.background.service_worker : manifest.background.scripts[0];
-        const graph = await collectStaticModuleGraph(staging, join(staging, entryRelative));
-        expect(entryRelative).toBe(browser === 'firefox'
-          ? FIREFOX_BACKGROUND_ENTRY : 'background/vault-kernel-chrome.js');
-        expect(graph.size).toBeGreaterThan(1);
-        if (browser === 'chrome') {
-          expect(statSync(join(staging, entryRelative)).size).toBeGreaterThan(0);
-        } else {
-          expect(graph.has(join(staging, 'background/driven-child-request-guard.js'))).toBe(true);
-          for (const leaf of [
-            'background/direct-controller-client.js',
-            'background/offscreen-controller-client.js',
-            'background/firefox-storage-keepalive.js',
-            'background/repository-local-client.js',
-          ]) {
-            expect(existsSync(join(staging, leaf)), leaf).toBe(true);
-            expect(graph.has(join(staging, leaf)), leaf).toBe(false);
-          }
+      await packageArtifact({
+        sourceRoot, artifactRoot, channel: 'store', browser,
+        version: '0.7.3', sign: false, verify: false, minify: true,
+      });
+      const staging = join(artifactRoot, 'staging', `store-${browser}`);
+      const manifest = JSON.parse(readFileSync(join(staging, 'manifest.json'), 'utf8'));
+      const entryRelative = browser === 'chrome'
+        ? manifest.background.service_worker : manifest.background.scripts[0];
+      const graph = await collectStaticModuleGraph(staging, join(staging, entryRelative));
+      expect(entryRelative).toBe(browser === 'firefox'
+        ? FIREFOX_BACKGROUND_ENTRY : 'background/vault-kernel-chrome.js');
+      expect(graph.size).toBeGreaterThan(1);
+      if (browser === 'chrome') {
+        expect(statSync(join(staging, entryRelative)).size).toBeGreaterThan(0);
+      } else {
+        expect(graph.has(join(staging, 'background/driven-child-request-guard.js'))).toBe(true);
+        for (const leaf of [
+          'background/direct-controller-client.js',
+          'background/offscreen-controller-client.js',
+          'background/firefox-storage-keepalive.js',
+          'background/repository-local-client.js',
+        ]) {
+          expect(existsSync(join(staging, leaf)), leaf).toBe(true);
+          expect(graph.has(join(staging, leaf)), leaf).toBe(false);
         }
       }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  }, 20_000);
+  }, 120_000);
 
   test('physical floor is explicit about controller and recycle non-claims', () => {
     const source = readFileSync(

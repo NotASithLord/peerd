@@ -95,3 +95,158 @@ test('a stalled partial chunk times out and link closure cancels partial state',
     client.close();
   }
 });
+
+test('valid chunk progress renews the idle deadline without weakening stalled-part failure', async () => {
+  const clock = transferClock();
+  let handler: any;
+  let request: any;
+  const bytes = new Uint8Array(CHUNK_PART_BYTES * 2 + 1).fill(7);
+  const client = createChannelClient({
+    setHandler: value => { handler = value; },
+    send: value => { request = value; },
+  }, 20, clock.timers);
+  const result = client.chunk('hash');
+  try {
+    // Let the send receipt arm the response deadline before advancing time.
+    await Promise.resolve();
+    for (const offset of [0, CHUNK_PART_BYTES, CHUNK_PART_BYTES * 2]) {
+      clock.advance(12);
+      const length = Math.min(CHUNK_PART_BYTES, bytes.length - offset);
+      handler({ t: 'CHUNK', hash: 'hash', requestId: request.requestId, offset,
+        size: bytes.length, bytes: toBase64(bytes.subarray(offset, offset + length)) });
+    }
+    expect(fromBase64((await result).bytes!)).toEqual(bytes);
+  } finally { client.close(); expect(clock.pending()).toBe(0); }
+});
+
+test('progress on a shared ordered channel keeps a queued chunk request alive', async () => {
+  const clock = transferClock();
+  let handler: any;
+  const requests = new Map<string, any>();
+  const client = createChannelClient({
+    setHandler: value => { handler = value; },
+    send: value => { requests.set(value.hash, value); },
+  }, 20, clock.timers);
+  const first = client.chunk('first');
+  const second = client.chunk('second');
+  try {
+    // Let the send receipt arm the response deadline before advancing time.
+    await Promise.resolve();
+    clock.advance(12);
+    handler({ t: 'CHUNK', hash: 'first', requestId: requests.get('first').requestId, offset: 0,
+      size: CHUNK_PART_BYTES + 1, bytes: toBase64(new Uint8Array(CHUNK_PART_BYTES)) });
+    clock.advance(12);
+    handler({ t: 'CHUNK', hash: 'first', requestId: requests.get('first').requestId, offset: CHUNK_PART_BYTES,
+      size: CHUNK_PART_BYTES + 1, bytes: toBase64(new Uint8Array(1)) });
+    clock.advance(12);
+    handler({ t: 'CHUNK', hash: 'second', requestId: requests.get('second').requestId, offset: 0,
+      size: 1, bytes: toBase64(new Uint8Array([2])) });
+    expect(fromBase64((await first).bytes!).length).toBe(CHUNK_PART_BYTES + 1);
+    expect(fromBase64((await second).bytes!)).toEqual(new Uint8Array([2]));
+  } finally { client.close(); expect(clock.pending()).toBe(0); }
+});
+
+const transferClock = () => {
+  let now = 0;
+  let next = 0;
+  const pending = new Map<number, { at: number, run: () => void }>();
+  return {
+    timers: {
+      setTimeout: ((run: () => void, delay: number) => {
+        const id = ++next;
+        pending.set(id, { at: now + delay, run });
+        return id;
+      }) as unknown as typeof setTimeout,
+      clearTimeout: ((id: number) => { pending.delete(id); }) as unknown as typeof clearTimeout,
+    },
+    advance(ms: number) {
+      const end = now + ms;
+      while (true) {
+        const due = [...pending].filter(([, task]) => task.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        now = due[1].at;
+        pending.delete(due[0]);
+        due[1].run();
+      }
+      now = end;
+    },
+    pending: () => pending.size,
+  };
+};
+
+test('unrelated chunk progress cannot replace the unsent request deadline', async () => {
+  const clock = transferClock();
+  let handler: any;
+  const requests = new Map<string, any>();
+  const client = createChannelClient({
+    setHandler: value => { handler = value; },
+    send: request => {
+      requests.set(request.hash, request);
+      return request.hash === 'unsent' ? new Promise<void>(() => {}) : undefined;
+    },
+  }, 20_000, clock.timers);
+  const queued = client.chunk('unsent').catch(error => error);
+  const active = client.chunk('active').catch(error => error);
+  try {
+    await Promise.resolve();
+    clock.advance(14_000);
+    handler({ t: 'CHUNK', hash: 'active', requestId: requests.get('active').requestId,
+      offset: 0, size: CHUNK_SIZE, bytes: toBase64(new Uint8Array(CHUNK_PART_BYTES)) });
+    clock.advance(1_000);
+    // Closing settles any erroneously retained request, so a regression fails
+    // the assertion instead of hanging the test.
+    client.close();
+    expect((await queued).message).toBe('content send timed out');
+    await active;
+    expect(clock.pending()).toBe(0);
+  } finally { client.close(); }
+});
+
+test('a provider serving other chunks cannot pin a permanently missing chunk', async () => {
+  const clock = transferClock();
+  let handler: any;
+  const requests = new Map<string, any>();
+  const client = createChannelClient({
+    setHandler: value => { handler = value; },
+    send: request => { requests.set(request.hash, request); },
+  }, 100, clock.timers);
+  const missing = client.chunk('missing').catch(error => error);
+  try {
+    await Promise.resolve();
+    for (let index = 0; index < 40; index++) {
+      const hash = `available-${index}`;
+      const result = client.chunk(hash);
+      await Promise.resolve();
+      clock.advance(50);
+      handler({ t: 'CHUNK', hash, requestId: requests.get(hash).requestId,
+        offset: 0, size: 1, bytes: toBase64(new Uint8Array([1])) });
+      await result;
+    }
+    client.close();
+    expect((await missing).message).toBe('transfer lifetime exceeded');
+    expect(clock.pending()).toBe(0);
+  } finally { client.close(); }
+});
+
+test('malformed correlated parts do not renew other response deadlines', async () => {
+  const clock = transferClock();
+  let handler: any;
+  const requests = new Map<string, any>();
+  const client = createChannelClient({
+    setHandler: value => { handler = value; },
+    send: request => { requests.set(request.hash, request); },
+  }, 100, clock.timers);
+  const waiting = client.chunk('waiting').catch(error => error);
+  const invalid = client.chunk('invalid').catch(error => error);
+  try {
+    await Promise.resolve();
+    clock.advance(90);
+    handler({ t: 'CHUNK', hash: 'invalid', requestId: requests.get('invalid').requestId,
+      offset: 1, size: 1, bytes: toBase64(new Uint8Array([1])) });
+    clock.advance(10);
+    client.close();
+    expect((await waiting).message).toBe('transfer timeout');
+    expect((await invalid).message).toBe('invalid chunk part bounds');
+    expect(clock.pending()).toBe(0);
+  } finally { client.close(); }
+});

@@ -427,3 +427,82 @@ describe('home.discover immutable address copy', () => {
     });
   });
 });
+
+describe('Discover runtime compatibility', () => {
+  it('shows unsupported requirements and refuses installation from that card', async () => {
+    const root = document.createElement('div'); document.body.appendChild(root);
+    let installs = 0;
+    const send = async (/** @type {any} */ message) => {
+      if (message.type === 'apps/list') return { ok: true, apps: [] };
+      if (message.type === 'dweb/base/status') return { ok: true, did: 'self' };
+      if (message.type === 'dweb/base/heard') return { ok: true, apps: [{
+        dwapp_id: 'runtime-app', name: 'WASI App', uri: 'peerd://did:key:source/hash',
+        runtimeCompatibility: { status: 'unsupported', message: 'Unsupported App runtime target: wasi.' },
+      }] };
+      if (message.type === 'dweb/base/install') installs++;
+      return { ok: false };
+    };
+    m.mount(root, { view: () => m(DiscoverSection, { send }) });
+    try {
+      await settle();
+      expect(root.textContent).toContain('Unsupported App runtime target: wasi.');
+      const install = /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')].find(button => button.textContent === 'Install'));
+      expect(install.disabled).toBe(true); install.click();
+      expect(installs).toBe(0);
+    } finally { m.mount(root, null); root.remove(); }
+  });
+});
+
+describe('home.discover suggestions', () => {
+  it('focuses unfamiliar compatible cards without downloads, preserves polling selection, and resets explicitly', async () => {
+    const root = document.createElement('div'); document.body.appendChild(root);
+    const apps = [
+      {dwapp_id:'installed',publisher:'local',name:'Installed'},
+      {dwapp_id:'bad',publisher:'bad',name:'Unsupported',runtimeCompatibility:{status:'unsupported',message:'Not supported'}},
+      {dwapp_id:'a',publisher:'one',name:'First',version_id:'v1'},
+      {dwapp_id:'b',publisher:'two',name:'Second',version_id:'v1'},
+    ];
+    let catalogFails = false;
+    /** @type {string[]} */ const calls = [];
+    const send = async (/** @type {any} */ message) => {
+      calls.push(message.type);
+      if (message.type === 'dweb/base/heard') return {ok:true,apps};
+      if (message.type === 'dweb/base/status') return {ok:true,did:null};
+      if (message.type === 'apps/list') return catalogFails ? {ok:false} : {ok:true,apps:[{id:'local',dweb:{dwapp_id:'installed'}}]};
+      throw new Error('Suggestions must not mutate or download');
+    };
+    /** @param {string} label */
+    const click = async label => {
+      /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')].find(button=>button.textContent===label)).click();
+      await settle();
+    };
+    m.mount(root,{view:()=>m(DiscoverSection,{send,initialSeed:42})});
+    try {
+      await settle();
+      await click('Surprise me');
+      const first = root.querySelector('[data-suggested="true"]');
+      expect(first).toBeTruthy();
+      expect(document.activeElement === first).toBe(true);
+      expect(first?.textContent?.includes('Unsupported')).toBe(false);
+      expect(first?.textContent?.includes('Installed')).toBe(false);
+      expect(root.textContent).toContain('Availability is not checked');
+      const name = first?.querySelector('.disc-name')?.textContent;
+      /** @type {HTMLButtonElement} */ (root.querySelector('.disc-refresh')).click(); await settle();
+      expect(root.querySelector('[data-suggested="true"] .disc-name')?.textContent).toBe(name);
+      await click('Surprise me');
+      expect(root.querySelector('[data-suggested="true"] .disc-name')?.textContent === name).toBe(false);
+      await click('Surprise me');
+      expect(root.textContent).toContain('No new suggestions');
+      await click('Reset suggestions');
+      expect(root.querySelector('[data-suggested="true"]')).toBe(null);
+      await click('Surprise me');
+      expect(root.querySelector('[data-suggested="true"]')).toBeTruthy();
+      catalogFails = true;
+      /** @type {HTMLButtonElement} */ (root.querySelector('.disc-refresh')).click(); await settle();
+      const paused = /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')].find(button=>button.textContent==='Surprise me'));
+      expect(paused.disabled).toBe(true);
+      expect(root.textContent).toContain('Surprise me is paused');
+      expect(calls.every(type=>['dweb/base/heard','dweb/base/status','apps/list'].includes(type))).toBe(true);
+    } finally {m.mount(root,null);root.remove();}
+  });
+});

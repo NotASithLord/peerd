@@ -3,6 +3,7 @@
 // why: App code stays in the opaque runner while the parent owns storage and controls.
 
 import browser from '/shared/browser-api.js';
+import { assertAppRuntime, appRuntimeFromFiles } from '/shared/app-runtime.js';
 import { makeUiRuntimeClient } from '/shared/ui-runtime-client.js';
 import {
   composeApp,
@@ -385,6 +386,10 @@ let runnerPhase = 'idle';
 let runnerWatchdog = null;
 /** @type {string | null} */
 let pendingBody = null;
+/** @type {import('/shared/app-runtime-contract.js').AppRuntime | undefined} */
+let pendingRuntime;
+/** @type {string[]} */
+let runnerFeatures = [];
 /** @type {Record<string, ArrayBuffer>} */
 let pendingAssets = {};
 /** @type {MessagePort | null} */
@@ -450,6 +455,8 @@ browser.runtime.onMessage.addListener((/** @type {any} */ message, /** @type {an
 
 const tryDeliver = () => {
   if (runnerPhase !== 'ready' || pendingBody == null) return;
+  try { assertAppRuntime(pendingRuntime, runnerFeatures); }
+  catch (error) { fail(/** @type {Error} */ (error).message); return; }
   expectingBodyLoad = true;
   // why: sandbox flags are fixed for the active document. Removing script
   // permission here leaves the already-loaded trusted runner able to execute
@@ -484,6 +491,7 @@ const startRunner = () => {
   runnerPort?.close();
   runnerPort = null;
   runnerPhase = 'awaiting-ready';
+  runnerFeatures = [];
   runnerStarted = true;
   runnerGeneration += 1;
   frame.sandbox.add('allow-scripts');
@@ -540,6 +548,10 @@ const initializeRunnerChannel = () => {
       return;
     }
     if (event.data?.type !== 'runner-ready') return;
+    // This private port belongs to the trusted runner before App code loads.
+    // Treat absence/malformed reports as no features, never optimistic support.
+    runnerFeatures = Array.isArray(event.data.runtimeFeatures)
+      ? event.data.runtimeFeatures.filter((/** @type {unknown} */ feature) => feature === 'wasm-core') : [];
     runnerPhase = 'ready';
     if (runnerWatchdog) { clearTimeout(runnerWatchdog); runnerWatchdog = null; }
     tryDeliver();
@@ -584,6 +596,13 @@ const renderMode = async () => {
     return;
   }
 
+  let runtime;
+  try {
+    runtime = appRuntimeFromFiles({ ...textFiles, ...(binaryAssets['peerd.json']
+      ? { 'peerd.json': new Uint8Array(binaryAssets['peerd.json']) } : {}) });
+  }
+  catch (error) { fail(/** @type {Error} */ (error).message); return; }
+
   // Make built-in libs (Mithril) available before composing.
   await withBuiltinLibs(textFiles);
 
@@ -594,6 +613,8 @@ const renderMode = async () => {
   // Ensure the iframe is in the DOM (re-create on mode switch).
   if (!frame.isConnected) document.querySelector('.frame-host')?.appendChild(frame);
   frame.hidden = false;
+  // Commit requirements and bytes together after asynchronous preparation.
+  pendingRuntime = runtime;
   pendingBody = composed;
   pendingAssets = binaryAssets;
 

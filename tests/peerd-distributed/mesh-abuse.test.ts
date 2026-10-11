@@ -4,6 +4,9 @@ import { createBufferedChannel, memoryPair } from '../../extension/peerd-distrib
 import { createRoomMesh, CTRL } from '../../extension/peerd-distributed/transport/mesh.js';
 import { buildEnvelope, signEnvelope } from '../../extension/peerd-distributed/transport/envelope.js';
 
+import { createChannelClient, CHUNK_PART_BYTES } from '../../extension/peerd-distributed/content/transfer.js';
+import { toBase64 } from '../../extension/shared/bundle/bytes.js';
+
 import { iterateSyncChunks, SYNC_CHUNK_BYTES } from '../../extension/peerd-distributed/self/sync.js';
 
 const channel = () => {
@@ -254,4 +257,89 @@ describe('aggregate ingress bounds', () => {
     c.setHandler(() => { delivered++; });
     expect(delivered).toBe(0);
   });
+});
+
+
+test('content liveness requires current correlated response progress, not unsolicited or stale traffic', async () => {
+  let time = 0;
+  const mesh = createRoomMesh({ roomId: 'content-progress', identity: await generateIdentity(), now: () => time });
+  const carrier = channel();
+  const requests: any[] = [];
+  carrier.send = message => { requests.push(message); };
+  mesh.addLink(carrier, 'provider');
+  const client = createChannelClient(mesh.contentChannel('provider')!, 60_000);
+  const hash = 'a'.repeat(64);
+  try {
+    time = 1;
+    carrier.receive({ t: 'NOCHUNK', hash });
+    expect(mesh.peers()[0]!.lastSeen).toBe(0);
+    const chunk = client.chunk(hash).catch(error => error);
+    const request = requests[0];
+    time = 2;
+    const part = { t: 'CHUNK', hash, requestId: request.requestId, offset: 0,
+      size: CHUNK_PART_BYTES + 1, bytes: toBase64(new Uint8Array(CHUNK_PART_BYTES)) };
+    carrier.receive({ ...part, requestId: 'unrelated-request' });
+    expect(mesh.peers()[0]!.lastSeen).toBe(0);
+    time = 3;
+    carrier.receive(part);
+    expect(mesh.peers()[0]!.lastSeen).toBe(3);
+    time = 4;
+    carrier.receive({ ...part, offset: 1 });
+    expect((await chunk).message).toBe('invalid chunk part bounds');
+    expect(mesh.peers()[0]!.lastSeen).toBe(3);
+    const another = client.chunk(hash).catch(error => error);
+    const next = requests.at(-1);
+    client.close();
+    expect((await another).message).toBe('content client closed');
+    time = 5;
+    for (let index = 0; index < 4; index++) {
+      carrier.receive({ t: 'NOCHUNK', hash, requestId: next.requestId });
+    }
+    expect(mesh.hasLink('provider')).toBe(true); // cancellation races are not misconduct
+    expect(mesh.peers()[0]!.lastSeen).toBe(3);
+  } finally { client.close(); mesh.close(); }
+});
+
+test('legacy whole replies and correlated misses preserve liveness without claiming contribution', async () => {
+  let time = 0;
+  const mesh = createRoomMesh({ roomId: 'legacy-progress', identity: await generateIdentity(), now: () => time });
+  const carrier = channel(); mesh.addLink(carrier, 'provider');
+  const client = createChannelClient(mesh.contentChannel('provider')!, 60_000);
+  const hash = 'a'.repeat(64);
+  try {
+    const legacy = client.chunk(hash);
+    time = 1;
+    carrier.receive({ t: 'CHUNK', hash, bytes: toBase64(new Uint8Array([7])) });
+    expect((await legacy).t).toBe('CHUNK');
+    expect(mesh.peers()[0]!.lastSeen).toBe(1);
+    const malformed = client.chunk(hash);
+    time = 2;
+    carrier.receive({ t: 'CHUNK', hash, bytes: 'invalid base64' });
+    // The transfer owner still receives the legacy response and rejects its
+    // payload through the existing hash/size checks; liveness grants nothing.
+    expect((await malformed).bytes).toBe('invalid base64');
+    expect(mesh.peers()[0]!.lastSeen).toBe(1);
+    const miss = client.chunk(hash);
+    time = 3;
+    carrier.receive({ t: 'NOCHUNK', hash });
+    expect((await miss).t).toBe('NOCHUNK');
+    expect(mesh.peers()[0]!.lastSeen).toBe(3);
+  } finally { client.close(); mesh.close(); }
+});
+
+test('malformed content response addresses use the existing bounded strike policy', async () => {
+  let time = 0;
+  const mesh = createRoomMesh({ roomId: 'response-shape', identity: await generateIdentity(), now: () => time });
+  const carrier = channel(); mesh.addLink(carrier, 'provider');
+  try {
+    time = 1;
+    carrier.receive({ t: 'NOCHUNK' });
+    carrier.receive({ t: 'MANIFEST', hash: 42 });
+    expect(mesh.hasLink('provider')).toBe(true);
+    expect(mesh.peers()[0]!.lastSeen).toBe(0);
+    carrier.receive({ t: 'CHUNK', hash: 'bad' });
+    expect(mesh.hasLink('provider')).toBe(false);
+    expect(mesh.addLink(channel(), 'provider')).toBe(false);
+    expect(mesh.addLink(channel(), 'honest')).toBe(true);
+  } finally { mesh.close(); }
 });

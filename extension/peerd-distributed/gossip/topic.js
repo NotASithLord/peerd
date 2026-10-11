@@ -23,6 +23,7 @@
 //     The room is consent; the bucket is the ceiling on what consent buys.
 
 import { envelopeBytes } from '../transport/envelope.js';
+import { createLocalCounters } from '../local-counters.js';
 
 const PUB = 0; // ch=4 typ — a topic publish
 
@@ -65,6 +66,9 @@ export const createGossip = ({
   maxEnvelopeBytes = MAX_GOSSIP_ENVELOPE_BYTES,
   audit = null,
 } = /** @type {{ mesh: any }} */ ({})) => {
+  // Acceptance counts are protocol work, not subscriber callbacks or delivery receipts.
+  const counts = createLocalCounters(['originals', 'received', 'duplicates', 'muted', 'rateLimited',
+    'oversized', 'liveAccepted', 'forwarded', 'backfillAccepted']);
   /** @typedef {{ from: string, data: any, ts: number, id: any, env: any, via: any }} GossipMsg */
   /** @type {Map<string, Set<(msg: GossipMsg) => void>>} */
   const subs = new Map(); // topic -> Set<cb>
@@ -123,6 +127,7 @@ export const createGossip = ({
   /** @param {any} env @param {string} topic */
   const oversized = (env, topic) => {
     if (envelopeBytes(env) <= maxEnvelopeBytes) return false;
+    counts.add('oversized');
     audit?.('gossip_envelope_oversized', { did: env.from, topic, cap: maxEnvelopeBytes });
     return true;
   };
@@ -141,10 +146,12 @@ export const createGossip = ({
   const offEnvelope = mesh.onEnvelope(async (/** @type {{ env: any, via: any }} */ { env, via }) => {
     if (closed || env.ch !== 4 || env.typ !== PUB) return;
     if (!env.body || typeof env.body.topic !== 'string') return;
-    if (seen.has(env.sig)) return; // duplicate via another path
+    counts.add('received');
+    if (seen.has(env.sig)) { counts.add('duplicates'); return; } // duplicate via another path
     markSeen(env.sig);
-    if (muted.has(env.from)) return; // user said no — drop silently, no relay
+    if (muted.has(env.from)) { counts.add('muted'); return; } // no relay
     if (!allow(env.from)) {
+      counts.add('rateLimited');
       audit?.('gossip_rate_limited', { did: env.from, topic: env.body.topic });
       return; // dropped AND not re-broadcast: a flood dies at first hop
     }
@@ -153,9 +160,10 @@ export const createGossip = ({
     // one. Same disposition as a rate-limited frame — dropped and NOT
     // re-broadcast, so an oversized publish dies at its first hop.
     if (oversized(env, env.body.topic)) return;
+    counts.add('liveAccepted');
     deliver(env, via);
     // Forward the same signed frame onward — everyone but where it came from.
-    if (!closed) await mesh.broadcast(env, via);
+    if (!closed) { counts.add('forwarded'); await mesh.broadcast(env, via); }
   });
 
   return Object.freeze({
@@ -169,6 +177,7 @@ export const createGossip = ({
       // Signing may finish after the mesh owner retires this gossip instance.
       if (closed) throw new Error('gossip-closed');
       markSeen(env.sig); // our own frame must not boomerang back to us
+      counts.add('originals');
       await mesh.broadcast(env);
       return env;
     },
@@ -213,11 +222,13 @@ export const createGossip = ({
       if (oversized(env, env.body.topic)) return false;
       const fresh = !seen.has(env.sig);
       if (fresh) markSeen(env.sig);
+      counts.add('backfillAccepted');
       deliver(env, via);
       return fresh;
     },
     /** @param {string} sig */
     hasSeen: (sig) => seen.has(sig),
+    stats: counts.snapshot,
     /** @param {string} did */
     mute(did) { muted.add(did); audit?.('gossip_muted', { did }); },
     /** @param {string} did */

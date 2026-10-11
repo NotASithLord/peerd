@@ -24,6 +24,9 @@ import { parsePeerdUri } from './uri.js';
 import { createChannelClient } from './transfer.js';
 import { concat } from '/shared/bundle/bytes.js';
 
+// Separate bounded pools prevent silent metadata probes from occupying every
+// download slot: at most ALPHA manifest + ALPHA chunk requests per transfer,
+// and at most ALPHA + 1 requests to a single provider.
 const ALPHA = 3;
 
 /**
@@ -43,16 +46,19 @@ const ALPHA = 3;
  *   onProgress?: (p: any) => void,
  *   timeoutMs?: number,
  *   alpha?: number,
+ *   acceptManifest?: (manifest: any) => void | Promise<void>,
+ *   isAllowed?: (did: string) => boolean,
  * }} opts
  * @returns {Promise<{ manifest: any, payload: Uint8Array, providers: string[], verifiedContributors: string[] }>}
  */
-export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeoutMs = 15000, alpha = ALPHA }) => {
-  const { hash } = parsePeerdUri(uri);
+export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeoutMs = 15000, alpha = ALPHA, isAllowed = () => true, acceptManifest: checkManifest = () => {} }) => {
+  const concurrency = Number.isInteger(alpha) && alpha > 0 ? Math.min(alpha, ALPHA) : ALPHA;
+  const { hash, did: publisher } = parsePeerdUri(uri);
   /** @type {Array<{ did: string, client: ChannelClient }>} */
   const clients = [];
   for (const did of [...new Set(providers)]) {
     const ch = channelFor(did);
-    if (ch) clients.push({ did, client: createChannelClient(ch, timeoutMs) });
+    if (ch && isAllowed(did)) clients.push({ did, client: createChannelClient(ch, timeoutMs) });
   }
   if (!clients.length) throw new Error(`swarm: no reachable provider for ${hash}`);
 
@@ -60,34 +66,50 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
   // original providers list separate from verified chunk contributors, and
   // expose evidence only after whole-bundle verification succeeds.
   const verifiedContributors = new Set();
+  const selection = new AbortController();
+  const qualified = new Set();
+  const active = new Map();
+  // why: probes and chunk workers share one live cancellation state, including
+  // continuations that resume after a sibling rejects and cleanup has run.
   try {
-    // why: a silent early provider must not suppress a healthy neighbor.
-    // Bound concurrent requests, verify each candidate before winning, and
-    // cancel only losing manifest requests so clients remain usable for chunks.
-    const selection = new AbortController();
+    // why: begin downloading on the first verified manifest, but keep bounded
+    // probes alive so other seeders can join without waiting for author failure.
+    // Unqualified peers remain fallback chunk sources (partial-piece serving).
     let nextProvider = 0;
-    /** @returns {Promise<{ chunks: Array<{ hash: string, size: number }>, size: number } & Record<string, any>>} */
+    /** @typedef {{ chunks: Array<{ hash: string, size: number }>, size: number } & Record<string, any>} Manifest */
+    /** @type {(manifest: Manifest) => void} */
+    let acceptManifest = () => {};
+    /** @type {(error: Error) => void} */
+    let rejectManifest = () => {};
+    /** @type {Promise<Manifest>} */
+    const firstManifest = new Promise((resolve, reject) => {
+      acceptManifest = resolve; rejectManifest = reject;
+    });
     const candidate = async () => {
       while (!selection.signal.aborted && nextProvider < clients.length) {
-        const { client } = clients[nextProvider++];
+        const { did, client } = clients[nextProvider++];
+        if (!isAllowed(did)) continue;
         try {
           const response = await client.manifest(hash, selection.signal);
           if (response.t !== 'MANIFEST') continue;
           const manifest = response.manifest;
+          if (publisher && manifest?.publisher !== publisher) continue;
           assertBundleWithinLimits(manifest);
           if (await manifestHash(manifest) !== hash) continue;
           if (!(await verifyManifest(manifest)).ok) continue;
-          return manifest;
-        } catch { /* try the next provider until selection completes */ }
+          if (selection.signal.aborted || !isAllowed(did)) continue;
+          qualified.add(did);
+          acceptManifest(manifest);
+        } catch { /* one unavailable candidate cannot suppress other providers */ }
       }
-      throw new Error('no valid manifest from candidate providers');
     };
-    let manifest;
-    try {
-      manifest = await Promise.any(Array.from({ length: Math.min(ALPHA, clients.length) }, candidate));
-    } catch {
-      throw new Error(`no reachable provider holds ${hash}`);
-    } finally { selection.abort(); }
+    Promise.all(Array.from({ length: Math.min(concurrency, clients.length) }, candidate))
+      .then(() => rejectManifest(new Error(`no reachable provider holds ${hash}`)))
+      .catch(rejectManifest);
+    const manifest = await firstManifest;
+    // Compatibility is a property of the immutable version, not its seeder.
+    // Run the host gate once, before workers can send any CHUNK_REQ.
+    await checkManifest(manifest);
     onProgress?.({ phase: 'manifest', publisher: manifest.publisher, total: manifest.chunks.length, providers: clients.length });
 
     // 3. Stripe unique chunks across providers — α concurrent, per-chunk failover.
@@ -101,31 +123,42 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
     const worker = async () => {
       /** @type {string | undefined} */
       let h;
-      while ((h = queue.shift()) !== undefined) {
+      while (!selection.signal.aborted && (h = queue.shift()) !== undefined) {
         const start = rr++ % clients.length;
+        // why: known holders get useful work first; rotate equal candidates and
+        // prefer the least occupied provider so a slow seeder cannot claim the
+        // whole queue. A failed holder falls back to partial/unprobed peers.
+        const candidates = [...clients.slice(start), ...clients.slice(0, start)];
         /** @type {Uint8Array | null} */
         let got = null;
-        for (let j = 0; j < clients.length && !got; j++) {
-          const { did, client } = clients[(start + j) % clients.length];
+        while (candidates.length && !got && !selection.signal.aborted) {
+          // A new holder may qualify while the previous request stalls. Re-rank
+          // untried candidates at every retry instead of preserving stale order.
+          candidates.sort((a, b) => Number(qualified.has(b.did)) - Number(qualified.has(a.did))
+            || (active.get(a.did) ?? 0) - (active.get(b.did) ?? 0));
+          const { did, client } = /** @type {{did:string,client:ChannelClient}} */ (candidates.shift());
+          if (!isAllowed(did)) continue;
+          active.set(did, (active.get(did) ?? 0) + 1);
           try {
             const resp = await client.chunk(h);
-            if (resp.t === 'CHUNK') {
+            if (!selection.signal.aborted && isAllowed(did) && resp.t === 'CHUNK') {
               // why cast: a CHUNK reply carries bytes; re-verified by the
               // hash check on the next line.
               const bytes = decodeCommittedChunk(resp.bytes, /** @type {number} */ (expectedSizes.get(h)));
-              if (await sha256hex(bytes) === h) {
+              if (await sha256hex(bytes) === h && !selection.signal.aborted && isAllowed(did)) {
                 got = bytes;
                 verifiedContributors.add(did);
               } // tamper → treat as a miss, try next provider
             }
           } catch { /* miss → next provider */ }
+          finally { active.set(did, (active.get(did) ?? 1) - 1); }
         }
         if (!got) throw new Error(`chunk unavailable on all providers: ${h}`);
         byHash.set(h, got);
         onProgress?.({ phase: 'chunk', done: ++done, total: uniqueHashes.length });
       }
     };
-    await Promise.all(Array.from({ length: Math.min(alpha, uniqueHashes.length || 1) }, worker));
+    await Promise.all(Array.from({ length: Math.min(concurrency, uniqueHashes.length || 1) }, worker));
 
     // 4. Reassemble in manifest order; final size check.
     // why non-null: every manifest chunk hash was fetched into byHash above
@@ -135,8 +168,12 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
     if (manifest.v === 2 && await sha256hex(payload) !== manifest.bundle.compressedHash) {
       throw new Error('compressed bundle hash mismatch');
     }
+    if (selection.signal.aborted || [...verifiedContributors].some((did) => !isAllowed(did))) {
+      throw new Error('content provider policy changed during transfer');
+    }
     return { manifest, payload, providers: clients.map((c) => c.did), verifiedContributors: [...verifiedContributors] };
   } finally {
+    selection.abort();
     for (const { client } of clients) client.close();
   }
 };

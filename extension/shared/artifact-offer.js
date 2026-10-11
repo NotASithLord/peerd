@@ -6,7 +6,7 @@ export const ARTIFACT_CHANNEL_OFFER = 'peerd/artifact-channel';
 export const ARTIFACT_CHANNEL_PROTOCOL = 1;
 export const ARTIFACT_CHANNEL_OPERATIONS = Object.freeze([
   'buildAppExport', 'buildNotebookExport', 'buildVmRecipeExport',
-  'openEnvelope', 'inspectEnvelope', 'exportFilename',
+  'openEnvelope', 'inspectEnvelope', 'exportFilename', 'decodeAppSeedHandoff',
 ]);
 const OPERATIONS = new Set(ARTIFACT_CHANNEL_OPERATIONS);
 const OFFER_KEYS = 'args\nchannelId\noperation\nprotocol\ntype';

@@ -11,4 +11,5 @@ export {
   exportFilename,
   inspectEnvelope,
   openEnvelope,
+  decodeAppSeedHandoff,
 } from './export.js';

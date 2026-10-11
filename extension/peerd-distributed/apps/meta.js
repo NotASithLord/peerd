@@ -18,6 +18,7 @@
 import { signItem, verifyItem, itemKey, MAX_SALT_LEN } from '../dht/records.js';
 import { utf8, concat, toHex } from '/shared/bundle/bytes.js';
 import { canonicalize } from '/shared/bundle/canonical.js';
+import { normalizeAppRuntime } from '/shared/app-runtime-contract.js';
 
 // Caps — what keeps the card cheap enough to relay liberally (PROPAGATION.md).
 export const MAX_NAME = 64;
@@ -54,6 +55,7 @@ export const metaDwappId = (item) => dwappId(item.publisher, item.salt ?? '');
 const headWellFormed = (head) => {
   if (!head || typeof head !== 'object') return false;
   const h = /** @type {Record<string, unknown>} */ (head);
+  try { normalizeAppRuntime(h.runtime); } catch { return false; }
   return typeof h.version_id === 'string' && h.version_id.length > 0 && h.version_id.length <= 128
     && typeof h.content_addr === 'string' && h.content_addr.startsWith('peerd://')
     && typeof h.size === 'number' && Number.isInteger(h.size) && h.size >= 0
@@ -73,7 +75,7 @@ const headWellFormed = (head) => {
  *   name: string,
  *   description?: string,
  *   seq: number,
- *   head: { version_id: string, content_addr: string, size: number, includes_wasm?: boolean,
+ *   head: { version_id: string, content_addr: string, size: number, includes_wasm?: boolean, runtime?: import('/shared/app-runtime-contract.js').AppRuntime,
  *           previous_version_id?: string, git_commit_oid?: string, changelog?: string },
  *   icon?: string | null,
  * }} fields
@@ -94,6 +96,7 @@ export const buildMeta = async ({ slug, name, description = '', seq, head, icon 
     description,
     head: {
       version_id: head.version_id, content_addr: head.content_addr, size: head.size,
+      ...(head.runtime !== undefined ? { runtime: normalizeAppRuntime(head.runtime) } : {}),
       ...(typeof head.includes_wasm === 'boolean' ? { includes_wasm: head.includes_wasm } : {}),
       ...(head.previous_version_id ? { previous_version_id: head.previous_version_id } : {}),
       ...(head.git_commit_oid ? { git_commit_oid: head.git_commit_oid } : {}),
@@ -110,7 +113,7 @@ export const buildMeta = async ({ slug, name, description = '', seq, head, icon 
  * The validated DWAPP_META shape (an app card).
  * @typedef {{
  *   publisher: string, salt: string, seq: number, sig: string,
- *   value: { name: string, description: string, head: { version_id: string, content_addr: string, size: number, includes_wasm?: boolean, previous_version_id?: string, git_commit_oid?: string, changelog?: string }, icon?: string },
+ *   value: { name: string, description: string, head: { version_id: string, content_addr: string, size: number, includes_wasm?: boolean, runtime?: import('/shared/app-runtime-contract.js').AppRuntime, previous_version_id?: string, git_commit_oid?: string, changelog?: string }, icon?: string },
  * }} MetaItem
  */
 

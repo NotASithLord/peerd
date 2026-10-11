@@ -10,10 +10,10 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { discoveryAddress } from './discovery-address.js';
-import { exploreOrder, EXPLORE_PAGE, EXPLORE_WINDOW } from './explore-order.js';
+import { exploreOrder, EXPLORE_PAGE, EXPLORE_WINDOW, nextSuggestion, suggestionKey, SURPRISE_HISTORY_LIMIT } from './explore-order.js';
 
 /** @typedef {import('../options/sections/reset-row.js').Send} Send */
-/** @typedef {{ dwapp_id?: string, uri?: string, name?: string, slug?: string, seq?: number, publisher?: string, from?: string, version_id?: string, description?: string, size?: number, includes_wasm?: boolean|null }} DwebApp */
+/** @typedef {{ dwapp_id?: string, uri?: string, name?: string, slug?: string, seq?: number, publisher?: string, from?: string, version_id?: string, description?: string, size?: number, includes_wasm?: boolean|null, runtimeCompatibility?: {status:string,message:string} }} DwebApp */
 
 /** @param {string} [did] */
 const short = (did) => (typeof did === 'string' ? did.slice(-8) : '????????');
@@ -61,6 +61,17 @@ export const DiscoverSection = (initialVnode) => {
   /** @type {string[]} */ let orderedIds = [];
   /** @type {{id:string,address:string,status:'pending'|'copied'|'failed'}|null} */
   let copyState = null;
+  /** @type {Set<string>} */ const suggested = new Set();
+  /** @type {string|null} */ let lastPublisher = null;
+  /** @type {string|null} */ let selectedKey = null;
+  let suggestionMessage = '';
+  let focusSuggestion = false;
+  /** @param {{dom:Element}} vnode */
+  const focusSelected = ({dom}) => {
+    if (!focusSuggestion || dom.getAttribute('data-suggested') !== 'true') return;
+    focusSuggestion = false;
+    /** @type {HTMLElement} */ (dom).focus();
+  };
   let refreshing = false;  // drives the manual ↻ spin (the 4s poll stays silent)
   /** @type {(() => void) | null} */
   let onVisible = null;    // focus/visibility re-sync handler (removed on teardown)
@@ -153,7 +164,10 @@ export const DiscoverSection = (initialVnode) => {
       return;
     }
     unconfirmed.delete(id);
-    busy[id] = `Peerd could not ${action} this App. Try again.`;
+    const failure = /** @type {{code?:string,error?:string}} */ (result);
+    busy[id] = ['app-runtime-invalid', 'app-runtime-unsupported', 'app-runtime-mismatch'].includes(failure?.code ?? '')
+      && typeof failure?.error === 'string' ? failure.error
+      : `Peerd could not ${action} this App. Try again.`;
   };
 
   /** @param {Send} send */
@@ -202,7 +216,7 @@ export const DiscoverSection = (initialVnode) => {
     // dwapp_id (it keys every record + the busy/installed maps); the guard
     // makes that invariant explicit without changing behavior.
     const id = app.dwapp_id;
-    if (!id) return;
+    if (!id || app.runtimeCompatibility?.status === 'unsupported') return;
     busy[id] = 'installing';
     delete notices[id];
     if (!dead) m.redraw();
@@ -238,7 +252,7 @@ export const DiscoverSection = (initialVnode) => {
     // why the guard: same invariant as install — an update card always has a
     // dwapp_id keying the busy map.
     const id = app.dwapp_id;
-    if (!id) return;
+    if (!id || app.runtimeCompatibility?.status === 'unsupported') return;
     busy[id] = 'updating';
     delete notices[id];
     if (!dead) m.redraw();
@@ -329,6 +343,7 @@ export const DiscoverSection = (initialVnode) => {
       && app.version_id !== tracked.version_id && (app.seq ?? 0) > (tracked.seq ?? 0);
     const failed = typeof state === 'string' && !['installing', 'installed', 'updating'].includes(state);
     const uncertain = unconfirmed.has(id);
+    const incompatible = app.runtimeCompatibility?.status === 'unsupported';
     const label = app.name || id.slice(0, 12);
     const address = discoveryAddress(app);
     const copy = copyState?.id === id && copyState.address === address ? copyState : null;
@@ -337,18 +352,22 @@ export const DiscoverSection = (initialVnode) => {
     let action;
     if (mine && installed) action = m('span.peerd-disc-done', 'in your Library');
     else if (installed && updatable) action = m('button.disc-open', {
-      disabled: state === 'updating' || uncertain,
+      disabled: state === 'updating' || uncertain || incompatible,
       onclick: () => update(send, app, /** @type {string} */ (localId)),
     }, state === 'updating' ? 'Updating…' : uncertain ? 'Refresh to reconcile' : failed ? 'Retry update' : 'Update');
     else if (installed) action = localId
       ? m('button.disc-open', { onclick: () => open(send, localId, id) }, 'Open ↗')
       : m('span.peerd-disc-done', 'installed ✓');
     else action = m('button.disc-open', {
-      disabled: state === 'installing' || uncertain || !app.uri,
+      disabled: state === 'installing' || uncertain || !app.uri || incompatible,
       onclick: () => install(send, app),
     }, state === 'installing' ? 'Installing…' : uncertain ? 'Refresh to reconcile' : failed ? 'Retry' : 'Install');
 
-    return m('.disc-card', { key: id }, [
+    return m('.disc-card', { key: id, tabindex: -1,
+      'data-suggested': suggestionKey(app) === selectedKey ? 'true' : null,
+      oncreate: focusSelected, onupdate: focusSelected,
+    }, [
+      suggestionKey(app) === selectedKey ? m('p.disc-meta', 'Suggested for you') : null,
       m('.disc-head', [
         m('.disc-avatar', { style: `background:${colorOf(id)}`, 'aria-hidden': 'true' }, label.trim().charAt(0) || '?'),
         m('div', { style: 'flex:1; min-width:0;' }, [
@@ -364,6 +383,7 @@ export const DiscoverSection = (initialVnode) => {
         app.includes_wasm === true ? 'Includes WebAssembly' : app.includes_wasm === false ? 'No detected WebAssembly files' : 'WebAssembly not specified',
         Number.isSafeInteger(app.size) && /** @type {number} */ (app.size) >= 0 ? ` · ${new Intl.NumberFormat().format(/** @type {number} */ (app.size))} bundle bytes` : '',
       ]),
+      m('p.disc-meta', app.runtimeCompatibility?.message ?? 'Runtime requirements not specified.'),
       updatable && !failed ? m('.disc-update-badge', { title: 'A newer version is available' }, '● update available') : null,
       failed ? m('p.peerd-disc-err', { style: 'margin:0;' }, state) : null,
       notices[id] ? m('p.muted', {
@@ -445,6 +465,28 @@ export const DiscoverSection = (initialVnode) => {
       const ordered = orderedIds.map(id => /** @type {DwebApp} */ (byId.get(id)));
       if (offset >= ordered.length) offset = 0;
       const shown = ordered.slice(offset, offset + limit);
+      const suggestionCandidates = ordered.filter(app => {
+        const id = app.dwapp_id;
+        return !!id && !installedId[id] && !installedByDwappId.has(id)
+          && !(app.uri && installedByUri.has(app.uri)) && !busy[id] && !unconfirmed.has(id);
+      });
+      const suggest = () => {
+        if (!localReady || localFailed) return;
+        const chosen = nextSuggestion(suggestionCandidates, suggested, lastPublisher);
+        if (!chosen) {
+          suggestionMessage = suggested.size >= SURPRISE_HISTORY_LIMIT
+            ? 'Suggestion history is full for this visit. Reset suggestions to continue.'
+            : 'No new suggestions match these filters. Change filters or reset suggestions.';
+          return;
+        }
+        selectedKey = suggestionKey(chosen);
+        suggested.add(selectedKey);
+        lastPublisher = chosen.publisher ?? null;
+        offset = Math.floor(ordered.indexOf(chosen) / EXPLORE_PAGE) * EXPLORE_PAGE;
+        limit = EXPLORE_PAGE;
+        focusSuggestion = true;
+        suggestionMessage = `Suggested: ${chosen.name || chosen.dwapp_id}. Availability is not checked. Review the card before installing.`;
+      };
       return m('.peerd-disc', [
         header,
         errorBanner,
@@ -456,6 +498,8 @@ export const DiscoverSection = (initialVnode) => {
           oninput: (/** @type {{ target: HTMLInputElement }} */ e) => { query = e.target.value; limit = EXPLORE_PAGE; offset = 0; orderedIds = []; },
         }),
         m('.disc-controls', [
+          m('button.secondary', { disabled: !localReady || localFailed, onclick: suggest }, 'Surprise me'),
+          suggested.size ? m('button.secondary', { onclick: () => { suggested.clear(); lastPublisher = null; selectedKey = null; suggestionMessage = 'Suggestion history reset for this visit.'; } }, 'Reset suggestions') : null,
           m('select', { 'aria-label': 'WebAssembly content', value: wasm,
             onchange: (/** @type {{target: HTMLSelectElement}} */ e) => { wasm = e.target.value; limit = EXPLORE_PAGE; offset = 0; orderedIds = []; },
           }, [m('option', {value:'all'}, 'All Apps'), m('option', {value:'yes'}, 'Includes WebAssembly'),
@@ -467,10 +511,11 @@ export const DiscoverSection = (initialVnode) => {
           }, [m('option', {value:'all'}, 'All Apps'), m('option', {value:'uninstalled'}, 'Not in my Library')]),
           m('button.secondary', { onclick: () => { seed = crypto.getRandomValues(new Uint32Array(1))[0]; limit = EXPLORE_PAGE; offset = 0; orderedIds = []; } }, 'Shuffle'),
         ]),
-        !localReady || localFailed && libraryFilter !== 'all' ? m('p.muted', {role:'status'},
+        !localReady || localFailed ? m('p.muted', {role:'status'},
           !localFailed ? 'Checking your Library…' : localReady
-            ? 'Could not refresh your Library. Filtering uses the last confirmed Library. Refresh to try again.'
+            ? 'Could not refresh your Library. Filtering uses the last confirmed Library; Surprise me is paused. Refresh to try again.'
             : 'Could not read your Library. Refresh to enable the Library filter.') : null,
+        suggestionMessage ? m('p.muted', {role:'status', 'aria-live':'polite'}, suggestionMessage) : null,
         m('p.muted', 'WebAssembly hints are publisher-signed, not a safety or compatibility guarantee.'),
         m('p.muted', {role:'status', 'aria-live':'polite'}, ordered.length ? `Showing ${offset + 1}–${offset + shown.length} of ${ordered.length} Apps` : 'No matching Apps. Change your search or filters.'),
         !ordered.length ? m('button.secondary', { onclick: () => { query = ''; wasm = 'all'; libraryFilter = 'all'; orderedIds = []; offset = 0; } }, 'Clear filters') : null,

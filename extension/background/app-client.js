@@ -238,10 +238,11 @@ const opfsForApp = (appId, beforeMutation = () => {}) =>
  * @param {(appId:string)=>void|Promise<void>} [deps.onManifestMutation]
  * @param {(ownerSessionId:string,record:any)=>Promise<string>} [deps.resolveOwnerRoot]
  * @param {ReturnType<typeof import('/peerd-engine/repository.js').createRepositoryService>} deps.repositories
+ * @param {Pick<typeof import('/peerd-egress/background.js').idb, 'del'>} [deps.idb]
  */
 export const createAppClient = ({
   registry, tracker, beforeOpfsMutation = () => {}, onManifestMutation = () => {},
-  resolveOwnerRoot = async (ownerSessionId) => ownerSessionId, repositories,
+  resolveOwnerRoot = async (ownerSessionId) => ownerSessionId, repositories, idb,
   opfsForApp: openAppOpfs = opfsForApp,
 }) => {
   if (typeof repositories?.coordinate !== 'function') {
@@ -991,6 +992,8 @@ export const createAppClient = ({
       // claim deletion while either durable byte root remains.
       await repositories?.destroyApp?.(appId);
       await guardedOpfsForApp(appId).nuke();
+      // why: Signed seed bytes must leave with their App.
+      await idb?.del('apps', `dweb-seed:${appId}`);
       await registry.delete(appId);
     });
     return true;

@@ -18,11 +18,16 @@ import { packBundle, unpackBundle } from '/shared/bundle/bundle.js';
 import { buildManifest, manifestHash, verifyManifestChunks } from '/shared/bundle/manifest.js';
 import { utf8, toBase64, fromBase64, base64ByteLength, concat } from '/shared/bundle/bytes.js';
 import { CHUNK_SIZE } from '/shared/bundle/chunk.js';
+import { appRuntimeFromFiles, assertAppRuntime, assertAppRuntimeAgreement } from '/shared/app-runtime.js';
 import {
   ArtifactTooLargeError,
   EnvelopeFormatError,
   EnvelopeIntegrityError,
 } from './errors.js';
+
+// why: Seed decoding uses this existing bounded, cancellable codec realm; the
+// authority kernel never imports compression or bundle implementations.
+export { decodeAppSeedHandoff } from '/shared/app-seed-handoff.js';
 
 export const EXPORT_FORMAT = 'peerd-bundle';
 export const EXPORT_VERSION = 1;
@@ -107,16 +112,20 @@ const packEnvelope = async ({ payload, kind, entry, meta }) => {
  *                     fileKinds?: Record<string, 'text' | 'binary'> },
  *           files: Record<string, string | Uint8Array> }} args
  */
-export const buildAppExport = async ({ record, files }) => packEnvelope({
-  payload: packBundle({
+export const buildAppExport = async ({ record, files }) => {
+  const runtime = appRuntimeFromFiles(files);
+  return packEnvelope({
+    payload: packBundle({
+      entry: record.entryFile,
+      files: toByteFiles(files),
+      fileKinds: record.fileKinds,
+    }),
+    kind: 'app',
     entry: record.entryFile,
-    files: toByteFiles(files),
-    fileKinds: record.fileKinds,
-  }),
-  kind: 'app',
-  entry: record.entryFile,
-  meta: { kind: 'app', name: record.name, tags: record.tags ?? [] },
-});
+    meta: { kind: 'app', name: record.name, tags: record.tags ?? [],
+      ...(runtime ? { runtime } : {}) },
+  });
+};
 
 /**
  * Notebook → envelope. `files` is the OPFS tree under
@@ -257,6 +266,11 @@ export const openEnvelope = async (envelope) => {
     unpacked = unpackBundle(concat(...chunks));
   } catch {
     throw new EnvelopeFormatError('payload is not a peerd bundle');
+  }
+
+  if (kind === 'app') {
+    assertAppRuntime(meta.runtime);
+    assertAppRuntimeAgreement(meta.runtime, appRuntimeFromFiles(unpacked.files));
   }
 
   const name = typeof meta.name === 'string' && meta.name ? meta.name : `imported-${kind}`;

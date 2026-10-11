@@ -1,4 +1,5 @@
 // @ts-check
+import { normalizeAppRuntime, appRuntimeVerdict } from '/shared/app-runtime.js';
 // Bind an install to the discovery card the local host actually heard.
 
 /**
@@ -35,6 +36,8 @@ export const discoveredAppFromRow = (row) => hasConsistentVersionAddress(row) ? 
   name: row.name,
   description: row.description ?? '',
   size: row.head.size,
+  ...(row.head.runtime !== undefined ? { runtime: normalizeAppRuntime(row.head.runtime) } : {}),
+  runtimeCompatibility: appRuntimeVerdict(row.head.runtime),
   includes_wasm: typeof row.head.includes_wasm === 'boolean' ? row.head.includes_wasm : null,
   uri: row.head.content_addr,
   version_id: row.head.version_id,
@@ -48,7 +51,7 @@ export const discoveredAppFromRow = (row) => hasConsistentVersionAddress(row) ? 
 /**
  * @param {any[]} rows
  * @param {unknown} uri
- * @returns {{ dwappId: string, slug: string, seq: number, publisher: string | null } | null}
+ * @returns {{ dwappId: string, slug: string, seq: number, publisher: string | null, runtime?: import('/shared/app-runtime-contract.js').AppRuntime } | null}
  */
 export const identityForDiscoveredUri = (rows, uri) => {
   if (typeof uri !== 'string') return null;
@@ -64,6 +67,7 @@ export const identityForDiscoveredUri = (rows, uri) => {
     slug: row.slug,
     seq: row.seq,
     publisher: typeof row.publisher === 'string' ? row.publisher : null,
+    ...(row.head.runtime !== undefined ? { runtime: normalizeAppRuntime(row.head.runtime) } : {}),
   }));
   if (!matches.length) return null;
   const first = matches[0];
@@ -72,6 +76,7 @@ export const identityForDiscoveredUri = (rows, uri) => {
     && candidate.slug === first.slug
     && candidate.seq === first.seq
     && candidate.publisher === first.publisher
+    && JSON.stringify(candidate.runtime) === JSON.stringify(first.runtime)
   )) ? first : null;
 };
 
@@ -80,7 +85,7 @@ export const identityForDiscoveredUri = (rows, uri) => {
  * Omitted expectations are not checked, which lets first install bind only the
  * manifest while update binds all three identities.
  *
- * @param {{ dwappId: string, publisher: string | null } | null} identity
+ * @param {{ dwappId: string, publisher: string | null, runtime?: import('/shared/app-runtime-contract.js').AppRuntime } | null} identity
  * @param {{ expectedDwappId?: unknown, expectedPublisher?: unknown,
  *   manifestPublisher?: unknown }} [expected]
  * @returns {string | null}

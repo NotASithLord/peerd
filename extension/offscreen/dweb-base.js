@@ -25,6 +25,8 @@ import {
   identityForDiscoveredUri,
 } from '/offscreen/install-card-identity.js';
 import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
+import { MAX_NETWORK_BUNDLE_BYTES } from '/shared/bundle/bundle.js';
+import { appSeedHandoff } from '/shared/app-seed-handoff.js';
 import { publishFailureError, runPublishTransaction } from '/shared/publish-transaction.js';
 import { createSelfDeviceHost } from '/offscreen/dweb-self.js';
 import { createAppRoomLiveness } from '/offscreen/app-room-liveness.js';
@@ -90,22 +92,12 @@ const reseedNotifier = createDwebReseedNotifier({
 const contentOwnership = createContentOwnership();
 const shareRollbacks = createShareRollbackStore();
 /** @type {ReturnType<typeof setInterval> | null} */
-let resubTimer = null; // periodic re-subscribe — self-heals a missed onPeer SUB
+let policyTimer = null;
 
 // A publisher-chosen, stable app slug from the app name (the dwapp_id is
 // H(publisher‖slug), so the slug only needs to be stable + ≤64 chars).
 /** @param {unknown} name */
 const slugify = (name) => (String(name || 'app').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'app');
-/** Runtime messaging uses JSON serialization, so raw typed arrays need an envelope. */
-const jsonSafeFiles = (/** @type {Record<string, Uint8Array>} */ files) => {
-  /** @type {Record<string, { base64: string, kind: 'auto' }>} */
-  const encoded = Object.create(null);
-  for (const [path, bytes] of Object.entries(files)) {
-    encoded[path] = { base64: toBase64(bytes), kind: 'auto' };
-  }
-  return encoded;
-};
-
 /** @param {string} ownerId @param {string} hash */
 const trackServedHash = (ownerId, hash) => contentOwnership.acquire(ownerId, hash);
 
@@ -398,15 +390,7 @@ const baseLifecycle = makeStartStopBarrier({
     startNotifications(candidate);
     // Late joiners discover through the sovereign subscription plane.
     candidate.base.onDwappAnnounce((/** @type {any} */ a) => log('discovery card:', a?.dwapp_id?.slice(0, 12), `from …${String(a?.publisher).slice(-8)}`));
-    // Self-heal discovery if the initial subscription races WebRTC readiness.
-    if (!resubTimer) {
-      resubTimer = setInterval(() => {
-        const current = handle;
-        void refreshPeerPolicy().then(() => {
-          if (handle === current) return current?.base?.discovery?.subscribeAll();
-        }).catch(() => {});
-      }, 12_000);
-    }
+    if (!policyTimer) policyTimer = setInterval(() => { refreshPeerPolicy().catch(() => {}); }, 12_000);
     // Same-user device discovery rides the mesh that just came up. It stays
     // INERT on an install that has not been enrolled into a person's device
     // set, so this is safe to attempt unconditionally.
@@ -433,7 +417,7 @@ const baseLifecycle = makeStartStopBarrier({
     roomLiveness.clear();
     contentOwnership.clear();
     shareRollbacks.clear();
-    if (resubTimer) { clearInterval(resubTimer); resubTimer = null; }
+    if (policyTimer) { clearInterval(policyTimer); policyTimer = null; }
     handle = null;
     log('base network stopped');
   },
@@ -797,6 +781,7 @@ const handleRoomOpUnlocked = async (msg, current = () => true) => {
     const h = await start();
     const { manifest, payload } = await h.base.fetchApp(msg.uri);
     const client = /** @type {any} */ (await loadDweb());
+    const prepared = await client.prepareAppBundle({ uri: msg.uri, manifest, payload, name: msg.name });
     // why: Seed first so deletion can revoke bytes as soon as the App is visible.
     const appId = mintAppId();
     const ownerId = appContentOwner(appId, 'seed');
@@ -805,17 +790,15 @@ const handleRoomOpUnlocked = async (msg, current = () => true) => {
         const hash = await h.base.seedApp({ manifest, payload });
         return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
       },
-      announce: () => client.installAppBundle({
-        uri: msg.uri, manifest, payload, name: msg.name,
-        install: async (/** @type {any} */ a) => {
-          const r = await swEffectCall('dweb/app-install', {
-            appId, ...a, files: jsonSafeFiles(a.files),
-            publicationGeneration: msg.publicationGeneration,
-          });
-          if (!r?.ok) throw publishFailureError(r, 'install failed');
-          return { app: r.app, warning: r.warning };
-        },
-      }),
+      announce: async () => {
+        const a = prepared;
+        const r = await swEffectCall('dweb/app-install', {
+          appId, ...appSeedHandoff(a, manifest, payload),
+          publicationGeneration: msg.publicationGeneration,
+        });
+        if (!r?.ok) throw publishFailureError(r, 'install failed');
+        return { app: r.app, warning: r.warning };
+      },
       rollback: ({ hash, ownershipAdded }) => {
         if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
       },
@@ -978,7 +961,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
                 const summary = client.immutableAppSummary(verified);
                 const a = verified.app;
                 const result = await swEffectCall('dweb/app-install', {
-                  appId, ...a, name: summary.name ?? a.name, files: jsonSafeFiles(a.files),
+                  appId, ...appSeedHandoff(a, verified.manifest, verified.payload), name: summary.name ?? a.name,
                   publicationGeneration: msg.publicationGeneration,
                 });
                 if (!result?.ok) throw publishFailureError(result, 'install failed');
@@ -1077,6 +1060,49 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
           );
           if (!reseedCurrent()) {
             sendResponse({ ok: false, error: 'dweb-generation-retired' });
+            return;
+          }
+          if (reseed && msg.seedBundle) {
+            // why: Edited App files cannot reproduce the original signed bytes.
+            const client = /** @type {any} */ (await loadDweb());
+            const { manifest, payload: encodedPayload } = msg.seedBundle;
+            if (typeof encodedPayload !== 'string'
+                || encodedPayload.length > 4 * Math.ceil(MAX_NETWORK_BUNDLE_BYTES / 3)
+                || base64ByteLength(encodedPayload) > MAX_NETWORK_BUNDLE_BYTES) {
+              throw new Error('dweb-seed-payload-invalid');
+            }
+            const payload = fromBase64(encodedPayload);
+            const verified = await client.installAppBundle({
+              uri: msg.seedUri, expectedPublisher: msg.seedPublisher,
+              manifest, payload,
+              install: async (/** @type {any} */ app) => app,
+            });
+            if (verified.dweb.hash !== msg.expectedHash) {
+              throw new Error('dweb-seed-hash-mismatch');
+            }
+            const stableOwnerId = appContentOwner(msg.appId, 'seed');
+            const ownerId = `${stableOwnerId}:reseed:${reseedAttemptId}`;
+            const rollback = (/** @type {{hash:string,ownershipAdded:boolean}} */ published) => {
+              if (published.ownershipAdded) unserveTrackedHash(h, ownerId, published.hash);
+            };
+            await runDwebReseedPublication({
+              current: reseedCurrent,
+              publish: async () => {
+                const hash = await h.base.seedApp({ manifest, payload });
+                return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
+              },
+              // why: Only the original publisher can sign a discovery card.
+              announce: async () => null,
+              rollbackBytes: rollback,
+              compensate: rollback,
+              commit: (published) => {
+                if (published.ownershipAdded
+                    && !contentOwnership.transfer(ownerId, stableOwnerId, published.hash)) {
+                  throw new Error('dweb-reseed-ownership-transfer-failed');
+                }
+              },
+            });
+            sendResponse({ ok: true, hash: verified.dweb.hash, uri: msg.seedUri });
             return;
           }
           // The UI passes an edited namespace on FIRST share (and the stored slug on
@@ -1289,7 +1315,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
             });
             return;
           }
-          const { manifest, payload } = await h.base.fetchApp(msg.uri);
+          const { manifest, payload } = await h.base.fetchApp(msg.uri, { expectedRuntime: { value: identity?.runtime } });
           const publisherError = discoveredIdentityError(identity, {
             manifestPublisher: manifest.publisher,
           });
@@ -1300,6 +1326,8 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
             return;
           }
           const client = /** @type {any} */ (await loadDweb());
+          const prepared = await client.prepareAppBundle({ uri: msg.uri, manifest, payload, name: msg.name,
+            dwappId: identity?.dwappId ?? null, slug: identity?.slug ?? null, seq: identity?.seq ?? null });
           const appId = mintAppId();
           const ownerId = appContentOwner(appId, 'seed');
           const { announced: installed } = await runPublishTransaction({
@@ -1307,20 +1335,15 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
               const hash = await h.base.seedApp({ manifest, payload });
               return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
             },
-            announce: () => client.installAppBundle({
-              uri: msg.uri, manifest, payload, name: msg.name,
-              // The version identity from the card the user installed from lets the
-              // Library later detect a newer announce for this same dwapp_id.
-              dwappId: identity.dwappId, slug: identity.slug, seq: identity.seq,
-              install: async (/** @type {any} */ a) => {
-                const r = await swEffectCall('dweb/app-install', {
-                  appId, ...a, files: jsonSafeFiles(a.files),
-                  publicationGeneration: msg.publicationGeneration,
-                });
-                if (!r?.ok) throw publishFailureError(r, 'install failed');
-                return { app: r.app, warning: r.warning };
-              },
-            }),
+            announce: async () => {
+              const a = prepared;
+              const r = await swEffectCall('dweb/app-install', {
+                appId, ...appSeedHandoff(a, manifest, payload),
+                publicationGeneration: msg.publicationGeneration,
+              });
+              if (!r?.ok) throw publishFailureError(r, 'install failed');
+              return { app: r.app, warning: r.warning };
+            },
             rollback: ({ hash, ownershipAdded }) => {
               if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
             },
@@ -1345,7 +1368,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
             sendResponse({ ok: false, error: streamError, outcomeKind: 'pre-effect-failure' });
             return;
           }
-          const { manifest, payload } = await h.base.fetchApp(msg.uri);
+          const { manifest, payload } = await h.base.fetchApp(msg.uri, { expectedRuntime: { value: identity?.runtime } });
           const publisherError = discoveredIdentityError(identity, {
             manifestPublisher: manifest.publisher,
           });
@@ -1354,6 +1377,8 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
             return;
           }
           const client = /** @type {any} */ (await loadDweb());
+          const prepared = await client.prepareAppBundle({ uri: msg.uri, manifest, payload, name: msg.name,
+            dwappId: identity?.dwappId ?? null, slug: identity?.slug ?? null, seq: identity?.seq ?? null });
           const ownerId = appContentOwner(msg.appId, 'seed');
           /** @type {string[]} */
           let cleanupHashes = [];
@@ -1364,33 +1389,27 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
               const hash = await h.base.seedApp({ manifest, payload });
               return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
             },
-            announce: () => client.installAppBundle({
-              uri: msg.uri, manifest, payload, name: msg.name,
-              dwappId: identity?.dwappId ?? null,
-              slug: identity?.slug ?? null,
-              seq: identity?.seq ?? null,
-              install: async (/** @type {any} */ a) => {
-                const r = await swEffectCall('dweb/app-update', {
-                  appId: msg.appId,
-                  publicationGeneration: msg.publicationGeneration,
-                  ...(msg.strategy === 'replace' || msg.strategy === 'fork'
-                    ? { strategy: msg.strategy, conflictToken: msg.conflictToken }
-                    : {}),
-                  ...a,
-                  files: jsonSafeFiles(a.files),
-                });
-                if (!r?.ok) throw Object.assign(publishFailureError(r, 'update failed'), {
-                  conflictToken: r?.conflictToken,
-                  requiresAction: r?.requiresAction,
-                });
-                // Only the committed repository transition knows which old
-                // versions are no longer retained by the resulting App.
-                cleanupHashes = Array.isArray(r.cleanupHashes)
-                  ? [...new Set(r.cleanupHashes.filter((/** @type {unknown} */ hash) => typeof hash === 'string'))]
-                  : [];
-                return { app: r.app, warning: r.warning, fork: r.fork };
-              },
-            }),
+            announce: async () => {
+              const a = prepared;
+              const r = await swEffectCall('dweb/app-update', {
+                appId: msg.appId,
+                publicationGeneration: msg.publicationGeneration,
+                ...(msg.strategy === 'replace' || msg.strategy === 'fork'
+                  ? { strategy: msg.strategy, conflictToken: msg.conflictToken }
+                  : {}),
+                ...appSeedHandoff(a, manifest, payload),
+              });
+              if (!r?.ok) throw Object.assign(publishFailureError(r, 'update failed'), {
+                conflictToken: r?.conflictToken,
+                requiresAction: r?.requiresAction,
+              });
+              // Only the committed repository transition knows which old
+              // versions are no longer retained by the resulting App.
+              cleanupHashes = Array.isArray(r.cleanupHashes)
+                ? [...new Set(r.cleanupHashes.filter((/** @type {unknown} */ hash) => typeof hash === 'string'))]
+                : [];
+              return { app: r.app, warning: r.warning, fork: r.fork };
+            },
             rollback: ({ hash, ownershipAdded }) => {
               if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
             },

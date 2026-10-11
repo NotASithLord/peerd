@@ -1,6 +1,7 @@
 // @ts-check
 import { immutableAppRoot } from '/shared/address/immutable-app-root.js';
 import { prepareAppBundle } from './loader.js';
+import { normalizeAppRuntime, appRuntimeVerdict } from '/shared/app-runtime.js';
 
 /**
  * Fetch and validate a root address without publishing or installing it.
@@ -19,6 +20,8 @@ export const immutableAppSummary = ({ target, manifest, app }) => ({
   // why: display only signed metadata, never a caller-supplied discovery label.
   name: typeof manifest.meta?.name === 'string' && manifest.meta?.name.trim() ? manifest.meta?.name.slice(0, 200) : null,
   type: 'app',
+  runtime: normalizeAppRuntime(manifest.meta?.runtime),
+  runtimeCompatibility: appRuntimeVerdict(manifest.meta?.runtime),
   entryFile: app.entryFile,
   decodedBytes: Object.values(app.files).reduce((sum, bytes) => sum + bytes.byteLength, 0),
   fileCount: Object.keys(app.files).length,

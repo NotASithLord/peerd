@@ -67,6 +67,10 @@ const generate = () => {
       maxBuffer: 20 * 1024 * 1024,
     });
     if (run.status !== 0) {
+      // Preserve the runner's assertion/timeout details. The summary below is
+      // useful for navigation, but names alone cannot diagnose a failed gate.
+      if (run.stdout) console.error(run.stdout);
+      if (run.stderr) console.error(run.stderr);
       try {
         const report = readFileSync(junitPath, 'utf8');
         const totals = parseFunctionalTestReport(report);

@@ -46,3 +46,19 @@ export const exploreOrder = (apps, { query = '', wasm = 'all', seed = 0 } = {}) 
   }
   return ordered;
 };
+
+export const SURPRISE_HISTORY_LIMIT = 512;
+/** @param {{dwapp_id?:string,version_id?:string,uri?:string}} app */
+export const suggestionKey = (app) => JSON.stringify([app.dwapp_id, app.version_id ?? app.uri ?? null]);
+/** Candidates are already locally filtered and publisher-balanced. No network
+ * availability is inferred. History resets only through an explicit action.
+ * @template {{dwapp_id?:string,version_id?:string,uri?:string,publisher?:string,runtimeCompatibility?:{status:string}}} T
+ * @param {T[]} apps @param {Set<string>} seen @param {string|null} lastPublisher
+ * @returns {T|null}
+ */
+export const nextSuggestion = (apps, seen, lastPublisher) => {
+  if (seen.size >= SURPRISE_HISTORY_LIMIT) return null;
+  const eligible = apps.filter(app => app.dwapp_id && app.runtimeCompatibility?.status !== 'unsupported'
+    && !seen.has(suggestionKey(app)));
+  return eligible.find(app => (app.publisher ?? null) !== lastPublisher) ?? eligible[0] ?? null;
+};

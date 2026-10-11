@@ -562,6 +562,7 @@ describe('App storage binary contract', () => {
 
 /** @returns {Promise<any>} */
 const runDirectRunner = () => new Promise((resolve, reject) => {
+  /** @type {string[]} */ let runtimeFeatures = [];
   const iframe = document.createElement('iframe');
   iframe.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px';
   /** @type {MessagePort | null} */
@@ -599,7 +600,7 @@ const runDirectRunner = () => new Promise((resolve, reject) => {
       reject(new Error(event.data.error));
     } else if (event.data?.type === 'runner-binary-result') {
       cleanup();
-      resolve(event.data);
+      resolve({ ...event.data, runtimeFeatures });
     }
   };
   window.addEventListener('message', onMessage);
@@ -608,6 +609,7 @@ const runDirectRunner = () => new Promise((resolve, reject) => {
     runnerPort = channel.port1;
     runnerPort.addEventListener('message', (event) => {
       if (event.data?.type !== 'runner-ready') return;
+      runtimeFeatures = event.data.runtimeFeatures;
       const asset = new Uint8Array(BINARY_TRIPWIRE).buffer;
       const wasm = new Uint8Array(VALID_EMPTY_WASM).buffer;
       runnerPort?.postMessage({
@@ -693,6 +695,7 @@ describe('App runner binary assets', () => {
     expect(result.missing).toBe(null);
     expect(result.list).toEqual(['asset.bin', 'empty.wasm']);
     expect(result.exports).toEqual([]);
+    expect(result.runtimeFeatures).toEqual(['wasm-core']);
   });
 });
 

@@ -18,6 +18,10 @@ import {
   artifactChannelRequestAllowed,
 } from '../../extension/shared/artifact-channel.js';
 import * as artifactCodec from '../../extension/peerd-engine/export.js';
+import { appSeedHandoff } from '../../extension/shared/app-seed-handoff.js';
+import { packTransportBundle } from '../../extension/shared/bundle/transport.js';
+import { buildManifest } from '../../extension/peerd-distributed/content/manifest.js';
+import { generateIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
 
 const supervisorSource = readFileSync(
   join(EXTENSION_DIR, 'offscreen/supervisor-channels.js'), 'utf8',
@@ -49,6 +53,20 @@ const ids = (prefix: string) => {
 };
 
 describe('demand-only artifact codec channel', () => {
+  test('seed decoding uses the private codec channel and preserves verified executable files', async () => {
+    const client: any = makeArtifactEngineClient({
+      offscreen: true, offscreenUrl, withHost: (operation) => operation(),
+      listWindowClients: async () => [target], newId: ids('artifact-seed'),
+    });
+    const files = { 'index.html': new TextEncoder().encode('<h1>Signed peer App</h1>') };
+    const { payload, descriptor } = await packTransportBundle({ entry: 'index.html', files });
+    const { manifest, hash } = await buildManifest({ payload, bundle: descriptor, identity: await generateIdentity() });
+    const { seedBundle } = appSeedHandoff({}, manifest, payload);
+    const dweb = { hash, publisher: manifest.publisher };
+    expect(await client.decodeAppSeedHandoff(seedBundle, dweb)).toMatchObject({ entryFile: 'index.html', files });
+    await expect(client.decodeAppSeedHandoff(seedBundle, { ...dweb, hash: '0'.repeat(64) }))
+      .rejects.toThrow('dweb-seed-hash-mismatch');
+  });
   test('preserves multi-MiB binary App bytes through the exact private channel', async () => {
     let leaseDepth = 0;
     const client: any = makeArtifactEngineClient({

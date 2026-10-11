@@ -22,21 +22,21 @@ export const OFFSCREEN_FEATURE_LEASE_SCOPES = Object.freeze([
 ]);
 
 const LOCAL_MODEL_METHODS = new Set(['status', 'catalog', 'probe', 'init', 'generate']);
+const APP_FILE_METHODS = new Set(['appRead', 'appList', 'appInspect', 'appWrite', 'appDelete']);
+const NETWORK_METHODS = new Set(['fetch', 'push', 'clone']);
 export const REPOSITORY_METHODS = Object.freeze([
   'init', 'stage', 'commit', 'status', 'branches', 'history', 'diff', 'restore',
-  'branch', 'checkout', 'setRemote', 'getRemote', 'fetch', 'push', 'clone',
-  'snapshot', 'workingSnapshot', 'matches', 'fork', 'replaceWorkingTree', 'destroy',
-  'appRead', 'appList', 'appInspect', 'appWrite', 'appDelete',
+  'branch', 'checkout', 'setRemote', 'getRemote', ...NETWORK_METHODS,
+  'snapshot', 'workingSnapshot', 'matches', 'fork', 'replaceWorkingTree', 'rollbackWorkingTree', 'destroy',
+  ...APP_FILE_METHODS,
 ]);
 const METHODS = new Set(REPOSITORY_METHODS);
 const MUTATING_METHODS = new Set([
   'init', 'stage', 'commit', 'restore', 'branch', 'checkout', 'setRemote',
-  'fetch', 'push', 'clone', 'fork', 'replaceWorkingTree', 'destroy',
+  ...NETWORK_METHODS, 'fork', 'replaceWorkingTree', 'rollbackWorkingTree', 'destroy',
   'matches',
   'appWrite', 'appDelete',
 ]);
-const NETWORK_METHODS = new Set(['fetch', 'push', 'clone']);
-const APP_FILE_METHODS = new Set(['appRead', 'appList', 'appInspect', 'appWrite', 'appDelete']);
 const OFFER_KEYS = 'args\nchannelId\nlease\nmethod\nprotocol\ntype';
 const safeId = (/** @type {unknown} */ value, /** @type {number} */ max = 256) =>
   typeof value === 'string' && value.length >= 8 && value.length <= max

@@ -82,6 +82,22 @@ describe('the dweb app store (base-network content + discovery)', () => {
     base.close();
   });
 
+  test('a self-publisher can recover unshared bytes from another seeder', async () => {
+    const { a, b, ia } = await linkedPair();
+    try {
+      const { uri, hash } = await a.publishApp({
+        name: 'recover', entry: 'index.html', files: { 'index.html': '<h1>recover</h1>' },
+      });
+      await b.seedApp(await b.fetchApp(uri));
+      expect(a.unserveContent(hash)).toBe(true);
+      const recovered = await a.fetchApp(uri);
+      expect(recovered.manifest.publisher).toBe(ia.did);
+      expect(new TextDecoder().decode(
+        (await unpackTransportBundle(recovered)).files['index.html'],
+      )).toBe('<h1>recover</h1>');
+    } finally { a.close(); b.close(); }
+  });
+
   test('publish on one node, fetch + verify the signed bundle on a linked peer', async () => {
     const { a, b, ia } = await linkedPair();
     const { uri, hash } = await a.publishApp({

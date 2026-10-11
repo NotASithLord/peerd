@@ -1,4 +1,4 @@
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, spyOn } from 'bun:test';
 import { generateIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
 import { swarmFetch } from '../../extension/peerd-distributed/content/swarm.js';
 import { createContentResponder, createChannelClient, fetchBundle } from '../../extension/peerd-distributed/content/transfer.js';
@@ -135,7 +135,7 @@ describe('content transfer ownership and failover', () => {
     } finally { reading.close(); serving.close(); }
   });
 
-  test('silent manifest candidates do not delay a healthy provider or disable their chunk service', async () => {
+  test('manifest-silent partial providers remain fallback chunk sources', async () => {
     const publisher = await generateIdentity();
     const store = createContentStore();
     const { uri } = await publishInto(store, publisher, { 'index.html': 'healthy' });
@@ -150,7 +150,8 @@ describe('content transfer ownership and failover', () => {
       },
       setHandler: (handler: any) => { silentHandler = handler; },
     };
-    const channels: Record<string, any> = { silent, healthy: providerChannel(store) };
+    const channels: Record<string, any> = { silent, healthy: providerChannel(store, (message) =>
+      message.t === 'CHUNK' ? { t: 'NOCHUNK', hash: message.hash } : message) };
     // The test deadline is shorter than the transfer timeout: serial selection
     // cannot complete, whereas the good manifest starts downloading at once.
     const result = await swarmFetch({ uri, providers: ['silent', 'healthy'], channelFor: (did) => channels[did], timeoutMs: 60_000 });
@@ -190,21 +191,21 @@ describe('content transfer ownership and failover', () => {
       const [a, b] = memoryPair();
       mesh.addLink(a, peer.did);
       const old = createChannelClient(mesh.contentChannel(peer.did)!, 60_000);
-      const manifest = old.manifest('manifest').catch((error: Error) => error);
-      const chunk = old.chunk('chunk').catch((error: Error) => error);
+      const manifest = old.manifest('a'.repeat(64)).catch((error: Error) => error);
+      const chunk = old.chunk('b'.repeat(64)).catch((error: Error) => error);
       const [c, d] = memoryPair();
       mesh.addLink(c, peer.did);
       expect(await manifest).toMatchObject({ message: 'content client closed' });
       expect(await chunk).toMatchObject({ message: 'content client closed' });
       const fresh = createChannelClient(mesh.contentChannel(peer.did)!, 60_000);
-      const pending = fresh.manifest('replacement').catch((error: Error) => error);
+      const pending = fresh.manifest('c'.repeat(64)).catch((error: Error) => error);
       old.close();
-      d.send({ t: 'NOMANIFEST', hash: 'replacement' });
+      d.send({ t: 'NOMANIFEST', hash: 'c'.repeat(64) });
       expect(await pending).toMatchObject({ t: 'NOMANIFEST' });
-      const disconnected = fresh.chunk('pending').catch((error: Error) => error);
+      const disconnected = fresh.chunk('d'.repeat(64)).catch((error: Error) => error);
       d.close();
       expect(await disconnected).toMatchObject({ message: 'content client closed' });
-      await expect(fresh.manifest('late')).rejects.toThrow('closed');
+      await expect(fresh.manifest('e'.repeat(64))).rejects.toThrow('closed');
       b.close();
     } finally { mesh.close(); }
   }, 2000);
@@ -305,4 +306,247 @@ test('verified transport contributions do not assert that app bytes are installa
     providers: ['peer'], channelFor: () => channel });
   expect(result.verifiedContributors).toEqual(['peer']);
   expect(() => unpackBundle(result.payload)).toThrow();
+});
+
+
+test('unrelated silent neighbors never receive chunks ahead of a qualified holder', async () => {
+  const identity = await generateIdentity();
+  const store = createContentStore();
+  const { uri } = await publishInto(store, identity, { 'index.html': 'available immediately' });
+  let requests = 0; let handler: any;
+  const silent = { send: (message: any) => { if (message.t === 'CHUNK_REQ') requests++; }, setHandler: (h: any) => { handler = h; } };
+  const channels: Record<string, any> = { silent, healthy: providerChannel(store) };
+  const result = await swarmFetch({ uri, providers: ['silent', 'healthy'], channelFor: (did) => channels[did], timeoutMs: 60_000 });
+  expect(result.verifiedContributors).toEqual(['healthy']);
+  expect(requests).toBe(0);
+  expect(handler).toBeNull();
+}, 2000);
+
+test('a qualified seeder completes useful work while publisher requests remain pending', async () => {
+  const identity = await generateIdentity();
+  const store = createContentStore();
+  const { uri } = await publishInto(store, identity, {
+    'index.html': ['a', 'b', 'c', 'd', 'e', 'f'].map(letter => letter.repeat(262_144)).join(''),
+  });
+  const respond = createContentResponder({ store });
+  const handlers: Record<string, any> = {};
+  const pendingPublisher: Array<() => void> = [];
+  const publisherBusy = Promise.withResolvers<void>();
+  const seederQualified = Promise.withResolvers<void>();
+  const seederServed = Promise.withResolvers<void>();
+  let releaseManifest: (() => void) | undefined;
+  let holdPublisher = true;
+  const channels = Object.fromEntries(['publisher', 'silent', 'seeder', 'hold', 'marker'].map(did => [did, {
+    setHandler: (handler: any) => { handlers[did] = handler; },
+    send: (request: any) => {
+      // Publisher qualification advances its probe worker into 'hold'. Only
+      // the seeder can advance into 'marker', after completing verification.
+      if (did === 'marker') { seederQualified.resolve(); return; }
+      if (did === 'silent' || did === 'hold') return;
+      if (did === 'seeder' && request.t === 'MANIFEST_REQ') {
+        releaseManifest = () => { void respond(request, message => handlers[did]?.(message)); };
+        return;
+      }
+      const serve = () => { void respond(request, message => handlers[did]?.(message)); };
+      if (did === 'publisher' && request.t === 'CHUNK_REQ' && holdPublisher) {
+        pendingPublisher.push(serve);
+        if (pendingPublisher.length === 3) publisherBusy.resolve();
+      } else {
+        serve();
+        if (did === 'seeder' && request.t === 'CHUNK_REQ') seederServed.resolve();
+      }
+    },
+  }]));
+  let verifiedChunks = 0;
+  const seederVerified = Promise.withResolvers<void>();
+  const result = swarmFetch({ uri, providers: Object.keys(channels), channelFor: did => channels[did], timeoutMs: 60_000,
+    onProgress: progress => {
+      // Exactly one publisher response is released before this checkpoint;
+      // a second verified chunk therefore came from the seeder.
+      if (progress.phase === 'chunk' && ++verifiedChunks === 2) seederVerified.resolve();
+    },
+  });
+  await publisherBusy.promise;
+  expect(releaseManifest).toBeDefined();
+  releaseManifest!();
+  await seederQualified.promise;
+  pendingPublisher.shift()!();
+  await seederServed.promise;
+  await seederVerified.promise;
+  expect(pendingPublisher).toHaveLength(2);
+  holdPublisher = false;
+  for (const serve of pendingPublisher) serve();
+  expect((await result).verifiedContributors.sort()).toEqual(['publisher', 'seeder']);
+  expect(Object.values(handlers).every(handler => handler === null)).toBe(true);
+}, 2000);
+
+test('a late manifest from a blocked candidate cannot authorize chunk work', async () => {
+  const identity = await generateIdentity();
+  const store = createContentStore();
+  const { uri } = await publishInto(store, identity, { 'index.html': 'safe' });
+  let blocked = false; let forbiddenChunks = 0;
+  const bad = providerChannel(store, (message) => {
+    if (message.t === 'MANIFEST') blocked = true;
+    if (message.t === 'CHUNK') forbiddenChunks++;
+    return message;
+  });
+  const channels: Record<string, any> = { bad, healthy: providerChannel(store) };
+  const result = await swarmFetch({ uri, providers: ['bad', 'healthy'], channelFor: (did) => channels[did], isAllowed: (did) => did !== 'bad' || !blocked });
+  expect(result.verifiedContributors).toEqual(['healthy']);
+  expect(forbiddenChunks).toBe(0);
+});
+
+
+test('a publisher-qualified address rejects a different signer before fetching chunks', async () => {
+  const identity = await generateIdentity();
+  const other = await generateIdentity();
+  const store = createContentStore();
+  const { hash } = await publishInto(store, identity, { 'index.html': 'wrong identity' });
+  let chunks = 0;
+  const channel = providerChannel(store, (message) => { if (message.t === 'CHUNK') chunks++; return message; });
+  const uri = formatPeerdUri({ did: other.did, hash });
+  await expect(swarmFetch({ uri, providers: ['source'], channelFor: () => channel })).rejects.toThrow('no reachable provider');
+  expect(chunks).toBe(0);
+});
+
+
+test('overlapping probes and downloads have separate bounded pools and detach on completion', async () => {
+  const identity = await generateIdentity();
+  const store = createContentStore();
+  const { uri } = await publishInto(store, identity, { 'index.html': 'a'.repeat(300_000), 'other': 'b'.repeat(900_000) });
+  const respond = createContentResponder({ store });
+  let manifests = 0; let chunks = 0; let maxTotal = 0; let maxChunks = 0;
+  let holdChunks = true;
+  const pending: Array<() => void> = [];
+  const handlers: Record<string, any> = {};
+  const channels = Object.fromEntries(['source', 'silent1', 'silent2', 'unused'].map((did) => [did, {
+    setHandler: (handler: any) => { handlers[did] = handler; },
+    send: (request: any) => {
+      if (request.t === 'MANIFEST_REQ') {
+        manifests++;
+        maxTotal = Math.max(maxTotal, manifests + chunks);
+        expect(manifests).toBeLessThanOrEqual(3);
+        if (did === 'source') respond(request, (message) => { manifests--; handlers[did]?.(message); });
+        return;
+      }
+      chunks++;
+      maxChunks = Math.max(maxChunks, chunks);
+      maxTotal = Math.max(maxTotal, manifests + chunks);
+      expect(chunks).toBeLessThanOrEqual(3);
+      const serve = () => {
+        respond(request, (message) => handlers[did]?.(message));
+        chunks--;
+      };
+      if (holdChunks) pending.push(serve); else serve();
+    },
+  }]));
+  const result = swarmFetch({ uri, providers: Object.keys(channels), channelFor: (did) => channels[did], timeoutMs: 60_000 });
+  while (pending.length < 3) await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(maxChunks).toBe(3);
+  expect(maxTotal).toBeGreaterThan(3);
+  expect(maxTotal).toBeLessThanOrEqual(6);
+  holdChunks = false;
+  for (const serve of pending) serve();
+  await result;
+  expect(Object.values(handlers).every((handler) => handler === null)).toBe(true);
+});
+
+test('a newly qualified seeder is preferred over silent fallback after a delayed miss', async () => {
+  const identity = await generateIdentity();
+  const store = createContentStore();
+  const { uri } = await publishInto(store, identity, { 'index.html': 'available' });
+  const respond = createContentResponder({ store });
+  const handlers: Record<string, any> = {};
+  let releaseManifest: (() => void) | undefined;
+  let releaseMiss: (() => void) | undefined;
+  let silentChunks = 0;
+  const firstPending = Promise.withResolvers<void>();
+  const qualified = Promise.withResolvers<void>();
+  const channels = Object.fromEntries(['first', 'silent', 'late', 'hold', 'marker'].map((did) => [did, {
+    setHandler: (handler: any) => { handlers[did] = handler; },
+    send: (request: any) => {
+      if (did === 'marker') { qualified.resolve(); return; }
+      if (did === 'hold') return;
+      if (did === 'silent') { if (request.t === 'CHUNK_REQ') silentChunks++; return; }
+      if (did === 'late' && request.t === 'MANIFEST_REQ') {
+        releaseManifest = () => { respond(request, (message) => handlers[did]?.(message)); };
+        return;
+      }
+      if (did === 'first' && request.t === 'CHUNK_REQ') {
+        releaseMiss = () => handlers[did]?.({ t: 'NOCHUNK', hash: request.hash });
+        firstPending.resolve();
+        return;
+      }
+      return respond(request, (message) => handlers[did]?.(message));
+    },
+  }]));
+  const result = swarmFetch({ uri, providers: Object.keys(channels), channelFor: (did) => channels[did], timeoutMs: 60_000 });
+  await firstPending.promise;
+  expect(releaseManifest).toBeDefined();
+  releaseManifest!();
+  // The first probe worker is held at 'hold', and the second at 'silent'.
+  // Only the late seeder's completed qualification can dispatch 'marker'.
+  await qualified.promise;
+  releaseMiss!();
+  expect((await result).verifiedContributors).toEqual(['late']);
+  expect(silentChunks).toBe(0);
+}, 2000);
+
+
+test('a chunk finishing verification after sibling failure cannot publish progress or take more work', async () => {
+  const identity = await generateIdentity();
+  const signed = await buildManifest({
+    payload: utf8('a'.repeat(262_144) + 'b'.repeat(262_144) + 'tail'),
+    type: 'app', entry: 'index.html', identity,
+  });
+  const store = createContentStore();
+  store.publish(signed);
+  const respond = createContentResponder({ store });
+  const verifying = Promise.withResolvers<void>();
+  const releaseVerification = Promise.withResolvers<void>();
+  const digest = crypto.subtle.digest.bind(crypto.subtle);
+  // why: hold real hash verification across the sibling's rejection, rather
+  // than relying on crypto speed or delivering a reply to an already closed client.
+  const digestSpy = spyOn(crypto.subtle, 'digest').mockImplementation(async (algorithm, data) => {
+    const result = await digest(algorithm, data);
+    if (ArrayBuffer.isView(data) && data.byteLength === 262_144
+      && new Uint8Array(data.buffer, data.byteOffset, 1)[0] === 97) {
+      verifying.resolve();
+      await releaseVerification.promise;
+    }
+    return result;
+  });
+  let handler: any;
+  let chunkRequests = 0;
+  let chunkProgress = 0;
+  let rejectSibling: (() => void) | undefined;
+  try {
+    const result = swarmFetch({
+      uri: formatPeerdUri({ did: identity.did, hash: signed.hash }),
+      providers: ['source'], alpha: 2,
+      channelFor: () => ({
+        setHandler: (next) => { handler = next; },
+        send: (request) => {
+          if (request.t === 'CHUNK_REQ' && ++chunkRequests === 2) {
+            rejectSibling = () => handler?.({ t: 'NOCHUNK', hash: request.hash });
+            return;
+          }
+          return respond(request, (response) => handler?.(response));
+        },
+      }),
+      onProgress: (progress) => { if (progress.phase === 'chunk') chunkProgress++; },
+    });
+    await verifying.promise;
+    expect(rejectSibling).toBeDefined();
+    rejectSibling!();
+    await expect(result).rejects.toThrow('chunk unavailable on all providers');
+    expect(handler).toBeNull();
+    releaseVerification.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(chunkProgress).toBe(0);
+    expect(chunkRequests).toBe(2);
+  } finally {
+    releaseVerification.resolve();
+    digestSpy.mockRestore();
+  }
 });

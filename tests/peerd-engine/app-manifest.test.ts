@@ -55,3 +55,11 @@ describe('peerd.json App contract', () => {
     }))).toThrow('agent.instructions');
   });
 });
+
+test('the cold App authority parser preserves runtime prerequisites without granting permissions', () => {
+  const runtime = { schema: 1, target: 'browser-app', requires: ['wasm-core', 'future-feature'] };
+  const parsed = parseAppManifest(JSON.stringify({ ...buildAppManifest({ entry: 'index.html' }), runtime }));
+  expect(parsed.runtime).toEqual(runtime);
+  expect(parsed.capabilities).toEqual([]);
+  expect(parsed.agent).not.toHaveProperty('runtime');
+});

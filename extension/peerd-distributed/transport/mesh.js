@@ -34,6 +34,7 @@ import { buildEnvelope, signEnvelope, verifyEnvelope } from './envelope.js';
 import { establishedAdmission, TRANSFER_PROTECTION_MS, NEIGHBOR_GRACE_MS } from './neighbor-policy.js';
 import { createContentResponder, fetchBundle } from '../content/transfer.js';
 import { dlog } from '../log.js';
+import { createLocalCounters } from '../local-counters.js';
 
 // ch=0 control message types (PROTOCOL §3.4; 5–7 are the Phase 1 rows).
 export const CTRL = Object.freeze({
@@ -89,7 +90,7 @@ const QUEUED_PER_MESH = 128;
  *   serving: number,
  *   queued: number,
  *   verifying: number,
- *   contentHandlers: Set<(msg: any) => void>,
+ *   contentHandlers: Set<(msg: any) => boolean | void>,
  *   ctrl: { windowStart: number, count: number },
  *   abuse: { windowStart: number, count: number },
  *   info?: any,
@@ -131,9 +132,24 @@ export const createRoomMesh = ({
   ctrlRateLimit = 60,
   audit = null, // optional (type, detail) => void
 } = /** @type {{ roomId: string, identity: Identity }} */ ({})) => {
+  // Local send completion is not a remote delivery acknowledgment.
+  const traffic = Object.fromEntries(['gossip', 'discoveryItem', 'discoverySnapshot', 'discoveryControl',
+    'topicControl', 'contentRequest', 'contentResponse', 'other'].map(name =>
+    [name, createLocalCounters(['attempted', 'completed', 'failed'])]));
+  const broadcasts = createLocalCounters(['calls', 'destinations', 'maxDestinations']);
+  /** @param {any} frame */
+  const trafficFor = (frame) => {
+    if (CONTENT_REQ.has(frame?.t)) return traffic.contentRequest;
+    if (CONTENT_RESP.has(frame?.t)) return traffic.contentResponse;
+    if (frame?.ch === 4) return frame.typ === 0 ? traffic.gossip : traffic.topicControl;
+    if (frame?.ch === 5) return frame.typ === 2 ? traffic.discoveryItem
+      : frame.typ === 1 ? traffic.discoverySnapshot : traffic.discoveryControl;
+    return traffic.other;
+  };
   /** @type {Map<string, Link>} */
   const links = new Map(); // did -> { channel, lastSeen, ctrl: {windowStart, count}, offClose }
   let lastRotation = -Infinity;
+  let sparseRotation = sparse;
   /** @type {Set<(arg: any) => void>} */
   const peerCbs = new Set();
   /** @type {Set<(arg: any) => void>} */
@@ -211,7 +227,12 @@ export const createRoomMesh = ({
 
   /** @param {Link} link @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
   const sendOnLink = async (link, env, options = {}) => {
-    if (closed || links.get(link.did) !== link || options.signal?.aborted) throw new Error('mesh send cancelled or link closed');
+    const counts = trafficFor(env);
+    counts.add('attempted');
+    if (closed || links.get(link.did) !== link || options.signal?.aborted) {
+      counts.add('failed');
+      throw new Error('mesh send cancelled or link closed');
+    }
     const ac = new AbortController();
     const abort = () => ac.abort();
     link.retired.signal.addEventListener('abort', abort, { once: true });
@@ -219,6 +240,10 @@ export const createRoomMesh = ({
     try {
       await link.channel.send(env, { ...options, signal: ac.signal });
       if (closed || links.get(link.did) !== link || ac.signal.aborted) throw new Error('mesh link retired during send');
+      counts.add('completed');
+    } catch (error) {
+      counts.add('failed');
+      throw error;
     } finally {
       link.retired.signal.removeEventListener('abort', abort);
       options.signal?.removeEventListener('abort', abort);
@@ -228,7 +253,7 @@ export const createRoomMesh = ({
   /** @param {string} did @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
   const sendTo = async (did, env, options) => {
     const link = links.get(did);
-    if (!link) return false;
+    if (!link) { const counts = trafficFor(env); counts.add('attempted'); counts.add('failed'); return false; }
     try { await sendOnLink(link, env, options); return true; }
     catch {
       // Backpressure failure is a failed connection, never identity misconduct.
@@ -245,7 +270,7 @@ export const createRoomMesh = ({
     if (!link) return null;
     // why: concurrent downloads own separate handlers, scoped to this link
     // generation; finishing an old transfer must not detach a new one.
-    /** @type {((msg: any) => void) | null} */
+    /** @type {((msg: any) => boolean | void) | null} */
     let handler = null;
     return {
       /** @param {any} m @param {import('./outgoing.js').SendOptions} [options] */
@@ -260,7 +285,7 @@ export const createRoomMesh = ({
         if (closed || links.get(did) !== link) { cb(); return () => {}; }
         return link.channel.onClose(cb);
       },
-      /** @param {((msg: any) => void) | null} h */
+      /** @param {((msg: any) => boolean | void) | null} h */
       setHandler: (h) => {
         if (handler) link.contentHandlers.delete(handler);
         handler = h;
@@ -367,13 +392,24 @@ export const createRoomMesh = ({
       if (typeof msg.hash !== 'string' || !/^[0-9a-f]{64}$/.test(msg.hash)) {
         penalize(link, 'malformed-content-request'); return;
       }
+      // why: content rides the authenticated DTLS/SCTP link without a signed
+      // envelope. Valid transfer traffic is still peer activity; ignoring it
+      // lets the idle sweeper sever a healthy slow transfer.
+      link.lastSeen = now();
       link.serving++;
       try { await respondContent?.(msg, (out) => sendOnLink(link, out), link); }
       finally { link.serving--; }
       return;
     }
     if (typeof msg.t === 'string' && CONTENT_RESP.has(msg.t)) {
-      for (const handler of [...link.contentHandlers]) handler(msg);
+      if (typeof msg.hash !== 'string' || !/^[0-9a-f]{64}$/.test(msg.hash)) {
+        penalize(link, 'malformed-content-response'); return;
+      }
+      // A late reply after cancellation is ordinary, not abuse. Ignore it for
+      // liveness unless a current client accepts validated correlated progress.
+      let progress = false;
+      for (const handler of [...link.contentHandlers]) if (handler(msg) === true) progress = true;
+      if (progress && !closed && links.get(link.did) === link) link.lastSeen = now();
       return;
     }
     if (msg.__t === 'HELLO') return; // stale handshake frame
@@ -450,7 +486,12 @@ export const createRoomMesh = ({
     // Enabled only after the room owner observes a negotiated public profile.
     // Sticky for this room lifetime: reconnect fallback must not erase local
     // ownership/reservations while authenticated links survive the outage.
-    enableSparseAdmission: () => { sparse = true; },
+    enableSparseAdmission: () => { sparse = true; sparseRotation = true; },
+    // A rendezvous outage removes the only authoritative source of fresh
+    // candidates. Keep accepting into free slots, but never evict a healthy
+    // link for a replacement that may partition the remaining overlay.
+    /** @param {boolean} enabled */
+    setSparseRotation: (enabled) => { sparseRotation = sparse && !!enabled; },
     locallySelectedCount: () => [...links.values()].filter((link) => link.locallySelected).length,
 
     // Admit an AUTHENTICATED link (HELLO already done — did is proven).
@@ -484,6 +525,9 @@ export const createRoomMesh = ({
               protectedUntil: link.protectedUntil, busy };
           });
           decision = { evict: undefined, ...establishedAdmission({ peers, budget, locallySelected, now: time, lastRotation }) };
+          // why: a rendezvous outage freezes replacement, not local ownership.
+          // Unsolicited links must leave exploration slots available for repair.
+          if (!sparseRotation && decision.evict) decision = { allowed: false, evict: undefined };
         }
         if (!decision.allowed) {
           audit?.('peer_budget_refused', { did });
@@ -549,10 +593,15 @@ export const createRoomMesh = ({
     // Build-and-sign for upper layers (gossip), so the envelope shape and
     // signing stay in one place.
     sign,
+    stats: () => ({ peerDegree: links.size, broadcasts: broadcasts.snapshot(),
+      sends: Object.fromEntries(Object.entries(traffic).map(([name, counts]) => [name, counts.snapshot()])) }),
     send: sendTo,
     /** @param {any} env @param {string | null} [exceptDid] */
     async broadcast(env, exceptDid = null) {
-      await Promise.all([...links.keys()].filter((did) => did !== exceptDid).map((did) => sendTo(did, env)));
+      const destinations = [...links.keys()].filter((did) => did !== exceptDid);
+      broadcasts.add('calls'); broadcasts.add('destinations', destinations.length);
+      broadcasts.max('maxDestinations', destinations.length);
+      await Promise.all(destinations.map((did) => sendTo(did, env)));
     },
 
     // "Who do you see in this room?" — the server-optional roster.

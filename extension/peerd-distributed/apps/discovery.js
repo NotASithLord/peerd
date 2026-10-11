@@ -22,6 +22,7 @@
 // not re-forwarded — the same role the gossip seen-cache plays).
 
 import { verifyMeta, metaDwappId, metaWellFormed } from './meta.js';
+import { createLocalCounters } from '../local-counters.js';
 
 export const DISCOVERY = Object.freeze({ CH: 5, SUB: 0, SNAPSHOT: 1, ITEM: 2, UNSUB: 3 });
 
@@ -51,6 +52,11 @@ export const createDiscovery = ({
   mesh, identity, library, isBlocked = () => false, block = null, audit = null, now = Date.now, caps = {}, onCard = null,
   admitMeta = null, isEnabled = () => true,
 } = /** @type {{ mesh: any, identity: { did: string }, library: any }} */ ({})) => {
+  // Frames and known-version claims are work counters; only fresh counts newly
+  // verified, committed metadata. Destinations count attempted live forwarding.
+  const counts = createLocalCounters(['originals', 'fresh', 'known', 'invalid', 'rateLimited',
+    'forwardCalls', 'destinations', 'maxDestinations', 'snapshotRequestsReceived', 'snapshotFramesReceived',
+    'subscriptionsSent', 'reconcileCalls']);
   const relayPerMin = caps.relayPerMin ?? DEFAULTS.relayPerMin;
   const snapshotMax = caps.snapshotMax ?? DEFAULTS.snapshotMax;
   const snapshotsPerMin = caps.snapshotsPerMin ?? DEFAULTS.snapshotsPerMin;
@@ -117,8 +123,10 @@ export const createDiscovery = ({
     const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.ITEM, { item });
     // Subscriber membership is bounded by live mesh links. Launch separately
     // so one stalled link cannot hold every healthy subscriber behind it.
-    const results = await Promise.all([...subscribers].filter((did) => !closed && !isBlocked(did) && did !== exceptVia)
-      .map((did) => mesh.send(did, env)));
+    const destinations = [...subscribers].filter((did) => !closed && !isBlocked(did) && did !== exceptVia);
+    counts.add('forwardCalls'); counts.add('destinations', destinations.length);
+    counts.max('maxDestinations', destinations.length);
+    const results = await Promise.all(destinations.map((did) => mesh.send(did, env)));
     return results.every(Boolean);
   };
 
@@ -144,20 +152,21 @@ export const createDiscovery = ({
     onRateLimited = () => {}) => {
     const current = () => !closed && (via === null || receiving(via, subscription));
     if (!current()) return false;
-    if (!metaWellFormed(item)) return false;
+    if (!metaWellFormed(item)) { counts.add('invalid'); return false; }
     const id = await metaDwappId(item);
     if (!current()) return false;
     // A known version cannot change local state. Drop it before spending the
     // new-card budget or verifying its signature, so repeated snapshots leave
     // room for the unseen tail. Unverified claims can only discard themselves.
     const known = library.get(id);
-    if (known && item.seq <= known.seq) return false;
+    if (known && item.seq <= known.seq) { counts.add('known'); return false; }
     if (via !== null && !allow(via)) {
+      counts.add('rateLimited');
       onRateLimited();
       audit?.('discovery_rate_limited', { did: via });
       return false;
     }
-    if (!(await verifyMeta(item))) { audit?.('discovery_card_invalid', { via }); return false; }
+    if (!(await verifyMeta(item))) { counts.add('invalid'); audit?.('discovery_card_invalid', { via }); return false; }
     if (!current() || isBlocked(item.publisher)) return false;
     // Refuse a card we un-shared, even if a peer who cached it re-sends it in a
     // SNAPSHOT — otherwise our own deleted app keeps re-infecting our Library (it'd
@@ -175,7 +184,7 @@ export const createDiscovery = ({
     // A consent change can race the durable version check as well as crypto.
     if (!current() || isBlocked(item.publisher) || tombstoned.has(id)) return false;
     const fresh = library.put(id, item);
-    if (fresh) await propagateCommitted(id, item, via);
+    if (fresh) { counts.add('fresh'); await propagateCommitted(id, item, via); }
     return fresh;
   };
 
@@ -201,6 +210,7 @@ export const createDiscovery = ({
     switch (env.typ) {
       case DISCOVERY.SUB:
         if (isBlocked(via)) return;
+        counts.add('snapshotRequestsReceived');
         subscribers.add(via);
         audit?.('discovery_subscriber_added', { did: via });
         await sendSnapshot(via, env.body);
@@ -218,6 +228,7 @@ export const createDiscovery = ({
           || !(page.next === null || typeof page.next === 'string'
             && /^[a-f0-9]{64}$/.test(page.next) && page.next > request.after))) return;
         if (!allowSnapshot(via, 'received')) return;
+        counts.add('snapshotFramesReceived');
         /** @type {{ reconcile?: boolean }} */
         const token = {};
         processing.set(via, token);
@@ -306,6 +317,7 @@ export const createDiscovery = ({
       const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.SUB, { catalog: 1, ...request });
       if (!receiving(did, subscription) || requests.get(did) !== request) return false;
       const sent = await mesh.send(did, env);
+      if (sent) counts.add('subscriptionsSent');
       if (!sent) {
         if (!previous && upstreams.get(did) === subscription) upstreams.delete(did);
         if (requests.get(did) === request) requests.delete(did);
@@ -346,6 +358,7 @@ export const createDiscovery = ({
       library.markInstalled(id, true); // our own app is installed by definition (we authored + seed it)
       // An explicit re-announce is also the retry path after a prior link
       // refusal. Re-send even when the local no-downgrade store is unchanged.
+      counts.add('originals');
       const propagated = await propagateCommitted(id, item, null);
       return { dwapp_id: id, fresh, propagated };
     },
@@ -357,6 +370,7 @@ export const createDiscovery = ({
     // (the base mesh is usually up long before discovery starts).
     subscribeAll() {
       if (closed || !autoSubscribe || !isEnabled()) return;
+      counts.add('reconcileCalls');
       for (const p of mesh.peers()) if (!unsubscribed.has(p.did)) subscribeTo(p.did).catch(() => {});
     },
     // The sovereign switch: "I don't want to see shit." Off → stop asking new
@@ -397,6 +411,7 @@ export const createDiscovery = ({
     /** @param {string} id */
     isTombstoned: (id) => tombstoned.has(id),
     subscriberCount: () => subscribers.size,
+    stats: () => ({ ...counts.snapshot(), subscribers: subscribers.size, upstreams: upstreams.size }),
     enabled: () => autoSubscribe && isEnabled(),
     rows: () => library.rows(),
     close() {

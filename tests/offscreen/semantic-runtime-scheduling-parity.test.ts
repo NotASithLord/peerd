@@ -14,6 +14,14 @@ const schedulingBatches = [[
 ]];
 
 describe('main and actor production scheduling parity', () => {
+  test.serial('successful overlap stays successful after its deadline', async () => {
+    const probe = makeLaneProbe();
+    await Promise.all([probe.read(), probe.read()]);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(probe.state.maxReadActive).toBe(2);
+    expect(probe.state.readTimedOut).toBe(false);
+  });
+
   test.serial('overlaps ordinary reads and keeps writes ordered in both sealed runtimes', async () => {
     const main = makeLaneProbe();
     await runMainSchedulingScenario(schedulingBatches, false, main);

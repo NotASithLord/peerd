@@ -48,6 +48,8 @@ export const APP_DWEB_GENERATION_PREFIX = 'app.dweb-generation.';
  *   build the portable identity record (capsule + wrappers) in the dweb crypto host
  * @property {((args: { record: any, passphrase?: string, existingMaterial?: string | null, replaceExisting?: boolean }) => Promise<any>)=} identityRecordAdopt
  *   decide + open an imported identity record in the dweb crypto host
+ * @property {((opts: any) => Promise<any>)=} prepareAppBundle
+ *   verify/decode a peer App before installation or seeding
  * @property {((opts: any) => Promise<any>)=} installAppBundle
  *   verified bundle → engine App via an injected installer
  * @property {((io: { fetchText: (p: string) => Promise<string> }) => Promise<any>)=} loadSeedApp

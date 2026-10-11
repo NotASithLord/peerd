@@ -2553,16 +2553,16 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
 
     await driver.navigate(`${EXTENSION_ORIGIN}/sidepanel/sidepanel.html`);
 
+    const proofNow = () => Number(process.hrtime.bigint()) / 1_000_000;
+    const proofDeadline = proofNow() + 60_000;
     const proof = await waitFor(() => driver.executeAsync(`
-      const [rootToolUseId, heartbeatKey] = arguments;
+      const [rootToolUseId] = arguments;
       const done = arguments[arguments.length - 1];
       const send = (message) => browser.runtime.sendMessage(message);
       (async () => {
-        const [listed, audit, heartbeat, mailbox] = await Promise.all([
+        const [listed, audit] = await Promise.all([
           send({ type: 'session/list' }),
           send({ type: 'audit/list', limit: 500 }),
-          browser.storage.session.get(heartbeatKey),
-          browser.storage.session.get('actorMailbox'),
         ]);
         let bundle = null;
         let toolResult = null;
@@ -2586,13 +2586,11 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
           bundle,
           toolResult,
           audit: audit?.entries ?? [],
-          heartbeat: heartbeat?.[heartbeatKey] ?? null,
-          mailboxKeys: Object.keys(mailbox?.actorMailbox ?? {}),
           actorExecution,
         };
       })().then(done, (error) => done({ error: error?.message || String(error) }));
-    `, ['firefox-keepalive-loss-actor-tool', LIFETIME_HEARTBEAT_KEY]), {
-      budgetMs: 60_000,
+    `, ['firefox-keepalive-loss-actor-tool']), {
+      budgetMs: Math.max(0, proofDeadline - proofNow()),
       pollMs: 250,
     });
     assert(proof?.bundle && proof?.toolResult,
@@ -2609,9 +2607,27 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
     assert(failedRun?.details?.performed === true
       && failedRun?.details?.outcomeKnown === false,
     'the audit records a post-start ambiguous outcome', JSON.stringify(failedRun));
-    assert(proof.heartbeat === null && proof.mailboxKeys.length === 0,
+    // Runtime inspection can acquire a fresh Firefox lifetime lease itself.
+    // Observe its asynchronous cleanup only after demand-plane reads finish,
+    // without generating more leases or extending the original proof deadline.
+    let cleanup = null;
+    await waitFor(async () => {
+      cleanup = await driver.executeAsync(`
+        const [heartbeatKey] = arguments;
+        const done = arguments[arguments.length - 1];
+        Promise.all([
+          browser.storage.session.get(heartbeatKey),
+          browser.storage.session.get('actorMailbox'),
+        ]).then(([heartbeat, mailbox]) => done({
+          heartbeat: heartbeat?.[heartbeatKey] ?? null,
+          mailboxKeys: Object.keys(mailbox?.actorMailbox ?? {}),
+        }), (error) => done({ error: error?.message || String(error) }));
+      `, [LIFETIME_HEARTBEAT_KEY]);
+      return cleanup?.heartbeat === null && cleanup.mailboxKeys?.length === 0;
+    }, { budgetMs: Math.max(0, proofDeadline - proofNow()), pollMs: 250 });
+    assert(cleanup?.heartbeat === null && cleanup.mailboxKeys.length === 0,
       'the failed lease and committed actor receipt leave no heartbeat or mailbox row',
-      JSON.stringify({ heartbeat: proof.heartbeat, mailboxKeys: proof.mailboxKeys }));
+      JSON.stringify(cleanup));
     assert(proof.actorExecution?.status === 'temporarily_unavailable'
       && proof.actorExecution?.retryable === true,
     'the failed heartbeat pauses actor execution until an explicit retry',

@@ -335,9 +335,9 @@ describe('verified catalog contribution hints', () => {
       const result = await reader.base.fetchApp(shared.uri);
       expect(result.verifiedContributors).toEqual([publisher.identity.did]);
       expect(count()).toBe(1);
-      await reader.base.fetchApp(shared.uri, { onProgress: (progress: any) => {
+      await expect(reader.base.fetchApp(shared.uri, { onProgress: (progress: any) => {
         if (progress.phase === 'chunk') reader.base.close();
-      } });
+      } })).rejects.toThrow('base network closed');
       expect(count()).toBe(0); // late completion cannot restore a closed host's history
     } finally { publisher.base.close(); reader.base.close(); }
   });
@@ -406,4 +406,43 @@ test('durable policy refresh fences an absent contributor before late verified c
     expect(result.verifiedContributors).toEqual([seeder.identity.did]);
     expect(reader.base.heardDwapps()[0].providers).toBe(0);
   } finally { publisher.base.close(); seeder.base.close(); reader.base.close(); }
+});
+
+test('runtime rejection is terminal before chunks or DHT retries', async () => {
+  const publisher = await spawn('runtime-publisher');
+  const reader = await spawn('runtime-reader');
+  try {
+    await link(publisher, reader);
+    const runtime = { schema: 1, target: 'wasi', requires: ['wasm-core'] };
+    const shared = await publisher.base.publishApp({ name: 'WASI', entry: 'index.html', files: {
+      'index.html': 'unsupported runtime', 'peerd.json': JSON.stringify({ runtime }),
+    } });
+    expect(shared.runtime).toEqual(runtime);
+    let chunks = 0; let lookups = 0;
+    const getChunk = publisher.base.node.content.getChunk;
+    publisher.base.node.content.getChunk = (hash: string) => { chunks++; return getChunk(hash); };
+    reader.base.node.dht.findProviderContacts = async () => { lookups++; return []; };
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow('Unsupported App runtime target');
+    expect(chunks).toBe(0); expect(lookups).toBe(0);
+  } finally { publisher.base.close(); reader.base.close(); }
+});
+
+test('publication binds runtime requirements to version identity and discovery expectation', async () => {
+  const publisher = await spawn('runtime-publisher');
+  const reader = await spawn('runtime-reader');
+  try {
+    await link(publisher, reader);
+    const runtime = { schema: 1, target: 'browser-app', requires: ['wasm-core'] };
+    const fields = { name: 'WASM', entry: 'index.html', created: 1 };
+    const shared = await publisher.base.publishApp({ ...fields, files: {
+      'index.html': 'WASM', 'peerd.json': JSON.stringify({ runtime }),
+    } });
+    const fetched = await reader.base.fetchApp(shared.uri, { expectedRuntime: { value: runtime } });
+    expect(fetched.manifest.meta.runtime).toEqual(runtime);
+    await expect(reader.base.fetchApp(shared.uri, { expectedRuntime: { value: undefined } })).rejects.toThrow('signed version');
+    const changed = await publisher.base.publishApp({ ...fields, files: {
+      'index.html': 'WASM', 'peerd.json': JSON.stringify({ runtime: { ...runtime, requires: [] } }),
+    } });
+    expect(changed.hash).not.toBe(shared.hash);
+  } finally { publisher.base.close(); reader.base.close(); }
 });

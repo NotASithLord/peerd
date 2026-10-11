@@ -480,3 +480,21 @@ describe('topic sync (late-join backfill)', () => {
     close([raw]);
   });
 });
+
+
+test('gossip diagnostics separate originals, forwarding, and duplicates without changing delivery', async () => {
+  const peers = await clique(3);
+  try {
+    const received: any[] = [];
+    peers[2].gossip.subscribe('metrics', (message: unknown) => received.push(message));
+    await peers[0].gossip.publish('metrics', 'hello');
+    await waitFor(() => received.length === 1 && peers[2].gossip.stats().duplicates > 0);
+    expect(received).toHaveLength(1);
+    expect(peers[0].gossip.stats().originals).toBe(1);
+    expect(peers[2].gossip.stats().liveAccepted).toBe(1);
+    expect(peers[2].gossip.stats().forwarded).toBe(1);
+    expect(peers[2].gossip.stats().duplicates).toBeGreaterThan(0);
+    const snapshot = peers[2].gossip.stats(); snapshot.originals = 99;
+    expect(peers[2].gossip.stats().originals).toBe(0);
+  } finally { close(peers); }
+});

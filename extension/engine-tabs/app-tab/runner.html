@@ -363,7 +363,14 @@
       port.start();
       // The transferred port is the readiness capability. App code inherits the
       // Window after document.write but never gets a reference to this closure.
-      port.postMessage({ type: 'runner-ready' });
+      // Probe the actual opaque execution realm before any app bytes arrive.
+      // The empty core module tests engine + CSP without running publisher code.
+      const runtimeFeatures = [];
+      try {
+        new WebAssembly.Module(Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0]));
+        runtimeFeatures.push('wasm-core');
+      } catch { /* unavailable requirements are refused by the trusted parent */ }
+      port.postMessage({ type: 'runner-ready', runtimeFeatures });
     });
     window.parent.postMessage({
       type: 'runner-loaded', generation: location.hash.slice(1),

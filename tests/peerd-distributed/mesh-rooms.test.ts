@@ -17,6 +17,37 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 1_000) => {
   }
 };
 
+test('offline repair retirement aborts pending dials and closes late channels', async () => {
+  for (const retirement of ['restart-with-no-survivors', 'leave']) {
+    const started = Promise.withResolvers<AbortSignal>();
+    const opened = Promise.withResolvers<ReturnType<typeof memoryPair>[number]>();
+    const room = await joinRoom({ roomId: `repair-${retirement}`, identity: await generateIdentity(), url: null,
+      transport: {
+        name: 'delayed-repair', canReach: () => 1,
+        connect: async (_peer: any, { signal }: any) => { started.resolve(signal); return opened.promise; },
+        accept: async () => { throw new Error('unexpected inbound dial'); },
+      } });
+    const target = memoryPair(), broker = memoryPair(), late = memoryPair();
+    try {
+      room.mesh.addLink(target[0], 'lost-target');
+      room.mesh.addLink(broker[0], 'surviving-broker');
+      room.mesh.removeLink('lost-target');
+      const signal = await started.promise;
+      expect(signal.aborted).toBe(false);
+      if (retirement === 'leave') room.leave();
+      else room.mesh.removeLink('surviving-broker');
+      expect(signal.aborted).toBe(true);
+      opened.resolve(late[0]);
+      await waitFor(() => late[0].isClosed());
+      expect(late[0].isClosed()).toBe(true);
+      expect(room.mesh.hasLink('lost-target')).toBe(false);
+    } finally {
+      opened.resolve(late[0]); room.leave();
+      for (const pair of [target, broker, late]) for (const channel of pair) channel.close();
+    }
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Fakes. The REAL reducer runs the fake node (same code as the Bun/CF
 // shells); the fake transport swaps WebRTC bytes for memoryPair while
@@ -226,6 +257,12 @@ describe('rooms over the rendezvous (fake node, real reducer)', () => {
     expect(ra.rendezvous()).toBe('connecting'); // reconnecting with backoff (was 'down') — mesh survives meanwhile
     expect(didsOf(ra)).toEqual([b.did, c.did].sort()); // links untouched
 
+    // If one of those links then dies, the remaining authenticated neighbor
+    // relays a replacement to that known lost peer without the server.
+    ra.mesh.removeLink(b.did);
+    await waitFor(() => ra.mesh.hasLink(b.did), 2_000);
+    expect(ra.mesh.hasLink(b.did)).toBe(true);
+
     // D arrives with ONE link to A (out-of-band — the invite-code shape),
     // then crawls the room through it: roster + relayed dials, no server.
     const rd = await joinRoom({ roomId: 'r3', identity: d, url: null, transport: ether.makeTransport() });
@@ -351,6 +388,27 @@ describe('mesh boundary rules', () => {
     await tick(200);
     ma.close();
     expect(gone.map((g) => g.why)).toContain('idle-timeout');
+  });
+
+  test('valid content requests keep an authenticated slow link alive', async () => {
+    const identity = await generateIdentity();
+    const mesh = createRoomMesh({ roomId: 'content-liveness', identity,
+      pingIntervalMs: 50, idleTimeoutMs: 500 });
+    let handler: any;
+    const link = { send: () => {}, setHandler: (value: any) => { handler = value; },
+      onClose: () => () => {}, close: () => {}, isClosed: () => false };
+    const did = 'did:key:zSlowContentPeer';
+    mesh.addLink(link as any, did);
+    mesh.start();
+    try {
+      for (let index = 0; index < 7; index++) {
+        await Bun.sleep(100);
+        handler({ t: 'CHUNK_REQ', hash: 'a'.repeat(64) });
+      }
+      expect(mesh.hasLink(did)).toBe(true);
+      await Bun.sleep(600);
+      expect(mesh.hasLink(did)).toBe(false);
+    } finally { mesh.close(); }
   });
 
   test('budget refuses links past the cap', async () => {

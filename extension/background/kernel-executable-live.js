@@ -95,6 +95,7 @@ export const createKernelEngineLive = async (deps) => {
   const appClient = createAppClient({
     registry: appRegistry,
     tracker: appTabTracker,
+    idb: deps.idb,
     beforeOpfsMutation: () => deps.canWrite('app-manifests'),
     onManifestMutation: deps.onAppManifestMutation,
     resolveOwnerRoot: deps.resolveAppOwnerRoot,

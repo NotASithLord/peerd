@@ -6,7 +6,7 @@ import { withDeadline } from '../shared/cold-util.js';
 
 /** @param {any} deps */
 export const createKernelDwebReseedOwner = ({
-  active, locked, appRegistry, withDwebReseedPublication, withAppLifecycle,
+  active, locked, appRegistry, readSeedBundle, withDwebReseedPublication, withAppLifecycle,
   repositories, sendMessage, currentHostEpoch, messageTimeoutMs = 10_000,
   newId = () => crypto.randomUUID(), setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout, log = console,
@@ -17,6 +17,12 @@ export const createKernelDwebReseedOwner = ({
   ) || !Number.isFinite(messageTimeoutMs) || messageTimeoutMs <= 0) {
     throw new TypeError('kernel-dweb-reseed-owner-config-invalid');
   }
+  /** Preserve the pre-list receipt's absent failure count. @param {number} [seeded]
+   * @param {number} [failed] */
+  const retired = (seeded = 0, failed) => ({
+    ok: false, seeded, ...(failed === undefined ? {} : { failed }),
+    cancelled: true, error: 'dweb-generation-retired',
+  });
   const completedGenerations = new Set();
   /** @type {Map<string, Promise<any>>} */
   const pendingGenerations = new Map();
@@ -39,40 +45,28 @@ export const createKernelDwebReseedOwner = ({
     clearTimeoutFn,
   );
   /** @param {any} message */
-  const sendBounded = (message) => {
-    let timer = /** @type {ReturnType<typeof setTimeoutFn>|null} */ (null);
-    const sent = Promise.resolve().then(() => sendMessage(message))
-      .then((reply) => ({ reply }), (cause) => ({ cause }));
-    const timedOut = new Promise((resolve) => {
-      timer = setTimeoutFn(() => resolve({ timeout: true }), messageTimeoutMs);
-    });
-    return Promise.race([sent, timedOut]).then((outcome) => {
-      if (timer !== null) clearTimeoutFn(timer);
-      if (/** @type {any} */ (outcome)?.timeout) {
-        throw Object.assign(new Error('dweb-reseed-host-timeout'), {
-          code: 'dweb-reseed-host-timeout', outcomeKnown: false,
-        });
-      }
-      const cause = /** @type {any} */ (outcome)?.cause;
-      if (cause) {
-        throw Object.assign(new Error('dweb-reseed-host-disconnected', { cause }), {
-          code: 'dweb-reseed-host-disconnected', outcomeKnown: false,
-        });
-      }
-      return /** @type {any} */ (outcome)?.reply;
-    });
+  const sendBounded = async (message) => {
+    try {
+      return await readBounded('dweb-reseed-host-timeout', () => sendMessage(message));
+    } catch (cause) {
+      const causeMessage = /** @type {Error} */ (cause)?.message;
+      const code = causeMessage === 'dweb-reseed-host-timeout'
+        ? causeMessage : 'dweb-reseed-host-disconnected';
+      throw Object.assign(new Error(code, { cause }), { code, outcomeKnown: false });
+    }
   };
   const reconstructRelease = async (/** @type {any} */ app) => {
-    const oid = app.dweb.source_git_oid;
+    const { dweb } = app;
+    const oid = dweb.source_git_oid;
     if (oid == null) return {};
     if (!repositories?.snapshot || typeof oid !== 'string' || !/^[a-f0-9]{40}$/.test(oid)
-        || app.dweb.git_oid !== oid) {
+        || dweb.git_oid !== oid) {
       throw new Error('signed release lineage cannot be reconstructed safely');
     }
-    const entryFile = typeof app.dweb.release_entry_file === 'string'
-      ? app.dweb.release_entry_file : app.entryFile;
-    const fileKinds = app.dweb.release_file_kinds && typeof app.dweb.release_file_kinds === 'object'
-      ? app.dweb.release_file_kinds : (app.fileKinds ?? {});
+    const entryFile = typeof dweb.release_entry_file === 'string'
+      ? dweb.release_entry_file : app.entryFile;
+    const fileKinds = dweb.release_file_kinds && typeof dweb.release_file_kinds === 'object'
+      ? dweb.release_file_kinds : (app.fileKinds ?? {});
     const snapshot = await repositories.snapshot({ kind: 'app', id: app.id }, { at: oid });
     if (!Object.hasOwn(snapshot, entryFile)) throw new Error('release-entry-missing');
     let totalBytes = 0;
@@ -83,10 +77,10 @@ export const createKernelDwebReseedOwner = ({
     }));
     return {
       release: {
-        previousVersionId: typeof app.dweb.previous_version_id === 'string'
-          ? app.dweb.previous_version_id : null,
+        previousVersionId: typeof dweb.previous_version_id === 'string'
+          ? dweb.previous_version_id : null,
         gitCommitOid: oid,
-        changelog: typeof app.dweb.changelog === 'string' ? app.dweb.changelog : '',
+        changelog: typeof dweb.changelog === 'string' ? dweb.changelog : '',
       },
       releaseSnapshot: {
         ok: true, oid, totalBytes,
@@ -95,55 +89,43 @@ export const createKernelDwebReseedOwner = ({
       },
     };
   };
-  /** @param {any} value */
-  const stableFileKinds = (value) => value && typeof value === 'object'
-    ? Object.entries(value).sort(([left], [right]) => left.localeCompare(right)) : [];
   /** @param {any} app */
-  const reseedFingerprint = (app) => JSON.stringify({
-    id: app?.id,
-    name: app?.name,
-    entryFile: app?.entryFile,
-    fileKinds: stableFileKinds(app?.fileKinds),
-    dweb: {
-      local: app?.dweb?.local,
-      slug: app?.dweb?.slug,
-      manifestCreated: app?.dweb?.manifest_created,
-      hash: app?.dweb?.hash,
-      seq: app?.dweb?.seq,
-      description: app?.dweb?.description,
-      sourceGitOid: app?.dweb?.source_git_oid,
-      gitOid: app?.dweb?.git_oid,
-      previousVersionId: app?.dweb?.previous_version_id,
-      changelog: app?.dweb?.changelog,
-      releaseEntryFile: app?.dweb?.release_entry_file,
-      releaseFileKinds: stableFileKinds(app?.dweb?.release_file_kinds),
-    },
-  });
+  const reseedKind = (app) => {
+    if (!app?.shared || typeof app.dweb?.hash !== 'string') return null;
+    if (app.dweb.local === true && typeof app.dweb.slug === 'string'
+        && Number.isFinite(app.dweb.manifest_created)) return 'local';
+    return app.source === 'dweb' && app.dweb.seed_hash === app.dweb.hash
+      && typeof app.dweb.uri === 'string' && typeof app.dweb.publisher === 'string'
+      ? 'peer' : null;
+  };
+  /** @param {any} app */
+  const reseedFingerprint = (app) => JSON.stringify([
+    app.name, app.entryFile, app.fileKinds, app.dweb,
+  ]);
   const reseed = async (/** @type {string} */ hostEpoch,
     /** @type {number} */ meshGeneration) => {
     const exact = () => generationCurrent(hostEpoch, meshGeneration);
     if (!active() || locked() || !exact()) {
-      return { ok: false, seeded: 0, cancelled: true, error: 'dweb-generation-retired' };
+      return retired();
     }
     let candidates;
     try {
       candidates = (await readBounded(
         'dweb-reseed-list-timeout', () => appRegistry.list(),
-      )).filter((/** @type {any} */ app) => app.shared
-        && app.dweb?.local === true && typeof app.dweb?.slug === 'string'
-        && Number.isFinite(app.dweb?.manifest_created) && typeof app.dweb?.hash === 'string');
+      )).filter((/** @type {any} */ app) => reseedKind(app));
     } catch (cause) {
       if (!exact()) {
-        return { ok: false, seeded: 0, cancelled: true, error: 'dweb-generation-retired' };
+        return retired();
       }
       log.warn('[kernel] dweb reseed listing failed', cause);
       return { ok: false, seeded: 0, error: 'dweb-reseed-list-failed' };
     }
     let seeded = 0;
     let failed = 0;
+    let retryableRead = false;
     for (const candidate of candidates) {
       if (!exact()) {
-        return { ok: false, seeded, failed, cancelled: true, error: 'dweb-generation-retired' };
+        return retired(seeded, failed);
       }
       /** @type {any} */
       let prepared;
@@ -152,23 +134,26 @@ export const createKernelDwebReseedOwner = ({
         prepared = await readBounded(
           'dweb-reseed-read-timeout', () => appRegistry.get(candidate.id),
         );
-        if (!prepared?.shared || prepared.dweb?.local !== true
-            || typeof prepared.dweb?.slug !== 'string'
-            || !Number.isFinite(prepared.dweb?.manifest_created)
-            || typeof prepared.dweb?.hash !== 'string') continue;
-        release = await readBounded(
-          'dweb-reseed-release-timeout', () => reconstructRelease(prepared),
-        );
+        const kind = reseedKind(prepared);
+        if (!kind) continue;
+        release = await readBounded('dweb-reseed-release-timeout', async () => {
+          if (kind === 'local') return reconstructRelease(prepared);
+          const seedBundle = await readSeedBundle(prepared.id, prepared.dweb.hash);
+          if (!seedBundle) throw new Error('dweb-seed-bundle-missing');
+          return { seedBundle, seedUri: prepared.dweb.uri, seedPublisher: prepared.dweb.publisher };
+        });
       } catch (cause) {
         if (!exact()) {
-          return { ok: false, seeded, failed, cancelled: true, error: 'dweb-generation-retired' };
+          return retired(seeded, failed);
         }
         failed += 1;
+        const error = /** @type {Error} */ (cause);
+        if (reseedKind(candidate) === 'peer' && error?.message !== 'dweb-seed-bundle-missing') retryableRead = true;
         log.debug('[kernel] dweb reseed preparation failed', candidate.id, cause);
         continue;
       }
       if (!exact()) {
-        return { ok: false, seeded, failed, cancelled: true, error: 'dweb-generation-retired' };
+        return retired(seeded, failed);
       }
       const preparedFingerprint = reseedFingerprint(prepared);
       try {
@@ -179,12 +164,8 @@ export const createKernelDwebReseedOwner = ({
               'dweb-reseed-read-timeout', () => appRegistry.get(candidate.id),
             );
             if (!current() || !exact() || !active() || locked()
-                || !app?.shared || app.dweb?.local !== true
-                || typeof app.dweb?.slug !== 'string'
-                || !Number.isFinite(app.dweb?.manifest_created)
-                || typeof app.dweb?.hash !== 'string') return 'skipped';
+                || !reseedKind(app)) return 'skipped';
             if (reseedFingerprint(app) !== preparedFingerprint) return 'retry';
-            if (!current() || !exact()) return 'retired';
             const reply = await sendBounded({
               type: 'dweb/base-host/share-app',
               expectedHostEpoch: hostEpoch,
@@ -224,18 +205,18 @@ export const createKernelDwebReseedOwner = ({
         if (outcome === 'seeded') seeded += 1;
         else if (outcome === 'failed' || outcome === 'retry') failed += 1;
         else if (outcome === 'retired') {
-          return { ok: false, seeded, failed, cancelled: true, error: 'dweb-generation-retired' };
+          return retired(seeded, failed);
         }
       } catch (cause) {
         if (!exact()) {
-          return { ok: false, seeded, failed, cancelled: true, error: 'dweb-generation-retired' };
+          return retired(seeded, failed);
         }
         failed += 1;
         log.debug('[kernel] dweb reseed failed', candidate.id, cause);
       }
     }
     return failed > 0
-      ? { ok: false, seeded, failed, error: 'dweb-reseed-partial' }
+      ? { ok: false, seeded, failed, error: retryableRead ? 'dweb-reseed-read-failed' : 'dweb-reseed-partial' }
       : { ok: true, seeded };
   };
   const onHostGeneration = (/** @type {{hostEpoch?:unknown,meshGeneration?:unknown}} */ event) => {
@@ -249,14 +230,10 @@ export const createKernelDwebReseedOwner = ({
     let exactHostEpoch;
     try { exactHostEpoch = currentHostEpoch(); } catch { exactHostEpoch = null; }
     if (exactHostEpoch !== event.hostEpoch) {
-      return Promise.resolve({
-        ok: false, seeded: 0, cancelled: true, error: 'dweb-generation-retired',
-      });
+      return Promise.resolve(retired());
     }
     if (liveHostEpoch === event.hostEpoch && Number(meshGeneration) < liveMeshGeneration) {
-      return Promise.resolve({
-        ok: false, seeded: 0, cancelled: true, error: 'dweb-generation-retired',
-      });
+      return Promise.resolve(retired());
     }
     if (liveHostEpoch !== event.hostEpoch || Number(meshGeneration) > liveMeshGeneration) {
       liveHostEpoch = event.hostEpoch;

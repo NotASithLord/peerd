@@ -5,6 +5,7 @@ import { assertBundleWithinLimits, manifestHash, verifyManifest } from '../conte
 import { unpackTransportBundle } from '../content/bundle.js';
 import { chunkBytes, sha256hex } from '../content/chunk.js';
 import { parsePeerdUri } from '../content/uri.js';
+import { assertAppRuntime, assertAppRuntimeAgreement, appRuntimeFromFiles } from '/shared/app-runtime.js';
 
 // why: Enforce limits before and after bundle decoding.
 const MAX_TOTAL_BYTES = 50_000_000;
@@ -70,6 +71,7 @@ export const prepareAppBundle = async ({ uri, manifest, payload, name, dwappId =
   if (expectedPublisher && manifest.publisher !== expectedPublisher) {
     throw new BundleRejectedError('manifest publisher does not match the discovery card');
   }
+  assertAppRuntime(manifest.meta?.runtime);
   const release = manifest.meta?.release;
   if (release?.previousVersionId != null && !/^[a-f0-9]{64}$/.test(release.previousVersionId)) {
     throw new BundleRejectedError('release predecessor identity invalid');
@@ -95,6 +97,7 @@ export const prepareAppBundle = async ({ uri, manifest, payload, name, dwappId =
     throw new BundleRejectedError(`malformed bundle: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
   }
   const { entry, files, fileKinds } = unpacked;
+  assertAppRuntimeAgreement(manifest.meta?.runtime, appRuntimeFromFiles(files));
   const paths = Object.keys(files);
   if (!paths.length) throw new BundleRejectedError('empty bundle');
   if (paths.length > MAX_FILES) throw new BundleRejectedError(`too many files: ${paths.length} > ${MAX_FILES}`);

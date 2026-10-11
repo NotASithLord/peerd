@@ -92,9 +92,39 @@ const fixture = () => {
   });
   const rooms: Awaited<ReturnType<typeof joinRoom>>[] = [];
   const governors: ReturnType<typeof createAdmissionGovernor>[] = [];
+  const busyGovernors = new Set<ReturnType<typeof createAdmissionGovernor>>();
+  let admissionChanged = Promise.withResolvers<void>();
+  const notifyAdmissionChange = () => {
+    const previous = admissionChanged;
+    admissionChanged = Promise.withResolvers<void>();
+    previous.resolve();
+  };
+  const trackAdmissions = (governor: ReturnType<typeof createAdmissionGovernor>) => {
+    const createScope = governor.createScope.bind(governor);
+    governor.createScope = () => {
+      const scope = createScope();
+      const run = scope.run.bind(scope);
+      scope.run = (...args) => {
+        busyGovernors.add(governor);
+        const promise = run(...args);
+        notifyAdmissionChange();
+        const settled = () => {
+          const stats = governor.stats();
+          if (!stats.active && !stats.queued) busyGovernors.delete(governor);
+          notifyAdmissionChange();
+        };
+        // Observe settlement without replacing the production promise, limits,
+        // scheduling or cancellation. Wake the fixture only on actual progress.
+        promise.then(settled, settled);
+        return promise;
+      };
+      return scope;
+    };
+    return governor;
+  };
   const nodes: Awaited<ReturnType<typeof createPeerNode>>[] = [];
   const add = async ({ sparse = true, kind }: { sparse?: boolean; kind?: string } = {}) => {
-    const identity = await generateIdentity(); const admission = createAdmissionGovernor({ timers }); governors.push(admission);
+    const identity = await generateIdentity(); const admission = trackAdmissions(createAdmissionGovernor({ timers })); governors.push(admission);
     const owner = governors.length - 1;
     class OwnedSocket extends Socket { constructor(url: string) { super(url); this.owner = owner; } }
     const room = await joinRoom({ identity, roomId: PUBLIC_ROOM, profile: sparse ? SPARSE_PUBLIC_PROFILE : undefined, kind, url: 'ws://fixture',
@@ -117,19 +147,43 @@ const fixture = () => {
       task.fn();
     }
   };
-  const advance = async (ms: number) => {
-    tick(ms);
-    const deadline = Date.now() + 3_000;
+  const settleAdmissions = async () => {
+    const deadlineAt = Date.now() + 3_000;
     await new Promise<void>(resolve => setImmediate(resolve));
-    while (governors.some(g => g.stats().active || g.stats().queued)) {
-      const stats = governors.map(g => g.stats());
+    while (true) {
+      const changed = admissionChanged.promise;
+      const stats = [...busyGovernors].map(g => g.stats()).filter(s => s.active || s.queued);
       // Unaccepted offers legitimately remain until protocol deadlines. Wait
       // only for accepted-channel crypto to settle; tests advance the real
       // injected deadlines separately and assert those old offers retire.
-      if (pending.size > 0 && stats.every(s => !s.inbound && !s.queued)
-        && stats.reduce((n, s) => n + s.active, 0) === pending.size) break;
-      if (Date.now() > deadline) throw new Error(`fixture admission did not settle ${JSON.stringify(stats)} pending:${JSON.stringify([...pending.keys()].map(key => ({ key, ...offerTrace.get(key) })))}`);
+      const idle = stats.length === 0;
+      const awaitingDeadline = pending.size > 0 && stats.every(s => !s.inbound && !s.queued)
+        && stats.reduce((n, s) => n + s.active, 0) === pending.size;
+      if (idle || awaitingDeadline) {
+        // The optimization must never skip an unobserved production admission.
+        // Cross-check every governor at each boundary, not on every busy poll.
+        const actual = governors.map(g => g.stats()).filter(s => s.active || s.queued);
+        if (actual.length !== stats.length) throw new Error('fixture admission tracking drift');
+        break;
+      }
+      const remaining = deadlineAt - Date.now();
+      if (remaining <= 0) throw new Error('fixture admission did not settle');
+      await deadline(changed, `admission did not settle ${JSON.stringify(stats)} pending:${JSON.stringify([...pending.keys()].map(key => ({ key, ...offerTrace.get(key) })))}`, remaining);
+      // Keep the original phase boundary: drain dial/roster continuations before
+      // deciding it is safe to advance the injected clock.
       await new Promise<void>(resolve => setImmediate(resolve));
+    }
+  };
+  const advance = async (ms: number) => {
+    const target = now + ms;
+    // why: jumping straight to target collapses distinct reconnect jitter and
+    // maintenance deadlines into one artificial burst. Preserve timer order
+    // and settle native crypto at each simulated timestamp instead.
+    while (true) {
+      const nextAt = Math.min(target, ...[...tasks.values()].map(task => task.at));
+      tick(Math.max(0, nextAt - now));
+      await settleAdmissions();
+      if (now >= target && ![...tasks.values()].some(task => task.at <= target)) return;
     }
   };
   const outage = () => { online = false; for (const ws of [...sockets.values()]) ws.close(); };
