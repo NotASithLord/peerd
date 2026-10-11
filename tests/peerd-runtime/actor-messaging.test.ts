@@ -583,7 +583,7 @@ describe('message_actor — awaitReply (in-band reply mode)', () => {
     expect(reentries.length).toBe(0);
   });
 
-  test('await unwinds on a LIVE mid-flight abort (signal fires WHILE the turn runs) and stops the delegate', async () => {
+  test('await bounds a pending host receipt after Stop cancels the delegate', async () => {
     // The already-aborted case above tests the queued-before-start path; this
     // pins the RUNNING path — the abort arrives after the turn is in flight, so
     // stopActorForAwait must slot-cancel the actor this await is waiting on.
@@ -604,7 +604,7 @@ describe('message_actor — awaitReply (in-band reply mode)', () => {
     ac.abort();                                                  // fire the abort MID-FLIGHT
     const r = await p;
     expect(r.ok).toBe(false);
-    expect(r.error).toContain('aborted');
+    expect(r.actorTerminal).toBe(false);
     expect(r.actorAborted).toBe(true);
     expect(r.actorOutcomeKnown).toBe(false);
     expect(r.actorPerformed).toBe(true);

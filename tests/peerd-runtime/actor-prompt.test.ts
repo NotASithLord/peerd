@@ -75,7 +75,9 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
     // The web actor — addressed by "web", picks its own mechanism (sessionless fetch
     // or drive-a-tab); the orchestrator delegates INTENT, not the mechanism.
     expect(base.includes('message_actor("web", goal)')).toBe(true);
-    expect(base.includes('SINGLE entry point for web work')).toBe(true);
+    expect(base.includes('SINGLE entry point for fresh web work')).toBe(true);
+    expect(base).toContain('call actor_list and message its current');
+    expect(base).toContain('Do not use "web": it owns a different tab.');
     expect(base.includes('Do NOT pick')).toBe(true);                // mechanism is the actor's call
     expect(base.includes("The tab's ACTOR is your page-content boundary")).toBe(true);
     expect(base.includes('do                       — perform an action')).toBe(false); // runner listing gone
@@ -152,6 +154,8 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     // 0-or-1 tab lazy ownership + the fail-closed pin (never the user's foreground tab).
     expect(web.includes('0-OR-1 tab')).toBe(true);
     expect(web.includes('FAIL CLOSED')).toBe(true);
+    expect(web).toContain('Snapshot your existing tab first');
+    expect(web).toContain('origin alone is not the page');
     // DOM-driving lore still present.
     expect(web.includes('re-snapshot')).toBe(true);
     expect(web.includes('UNTRUSTED')).toBe(true);
@@ -432,6 +436,8 @@ describe('capability-derived actor profiles', () => {
     expect(web.split(codeClientReference('page')).length - 1).toBe(1);
     expect(web.includes('site_client_run stays a discrete tool')).toBe(true);
     expect(web.includes('tools: snapshot')).toBe(false);
+    expect(web).toContain('Snapshot your existing');
+    expect(web).toContain('fenced foreground_page');
 
     const app = actorBlock('app', undefined, 'app-1', 'code');
     expect(app).toContain(`client: ${codeClientReference('app')}`);

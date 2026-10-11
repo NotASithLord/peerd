@@ -40,7 +40,8 @@ describe('CDP native form submission guard', () => {
     expect(clickBody).toContain("method !== 'dialog'");
     expect(clickBody).toContain("error: 'cross_origin_form_submission_blocked'");
     expect(clickBody.indexOf('cross_origin_form_submission_blocked'))
-      .toBeLessThan(clickBody.indexOf('${OBS_SETUP}'));
+      .toBeLessThan(clickBody.indexOf('this.click();'));
+    expect(clickBody).not.toContain('awaitPromise: true');
     expect(clickBody).toContain("outcomeKind: 'pre-effect-failure'");
   });
 

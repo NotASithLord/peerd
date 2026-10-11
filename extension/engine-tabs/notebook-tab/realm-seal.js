@@ -1,20 +1,10 @@
 // @ts-check
-// realm-seal.js — side-effecting entry for the Notebook realm seal.
-//
-// The worker source assembled in notebook-tab.js emits this module's absolute
-// URL as the entry's FIRST static import. Chrome evaluates that module graph
-// directly. Firefox's linker preserves the same order in one strict script.
-// Either way, this body and therefore the whole seal runs BEFORE any
-// agent-authored module's top-level code, no matter what the agent imports. Do not add imports above
-// notebook-neutralizers.js or code before applyRealmSeal(): anything
-// earlier widens the pre-seal window.
-//
-// Kept as its own module (instead of calling applyRealmSeal in the entry
-// body) because the entry's top-level statements only run AFTER all of
-// its static imports have evaluated — too late to seal the realm against
-// imported agent code.
+// why: The seal must run before any imported user code.
+// This module is the worker's first static import. Chrome evaluates it first.
+// Firefox's linker keeps the same order. Keep the seal call before other code.
+// The worker entry runs after its imports. It cannot seal their execution.
 
-import { applyNotebookRealmSeal } from './notebook-neutralizers.js';
+import { applyNotebookRealmSeal, captureWorkerConsole } from './notebook-neutralizers.js';
 
 try {
   applyNotebookRealmSeal(globalThis);
@@ -30,3 +20,6 @@ try {
   });
   throw error;
 }
+
+// why: Static imports run before the worker entry can capture their output.
+export const consoleOutput = captureWorkerConsole();

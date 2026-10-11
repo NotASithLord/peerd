@@ -316,7 +316,7 @@ export const makeActorMessaging = (deps) => {
   // the slot frees); a RUNNING one is slot-aborted ONLY when the running turn is
   // this delivery's own (runningOnActor match) — a sibling's turn on the same
   // shared actor is never collateral. turnSlots.stop is optional (the pure-heap
-  // test harness injects no stop; the await resolves either way).
+  // test harness injects no stop; a running turn must still settle).
   /** @param {string} correlationId @param {string} actorSessionId @returns {boolean} whether this delivery was already running */
   const stopActorForAwait = (correlationId, actorSessionId) => {
     cancelledDeliveries.add(correlationId);
@@ -1056,27 +1056,9 @@ export const makeActorMessaging = (deps) => {
     // like the async path; only the completion routing differs.
     if (awaitReply === true) {
       const settled = await new Promise((resolve) => {
-        // Race the actor reply against the CALLING ACTOR's abort signal.
-        // why: the actor is suspended here in tool dispatch, and its loop
-        // only observes the signal at wave boundaries — so its wall-clock
-        // timeout / actor_cancel (which fire this signal) cannot unwind this
-        // await on their own. Without the race, a hung/queued actor turn parks
-        // the child, its slot, and its parent's await indefinitely — the exact
-        // "parked forever" failure the timeout exists to prevent. On abort we
-        // ALSO cancel the actor turn this child was waiting on (stopActorForAwait):
-        // it is the child's delegate, so it should die with the child — scoped by
-        // CORRELATION, so a sibling's distinct queued/running turn on the same
-        // shared actor is never collateral. onReply and onAbort race; the FIRST
-        // wins and the loser is a TRUE no-op. why the `done` guard is load-bearing
-        // beyond the resolve: the abort listener sits on the child's LONG-LIVED
-        // signal, so its OWN wall-clock timeout / cancel can fire onAbort LATE —
-        // after a reply already settled. Ungated, that stale abort would mark a
-        // settled correlation cancelled (a set entry nothing would ever clean).
-        // Gated, the stale abort returns at once. We also detach the listener on
-        // settle so an actor making many awaitReply calls doesn't pile no-op
-        // listeners on one signal. runEngineDelivery is ALWAYS called so its
-        // trackActor/clear bookkeeping stays symmetric even on abort (its onReply
-        // just no-ops by then).
+        // why: Stop cancels only this delivery. A running actor must return its
+        // host effect ledger before this result can say whether an effect ran.
+        // Bound the cleanup. A host that does not settle keeps an unknown result.
         let done = false;
         // Set true when the wall-clock cap fires: the awaited turn keeps running
         // (NOT cancelled), so its later reply must route to the sender's next turn
@@ -1102,13 +1084,18 @@ export const makeActorMessaging = (deps) => {
           if (degradeToAsync === true && abortReasonOf(awaitSignal) === ABORT_STEER) { onCap(); return; }
           const wasRunning = stopActorForAwait(correlationId, actor.actorSessionId);
           const notice = 'the request was aborted (timeout or cancel) before the actor replied.';
-          finish({
+          const cancelled = {
             text: bareReply === true ? notice : replyText(instanceId, kind, name, notice, true),
             failed: true,
             outcomeUnknown: wasRunning,
             performed: wasRunning,
+            actorTerminal: !wasRunning,
             actorAborted: true,
-          });
+          };
+          if (wasRunning) {
+            if (capTimer) clearTimeout(capTimer);
+            capTimer = setTimeout(() => finish(cancelled), 250);
+          } else finish(cancelled);
         };
         // The await wall-clock cap → DEGRADE TO ASYNC. why distinct from onAbort:
         // Stop/cancel means "stop the work"; a too-slow reply does NOT — the actor

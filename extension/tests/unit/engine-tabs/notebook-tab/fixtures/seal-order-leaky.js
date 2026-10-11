@@ -28,3 +28,4 @@ const attempt = (fn) => {
     return Boolean(desc && desc.writable === false && desc.configurable === false);
   })(),
 };
+console.log(/** @type {{ __peerdSealOrderProbe: unknown }} */ (/** @type {unknown} */ (globalThis)).__peerdSealOrderProbe);

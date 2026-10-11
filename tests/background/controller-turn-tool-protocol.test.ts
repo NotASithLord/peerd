@@ -19,6 +19,9 @@ import { ORCHESTRATOR_OPERATION_GRANT } from '../../extension/shared/controller-
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
 import { createProviderEgressAuthority } from '../../extension/background/provider-egress-authority.js';
 import { createSessionTurnStore } from '../../extension/shared/session-turn-store.js';
+import { makeDispatchTracker } from '../../extension/peerd-runtime/lifecycle/dispatch-tracking.js';
+import { createOperationLog } from '../../extension/peerd-runtime/lifecycle/operation-log.js';
+import { retryClassForTool } from '../../extension/peerd-runtime/lifecycle/tool-retry-class.js';
 
 const PROTOCOL_FIXTURE_TOOL = 'a2a_run';
 const authorityDescriptor = (name: string) => projectToolAuthority(
@@ -69,7 +72,6 @@ const makeSessions = () => {
         messages: session.messages.map((message: any) => message.id === messageId
           ? { ...message, ...structuredClone(patch) } : message),
       };
-      return structuredClone(session);
     },
     setTrimSummary: async () => structuredClone(session),
     snapshot: () => structuredClone(session),
@@ -1797,16 +1799,24 @@ describe('controller turn finite tool protocol', () => {
     expect(result.error).toBeNull();
   });
 
-  test('Stop keeps an exact terminal actor cancellation after performed admission', async () => {
+  test.each([true, false])('Stop keeps exact actor cancellation after lifecycle settlement (admission performed: %s)', async (performed) => {
     const actorDescriptor = authorityDescriptor('message_actor');
     const stop = new AbortController();
+    const operations = new Map<string, unknown>();
+    const operationLog = createOperationLog({ storage: {
+      get: async (key) => operations.get(key),
+      set: async (key, value) => { operations.set(key, value); },
+    } });
     let round = 0;
     const ctx = context({
       signal: stop.signal,
       tools: [actorDescriptor], refreshTools: async () => [actorDescriptor],
+      lifecycle: makeDispatchTracker({
+        operationLog, generationId: () => 'actor-terminal-stop', retryClassFor: retryClassForTool,
+      }),
       actorAuthority: {
         deliverMessage: async () => ({
-          ok: true, content: 'the actor stopped without touching its target',
+          ok: performed, [performed ? 'content' : 'error']: 'the actor stopped without touching its target',
           actorDeliveryId: 'delivery-stopped', actorCorrelationId: 'correlation-stopped',
           actorTerminal: true, actorOutcomeKnown: true,
           actorPerformed: false, actorAborted: true,
@@ -1838,14 +1848,15 @@ describe('controller turn finite tool protocol', () => {
       .flatMap((message: any) => message.toolResults ?? [])
       .find((block: any) => block.tool_use_id === 'actor-terminal-stop');
     for (const value of [live, stored]) expect(value).toMatchObject({
-      outcomeKnown: true, authorityPerformed: true,
+      outcomeKnown: true, authorityPerformed: performed,
       actorTerminal: true, actorOutcomeKnown: true,
       actorPerformed: false, actorAborted: true,
     });
     expect(result.events).not.toContainEqual(expect.objectContaining({
       type: 'error', outcomeKnown: false,
     }));
-    expect(result.error).toBeNull();
+    expect({ error: result.error, session: result.events.filter((event: any) => event.type === 'state').at(-1)?.session })
+      .toEqual({ error: null, session: ctx.sessions.snapshot() });
   });
 
   test('main finalization rejects a performed effect whose result was never persisted', async () => {

@@ -208,7 +208,7 @@ describe('actor_list — unified actor catalog', () => {
     expect(actorListTool.origins?.({}, {} as any)).toEqual([]);
     expect(actorListTool.name).toBe('actor_list');
     const metadata = getToolMetadata(actorListTool.name);
-    expect(metadata.description).toContain('webvm | notebook | pod | app');
-    expect(metadata.description).toContain("a Pod's lifecycle");
+    expect(metadata.description).toContain('webvm, notebook, pod, app, and integration');
+    expect(metadata.description).toContain('Pod lifecycle');
   });
 });

@@ -415,7 +415,7 @@ export const createDebuggerPool = (/** @type {{bindTabEvents?:boolean,bindTabRem
   // CDP resolves the exact node → no ambiguity, no "selector not found".
   // Synthetic el.click(); a real-event upgrade (DOM.getBoxModel +
   // Input.dispatchMouseEvent) is a follow-up for isTrusted-gating sites.
-  // Reports the action's DOM effect via OBS_SETUP/COLLECT (Phase 2).
+  // why: return the dispatch receipt before navigation destroys this document.
   const clickBackendNode = async (tabId, backendDOMNodeId, expectedDocument) => {
     const bound = await attachToExpectedDocument(tabId, expectedDocument);
     const actionContextId = await isolatedActionContext(tabId, bound, expectedDocument);
@@ -432,7 +432,7 @@ export const createDebuggerPool = (/** @type {{bindTabEvents?:boolean,bindTabRem
     try {
       const out = await browser.debugger.sendCommand({ tabId }, 'Runtime.callFunctionOn', {
         objectId,
-        functionDeclaration: `async function (expectedHref, expectedTimeOrigin, guardTag) {
+        functionDeclaration: `function (expectedHref, expectedTimeOrigin, guardTag) {
           if (!this.ownerDocument || this.ownerDocument.location.href !== expectedHref
               || !this.ownerDocument.defaultView
               || this.ownerDocument.defaultView.performance.timeOrigin !== expectedTimeOrigin) {
@@ -474,18 +474,15 @@ export const createDebuggerPool = (/** @type {{bindTabEvents?:boolean,bindTabRem
               }
             }
           }
-          ${OBS_SETUP}
           if (typeof this.click === 'function') { this.click(); }
           else { this.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); }
-          ${OBS_COLLECT}
-          return { tag: tag, text: text, mutations: __m };
+          return { tag: tag, text: text };
         }`,
         arguments: [
           { value: expectedDocument.href },
           { value: expectedDocument.timeOrigin },
           { value: guardTag },
         ],
-        awaitPromise: true,
         returnByValue: true,
         userGesture: true,
       });

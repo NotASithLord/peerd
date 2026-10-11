@@ -284,3 +284,22 @@ export const applyNotebookRealmSeal = (global) => applyRealmSeal(global, {
   blockHostStorage: true,
   blockExtensionApis: true,
 });
+
+/** @param {boolean} [retain] */
+export const captureWorkerConsole = (retain = true) => {
+  /** @type {Array<{level:string,text:string}>} */
+  const consoleOutput = [];
+  const stringify = (/** @type {unknown} */ value) => {
+    if (typeof value === 'string') return value;
+    if (value instanceof Error) return value.stack || `${value.name}: ${value.message}`;
+    try { return JSON.stringify(value); } catch { return String(value); }
+  };
+  for (const [method, level] of Object.entries({ log: 'info', info: 'info', warn: 'warn', error: 'error' })) {
+    console[/** @type {'log'|'info'|'warn'|'error'} */ (method)] = (...args) => {
+      const text = args.map(stringify).join(' ');
+      if (retain) consoleOutput.push({ level, text });
+      postMessage({ type: 'log', level, text });
+    };
+  }
+  return consoleOutput;
+};

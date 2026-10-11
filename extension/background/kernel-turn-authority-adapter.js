@@ -820,20 +820,15 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     // authoritative. Never turn it into the currently selected chat later.
     const sessionId = session?.sessionId ?? null;
     const permission = await resolvePermission(session);
-    /** @type {any} */
-    let activeTab;
     const activeTabSpecified = Object.hasOwn(options, 'activeTabId');
-    if (activeTabSpecified && typeof options.activeTabId === 'number') {
-      const tab = await deps.browser.tabs.get(options.activeTabId).catch(() => null);
-      if (tab) activeTab = {
-        id: tab.id, windowId: tab.windowId, url: tab.url ?? '', origin: originOf(tab.url ?? ''),
-      };
-    } else if (!activeTabSpecified && options.exposure !== ACTOR_EXPOSURE) {
-      const [tab] = await deps.browser.tabs.query({ active: true, currentWindow: true });
-      if (tab) activeTab = {
-        id: tab.id, windowId: tab.windowId, url: tab.url ?? '', origin: originOf(tab.url ?? ''),
-      };
-    }
+    const [tab] = activeTabSpecified && typeof options.activeTabId === 'number'
+      ? [await deps.browser.tabs.get(options.activeTabId).catch(() => null)]
+      : !activeTabSpecified && options.exposure !== ACTOR_EXPOSURE
+        ? await deps.browser.tabs.query({ active: true, currentWindow: true }) : [];
+    /** @type {any} */
+    const activeTab = tab && {
+      id: tab.id, windowId: tab.windowId, url: tab.url ?? '', origin: originOf(tab.url ?? ''),
+    };
     const providerName = session?.provider ?? resolveActiveProvider().name;
     const actorType = options.actorType;
     const actorBacking = options.actorBacking;
@@ -900,11 +895,19 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         listTasks: () => live.asyncActors.actorTasks(sessionId),
         cancelTask: (/** @type {string} */ taskId) =>
           live.asyncActors.actorCancel(sessionId, taskId),
-        deliverMessage: (/** @type {any} */ request) => live.actorMessaging.messageActor(request),
+        deliverMessage: (/** @type {any} */ request) => {
+          // why: only the same-origin actor receives the fenced page path.
+          const origin = safeWebActorSummaryOrigin(activeTab?.url, deps.denylist.patterns());
+          if (origin && parseSiteHandle(request.to) === origin
+              && typeof request.message === 'string') {
+            const url = new URL(activeTab.url);
+            url.username = ''; url.password = '';
+            request = { ...request, message: `${request.message}\n\n${
+              wrapUntrusted({ origin, tool: 'foreground_page', body: url.href })}` };
+          }
+          return live.actorMessaging.messageActor(request);
+        },
       }),
-      // why: the sealed-code actor client receives only actor messaging; tool
-      // semantics remain in the controller and message custody remains here.
-      messageActor: (/** @type {any} */ request) => live.actorMessaging.messageActor(request),
       scriptRuns,
       completeGoalRun: sessionId
         ? (/** @type {string} */ summary) => goalRunner?.complete(sessionId, summary) ?? false : undefined,
@@ -1068,42 +1071,43 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       vault: { isLocked: deps.vault.isLocked() },
       now: Date.now,
     };
+    // why: tool and sealed-code delivery use the same target context.
+    ctx.messageActor = ctx.actorAuthority.deliverMessage;
     if (options.exposure !== ACTOR_EXPOSURE) return ctx;
     // Exact actor operations are selected by the host grant and finite binder;
     // semantic tool names never authorize this in-service-worker context.
-    const restricted = ctx;
     if (actorType === 'web' && actorBacking === 'api') {
       const ownedOrigin = normalizeApiOrigin(options.actorInstanceId);
-      restricted.canUseSiteClientOrigin = makeFixedSiteClientOriginGuard(ownedOrigin, {
+      ctx.canUseSiteClientOrigin = makeFixedSiteClientOriginGuard(ownedOrigin, {
         isKnownIdp: isKnownIdpHost,
       });
-      restricted.authorizeSiteClientOrigin = async (/** @type {string} */ origin) =>
-        restricted.canUseSiteClientOrigin(origin);
-      restricted.webFetch = withSessionScopedCredentials(webFetch, () => ownedOrigin ?? undefined,
+      ctx.authorizeSiteClientOrigin = async (/** @type {string} */ origin) =>
+        ctx.canUseSiteClientOrigin(origin);
+      ctx.webFetch = withSessionScopedCredentials(webFetch, () => ownedOrigin ?? undefined,
         { captureRequestAuthority });
     } else if (actorType === 'web') {
       const hasCustody = hasDurableSiteClientState(session?.originState);
       originStates.hydrate(sessionId, session?.originState);
       const lock = live.originLockFor(sessionId);
-      restricted.judgeLanding = lock?.judgeLanding;
-      restricted.authorizeSignInOrigin = lock?.authorizeSignInOrigin;
-      restricted.authorizeSignInExcursion = lock?.authorizeSignInExcursion;
-      restricted.revokeSignInExcursion = lock?.revokeSignInExcursion;
-      restricted.canUseSiteClientOrigin = hasCustody
+      ctx.judgeLanding = lock?.judgeLanding;
+      ctx.authorizeSignInOrigin = lock?.authorizeSignInOrigin;
+      ctx.authorizeSignInExcursion = lock?.authorizeSignInExcursion;
+      ctx.revokeSignInExcursion = lock?.revokeSignInExcursion;
+      ctx.canUseSiteClientOrigin = hasCustody
         ? lock?.canUseSiteClientOrigin : () => false;
-      restricted.authorizeSiteClientOrigin = hasCustody
+      ctx.authorizeSiteClientOrigin = hasCustody
         ? lock?.authorizeSiteClientOrigin(() => live.liveLandingFor(sessionId))
         : async () => false;
-      restricted.webFetch = withSessionScopedCredentials(
+      ctx.webFetch = withSessionScopedCredentials(
         webFetch,
-        lock ? lock.makeScope(() => restricted.activeTab?.origin)
-          : () => restricted.activeTab?.origin,
+        lock ? lock.makeScope(() => ctx.activeTab?.origin)
+          : () => ctx.activeTab?.origin,
         { captureRequestAuthority },
       );
-      restricted.repinActiveTab = (/** @type {any} */ tab) => { restricted.activeTab = tab; };
-      restricted.siteCapture = siteCapture;
+      ctx.repinActiveTab = (/** @type {any} */ pin) => { ctx.activeTab = pin; };
+      ctx.siteCapture = siteCapture;
     }
-    return restricted;
+    return ctx;
   };
 
   const uiConnected = () => live?.shared.uiPorts.size > 0;

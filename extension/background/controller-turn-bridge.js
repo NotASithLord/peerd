@@ -400,7 +400,6 @@ export const makeControllerTurnBridge = ({
   ) => {
     const proof = run.terminalActorCancellations.get(receipt?.effectId);
     return proof?.callId === receipt?.callId
-      && proof?.effectId === receipt?.effectId
       && proof?.operation === receipt?.operation;
   };
   const exactStoppedActorCancellations = (/** @type {any} */ run) => {
@@ -411,9 +410,8 @@ export const makeControllerTurnBridge = ({
     for (const [callId, issued] of unpersisted) {
       const claimed = run.claimedEffectsByCall.get(callId);
       if (issued?.name !== 'message_actor') return [];
-      // Stop may freeze the run before the sealed semantic owner submits its
-      // first authority claim. After the kernel-call drain, an empty ledger is
-      // itself host proof that the actor boundary was never approached.
+      // why: after the host drain, an empty ledger proves that this call
+      // never reached the actor boundary.
       if (!claimed || claimed.size === 0) {
         if (authorityReceiptsForCall(run.effectReceipts, callId).length > 0) return [];
         cancellations.push(callId);
@@ -775,14 +773,10 @@ export const makeControllerTurnBridge = ({
       if (recoveryRewrite?.recovery?.state === 'outcome_unknown') {
         latchAuthorityOutcomeUnknown(run);
       }
-      // A message can be durably admitted (the outer receipt is performed)
-      // while its actor later stops with a host-known empty effect ledger. Keep
-      // that narrower host result beside the exact effect id; semantic result
-      // bytes are not trusted to weaken Stop's conservative fallback.
-      if (!recoveryRewrite && exactTerminalActorCancellation(result, receipt)) {
-        run.terminalActorCancellations.set(effect.effectId, Object.freeze({
-          callId: effect.callId, effectId: effect.effectId, operation,
-        }));
+      // why: retain exact host no-effect proof after a known cancellation rewrite.
+      if ((!recoveryRewrite || recoveryRewrite.recovery?.state === 'cancelled')
+          && exactTerminalActorCancellation(result, receipt)) {
+        run.terminalActorCancellations.set(effect.effectId, Object.freeze({ callId: effect.callId, operation }));
       }
       const auditPersisted = await appendRunAudit(run, {
         type: 'authority_effect', sessionId: run.sessionId,
@@ -2904,13 +2898,8 @@ export const makeControllerTurnBridge = ({
               && !run.persistedSemanticCalls.has(receipt.callId)
               && !receiptHasTerminalActorCancellation(run, receipt))
               || receipt.outcomeKnown === false);
-          // The semantic loop loses its local dispatch race when Stop fires, but
-          // the host ledger can prove one narrower truth: every unpersisted call
-          // was message_actor and either never entered its host or returned a
-          // terminal, known no-actor-effect cancellation. Persist only those
-          // exact results so the transcript remains a valid tool_use ->
-          // tool_result pair. No other operation may downgrade the controller's
-          // conservative unknown outcome here.
+          // why: Stop races semantic dispatch. Reconcile only exact message_actor
+          // cancellation proof after the host drain. Other effects stay unknown.
           const actorCancellations = controllerOutcomeUnknown && run.signal.aborted
             && !hostOutcomeUnknown
             ? exactStoppedActorCancellations(run) : [];
@@ -2960,7 +2949,7 @@ export const makeControllerTurnBridge = ({
                 }));
               }
             }
-            const session = await run.ctx.sessions.updateAssistantMessage(
+            await run.ctx.sessions.updateAssistantMessage(
               run.sessionId, value.messageId, {
               ...(value.content === undefined ? {} : { content: value.content }),
               streaming: false,
@@ -2980,8 +2969,8 @@ export const makeControllerTurnBridge = ({
                 toolUseId: callId, result: live,
               });
             }
-            if (cancellationResults.length > 0) {
-              await run.events.push({ type: 'state', session: externalizeSession(run, session) });
+            if (cancellationResults.length) {
+              await run.events.push({ type: 'state', session: externalizeSession(run, await run.ctx.sessions.get(run.sessionId)) });
             }
             await run.events.push(outcomeUnknown ? {
               type: 'error', sessionId: run.sessionId, messageId: value.messageId,

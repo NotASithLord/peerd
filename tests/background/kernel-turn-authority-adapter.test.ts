@@ -1454,7 +1454,8 @@ describe('kernel turn authority adapter', () => {
     ]]);
   });
 
-  test('runs a bound actor with projection and spend gates, then replays live state', async () => {
+  test.each(['9', 'site:https://www.selenium.dev', 'site:https://example.com'])(
+    'runs %s with exact same-origin page context, projection, and spend gates', async (to) => {
     let releaseRun!: () => void;
     const runGate = new Promise<void>((resolve) => { releaseRun = resolve; });
     const jobs: any[] = [];
@@ -1473,9 +1474,11 @@ describe('kernel turn authority adapter', () => {
         price: { cost: 0.000096, estimated: true },
       };
     });
+    const url = 'https://www.selenium.dev/selenium/web/web-form.html';
+    h.tabs.get(9).url = url;
     const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
     const reply = ctx.messageActor({
-      to: '9', message: 'inspect the page', senderSessionId: h.root.sessionId,
+      to, message: 'inspect the page', senderSessionId: h.root.sessionId,
       toolUseId: 'tool-1', awaitReply: true,
     });
     for (let attempt = 0; jobs.length === 0 && attempt < 20; attempt += 1) {
@@ -1487,6 +1490,10 @@ describe('kernel turn authority adapter', () => {
     await h.runtime.relays.onUiConnect({ postMessage: (message: any) => replay.push(message) });
     expect(replay.some((message) => message.type === 'turn/actor-start')).toBe(true);
     const actorSessionId = jobs[0].actorSessionId;
+    if (to === 'site:https://www.selenium.dev') {
+      expect(jobs[0].message).toContain(`tool="foreground_page"`);
+      expect(jobs[0].message).toContain(`\n${url}\n</untrusted_web_content>`);
+    } else expect(jobs[0].message).toBe('inspect the page');
     expect(jobs[0].maxOutputTokens).toBe(4096);
     await h.sessions.update(actorSessionId, { cost: { cost: 25 } });
     expect(await h.actorConfig().spendRefusalFor(actorSessionId)).toContain('spend limit');
@@ -1538,6 +1545,7 @@ describe('kernel turn authority adapter', () => {
   });
 
   test('preserves a host-known empty actor ledger when Stop lands after inference starts', async () => {
+    const controller = new AbortController();
     const cancelled = {
       ok: false, started: true, error: 'aborted', aborted: true,
       performed: false, outcomeKnown: true, newMessages: [],
@@ -1552,14 +1560,13 @@ describe('kernel turn authority adapter', () => {
     const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
     const pendingReply = ctx.messageActor({
       to: '9', message: 'inspect the page', senderSessionId: h.root.sessionId,
-      toolUseId: 'tool-inference-stop', awaitReply: true,
+      toolUseId: 'tool-inference-stop', awaitReply: true, awaitSignal: controller.signal,
     });
     for (let attempt = 0; !h.broadcasts.some((message) =>
       message.type === 'turn/actor-start') && attempt < 20; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 1));
     }
-    const actorStart = h.broadcasts.find((message) => message.type === 'turn/actor-start');
-    expect(h.shared.turnSlots.stop(actorStart.sessionId)).toBe(true);
+    controller.abort(ABORT_STOP);
 
     expect(await pendingReply).toMatchObject({
       ok: false, actorTerminal: true, actorAborted: true,

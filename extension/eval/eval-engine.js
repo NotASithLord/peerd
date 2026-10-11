@@ -1,17 +1,7 @@
 // @ts-check
-// eval/eval-engine — the DOM-free eval orchestration, shared by the home "Lab"
-// section. Inject `browser` + a `log` callback; the engine owns the SW port, a
-// dedicated hidden subject window, and the run loop, and returns scorecards as
-// DATA (not DOM). Both a single suite run and a head-to-head A/B go through here.
-//
-// It connects the same 'sidepanel' port the eval page uses (turn/* push events)
-// and drives the REAL agent via agent/send — so a Lab score reflects the actual
-// loop, gates, tools, and model. NB: a run does `session/reset` + takes over the
-// agent session; surfaces must warn before starting (your current chat resets).
-//
-// ponytail: extension/eval/runner.js still carries its own inline copy of this
-// orchestration — it's the proven standalone dev surface and I won't refactor it
-// onto this engine until the Lab is field-verified. Deliberate transitional debt.
+// eval/eval-engine drives the real agent and returns scorecards for the Lab.
+// Inject browser and log. Each task resets the active session.
+// runner.js keeps its standalone orchestration until the Lab is field-tested.
 
 import { SUITES, TASKS } from './tasks.js';
 import { aggregate, compare, wastedTurns } from './score.js';
@@ -21,7 +11,7 @@ import { sleep } from '/shared/util.js';
 /**
  * @typedef {{ inputTokens?: number, outputTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number, cost?: number }} Usage
  * @typedef {{ toolUseId: string, name: string, input?: unknown, ok?: boolean }} ToolLogEntry
- * @typedef {{ session: any, toolLog: ToolLogEntry[], tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, runnerUsd: number, runnerUsdByKey: Map<string, number>, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, goalMode: boolean, modelsSeen: Set<string> }} Turn
+ * @typedef {{ session: any, toolLog: ToolLogEntry[], actorStates: Map<string, any>, tokens: number, cost: Usage | null, runner: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, runnerUsd: number, runnerUsdByKey: Map<string, number>, error: string | null, started: boolean, resolveDone: ((value?: any) => void) | null, goalMode: boolean, modelsSeen: Set<string> }} Turn
  */
 
 // The runner's own $ for a task. 'local' (the on-device runner) is FREE; a cloud
@@ -45,7 +35,7 @@ const costFields = (c) => c ? {
   costUsd: typeof c.cost === 'number' ? c.cost : 0,
 } : { ...ZERO_COST };
 /** @returns {Turn} */
-const newTurn = () => ({ session: null, toolLog: [], tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, runnerUsd: 0, runnerUsdByKey: new Map(), error: null, started: false, resolveDone: null, goalMode: false, modelsSeen: new Set() });
+const newTurn = () => ({ session: null, toolLog: [], actorStates: new Map(), tokens: 0, cost: null, runner: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, runnerUsd: 0, runnerUsdByKey: new Map(), error: null, started: false, resolveDone: null, goalMode: false, modelsSeen: new Set() });
 
 /** @param {any} session */
 const finalAnswer = (session) => {
@@ -94,13 +84,7 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
         break;
       case 'turn/delta': turn.started = true; break;
       case 'turn/tool-use': turn.started = true; if (isSubject(msg)) turn.toolLog.push({ toolUseId: msg.toolUseId, name: msg.name, input: msg.input }); break;
-      // Correlate each outcome back to its naming tool-use by tool_use_id, so the
-      // scorecard can tell a failed call from a successful one. ok===true is
-      // success; anything else (explicit false, or a malformed/absent result) is
-      // an error, matching agent-loop's `is_error: !dispatchResult.ok`. why
-      // isSubject (like turn/cost): the 'eval' port sees EVERY session's events,
-      // so a zombie/actor turn's late tool-use/result must not land in THIS
-      // task's toolLog and skew toolErrors/wastedTurns.
+      // why: correlate results and reject other sessions before counting errors.
       case 'turn/tool-result': {
         if (!isSubject(msg)) break;
         const rec = turn.toolLog.find((c) => c.toolUseId === msg.toolUseId);
@@ -150,10 +134,10 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
           turn.runnerUsd = [...turn.runnerUsdByKey.values()].reduce((sum, v) => sum + v, 0);
         }
         break;
-      // An actor turn's session snapshot — its model(s) show the planner→
-      // executor handoff (engine-actor prewalk). turn/actor-state, not
-      // turn/state (which is the subject/main session only).
       case 'turn/actor-state':
+        // why: actor snapshots are cumulative. Keep one per current delegation.
+        if (!turn.session?.sessionId || msg.parentSessionId !== turn.session.sessionId) break;
+        turn.actorStates.set(msg.parentToolUseId, msg);
         if (msg.session?.model) turn.modelsSeen.add(msg.session.model);
         break;
       case 'turn/error': turn.error = msg.error; break;
@@ -308,17 +292,24 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
     turn.resolveDone = null;
     if (timedOut) {
       log('  ⏱ timed out (still scoring end state)');
-      // A live goal run would keep driving turns past this task — halt it.
-      if (turn.goalMode) await browser.runtime.sendMessage({ type: 'agent/stop' }).catch(() => {});
+      // why: any timed-out turn can continue into the next task.
+      await browser.runtime.sendMessage({ type: 'agent/stop' }).catch(() => {});
     }
     await settleSubject();
     const end = await resolveEndTab();
     const tabInfo = await readTab(end?.id ?? subjId);
-    // Tool outcomes (design 5a): the subject's tool transcript is the single
-    // source — `tools[]` is DERIVED from it (not maintained in parallel), and
-    // `toolResults` carries only the resolved calls; count errors + roll up by name.
+    // why: actor evidence must not change the main agent's call metrics.
     const tools = turn.toolLog.map((c) => c.name);
     const toolResults = turn.toolLog.filter((c) => typeof c.ok === 'boolean').map((c) => ({ name: c.name, ok: /** @type {boolean} */ (c.ok) }));
+    const actorToolResults = [...turn.actorStates.values()].flatMap(({ session, fromIndex }) => {
+      /** @type {any[]} */
+      const messages = session.messages.slice(fromIndex);
+      const results = messages.flatMap((message) => message.toolResults ?? []);
+      return messages.flatMap((message) => message.toolUses ?? []).flatMap((call) => {
+        const result = results.find((entry) => entry?.tool_use_id === call.id);
+        return result ? [{ actorSessionId: session.sessionId, name: call.name, input: call.input, content: result.content, ok: result.is_error === false }] : [];
+      });
+    });
     const toolCalls = tools.length;
     const toolErrors = toolResults.filter((r) => !r.ok).length;
     /** @type {Record<string, number>} */
@@ -328,7 +319,7 @@ export function createEvalEngine({ browser, log = () => {}, onProgress = () => {
     const state = {
       tabUrl: tabInfo.url, tabTitle: tabInfo.title, tabText: tabInfo.text,
       answer: finalAnswer(turn.session), steps: tools.length, tools,
-      toolResults,
+      toolResults, actorToolResults,
       tokens: turn.tokens, durationMs, error: turn.error || (timedOut ? 'timeout' : null),
     };
     let res;

@@ -21,7 +21,7 @@ export const validatePaths = (paths, expectedDids, { local = false } = {}) => {
   assert.deepEqual(paths.map(path => path.did).sort(), [...expectedDids].sort(), 'Every expected peer needs ICE evidence');
   for (const path of paths) {
     assert.equal(path.state, 'succeeded', 'ICE pair must succeed');
-    assert(path.bytesSent > 0 && path.bytesReceived > 0, 'ICE must carry bidirectional traffic');
+    assert(path.bytesSent > 0 && path.bytesReceived > 0, 'ICE transport must carry bidirectional traffic');
     for (const candidate of [path.local, path.remote]) {
       assert(candidate?.address && candidate.protocol === 'udp' && candidate.type === 'host', 'Expected direct host UDP candidate');
       assert(!/^(127\.|::1$|0\.0\.0\.0$|localhost$)/i.test(candidate.address), 'Loopback cannot prove cross-host traffic');
