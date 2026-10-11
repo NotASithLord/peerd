@@ -69,7 +69,8 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
   const selection = new AbortController();
   const qualified = new Set();
   const active = new Map();
-  let stopped = false;
+  // why: probes and chunk workers share one live cancellation state, including
+  // continuations that resume after a sibling rejects and cleanup has run.
   try {
     // why: begin downloading on the first verified manifest, but keep bounded
     // probes alive so other seeders can join without waiting for author failure.
@@ -96,7 +97,7 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
           assertBundleWithinLimits(manifest);
           if (await manifestHash(manifest) !== hash) continue;
           if (!(await verifyManifest(manifest)).ok) continue;
-          if (stopped || !isAllowed(did)) continue;
+          if (selection.signal.aborted || !isAllowed(did)) continue;
           qualified.add(did);
           acceptManifest(manifest);
         } catch { /* one unavailable candidate cannot suppress other providers */ }
@@ -122,7 +123,7 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
     const worker = async () => {
       /** @type {string | undefined} */
       let h;
-      while (!stopped && (h = queue.shift()) !== undefined) {
+      while (!selection.signal.aborted && (h = queue.shift()) !== undefined) {
         const start = rr++ % clients.length;
         // why: known holders get useful work first; rotate equal candidates and
         // prefer the least occupied provider so a slow seeder cannot claim the
@@ -130,7 +131,7 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
         const candidates = [...clients.slice(start), ...clients.slice(0, start)];
         /** @type {Uint8Array | null} */
         let got = null;
-        while (candidates.length && !got && !stopped) {
+        while (candidates.length && !got && !selection.signal.aborted) {
           // A new holder may qualify while the previous request stalls. Re-rank
           // untried candidates at every retry instead of preserving stale order.
           candidates.sort((a, b) => Number(qualified.has(b.did)) - Number(qualified.has(a.did))
@@ -140,11 +141,11 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
           active.set(did, (active.get(did) ?? 0) + 1);
           try {
             const resp = await client.chunk(h);
-            if (!stopped && isAllowed(did) && resp.t === 'CHUNK') {
+            if (!selection.signal.aborted && isAllowed(did) && resp.t === 'CHUNK') {
               // why cast: a CHUNK reply carries bytes; re-verified by the
               // hash check on the next line.
               const bytes = decodeCommittedChunk(resp.bytes, /** @type {number} */ (expectedSizes.get(h)));
-              if (await sha256hex(bytes) === h && !stopped && isAllowed(did)) {
+              if (await sha256hex(bytes) === h && !selection.signal.aborted && isAllowed(did)) {
                 got = bytes;
                 verifiedContributors.add(did);
               } // tamper → treat as a miss, try next provider
@@ -167,12 +168,11 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
     if (manifest.v === 2 && await sha256hex(payload) !== manifest.bundle.compressedHash) {
       throw new Error('compressed bundle hash mismatch');
     }
-    if (stopped || [...verifiedContributors].some((did) => !isAllowed(did))) {
+    if (selection.signal.aborted || [...verifiedContributors].some((did) => !isAllowed(did))) {
       throw new Error('content provider policy changed during transfer');
     }
     return { manifest, payload, providers: clients.map((c) => c.did), verifiedContributors: [...verifiedContributors] };
   } finally {
-    stopped = true;
     selection.abort();
     for (const { client } of clients) client.close();
   }

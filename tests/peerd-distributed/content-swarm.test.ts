@@ -1,4 +1,4 @@
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, spyOn } from 'bun:test';
 import { generateIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
 import { swarmFetch } from '../../extension/peerd-distributed/content/swarm.js';
 import { createContentResponder, createChannelClient, fetchBundle } from '../../extension/peerd-distributed/content/transfer.js';
@@ -491,3 +491,62 @@ test('a newly qualified seeder is preferred over silent fallback after a delayed
   expect((await result).verifiedContributors).toEqual(['late']);
   expect(silentChunks).toBe(0);
 }, 2000);
+
+
+test('a chunk finishing verification after sibling failure cannot publish progress or take more work', async () => {
+  const identity = await generateIdentity();
+  const signed = await buildManifest({
+    payload: utf8('a'.repeat(262_144) + 'b'.repeat(262_144) + 'tail'),
+    type: 'app', entry: 'index.html', identity,
+  });
+  const store = createContentStore();
+  store.publish(signed);
+  const respond = createContentResponder({ store });
+  const verifying = Promise.withResolvers<void>();
+  const releaseVerification = Promise.withResolvers<void>();
+  const digest = crypto.subtle.digest.bind(crypto.subtle);
+  // why: hold real hash verification across the sibling's rejection, rather
+  // than relying on crypto speed or delivering a reply to an already closed client.
+  const digestSpy = spyOn(crypto.subtle, 'digest').mockImplementation(async (algorithm, data) => {
+    const result = await digest(algorithm, data);
+    if (ArrayBuffer.isView(data) && data.byteLength === 262_144
+      && new Uint8Array(data.buffer, data.byteOffset, 1)[0] === 97) {
+      verifying.resolve();
+      await releaseVerification.promise;
+    }
+    return result;
+  });
+  let handler: any;
+  let chunkRequests = 0;
+  let chunkProgress = 0;
+  let rejectSibling: (() => void) | undefined;
+  try {
+    const result = swarmFetch({
+      uri: formatPeerdUri({ did: identity.did, hash: signed.hash }),
+      providers: ['source'], alpha: 2,
+      channelFor: () => ({
+        setHandler: (next) => { handler = next; },
+        send: (request) => {
+          if (request.t === 'CHUNK_REQ' && ++chunkRequests === 2) {
+            rejectSibling = () => handler?.({ t: 'NOCHUNK', hash: request.hash });
+            return;
+          }
+          return respond(request, (response) => handler?.(response));
+        },
+      }),
+      onProgress: (progress) => { if (progress.phase === 'chunk') chunkProgress++; },
+    });
+    await verifying.promise;
+    expect(rejectSibling).toBeDefined();
+    rejectSibling!();
+    await expect(result).rejects.toThrow('chunk unavailable on all providers');
+    expect(handler).toBeNull();
+    releaseVerification.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(chunkProgress).toBe(0);
+    expect(chunkRequests).toBe(2);
+  } finally {
+    releaseVerification.resolve();
+    digestSpy.mockRestore();
+  }
+});
