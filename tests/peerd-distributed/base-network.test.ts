@@ -39,6 +39,15 @@ const clique = async (n: number) => {
 };
 
 describe('base network — the always-on lobby + sub-protocols', () => {
+  test('unsupported discovery rollout profiles fail before acquiring mesh resources', async () => {
+    const identity = await generateIdentity();
+    let accesses = 0;
+    const mesh = new Proxy({}, { get() { accesses++; throw new Error('mesh acquired'); } });
+    await expect(createBaseNetwork({ identity, mesh, discoveryDisseminationProfile: 'unknown' as any }))
+      .rejects.toThrow('unsupported discovery dissemination profile');
+    expect(accesses).toBe(0);
+  });
+
   test('global presence: every node sees every other on the lobby', async () => {
     const peers = await clique(5);
     for (const p of peers) p.base.presence.announce();

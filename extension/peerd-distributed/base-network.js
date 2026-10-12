@@ -30,7 +30,7 @@ import { swarmFetch } from './content/swarm.js';
 import { formatPeerdUri, parsePeerdUri } from './content/uri.js';
 import { concat, utf8, toHex } from '/shared/bundle/bytes.js';
 import { createLibrary } from './apps/library.js';
-import { createDiscovery } from './apps/discovery.js';
+import { createDiscovery, DISCOVERY_BOUNDED_PROFILE } from './apps/discovery.js';
 import { buildMeta, dwappId, verifyMeta } from './apps/meta.js';
 import { dlog } from './log.js';
 import { AppRuntimeError, assertAppRuntime, assertAppRuntimeAgreement, appRuntimeFromFiles } from '/shared/app-runtime.js';
@@ -51,12 +51,19 @@ const subMsgTopic = (id) => `dwapp/${id}/msg`;            // a sub-protocol's go
  * @param {{ identity: import('./transport/mesh.js').Identity, mesh: any,
  *   meta?: () => any, dial?: any, audit?: import('./transport/mesh.js').AuditFn,
  *   now?: () => number, maxBundleBytes?: number, discoveryEnabled?: ()=>boolean, userBlocked?: (did:string)=>boolean,
+ *   discoveryDisseminationProfile?: typeof import('./apps/discovery.js').DISCOVERY_BOUNDED_PROFILE | null,
  *   admitDwappMeta?: ((candidate: { dwappId: string, publisher: string, seq: number, versionId: string }) => Promise<boolean>) | null }} opts
  */
 export const createBaseNetwork = async ({
   identity, mesh, meta = () => ({}), dial = null, audit = null,
   now = Date.now, maxBundleBytes = MAX_BUNDLE_BYTES, admitDwappMeta = null, userBlocked = () => false, discoveryEnabled = () => true,
+  discoveryDisseminationProfile = null,
 }) => {
+  // why: reject unsupported local rollout settings before acquiring node
+  // listeners or transport resources that a rejected constructor cannot close.
+  if (discoveryDisseminationProfile !== null && discoveryDisseminationProfile !== DISCOVERY_BOUNDED_PROFILE) {
+    throw new Error('unsupported discovery dissemination profile');
+  }
   dlog('base', `assembling base network for ${(identity.did || '').slice(-8)} on lobby "${BASE_TOPIC}"`);
   const node = await createPeerNode({ identity, mesh, meta, dial, audit, now });
   let closed = false;
@@ -118,6 +125,7 @@ export const createBaseNetwork = async ({
   const library = createLibrary({ isBlocked, now });
   const discovery = createDiscovery({
     mesh: node.mesh, identity, library, isBlocked, block, audit, now, admitMeta: admitDwappMeta, isEnabled: discoveryEnabled,
+    disseminationProfile: discoveryDisseminationProfile,
     onCard: (/** @type {any} */ card) => { dlog('base', `card ingested: ${card.value?.name} (${card.dwapp_id.slice(0, 8)}…)`); for (const cb of dwappCbs) cb(card); },
   });
 
