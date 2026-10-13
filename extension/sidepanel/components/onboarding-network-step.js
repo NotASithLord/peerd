@@ -24,9 +24,19 @@ export const PeerNetworkStatus = () => {
       if (!ready?.ok) throw new Error('status unavailable');
       const lease = ready.featureLeases?.leases?.dweb?.status;
       const result = lease === 'active' ? await send({ type: 'dweb/distributed/info' }) : null;
+      if (lease === 'active' && (result?.ok === false || typeof result?.running !== 'boolean'
+          || (result.running && (!Number.isSafeInteger(result.linkedCount) || result.linkedCount < 0)))) {
+        throw new Error('status unavailable');
+      }
+      // Signaling introduces peers; its socket being up does not establish a
+      // direct data path. Conversely, existing peers can survive its outage.
       label = lease === 'starting' ? 'Connecting to the peer network. You can continue.'
-        : result?.running && (result.rendezvous === 'up' || result.linkedCount > 0)
-        ? 'Connected to the peer network.'
+        : result?.running && result.linkedCount > 0
+        ? `Connected to ${result.linkedCount} ${result.linkedCount === 1 ? 'peer' : 'peers'}. App availability depends on who is sharing.`
+        : result?.running && result.rendezvous === 'up'
+        ? 'Looking for peers. No direct peer connections yet. You can continue.'
+        : result?.running
+        ? 'No peer connections. The introduction service is unavailable; Peerd will keep trying. You can continue.'
         : 'Peer network is offline. You can continue and reconnect later.';
     } catch { label = 'Connection status unavailable. You can continue and check again later.'; }
     finally {

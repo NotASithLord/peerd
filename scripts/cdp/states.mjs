@@ -43,6 +43,7 @@ import { STARTER_VISUAL_STATES } from './starter-visuals.mjs';
 import { APP_RUNTIME_STATES } from './app-runtime-state.mjs';
 import { IMMUTABLE_ADDRESS_VISUAL_STATES } from './immutable-address-visuals.mjs';
 import { CONSENT_LOCK_VISUAL_STATES } from './consent-lock-visuals.mjs';
+import { PEER_NETWORK_STATUS_STATES } from './peer-network-status-states.mjs';
 import { armVaultLockStages } from './vault-lock-stages.mjs';
 
 // A compact transcript probe shared by the functional states.
@@ -535,6 +536,7 @@ export const STATES = [
   ...CONSENT_LOCK_VISUAL_STATES,
   ...IMMUTABLE_ADDRESS_VISUAL_STATES,
   ...STARTER_VISUAL_STATES,
+  ...PEER_NETWORK_STATUS_STATES,
   ...APP_RUNTIME_STATES,
   WASMER_STATE,
   {
