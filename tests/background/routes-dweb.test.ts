@@ -1818,3 +1818,14 @@ test('host policy projects malformed discovery values false without invalidating
     expect(result).toMatchObject({ ok: true, discoveryEnabled: enabled === true, policy: { revision: 0, blocked: [] } });
   }
 });
+
+
+test('cold discovery lookup preserves the publisher namespace for the DHT fallback', async () => {
+  const { deps, sent } = baseDeps();
+  await makeDwebRoutes(deps)['dweb/base/find']({
+    dwappId: 'app-id', publisherDid: 'publisher-did', slug: 'shared-app',
+  });
+  expect(sent).toEqual([{
+    type: 'dweb/base-host/find', dwappId: 'app-id', publisherDid: 'publisher-did', slug: 'shared-app',
+  }]);
+});

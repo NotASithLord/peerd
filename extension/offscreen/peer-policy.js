@@ -22,6 +22,10 @@ export const createPeerPolicyView = () => {
     invalidate() { available = false; },
     /** @param {string} did */
     isBlocked: (did) => !available || blocked.has(did),
+    // why: unavailable authority must deny traffic, but is not a user ban.
+    // Retain the last explicit block set for destructive cache enforcement.
+    /** @param {string} did */
+    isExplicitlyBlocked: (did) => blocked.has(did),
     revision: () => revision,
   };
 };

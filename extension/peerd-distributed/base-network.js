@@ -50,13 +50,13 @@ const subMsgTopic = (id) => `dwapp/${id}/msg`;            // a sub-protocol's go
 /**
  * @param {{ identity: import('./transport/mesh.js').Identity, mesh: any,
  *   meta?: () => any, dial?: any, audit?: import('./transport/mesh.js').AuditFn,
- *   now?: () => number, maxBundleBytes?: number, discoveryEnabled?: ()=>boolean, userBlocked?: (did:string)=>boolean,
+ *   now?: () => number, maxBundleBytes?: number, discoveryEnabled?: ()=>boolean, localRecoveryPending?: ()=>boolean, userBlocked?: (did:string)=>boolean,
  *   discoveryDisseminationProfile?: typeof import('./apps/discovery.js').DISCOVERY_BOUNDED_PROFILE | null,
  *   admitDwappMeta?: ((candidate: { dwappId: string, publisher: string, seq: number, versionId: string }) => Promise<boolean>) | null }} opts
  */
 export const createBaseNetwork = async ({
   identity, mesh, meta = () => ({}), dial = null, audit = null,
-  now = Date.now, maxBundleBytes = MAX_BUNDLE_BYTES, admitDwappMeta = null, userBlocked = () => false, discoveryEnabled = () => true,
+  now = Date.now, maxBundleBytes = MAX_BUNDLE_BYTES, admitDwappMeta = null, userBlocked = () => false, discoveryEnabled = () => true, localRecoveryPending = () => false,
   discoveryDisseminationProfile = null,
 }) => {
   // why: reject unsupported local rollout settings before acquiring node
@@ -386,10 +386,11 @@ export const createBaseNetwork = async ({
       }
       return { manifest, payload, providers: [identity.did], verifiedContributors: [] };
     }
-    if (publisher === identity.did && node.mesh.peers().length === 0) {
-      // An isolated local generation cannot fetch from itself. With peers, keep
-      // going: another seeder may hold this immutable signed version after the
-      // original publisher unshared or restarted.
+    if (publisher === identity.did && (localRecoveryPending() || node.mesh.peers().length === 0)) {
+      // why: an install holds the publication lane needed by local reseeding.
+      // Yield before network IO while recovery is pending, even if neighbors
+      // have already supplied a discovery card. After recovery, another seeder
+      // may still serve an older local version that is no longer announced.
       throw Object.assign(new Error('local shared App bytes are not available yet'), {
         code: 'dweb-local-content-unavailable',
         performed: false,
@@ -550,14 +551,17 @@ export const createBaseNetwork = async ({
     },
     // Apply user policy to cached publishers too, even when their signed cards
     // arrived through a different seeder rather than a current direct link.
-    enforceUserPolicy: () => {
+    /** @param {(did:string)=>boolean} [explicitlyBlocked] */
+    enforceUserPolicy: (explicitlyBlocked = userBlocked) => {
       // why: a policy refresh can revoke a disconnected contributor absent
       // from the publisher catalog. Fence every older transfer, even if the
       // blocked DID is subsequently unblocked before verification completes.
       contributionGeneration += 1;
       for (const did of new Set([...node.mesh.peers().map((/** @type {any} */ peer) => peer.did),
         ...library.rows().map((/** @type {any} */ row) => row.publisher)])) {
-        if (userBlocked(did)) discovery.ban(did, 'user-policy');
+        // why: a temporary policy outage closes admission without turning
+        // cached publishers (including ourselves) into destructive user bans.
+        if (explicitlyBlocked(did)) discovery.ban(did, 'user-policy');
       }
     },
     // Ban a publisher/peer: drop their feed, blocklist, purge, cut the link.

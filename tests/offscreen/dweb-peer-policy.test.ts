@@ -1,5 +1,8 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { createBaseNetwork } from '../../extension/peerd-distributed/base-network.js';
+import { createRoomMesh } from '../../extension/peerd-distributed/transport/mesh.js';
+import { generateIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
 import { createPeerPolicyView } from '../../extension/offscreen/peer-policy.js';
 import { createDiscoverySettings } from '../../extension/offscreen/discovery-settings.js';
 import { withDeadline } from '../../extension/shared/cold-util.js';
@@ -9,7 +12,7 @@ const did = encodeDidKey(new Uint8Array(32));
 const slice = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 const policyBoundary = (send: () => Promise<any>) => new Function('createPeerPolicyView', 'createDiscoverySettings', 'withDeadline', 'browser',
   'let handle=null;' + slice('const peerPolicy =', '// Renderer-local mesh generation.') +
-  'return { peerPolicy, discoverySettings, policyMeshes, refreshPeerPolicy, enforcePeerPolicy };')(
+  'return { peerPolicy, discoverySettings, policyMeshes, refreshPeerPolicy, enforcePeerPolicy, setHandle: value => { handle=value; } };')(
     createPeerPolicyView, createDiscoverySettings, withDeadline, { runtime: { sendMessage: send } });
 
 test('policy hydration owns in-construction meshes, closes banned links and fails closed on refetch corruption', async () => {
@@ -95,4 +98,34 @@ test('the policy tick continues after a failed policy read', async () => {
   tick(); await Promise.resolve(); // the rejection is contained by the timer
   tick(); await recovery;
   expect(reads).toBe(2);
+});
+
+
+test('a kernel policy outage closes admission without destroying retained discovery cards', async () => {
+  let reply: any = { ok: true, policy: { v: 1, revision: 1, blocked: [] } };
+  const boundary = policyBoundary(async () => reply);
+  await boundary.refreshPeerPolicy();
+  const identity = await generateIdentity();
+  const mesh = createRoomMesh({ roomId: 'policy-recycle', identity });
+  const base = await createBaseNetwork({ identity, mesh, userBlocked: boundary.peerPolicy.isBlocked });
+  boundary.setHandle({ base });
+  try {
+    const shared = await base.publishApp({ name: 'retained', entry: 'index.html', files: { 'index.html': 'retained' } });
+    const { dwapp_id } = await base.publishMeta({ slug: 'retained', name: 'retained', head: {
+      version_id: shared.hash, content_addr: shared.uri, size: shared.packedBytes,
+    } });
+    expect(await base.findDwapp(dwapp_id)).not.toBeNull();
+    reply = { ok: false };
+    await expect(boundary.refreshPeerPolicy()).rejects.toThrow('peer-policy-unavailable');
+    expect(boundary.peerPolicy.isBlocked(identity.did)).toBe(true);
+    expect(await base.findDwapp(dwapp_id)).not.toBeNull();
+    await expect(base.fetchApp(shared.uri)).rejects.toThrow('publisher-user-blocked');
+    reply = { ok: true, policy: { v: 1, revision: 1, blocked: [] } };
+    await boundary.refreshPeerPolicy();
+    expect(boundary.peerPolicy.isBlocked(identity.did)).toBe(false);
+    expect(await base.findDwapp(dwapp_id)).not.toBeNull();
+    reply = { ok: true, policy: { v: 1, revision: 2, blocked: [identity.did] } };
+    await boundary.refreshPeerPolicy();
+    expect(await base.findDwapp(dwapp_id)).toBeNull();
+  } finally { base.close(); mesh.close(); }
 });

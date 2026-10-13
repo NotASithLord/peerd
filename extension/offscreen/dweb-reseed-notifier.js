@@ -28,6 +28,7 @@ export const createDwebReseedNotifier = ({
     throw new TypeError('dweb-reseed-notifier-config-invalid');
   }
   let generation = 0;
+  let pendingGeneration = 0;
   /** @type {ReturnType<typeof setTimeoutFn>|null} */
   let timer = null;
   /** @type {(()=>void)|null} */
@@ -36,6 +37,7 @@ export const createDwebReseedNotifier = ({
   const attempts = new Set();
   const cancel = () => {
     generation += 1;
+    pendingGeneration = 0;
     for (const attempt of attempts) attempt.abort('dweb-generation-retired');
     attempts.clear();
     if (timer !== null) clearTimeoutFn(timer);
@@ -96,21 +98,26 @@ export const createDwebReseedNotifier = ({
   const notify = async (/** @type {any} */ notice) => {
     cancel();
     const owner = generation;
-    for (let attempt = 0; ; attempt += 1) {
-      if (owner !== generation || !current(notice)) {
-        return { ok: false, cancelled: true, error: 'dweb-generation-retired' };
+    pendingGeneration = owner;
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        if (owner !== generation || !current(notice)) {
+          return { ok: false, cancelled: true, error: 'dweb-generation-retired' };
+        }
+        const result = await runAttempt(notice, owner);
+        // A partial result means the kernel completed this generation's pass.
+        // Retry transport/startup failures, not permanently bad individual apps.
+        if (result?.ok === true || result?.error === 'dweb-reseed-partial') return result;
+        // The offscreen host can announce before the SW has committed the start
+        // receipt that makes this same epoch current. Retry that transient refusal;
+        // local retirement still ends the loop at the guard above.
+        if (result?.cancelled === true && !current(notice)) return result;
+        const delay = retryDelaysMs[Math.min(attempt, retryDelaysMs.length - 1)];
+        await wait(delay, owner);
       }
-      const result = await runAttempt(notice, owner);
-      // A partial result means the kernel completed this generation's pass.
-      // Retry transport/startup failures, not permanently bad individual apps.
-      if (result?.ok === true || result?.error === 'dweb-reseed-partial') return result;
-      // The offscreen host can announce before the SW has committed the start
-      // receipt that makes this same epoch current. Retry that transient refusal;
-      // local retirement still ends the loop at the guard above.
-      if (result?.cancelled === true && !current(notice)) return result;
-      const delay = retryDelaysMs[Math.min(attempt, retryDelaysMs.length - 1)];
-      await wait(delay, owner);
+    } finally {
+      if (pendingGeneration === owner) pendingGeneration = 0;
     }
   };
-  return Object.freeze({ notify, cancel });
+  return Object.freeze({ notify, cancel, pending: () => !!pendingGeneration });
 };

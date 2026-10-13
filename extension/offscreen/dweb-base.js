@@ -54,7 +54,7 @@ const enforcePeerPolicy = () => {
   for (const mesh of policyMeshes) for (const { did } of mesh.peers()) {
     if (peerPolicy.isBlocked(did)) mesh.removeLink(did, 'user-policy');
   }
-  handle?.base.enforceUserPolicy();
+  handle?.base.enforceUserPolicy(peerPolicy.isExplicitlyBlocked);
 };
 /** @type {Promise<void>|null} */ let policyRead = null;
 // Coalesce concurrent HELLO reads so a late valid response cannot reopen the
@@ -364,6 +364,7 @@ const baseLifecycle = makeStartStopBarrier({
     const joined = await client.joinBaseNetwork({
       identity,
       discoveryEnabled: discoverySettings.enabled,
+      localRecoveryPending: reseedNotifier.pending,
       isBlocked: peerPolicy.isBlocked,
       onMesh: (/** @type {any} */ mesh) => { policyMeshes.add(mesh); return () => policyMeshes.delete(mesh); },
       admitPeer: async (/** @type {string} */ did) => { await refreshPeerPolicy(); return !peerPolicy.isBlocked(did); },
@@ -550,7 +551,7 @@ const disconnectCustodyPort = () => {
 
 const status = () => (handle
   ? {
-      running: true, meshGeneration, did: handle.base.did,
+      running: true, meshGeneration, recovering: reseedNotifier.pending(), did: handle.base.did,
       peers: handle.base.peers().length, present: handle.base.presence.list().length,
     }
   : { running: false, meshGeneration });

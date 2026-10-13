@@ -455,3 +455,22 @@ test('publication binds runtime requirements to version identity and discovery e
     expect(changed.hash).not.toBe(shared.hash);
   } finally { publisher.base.close(); reader.base.close(); }
 });
+
+test('local recovery yields the publication lane even when unrelated peers are linked', async () => {
+  let recovering = true;
+  const publisher = await spawn('recovering', { localRecoveryPending: () => recovering });
+  const seeder = await spawn('seeder');
+  try {
+    await link(publisher, seeder);
+    const shared = await publisher.base.publishApp({ name: 'recovering', entry: 'index.html', files: { 'index.html': 'retained' } });
+    const verified = await seeder.base.fetchApp(shared.uri);
+    await seeder.base.seedApp(verified);
+    publisher.base.unserveContent(shared.hash);
+    await expect(publisher.base.fetchApp(shared.uri)).rejects.toMatchObject({
+      code: 'dweb-local-content-unavailable', performed: false, outcomeKnown: true,
+      outcomeKind: 'pre-effect-failure', retryable: true,
+    });
+    recovering = false;
+    expect((await publisher.base.fetchApp(shared.uri)).manifest.publisher).toBe(publisher.identity.did);
+  } finally { publisher.base.close(); seeder.base.close(); }
+});
