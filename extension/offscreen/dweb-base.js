@@ -576,6 +576,8 @@ const activateDwebFeatureLease = async (/** @type {{hostEpoch?:unknown}} */ leas
   if (typeof lease.hostEpoch !== 'string' || lease.hostEpoch.length < 8) {
     throw new Error('dweb-feature-host-epoch-invalid');
   }
+  const previousHostEpoch = activeFeatureHostEpoch;
+  const previousMeshGeneration = meshGeneration;
   custodyIntended = true;
   connectCustodyPort();
   try {
@@ -592,15 +594,20 @@ const activateDwebFeatureLease = async (/** @type {{hostEpoch?:unknown}} */ leas
     // why: recovery must never become an in-lane install barrier. A transient
     // reseed refusal retries in the background while local self-fetch reports
     // its exact pre-effect unavailability until the bytes are announced.
-    void reseedNotifier.notify({
-      type: 'dweb/base-host/generation',
-      hostEpoch: activeFeatureHostEpoch,
-      meshGeneration,
-      did: current.did ?? null,
-    }).catch((cause) => ({
-      ok: false,
-      error: /** @type {{message?:unknown}} */ (cause)?.message ?? String(cause),
-    }));
+    // why: adoption preserves bytes and the running recovery loop. Restarting
+    // a completed pass arms a needless write-ahead retirement marker while
+    // the successor kernel is also reacquiring its other shared host leases.
+    if (previousHostEpoch !== activeFeatureHostEpoch || previousMeshGeneration !== meshGeneration) {
+      void reseedNotifier.notify({
+        type: 'dweb/base-host/generation',
+        hostEpoch: activeFeatureHostEpoch,
+        meshGeneration,
+        did: current.did ?? null,
+      }).catch((cause) => ({
+        ok: false,
+        error: /** @type {{message?:unknown}} */ (cause)?.message ?? String(cause),
+      }));
+    }
     return current;
   } catch (cause) {
     activeFeatureHostEpoch = null;

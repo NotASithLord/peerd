@@ -128,3 +128,23 @@ test('retired reseed compensates through the network, not its host wrapper', asy
   expect(published[0].seq).toBeGreaterThan(7);
   expect(released).toEqual(['new-hash', 'new-hash']);
 });
+
+test('worker adoption retains the existing mesh without arming a duplicate reseed', async () => {
+  const notices: any[] = [];
+  const activate = new Function('reseedNotifier',
+    `let activeFeatureHostEpoch = null, meshGeneration = 0, custodyIntended = false;
+     const DWEB_ENABLED = true;
+     const connectCustodyPort = () => {}, disconnectCustodyPort = () => {};
+     const start = async () => { if (!meshGeneration) meshGeneration = 1; };
+     const status = () => ({running: true, meshGeneration, did: 'test-did'});
+     ${section('const activateDwebFeatureLease =', 'export const startDwebFeatureLease')}
+     return activateDwebFeatureLease;`)(
+    { notify: async (notice: any) => { notices.push(notice); return { ok: true }; } },
+  );
+  await activate({ hostEpoch: 'retained-host-epoch' });
+  await activate({ hostEpoch: 'retained-host-epoch' });
+  expect(notices).toHaveLength(1);
+  expect(notices[0]).toMatchObject({ hostEpoch: 'retained-host-epoch', meshGeneration: 1 });
+  await activate({ hostEpoch: 'replacement-host-epoch' });
+  expect(notices).toHaveLength(2);
+});
