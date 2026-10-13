@@ -626,6 +626,34 @@ describe('peer-network onboarding consent', () => {
     } finally { unmount(); }
   });
 
+  for (const [info, expected] of [
+    [{ running: true, rendezvous: 'up', linkedCount: 0 }, 'Looking for peers. No direct peer connections yet.'],
+    [{ running: true, rendezvous: 'down', linkedCount: 1 }, 'Connected to 1 peer.'],
+    [{ running: true, rendezvous: 'up', linkedCount: 3 }, 'Connected to 3 peers.'],
+    [{ running: true, rendezvous: 'down', linkedCount: 0 }, 'The introduction service is unavailable'],
+    [{ running: false, linkedCount: 0 }, 'Peer network is offline'],
+    [{ running: true, rendezvous: 'up' }, 'Connection status unavailable'],
+    [{ running: true, linkedCount: -1 }, 'Connection status unavailable'],
+    [{ ok: false, running: true, linkedCount: 2 }, 'Connection status unavailable'],
+  ]) {
+    it(`reports observed peer connections: ${expected}`, async () => {
+      /** @type {Msg[]} */ const sends = [];
+      const { root, unmount } = mount(PeerNetworkStatus, {
+        send: async message => {
+          sends.push(message);
+          return message.type === 'bootstrap/ready'
+            ? { ok: true, featureLeases: { leases: { dweb: { status: 'active' } } } }
+            : info;
+        },
+      });
+      try {
+        await tick(); m.redraw.sync();
+        expect(need(root, '[role="status"]').textContent).toContain(expected);
+        expect(sends).toEqual([{ type: 'bootstrap/ready' }, { type: 'dweb/distributed/info' }]);
+      } finally { unmount(); }
+    });
+  }
+
   it('retains an unknown stop across persisted-off rendering and confirms an explicit stop retry', async () => {
     let completed = 0;
     let mutations = 0;
