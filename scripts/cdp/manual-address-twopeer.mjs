@@ -134,7 +134,7 @@ try {
   await until('network choice visible', () => evalIn(ctx.page, `!!document.querySelector('[data-network-choice="enable"]')`));
   check('fresh Home remains network-off before explicit choice', (await call({ type: 'state/get' }))?.state?.settings?.dwebEnabled === false && tunnels === 0);
   await click('Enable peer network');
-  const receiver = await until('actual offscreen network active', async () => { const r = await rpc(ctx.page, { type: 'dweb/distributed/info' }); return r?.running && r.did && r.rendezvous === 'up' ? r : null; });
+  const receiver = await until('actual offscreen network active', async () => { const r = await rpc(ctx.page, { type: 'dweb/distributed/info' }); evidence.lastNetworkInfo = r; evidence.rendezvousTunnels = tunnels; return r?.running && r.did && r.rendezvous === 'up' ? r : null; });
   evidence.receiverDid = receiver.did;
 
   const created = await bounded('publisher tab', async () => (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json());
