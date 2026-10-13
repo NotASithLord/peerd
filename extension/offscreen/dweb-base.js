@@ -1141,7 +1141,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
               if (!newerAttemptOwnsThisHost) {
                 try {
                   await rollbackSharePublication({
-                    base: h,
+                    base: h.base,
                     state: {
                       appId: msg.appId,
                       ownerId: publicationOwnerId,

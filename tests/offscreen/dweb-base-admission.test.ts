@@ -93,3 +93,38 @@ test('offscreen update carries exact conflict and publication receipts and trust
     performed: true, outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
   });
 });
+
+test('retired reseed compensates through the network, not its host wrapper', async () => {
+  const { rollbackSharePublication } = await import('../../extension/offscreen/share-publication.js');
+  const published: any[] = [];
+  const removed: any[] = [];
+  const released: any[] = [];
+  const h = { base: {
+    did: 'publisher',
+    publishMeta: async (card: any) => { published.push(card); },
+    unpublishMeta: async (card: any) => { removed.push(card); },
+  } };
+  const msg = { appId: 'app' };
+  const makeCompensate = new Function(
+    'handle', 'h', 'latestReseedAttempts', 'msg', 'reseedAttemptId',
+    'rollbackSharePublication', 'publicationOwnerId', 'slug', 'previousCard',
+    'rollbackPublishedBytes',
+    'return ({' + section('compensate: async (published, announced) => {',
+      '            commit: (published) => {') + '}).compensate;',
+  );
+  const invoke = async (previousCard: any) => {
+    const compensate = makeCompensate(h, h, new Map([['app', 'attempt']]), msg,
+      'attempt', rollbackSharePublication, 'attempt-owner', 'app-slug', previousCard,
+      (item: any) => { released.push(item.hash); });
+    await compensate({ hash: 'new-hash' }, { card: { seq: 7 } });
+  };
+  await invoke(null);
+  expect(removed).toEqual([{ slug: 'app-slug', publisher: 'publisher' }]);
+  const previous = { name: 'App', description: '', seq: 6,
+    head: { version_id: 'old-hash', content_addr: 'peerd://old-hash', size: 12 } };
+  await invoke(previous);
+  expect(published).toHaveLength(1);
+  expect(published[0].head).toEqual(previous.head);
+  expect(published[0].seq).toBeGreaterThan(7);
+  expect(released).toEqual(['new-hash', 'new-hash']);
+});
