@@ -10,6 +10,40 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-13
+
+### Added
+
+- Discover supports reviewing shared Apps, publisher-balanced random picks,
+  WASM filtering, and local starters before an explicit install or run.
+- Browser Apps can retain and execute binary WebAssembly assets. Signed App
+  runtime requirements are checked before transfer and execution; unsupported
+  runtimes are rejected. Standalone WASI programs are not supported yet.
+- Discovery supports an experimental, explicitly negotiated bounded-push
+  profile with paged catalog repair. It remains disabled by default pending
+  broader network measurements.
+
+### Fixed
+
+- Network status distinguishes actual peer connections from an available
+  introduction service, shows peer counts, and preserves connected status
+  when direct links survive a signaling outage.
+- Discovery preferences persist across restarts; subscription changes fence
+  delayed work, and paged repair catches up retained catalogs.
+- Content-provider referrals and renewed availability leases improve retrieval
+  and failover without treating stale advertisements as proof of availability.
+
+### Compatibility and release scope
+
+- This preview includes the authority-kernel migration and retired tool/hook
+  surfaces described under 0.8.0 below. Users updating from 0.7.3 should review
+  those compatibility changes.
+- P2P remains opt-in and Chrome-preview-only. App discovery does not execute
+  received code automatically. Residential, mobile and corporate network
+  reachability, sustained churn and larger-scale capacity remain under test.
+- This runtime release does not claim qualification of a new Peerd Browser
+  binary or successful browser-client update delivery.
+
 ## [0.8.0] - 2026-09-26
 
 ### Changed

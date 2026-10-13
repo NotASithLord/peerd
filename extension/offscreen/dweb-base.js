@@ -54,7 +54,7 @@ const enforcePeerPolicy = () => {
   for (const mesh of policyMeshes) for (const { did } of mesh.peers()) {
     if (peerPolicy.isBlocked(did)) mesh.removeLink(did, 'user-policy');
   }
-  handle?.base.enforceUserPolicy();
+  handle?.base.enforceUserPolicy(peerPolicy.isExplicitlyBlocked);
 };
 /** @type {Promise<void>|null} */ let policyRead = null;
 // Coalesce concurrent HELLO reads so a late valid response cannot reopen the
@@ -364,6 +364,7 @@ const baseLifecycle = makeStartStopBarrier({
     const joined = await client.joinBaseNetwork({
       identity,
       discoveryEnabled: discoverySettings.enabled,
+      localRecoveryPending: reseedNotifier.pending,
       isBlocked: peerPolicy.isBlocked,
       onMesh: (/** @type {any} */ mesh) => { policyMeshes.add(mesh); return () => policyMeshes.delete(mesh); },
       admitPeer: async (/** @type {string} */ did) => { await refreshPeerPolicy(); return !peerPolicy.isBlocked(did); },
@@ -550,7 +551,7 @@ const disconnectCustodyPort = () => {
 
 const status = () => (handle
   ? {
-      running: true, meshGeneration, did: handle.base.did,
+      running: true, meshGeneration, recovering: reseedNotifier.pending(), did: handle.base.did,
       peers: handle.base.peers().length, present: handle.base.presence.list().length,
     }
   : { running: false, meshGeneration });
@@ -575,6 +576,8 @@ const activateDwebFeatureLease = async (/** @type {{hostEpoch?:unknown}} */ leas
   if (typeof lease.hostEpoch !== 'string' || lease.hostEpoch.length < 8) {
     throw new Error('dweb-feature-host-epoch-invalid');
   }
+  const previousHostEpoch = activeFeatureHostEpoch;
+  const previousMeshGeneration = meshGeneration;
   custodyIntended = true;
   connectCustodyPort();
   try {
@@ -591,15 +594,20 @@ const activateDwebFeatureLease = async (/** @type {{hostEpoch?:unknown}} */ leas
     // why: recovery must never become an in-lane install barrier. A transient
     // reseed refusal retries in the background while local self-fetch reports
     // its exact pre-effect unavailability until the bytes are announced.
-    void reseedNotifier.notify({
-      type: 'dweb/base-host/generation',
-      hostEpoch: activeFeatureHostEpoch,
-      meshGeneration,
-      did: current.did ?? null,
-    }).catch((cause) => ({
-      ok: false,
-      error: /** @type {{message?:unknown}} */ (cause)?.message ?? String(cause),
-    }));
+    // why: adoption preserves bytes and the running recovery loop. Restarting
+    // a completed pass arms a needless write-ahead retirement marker while
+    // the successor kernel is also reacquiring its other shared host leases.
+    if (previousHostEpoch !== activeFeatureHostEpoch || previousMeshGeneration !== meshGeneration) {
+      void reseedNotifier.notify({
+        type: 'dweb/base-host/generation',
+        hostEpoch: activeFeatureHostEpoch,
+        meshGeneration,
+        did: current.did ?? null,
+      }).catch((cause) => ({
+        ok: false,
+        error: /** @type {{message?:unknown}} */ (cause)?.message ?? String(cause),
+      }));
+    }
     return current;
   } catch (cause) {
     activeFeatureHostEpoch = null;
@@ -1141,7 +1149,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
               if (!newerAttemptOwnsThisHost) {
                 try {
                   await rollbackSharePublication({
-                    base: h,
+                    base: h.base,
                     state: {
                       appId: msg.appId,
                       ownerId: publicationOwnerId,

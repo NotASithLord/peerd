@@ -605,13 +605,13 @@ export const makeDwebRoutes = (deps) => {
     // gates on dwebEnabled), then tear down a live host. NOT gated on dwebOn():
     // we must be able to stop precisely as we flip the setting off. Gated only on
     // DWEB_ENABLED; the store package prunes this module entirely.
-    'dweb/base/stop': async () => {
+    'dweb/base/stop': () => {
       if (!DWEB_ENABLED) return dwebDisabled();
       return disableDweb();
     },
     'dweb/base/status': () => readyHost('status'),
     'dweb/base/announce': ({ record } = {}) => readyHost('announce', { record }),
-    'dweb/base/find': ({ dwappId, publisherDid } = {}) => readyHost('find', { dwappId, publisherDid }),
+    'dweb/base/find': ({ dwappId, publisherDid, slug } = {}) => readyHost('find', { dwappId, publisherDid, slug }),
 
     // why: Reshares reuse the stored namespace identity.
     'dweb/base/share-app': async ({ appId, slug } = {}) => {

@@ -128,10 +128,12 @@ const closeOffscreenRenderer = async (ctx) => {
 };
 
 let lastDwebStatus = null;
+// A worker stopped during an armed reseed must retire its uncertain host.
+// This adoption oracle starts only after that separate safety fence settles.
 const waitForDweb = (page) => waitFor(async () => {
   const result = await rpc(page, { type: 'dweb/base/status' }, { timeoutMs: 10_000 });
   lastDwebStatus = result;
-  return result?.ok === true && result.running === true && typeof result.did === 'string'
+  return result?.ok === true && result.running === true && result.recovering === false && typeof result.did === 'string'
     ? result : null;
 }, { budgetMs: FEATURE_LEASE_DWEB_BUDGETS.dwebMs, pollMs: 100 });
 

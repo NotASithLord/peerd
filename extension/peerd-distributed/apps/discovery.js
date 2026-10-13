@@ -4,8 +4,8 @@
 // Plane 1 of PROPAGATION.md, and the spine of the whole propagation model: a
 // node NEVER receives discovery metadata it didn't ask for. There is no ambient
 // flood. A peer SUBSCRIBES to a neighbor's discovery feed; the neighbor replies
-// with a SNAPSHOT (the whole Library it's willing to share) and from then on
-// streams each new card it accepts. Either side can UNSUBSCRIBE ("stop") or ban
+// with paged SNAPSHOTs of the Library it's willing to share and fresh ITEMs.
+// Either side can UNSUBSCRIBE ("stop") or ban
 // the other (unilaterally, any reason). This makes spam-resistance STRUCTURAL —
 // there is simply no edge over which to deliver unsolicited metadata.
 //
@@ -15,9 +15,10 @@
 // accepts them. The INNER card is publisher-signed and verified independently
 // (a neighbor can carry history, never fabricate it).
 //
-// Reach is transitive over CONSENTED edges: you subscribe to your peers, they
-// forward everything THEY accept (from THEIR subscriptions), so a card still
-// saturates the connected mesh hop-by-hop — every hop now revocable. Loops die
+// Reach is transitive over CONSENTED edges: default feeds forward every fresh
+// card, while opted-in bounded feeds pair rotated pushes with catalog repair.
+// Retained catalogs converge over connected consenting links under bounded
+// load; expiry, eviction and ongoing churn still limit coverage. Loops die
 // on the Library's no-downgrade rule (a re-heard card is not "fresh", so it is
 // not re-forwarded — the same role the gossip seen-cache plays).
 
@@ -25,6 +26,11 @@ import { verifyMeta, metaDwappId, metaWellFormed } from './meta.js';
 import { createLocalCounters } from '../local-counters.js';
 
 export const DISCOVERY = Object.freeze({ CH: 5, SUB: 0, SNAPSHOT: 1, ITEM: 2, UNSUB: 3 });
+// why: only explicitly negotiated discovery feeds may omit an immediate push.
+// Live gossip is a separate protocol; periodic catalog repair still visits all
+// consenting links. Keep rollout opt-in rather than changing the public mesh.
+export const DISCOVERY_BOUNDED_PROFILE = 'bounded-push-v1';
+export const DISCOVERY_PUSH_FANOUT = 6;
 
 // Reasoned defaults (PROPAGATION.md caps table) — validate under load.
 const DEFAULTS = Object.freeze({
@@ -40,6 +46,7 @@ const DEFAULTS = Object.freeze({
  *   library: ReturnType<typeof import('./library.js').createLibrary>,
  *   isBlocked?: (did: string) => boolean,
  *   isEnabled?: () => boolean,
+ *   disseminationProfile?: typeof DISCOVERY_BOUNDED_PROFILE | null,
  *   block?: ((did: string, reason?: string) => void) | null,
  *   audit?: ((type: string, detail?: any) => void) | null,
  *   now?: () => number,
@@ -51,12 +58,17 @@ const DEFAULTS = Object.freeze({
 export const createDiscovery = ({
   mesh, identity, library, isBlocked = () => false, block = null, audit = null, now = Date.now, caps = {}, onCard = null,
   admitMeta = null, isEnabled = () => true,
+  disseminationProfile = null,
 } = /** @type {{ mesh: any, identity: { did: string }, library: any }} */ ({})) => {
+  if (disseminationProfile !== null && disseminationProfile !== DISCOVERY_BOUNDED_PROFILE) {
+    throw new Error('unsupported discovery dissemination profile');
+  }
   // Frames and known-version claims are work counters; only fresh counts newly
   // verified, committed metadata. Destinations count attempted live forwarding.
   const counts = createLocalCounters(['originals', 'fresh', 'known', 'invalid', 'rateLimited',
     'forwardCalls', 'destinations', 'maxDestinations', 'snapshotRequestsReceived', 'snapshotFramesReceived',
-    'subscriptionsSent', 'reconcileCalls']);
+    'subscriptionsSent', 'reconcileCalls', 'boundedDestinations', 'legacyDestinations',
+    'omittedPushes', 'maxBoundedDestinations']);
   const relayPerMin = caps.relayPerMin ?? DEFAULTS.relayPerMin;
   const snapshotMax = caps.snapshotMax ?? DEFAULTS.snapshotMax;
   const snapshotsPerMin = caps.snapshotsPerMin ?? DEFAULTS.snapshotsPerMin;
@@ -86,11 +98,12 @@ export const createDiscovery = ({
     cursors.delete(did); requests.delete(did); processing.delete(did); snapshotWindows.delete(did);
   };
 
-  /** @type {Set<string>} */
-  const subscribers = new Set();     // dids who subscribed to OUR feed (we serve them)
+  /** @type {Map<string, { bounded: boolean }>} */
+  const subscribers = new Map();    // exact subscription generations we serve
+  let pushCursor = 0;
   // Object identity fences asynchronous verification/signing against an
   // unsubscribe followed by a new subscription to the same peer.
-  /** @type {Map<string, object>} */
+  /** @type {Map<string, { bounded?: boolean }>} */
   const upstreams = new Map();
   /** @type {Set<string>} */
   const unsubscribed = new Set();
@@ -115,18 +128,34 @@ export const createDiscovery = ({
     return true;
   };
 
-  // Send each subscriber a fresh card — except whoever we just heard it from
-  // (they already have it). Our OWN announces use exceptVia = null.
+  // Legacy feeds retain full push. Negotiated feeds rotate a bounded immediate
+  // subset; omitted cards remain available through all-neighbor paged repair.
   /** @param {any} item @param {string | null} [exceptVia] */
   const forward = async (item, exceptVia = null) => {
     if (subscribers.size === 0) return true;
+    const candidates = [...subscribers].filter(([did]) => !closed && !isBlocked(did) && did !== exceptVia);
+    const legacy = candidates.filter(([, subscription]) => !subscription.bounded);
+    const bounded = candidates.filter(([, subscription]) => subscription.bounded);
+    // why: rotation avoids permanent winners and is independent of routing
+    // degree, publisher identity and remote self-reported contribution.
+    const selected = bounded.length ? Array.from({ length: Math.min(DISCOVERY_PUSH_FANOUT, bounded.length) },
+      (_, offset) => bounded[(pushCursor + offset) % bounded.length]) : [];
+    if (bounded.length) pushCursor = (pushCursor + selected.length) % bounded.length;
     const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.ITEM, { item });
     // Subscriber membership is bounded by live mesh links. Launch separately
     // so one stalled link cannot hold every healthy subscriber behind it.
-    const destinations = [...subscribers].filter((did) => !closed && !isBlocked(did) && did !== exceptVia);
+    // why: a late signature cannot deliver work from an old subscription to a
+    // replacement link or a peer that changed its requested feed profile.
+    const destinations = [...legacy, ...selected].filter(([did, subscription]) =>
+      !closed && !isBlocked(did) && subscribers.get(did) === subscription);
+    const boundedCount = destinations.filter(([, subscription]) => subscription.bounded).length;
     counts.add('forwardCalls'); counts.add('destinations', destinations.length);
     counts.max('maxDestinations', destinations.length);
-    const results = await Promise.all(destinations.map((did) => mesh.send(did, env)));
+    counts.add('boundedDestinations', boundedCount);
+    counts.add('legacyDestinations', destinations.length - boundedCount);
+    counts.add('omittedPushes', bounded.length - selected.length);
+    counts.max('maxBoundedDestinations', boundedCount);
+    const results = await Promise.all(destinations.map(([did]) => mesh.send(did, env)));
     return results.every(Boolean);
   };
 
@@ -188,33 +217,45 @@ export const createDiscovery = ({
     return fresh;
   };
 
-  /** @param {string} did @param {any} request */
-  const sendSnapshot = async (did, request) => {
-    if (!allowSnapshot(did, 'sent')) return;
-    const paged = request?.catalog === 1
+  /** @param {any} request */
+  const pagedRequest = (request) => request?.catalog === 1
       && typeof request.id === 'string' && request.id.length > 0 && request.id.length <= 64
       && typeof request.after === 'string' && /^(|[a-f0-9]{64})$/.test(request.after)
       && Number.isInteger(request.limit) && request.limit > 0;
+  /** @param {string} did @param {any} request @param {{ bounded: boolean }} subscription */
+  const sendSnapshot = async (did, request, subscription) => {
+    if (!allowSnapshot(did, 'sent')) return;
+    const paged = pagedRequest(request);
     const page = paged ? library.page(request.after, Math.min(snapshotMax, request.limit)) : null;
     const items = page?.items ?? library.list().slice(0, snapshotMax);
     const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.SNAPSHOT, {
       items,
-      ...(page ? { page: { id: request.id, after: request.after, next: page.next } } : {}),
+      ...(page ? { page: { id: request.id, after: request.after, next: page.next,
+        ...(subscription.bounded ? { dissemination: DISCOVERY_BOUNDED_PROFILE } : {}),
+      } } : {}),
     });
-    if (!closed && subscribers.has(did) && !isBlocked(did)) await mesh.send(did, env);
+    if (!closed && subscribers.get(did) === subscription && !isBlocked(did)) await mesh.send(did, env);
   };
 
   const offEnvelope = mesh.onEnvelope(async (/** @type {{ env: any, via: string }} */ { env, via }) => {
     if (closed || env.ch !== DISCOVERY.CH) return;
     if (env.from !== via) return; // link-local: the carrier MUST be the neighbor
     switch (env.typ) {
-      case DISCOVERY.SUB:
+      case DISCOVERY.SUB: {
         if (isBlocked(via)) return;
         counts.add('snapshotRequestsReceived');
-        subscribers.add(via);
+        // why: the signed, link-local request is consent to this feed mode;
+        // unknown profiles and non-paged legacy requests never authorize loss
+        // of an immediate push, even when the local profile is enabled.
+        const bounded = disseminationProfile === DISCOVERY_BOUNDED_PROFILE
+          && pagedRequest(env.body) && env.body.dissemination === DISCOVERY_BOUNDED_PROFILE;
+        const previous = subscribers.get(via);
+        const subscription = previous?.bounded === bounded ? previous : { bounded };
+        subscribers.set(via, subscription);
         audit?.('discovery_subscriber_added', { did: via });
-        await sendSnapshot(via, env.body);
+        await sendSnapshot(via, env.body, subscription);
         return;
+      }
       case DISCOVERY.UNSUB:
         subscribers.delete(via);
         return;
@@ -258,6 +299,8 @@ export const createDiscovery = ({
           // Retrying the same page is cheap because known versions are skipped.
           if (page && !rateLimited && receiving(via, subscription)) {
             cursors.set(via, page.next ?? '');
+            if (subscription) subscription.bounded = disseminationProfile === DISCOVERY_BOUNDED_PROFILE
+              && page.dissemination === DISCOVERY_BOUNDED_PROFILE;
           }
         } finally {
           if (processing.get(via) === token) {
@@ -314,7 +357,9 @@ export const createDiscovery = ({
     const subscription = previous ?? {};
     upstreams.set(did, subscription);
     try {
-      const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.SUB, { catalog: 1, ...request });
+      const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.SUB, { catalog: 1, ...request,
+        ...(disseminationProfile ? { dissemination: disseminationProfile } : {}),
+      });
       if (!receiving(did, subscription) || requests.get(did) !== request) return false;
       const sent = await mesh.send(did, env);
       if (sent) counts.add('subscriptionsSent');
@@ -411,7 +456,11 @@ export const createDiscovery = ({
     /** @param {string} id */
     isTombstoned: (id) => tombstoned.has(id),
     subscriberCount: () => subscribers.size,
-    stats: () => ({ ...counts.snapshot(), subscribers: subscribers.size, upstreams: upstreams.size }),
+    stats: () => ({ ...counts.snapshot(), subscribers: subscribers.size, upstreams: upstreams.size,
+      disseminationProfile,
+      boundedSubscribers: [...subscribers.values()].filter((subscription) => subscription.bounded).length,
+      boundedUpstreams: [...upstreams.values()].filter((subscription) => subscription.bounded).length,
+    }),
     enabled: () => autoSubscribe && isEnabled(),
     rows: () => library.rows(),
     close() {

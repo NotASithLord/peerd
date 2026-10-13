@@ -50,7 +50,9 @@ describe('dweb reseed generation notification', () => {
       retryDelaysMs: [20],
       attemptTimeoutMs: 100,
     });
+    expect(notifier.pending()).toBe(false);
     const recovery = notifier.notify(notice);
+    expect(notifier.pending()).toBe(true);
     while (calls === 0) await turn();
 
     await expect(Promise.all([
@@ -62,6 +64,7 @@ describe('dweb reseed generation notification', () => {
     ]);
     await expect(recovery).resolves.toEqual({ ok: true, seeded: 1 });
     expect(calls).toBe(2);
+    expect(notifier.pending()).toBe(false);
   });
 
   test('a completed partial pass does not retry forever or block unrelated work', async () => {
@@ -120,6 +123,7 @@ describe('dweb reseed generation notification', () => {
     const result = notifier.notify(notice);
     for (let attempt = 0; attempt < 5 && !signal; attempt += 1) await Promise.resolve();
     notifier.cancel();
+    expect(notifier.pending()).toBe(false);
     await expect(result).resolves.toMatchObject({ ok: false, cancelled: true });
     expect((signal as AbortSignal | null)?.aborted).toBe(true);
   });
@@ -162,6 +166,7 @@ describe('dweb reseed generation notification', () => {
     const result = notifier.notify(notice);
     while (calls === 0) await turn();
     notifier.cancel();
+    expect(notifier.pending()).toBe(false);
     await expect(result).resolves.toMatchObject({ ok: false, cancelled: true });
     expect(calls).toBe(1);
   });
