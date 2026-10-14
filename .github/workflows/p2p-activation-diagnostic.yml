@@ -1,0 +1,46 @@
+name: P2P activation diagnostic
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [fix/p2p-activation-diagnostics]
+    paths: [.github/workflows/p2p-activation-diagnostic.yml]
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.3'
+      - run: bun install --frozen-lockfile
+      - name: Select the pinned Chrome used by browser runtime CI
+        run: echo "CHROME_PATH=$(bun scripts/cdp/ensure-chrome-for-testing.mjs | tail -1)" >> "$GITHUB_ENV"
+      - name: Capture the first cold activation failure
+        env:
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0'
+        run: |
+          mkdir -p artifacts/activation-samples
+          for sample in {1..10}; do
+            result=0
+            bun scripts/cdp/manual-address-twopeer.mjs > "artifacts/activation-samples/$sample.log" 2>&1 || result=$?
+            if [ -d artifacts/manual-address-twopeer ]; then
+              mv artifacts/manual-address-twopeer "artifacts/activation-samples/$sample"
+            fi
+            echo "sample $sample exit $result"
+            # Preserve and fail on the first miss; never retry it into a pass.
+            if [ "$result" -ne 0 ]; then
+              tail -40 "artifacts/activation-samples/$sample.log"
+              exit "$result"
+            fi
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: p2p-activation-samples
+          path: artifacts/activation-samples/
+          retention-days: 7
