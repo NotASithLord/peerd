@@ -218,6 +218,28 @@ try {
 } catch (error) {
   failed = true; evidence.error = String(error?.stack ?? error); evidence.homeEvents = ctx?.page?.events?.slice(-30); evidence.publisherEvents = publisher?.events?.slice(-30); report(); console.error(evidence.error);
   if (ctx?.page) {
+    evidence.serviceWorkerEvents = ctx.swConn?.events?.slice(-80);
+    evidence.extensionTargetEvents = ctx.extensionTargetEvents?.();
+    // why: a responsive Home can hide a stalled offscreen lease or identity
+    // handshake. Inspect only after failure, preserving partial host receipts
+    // even when one debugger target does not answer within the diagnostic cap.
+    const hostSnapshots = evidence.failureHostTargets = [];
+    await failureDiagnostic('failureHostInspection', async () => {
+      const targets = await (await fetch(`http://127.0.0.1:${ctx.port}/json/list`)).json();
+      for (const target of targets.filter(t => t.url?.startsWith(`chrome-extension://${ctx.sw.id}/`)).slice(0, 8)) {
+        const snapshot = { id: target.id, type: target.type, url: target.url };
+        hostSnapshots.push(snapshot);
+        let connection;
+        try {
+          connection = await attach(target.webSocketDebuggerUrl);
+          await connection.send('Runtime.enable');
+          snapshot.context = await evalIn(connection, `({url:location.href, readyState:globalThis.document?.readyState ?? null})`);
+          snapshot.events = connection.events.slice(-80);
+        } catch (error) { snapshot.error = String(error); }
+        finally { connection?.close(); }
+      }
+      return { complete: true };
+    });
     await failureDiagnostic('failureDom', () => evalIn(ctx.page, `(() => {
       const section = document.querySelector('section[aria-label="App address"]');
       return { visibility: document.visibilityState, focused: document.hasFocus(), readyState: document.readyState,
