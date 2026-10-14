@@ -563,11 +563,15 @@ export const createProductionFeatureLeaseRuntime = ({
     }
   };
 
-  const reconcileUnsafe = async () => {
-    const results = await coordinator.reconcile();
+  const rememberDurable = (/** @type {any[]} */ results) => {
     for (const result of results) {
       if (result?.ok && OFFSCREEN_SCOPES.has(result.scope)) durableScopes.add(result.scope);
     }
+    return results;
+  };
+
+  const reconcileUnsafe = async () => {
+    const results = rememberDurable(await coordinator.reconcile());
     const stored = await store.get(FEATURE_LEASE_INTENT_KEY).catch(() => null);
     const intended = new Set((stored?.intents ?? []).map((/** @type {any} */ item) => item?.scope));
     const status = await readHost(false).catch(() => null);
@@ -593,32 +597,16 @@ export const createProductionFeatureLeaseRuntime = ({
       : result;
   };
 
-  const runTransitionUnsafe = async (/** @type {'initialize'|'unlock'|'resume'} */ transition,
-    /** @type {{dwebEnabled?:boolean}} */ options = {}) => {
-    const results = await coordinator.runTransition(transition, options);
-    for (const result of results) {
-      if (result?.ok && OFFSCREEN_SCOPES.has(result.scope)) durableScopes.add(result.scope);
-    }
-    return results;
-  };
-
   const acquire = async (/** @type {string} */ scope, /** @type {any} */ options = {}) => {
-    const prepare = async () => {
+    // why: dweb startup needs a nested vault lease. Release the host lane
+    // before its receipt settles; the coordinator still serializes the scope.
+    const pending = await withHostLifecycle(async () => {
       if (OFFSCREEN_SCOPES.has(scope)) await ensureHostRetirementUnsafe();
-    };
-    // why: dweb startup needs a nested vault lease. As in unlock/resume,
-    // finish retirement under the host lane, then release it before startup
-    // so the nested acquisition can run. The coordinator serializes dweb.
-    let result;
-    if (scope === 'dweb') {
-      await withHostLifecycle(prepare);
-      result = await acquireUnsafe(scope, options);
-    } else {
-      result = await withHostLifecycle(async () => {
-        await prepare();
-        return acquireUnsafe(scope, options);
-      });
-    }
+      const result = acquireUnsafe(scope, options);
+      if (scope !== 'dweb') await result;
+      return { result };
+    });
+    const result = await pending.result;
     if (!result?.ok && result?.outcomeKnown === false) {
       await retireActiveHost('feature-lease-start-outcome-unknown');
     }
@@ -665,7 +653,7 @@ export const createProductionFeatureLeaseRuntime = ({
     if (options.dwebEnabled) {
       await withHostLifecycle(() => ensureHostRetirementUnsafe());
     }
-    const results = await runTransitionUnsafe(transition, options);
+    const results = rememberDurable(await coordinator.runTransition(transition, options));
     if (results.some((result) => result?.outcomeKnown === false
         && OFFSCREEN_SCOPES.has(result?.scope))) {
       await retireActiveHost('feature-transition-start-outcome-unknown');
