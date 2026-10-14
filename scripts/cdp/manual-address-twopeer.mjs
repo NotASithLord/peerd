@@ -137,15 +137,19 @@ try {
     // Exercise ordinary concurrent status demand around the real consent
     // click, without replacing product handlers, storage, or host replies.
     await evaluate(ctx.page, `(() => {
-      globalThis.__activationDemand = { stopped: false, replies: [] };
+      globalThis.__activationDemand = { stopped: false, replies: [], failures: [] };
       const state = globalThis.__activationDemand;
       const poll = async () => {
         while (!state.stopped) {
           try {
             const reply = await chrome.runtime.sendMessage({ type: 'dweb/base/status' });
-            state.replies.push({ running: reply?.running === true, error: reply?.error ?? null });
+            const receipt = { running: reply?.running === true, error: reply?.error ?? null, code: reply?.code ?? null };
+            state.replies.push(receipt);
+            if (receipt.error && receipt.error !== 'dweb-disabled' && state.failures.length < 16) state.failures.push(receipt);
             if (state.replies.length > 32) state.replies.shift();
-          } catch {}
+          } catch (error) {
+            if (state.failures.length < 16) state.failures.push({ error: String(error) });
+          }
           await new Promise(resolve => setTimeout(resolve, 10));
         }
       };
@@ -159,8 +163,9 @@ try {
     evidence.activationDemand = await evaluate(ctx.page, `(() => {
       const state = globalThis.__activationDemand;
       state.stopped = true;
-      return state.replies;
+      return { replies: state.replies, failures: state.failures };
     })()`);
+    check('concurrent Discover demand has no activation failures', evidence.activationDemand.failures.length === 0, evidence.activationDemand.failures);
   }
   evidence.receiverDid = receiver.did;
 
