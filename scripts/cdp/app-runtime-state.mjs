@@ -46,6 +46,18 @@ export const APP_RUNTIME_STATES = ['legacy', 'core', 'unsupported'].map((variant
         });
       ` });
       const inspect = async (blocked) => {
+        // why: /json/list can expose the new target before its document is
+        // active. Reloading then fails in CDP before testing any App behavior.
+        // Wait for that same document; never replace a lost target or skip the
+        // body/execution assertions on the fresh, instrumented navigation.
+        const ready = await waitFor(async () => {
+          try {
+            const { frameTree } = await page.send('Page.getFrameTree');
+            return !!frameTree?.frame?.id && await evalIn(page,
+              `location.href === ${JSON.stringify(target.url)} && document.readyState === "complete"`);
+          } catch { return false; }
+        }, { budgetMs: 15_000, pollMs: 100 });
+        if (!ready) throw new Error('Runtime fixture App document did not become active');
         await page.send('Page.reload');
         const settled = await waitFor(() => evalIn(page, `(() => {
           const probe = globalThis.__runtimeProbe;
