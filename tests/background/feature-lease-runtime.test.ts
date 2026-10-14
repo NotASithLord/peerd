@@ -311,6 +311,27 @@ describe('production feature-lease runtime', () => {
     expect(oldLease?.hostEpoch).toBe(oldHostEpoch);
   });
 
+  test('cold dweb demand releases the host lane for its nested vault identity read', async () => {
+    const env = makeEnvironment();
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a', { hostEffectTimeoutMs: 100 });
+    let identityReads = 0;
+    env.onStart(async (scope) => {
+      if (scope !== 'dweb') return;
+      await runtime.runWithLease('vault-authority', async () => { identityReads += 1; });
+    });
+    await runtime.ready;
+    await runtime.acquire('vault-authority', { reason: 'vault-unlock' });
+    // A Home status request can demand the host before the settings observer
+    // starts the normal unlocked transition.
+    const results = await Promise.all(Array.from({ length: 3 }, () =>
+      runtime.acquire('dweb', { reason: 'feature-demand' })));
+    for (const result of results) expect(result).toMatchObject({ ok: true, scope: 'dweb' });
+    expect(new Set(results.map(result => result.leaseId)).size).toBe(1);
+    expect(identityReads).toBe(1);
+    expect(env.closeCount).toBe(0);
+    expect(runtime.snapshot().leases.dweb.status).toBe('active');
+  });
+
   test('renderer recovery releases the host lane for dweb vault identity restoration', async () => {
     const env = makeEnvironment();
     const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a');
