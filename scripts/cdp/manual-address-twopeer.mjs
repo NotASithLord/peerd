@@ -142,7 +142,7 @@ try {
       const poll = async () => {
         while (!state.stopped) {
           try {
-            const reply = await chrome.runtime.sendMessage({ type: 'dweb/distributed/info' });
+            const reply = await chrome.runtime.sendMessage({ type: 'dweb/base/status' });
             state.replies.push({ running: reply?.running === true, error: reply?.error ?? null });
             if (state.replies.length > 32) state.replies.shift();
           } catch {}

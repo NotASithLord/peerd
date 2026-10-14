@@ -23,6 +23,7 @@ jobs:
       - name: Capture the first cold activation failure
         env:
           BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0'
+          P2P_ACTIVATION_RACE: '1'
         run: |
           mkdir -p artifacts/activation-samples
           for sample in {1..10}; do
