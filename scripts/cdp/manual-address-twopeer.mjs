@@ -133,8 +133,35 @@ try {
   await evaluate(ctx.page, `(() => { const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Discover'); if (!b) throw new Error('Discover navigation missing'); b.click(); })()`);
   await until('network choice visible', () => evalIn(ctx.page, `!!document.querySelector('[data-network-choice="enable"]')`));
   check('fresh Home remains network-off before explicit choice', (await call({ type: 'state/get' }))?.state?.settings?.dwebEnabled === false && tunnels === 0);
+  if (process.env.P2P_ACTIVATION_RACE === '1') {
+    // Exercise ordinary concurrent status demand around the real consent
+    // click, without replacing product handlers, storage, or host replies.
+    await evaluate(ctx.page, `(() => {
+      globalThis.__activationDemand = { stopped: false, replies: [] };
+      const state = globalThis.__activationDemand;
+      const poll = async () => {
+        while (!state.stopped) {
+          try {
+            const reply = await chrome.runtime.sendMessage({ type: 'dweb/distributed/info' });
+            state.replies.push({ running: reply?.running === true, error: reply?.error ?? null });
+            if (state.replies.length > 32) state.replies.shift();
+          } catch {}
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      };
+      for (let i = 0; i < 4; i += 1) void poll();
+      return true;
+    })()`);
+  }
   await click('Enable peer network');
   const receiver = await until('actual offscreen network active', async () => { const r = await rpc(ctx.page, { type: 'dweb/distributed/info' }); evidence.lastNetworkInfo = r; evidence.rendezvousTunnels = tunnels; return r?.running && r.did && r.rendezvous === 'up' ? r : null; });
+  if (process.env.P2P_ACTIVATION_RACE === '1') {
+    evidence.activationDemand = await evaluate(ctx.page, `(() => {
+      const state = globalThis.__activationDemand;
+      state.stopped = true;
+      return state.replies;
+    })()`);
+  }
   evidence.receiverDid = receiver.did;
 
   const created = await bounded('publisher tab', async () => (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json());

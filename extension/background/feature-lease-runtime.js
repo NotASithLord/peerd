@@ -603,10 +603,22 @@ export const createProductionFeatureLeaseRuntime = ({
   };
 
   const acquire = async (/** @type {string} */ scope, /** @type {any} */ options = {}) => {
-    const result = await withHostLifecycle(async () => {
+    const prepare = async () => {
       if (OFFSCREEN_SCOPES.has(scope)) await ensureHostRetirementUnsafe();
-      return acquireUnsafe(scope, options);
-    });
+    };
+    // why: dweb startup needs a nested vault lease. As in unlock/resume,
+    // finish retirement under the host lane, then release it before startup
+    // so the nested acquisition can run. The coordinator serializes dweb.
+    let result;
+    if (scope === 'dweb') {
+      await withHostLifecycle(prepare);
+      result = await acquireUnsafe(scope, options);
+    } else {
+      result = await withHostLifecycle(async () => {
+        await prepare();
+        return acquireUnsafe(scope, options);
+      });
+    }
     if (!result?.ok && result?.outcomeKnown === false) {
       await retireActiveHost('feature-lease-start-outcome-unknown');
     }
