@@ -220,6 +220,9 @@ try {
   if (ctx?.page) {
     evidence.serviceWorkerEvents = ctx.swConn?.events?.slice(-80);
     evidence.extensionTargetEvents = ctx.extensionTargetEvents?.();
+    // The bootstrap route reads the kernel's lease snapshot without entering
+    // the dweb publication lane that may itself be stalled.
+    await failureDiagnostic('failureKernelState', () => rpc(ctx.page, { type: 'bootstrap/ready' }));
     // why: a responsive Home can hide a stalled offscreen lease or identity
     // handshake. Inspect only after failure, preserving partial host receipts
     // even when one debugger target does not answer within the diagnostic cap.
