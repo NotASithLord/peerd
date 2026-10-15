@@ -18,10 +18,13 @@ const semanticCaller = (authority: ReturnType<typeof createKernelSemanticAuthori
   return (route: string, message: any) => control.dispatchProjected(route, message, 'first-party');
 };
 
-const makeState = () => {
+const makeState = (fresh = false, failCreate = false) => {
+  let current: string | null = fresh ? null : 'chat';
+  const sessions = new Map<string, any>(fresh ? [] : [['chat', { sessionId: 'chat' }]]);
+  let creates = 0;
   const apps: Record<string, any> = {
     a: {
-      id: 'a', name: 'Alpha', entryFile: 'old.html', ownerSessionId: 'owner',
+      id: 'a', name: 'Alpha', entryFile: 'old.html', ownerSessionId: fresh ? null : 'owner',
       favorite: false, fileKinds: { 'old.html': 'text' }, dweb: null,
     },
   };
@@ -48,13 +51,45 @@ const makeState = () => {
       query: async () => [], create: async (value: any) => { tabs.push(value); },
     } },
     appTabUrl: 'chrome-extension://id/engine-tabs/app-tab/index.html',
-    sessionCache: { sessionGet: async () => 'chat' },
+    sessionCache: {
+      sessionGet: async () => current,
+      sessionSet: async (key: string, value: any) => { if (key === 'currentSessionId') current = value; },
+      sessionDelete: async () => { current = null; },
+    },
+    appLaunchSessions: {
+      get: async (id: string) => sessions.get(id),
+      create: async (options: any) => {
+        creates++;
+        if (failCreate) throw new Error('storage-unavailable');
+        const session = { ...options, sessionId: 'first-local-owner' };
+        sessions.set(session.sessionId, session);
+        return session;
+      },
+    },
   });
   const run = semanticCaller(authority);
-  return { apps, tabs, reloads, authority, run };
+  return { apps, tabs, reloads, authority, run, sessions, creates: () => creates, current: () => current };
 };
 
 describe('sealed App semantic routes', () => {
+  test('first keyless semantic opens share a durable owner before opening tabs', async () => {
+    const state = makeState(true);
+    await Promise.all([state.run('apps/open', { appId: 'a' }), state.run('apps/open', { appId: 'a' })]);
+    expect(state.creates()).toBe(1);
+    expect(state.current()).toBe('first-local-owner');
+    expect(state.sessions.get(state.current()!)).toMatchObject({ permissionMode: 'act', confirmActions: false });
+    expect(state.tabs).toHaveLength(2);
+    for (const tab of state.tabs) expect(tab.url).toEndWith('?owner=first-local-owner');
+  });
+
+  test('storage failure cannot launch an ownerless semantic app', async () => {
+    const state = makeState(true, true);
+    const reply = await state.run('apps/open', { appId: 'a' });
+    expect(reply.ok).toBe(false);
+    expect(state.tabs).toEqual([]);
+    expect(state.current()).toBeNull();
+  });
+
   test('preserves favorite, rename, reload, and browser-open behavior', async () => {
     const state = makeState();
     await expect(state.run('apps/favorite', { appId: 'a', favorite: true }))

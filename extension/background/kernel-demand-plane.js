@@ -273,6 +273,7 @@ export const createKernelDemandPlane = (deps) => {
     if (controllerOwner) return controllerOwner;
     controllerOwner = createKernelSemanticRuntime({
       ...deps,
+      appLaunchSessions: turnCustody.shared.sessions,
       withAppDwebAuthority,
       appDwebGeneration: (/** @type {string} */ appId) => getAppDwebAuthority().generation(appId),
       skillPersistence,

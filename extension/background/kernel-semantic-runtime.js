@@ -41,6 +41,7 @@ export const createKernelSemanticRuntime = (deps) => {
     browser: deps.browser,
     appTabUrl: deps.appTabUrl,
     sessionCache: deps.sessionCache,
+    appLaunchSessions: deps.appLaunchSessions,
   });
   const localRoutes = {
     'apps/list': async () => {
