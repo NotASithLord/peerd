@@ -40,3 +40,35 @@ export const bindCurrentChat = async (sessionCache, session) => {
   return permission;
   } finally { finish(); }
 };
+
+
+/**
+ * Allocate an owner for a user-opened App without requiring a model call or key.
+ * Existing claims remain exact: an invalid claim must never mint a replacement.
+ * @param {{current:()=>Promise<string|null>, resolve:(id:string)=>Promise<string|null>,
+ * create:()=>Promise<{sessionId:string}>, bind:(session:{sessionId:string})=>Promise<void>}} deps
+ */
+export const createAppLaunchOwner = ({ current, resolve, create, bind }) => {
+  /** @type {Promise<string>|null} */
+  let pending = null;
+  const requireRoot = async (/** @type {string} */ claim) => {
+    const root = await resolve(claim);
+    if (typeof root !== 'string' || !root) throw new Error('app-owner-unavailable');
+    return root;
+  };
+  return async (/** @type {string|null} */ claim) => {
+    if (claim !== null) return requireRoot(claim);
+    // why: simultaneous first opens share one durable chat owner. Failure is
+    // propagated to every waiter and never authorizes an ownerless tab.
+    if (!pending) {
+      pending = (async () => {
+        const existing = await current();
+        if (existing) return requireRoot(existing);
+        const session = await create();
+        await bind(session);
+        return requireRoot(session.sessionId);
+      })().finally(() => { pending = null; });
+    }
+    return pending;
+  };
+};

@@ -3,6 +3,7 @@
 import { createKernelMemoryAuthority } from './kernel-memory-authority.js';
 import { createKernelContactsAuthority } from './kernel-contacts-authority.js';
 import { PROVIDER_EGRESS_MANIFEST } from './provider-egress-manifest.js';
+import { createAppLaunchOwner, bindCurrentChat, DEFAULT_CHAT_PERMISSION } from '../shared/current-session-binding.js';
 import { parseAppManifest } from '../peerd-engine/app-manifest.js';
 
 const MUTATIONS = new Set([
@@ -40,6 +41,7 @@ export const createKernelSemanticAuthority = ({
   browser = null,
   appTabUrl = '',
   sessionCache = null,
+  appLaunchSessions = null,
 }) => {
   const memory = injectedMemory ?? createKernelMemoryAuthority({ idb, kv, auditLog, now });
   const contacts = injectedContacts ?? createKernelContactsAuthority({ idb, now });
@@ -54,20 +56,39 @@ export const createKernelSemanticAuthority = ({
         return [provider, { hasKey: policy.credential === null || !!key }];
       })));
   };
+  const resolveLaunchOwner = createAppLaunchOwner({
+    current: async () => await sessionCache?.sessionGet('currentSessionId') ?? null,
+    resolve: async (id) => {
+      for (let depth = 0; depth < 32; depth++) {
+        const session = await appLaunchSessions?.get(id);
+        if (!session) return null;
+        if (!session.parentSessionId) return session.sessionId;
+        id = session.parentSessionId;
+      }
+      return null;
+    },
+    create: async () => {
+      if (!appLaunchSessions) throw new Error('app-owner-unavailable');
+      return appLaunchSessions.create({
+        permissionMode: DEFAULT_CHAT_PERMISSION.mode,
+        confirmActions: DEFAULT_CHAT_PERMISSION.confirmActions,
+      });
+    },
+    bind: async (session) => { await bindCurrentChat(sessionCache, session); },
+  });
   const openApp = async (/** @type {any} */ payload) => {
     if (typeof payload?.appId !== 'string' || !appCatalog) return false;
     const app = await appCatalog.get(payload.appId);
     if (!app) return false;
     const sessionId = await sessionCache?.sessionGet('currentSessionId');
-    const owner = typeof sessionId === 'string' ? sessionId
+    const claim = typeof sessionId === 'string' ? sessionId
       : typeof app.ownerSessionId === 'string' ? app.ownerSessionId : null;
-    const url = `${appTabUrl}#${payload.appId}${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`;
+    const owner = await resolveLaunchOwner(claim);
+    const url = `${appTabUrl}#${payload.appId}?owner=${encodeURIComponent(owner)}`;
     const existing = (await browser?.tabs?.query?.({ url: `${appTabUrl}#${payload.appId}*` }) ?? [])[0];
-    if (typeof existing?.id === 'number') await browser.tabs.update(existing.id, { active: true });
+    if (typeof existing?.id === 'number') await browser.tabs.update(existing.id, { url, active: true });
     else await browser?.tabs?.create?.({ url, active: true });
-    if (typeof sessionId === 'string') {
-      await appCatalog.setDefaultForSession(sessionId, payload.appId);
-    }
+    await appCatalog.setDefaultForSession(owner, payload.appId);
     return true;
   };
   const calls = Object.freeze({
