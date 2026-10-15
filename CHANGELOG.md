@@ -10,6 +10,25 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-15
+
+### Fixed
+
+- Opening an imported local app before the first chat now creates a durable
+  owner without requiring an API key. Concurrent first launches share that
+  owner, while invalid ownership or failed storage refuses the launch.
+- Reopening an app tab supplies its validated owner, allowing a previously
+  ownerless failed tab to recover. Actor ownership and sandbox checks remain
+  enforced.
+
+### Validation and scope
+
+- The released Firefox extension reproduced the ownerless-launch failure;
+  the patched package renders the app inside its sandbox on a copy of an
+  updated profile. Chrome and Firefox package and worker constraints pass.
+- An intermittent vault-lock reply timeout remains under investigation.
+  This patch does not claim to resolve that separate lifecycle failure.
+
 ## [0.9.1] - 2026-10-14
 
 ### Fixed
