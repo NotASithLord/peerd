@@ -123,7 +123,7 @@ import {
 import { readBoundedResponseText } from '/shared/abort.js';
 import { captureSessionAuthority } from '/shared/session-authority-epoch.js';
 import {
-  bindCurrentChat, DEFAULT_CHAT_PERMISSION,
+  bindCurrentChat, DEFAULT_CHAT_PERMISSION, rootChatSession,
 } from '/shared/current-session-binding.js';
 import {
   needsWebWriteConfirm,
@@ -1114,17 +1114,8 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
   const post = (/** @type {any} */ message) => {
     if (uiConnected()) live.shared.uiPorts.broadcast(message);
   };
-  const rootSessionIdFor = async (/** @type {string} */ sessionId) => {
-    const seen = new Set();
-    let cursor = sessionId;
-    for (let hops = 0; cursor && hops < 32 && !seen.has(cursor); hops += 1) {
-      seen.add(cursor);
-      const record = await live.shared.sessions.get(cursor).catch(() => null);
-      if (!record?.parentSessionId) return record ? cursor : null;
-      cursor = record.parentSessionId;
-    }
-    return null;
-  };
+  const rootSessionIdFor = (/** @type {string} */ sessionId) =>
+    rootChatSession(live.shared.sessions, sessionId).catch(() => null);
   const dpopKeys = makeDpopKeyStore({
     get: (/** @type {string} */ store, /** @type {string} */ key) => deps.idb.get(store, key),
     put: (/** @type {string} */ store, /** @type {any} */ row) => deps.idb.put(store, row),
