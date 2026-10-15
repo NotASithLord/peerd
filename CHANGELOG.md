@@ -10,6 +10,25 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-14
+
+### Fixed
+
+- Cold P2P activation no longer holds the host lifecycle lane while startup
+  waits for its nested vault identity read. Concurrent Discover requests can
+  now complete startup without that deadlock or the resulting host retirement.
+- Activation diagnostics retain the initial failure even when the network
+  later recovers, making intermittent startup regressions visible.
+
+### Validation and scope
+
+- The packaged Mac browser reproduced the activation failure before this fix;
+  the fixed runtime passed ten consecutive strict runs on Mac and ten on Linux,
+  including real WebRTC and discovery install/open checks.
+- P2P remains opt-in and Chrome-preview-only. Broader network reachability and
+  scale testing continue. Browser binary update qualification is tracked
+  separately from this runtime release.
+
 ## [0.9.0] - 2026-10-13
 
 ### Added
