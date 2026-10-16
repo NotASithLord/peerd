@@ -13,11 +13,13 @@ import browser from '/shared/browser-api.js';
 /**
  * A feed entry. `id`/`ts` are stamped by the offscreen emitter
  * (offscreen/dweb-base.js); the rest ride the broadcast notification.
+ * `key` names the subject (a new app's dwapp_id), so Discover can open it.
  * `seen` is the feed's own dismissal/read bit.
  * @typedef {{
  *   id: string,
  *   ts: number,
  *   kind: string,
+ *   key?: string,
  *   title: string,
  *   body: string,
  *   link: string,

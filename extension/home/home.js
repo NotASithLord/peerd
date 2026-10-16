@@ -86,7 +86,6 @@ const loadEvalSection = () => {
 // component graph on every Home visit. Load it only after state requires it.
 /** @type {any} */
 let OnboardingGate = null;
-/** @type {any} */ let NetworkChoice = null;
 let onboardingLoading = false;
 let onboardingFailed = false;
 const loadOnboarding = () => {
@@ -94,7 +93,7 @@ const loadOnboarding = () => {
   onboardingLoading = true;
   onboardingFailed = false;
   import('../sidepanel/components/onboarding-view.js')
-    .then((mod) => { OnboardingGate = mod.OnboardingGate; NetworkChoice = mod.PeerNetworkStep; })
+    .then((mod) => { OnboardingGate = mod.OnboardingGate; })
     .catch(() => { onboardingFailed = true; })
     .finally(() => { onboardingLoading = false; m.redraw(); });
 };
@@ -109,26 +108,12 @@ const loadDiscover = () => {
     .catch(() => { discoverFailed = true; })
     .finally(() => { discoverLoading = false; m.redraw(); });
 };
-/** @type {any} */ let StarterSection = null;
-let starterLoading = false, starterFailed = false;
-const loadStarters = () => {
-  if (StarterSection || starterLoading) return;
-  starterLoading = true;
-  import('./starter-section.js').then(mod => { StarterSection = mod.StarterSection; starterFailed = false; })
-    .catch(() => { starterFailed = true; })
-    .finally(() => { starterLoading = false; m.redraw(); });
-};
-/** @type {any} */ let AddressSection = null;
-let addressLoading = false;
-let addressFailed = false;
-const loadAddressSection = () => {
-  if (AddressSection || addressLoading) return;
-  addressLoading = true;
-  import('./immutable-address-section.js')
-    .then(mod => { AddressSection = mod.ImmutableAddressSection; addressFailed = false; })
-    .catch(() => { addressFailed = true; })
-    .finally(() => { addressLoading = false; m.redraw(); });
-};
+// A "New app to install" notification carries the app's dwapp_id. Discover
+// answers it once, with the first heard read after it, then clears this.
+/** @type {string | null} */
+let discoverOpenKey = null;
+/** @param {import('/shared/peer-notifications.js').PeerNotification} n */
+const keepDiscoverKey = (n) => { if (n.link === 'discover' && n.key) discoverOpenKey = n.key; };
 
 const ALL_VIEWS = new Set(['chat', 'chats', 'actors', 'library', 'eval', 'discover', 'contacts', 'network']);
 /** @param {string | null | undefined} v */
@@ -160,7 +145,12 @@ const readView = () => {
 let activeView = readView();  // chat | actors | library | eval | discover | contacts | network
 clearHash();                  // deep-link consumed at boot — see viewFromHash
 /** @param {string} v */
-const setView = (v) => { activeView = v; try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ } };
+const setView = (v) => {
+  activeView = v;
+  // A notification's app page is a request for this visit to Discover only.
+  if (v !== 'discover') discoverOpenKey = null;
+  try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ }
+};
 // SPA navigation keeps the rail mounted, so explicitly land keyboard and AT
 // users in the new content instead of leaving focus on a now-stale trigger.
 const focusActiveContent = () => requestAnimationFrame(() => {
@@ -699,7 +689,7 @@ const NotificationsBell = () => {
         open ? m('.notif-menu', items.length
           ? items.map((n) => m('button.notif-item', {
               key: n.id,
-              onclick: () => { open = false; navigateHome(n.link); },
+              onclick: () => { open = false; keepDiscoverKey(n); navigateHome(n.link); },
             }, [m('.notif-item-title', n.title), m('.notif-item-body', n.body)]))
           : m('.notif-empty.muted', 'Nothing yet. New peers and apps show up here.')) : null,
       ]);
@@ -713,7 +703,7 @@ const NotificationsBell = () => {
 const notifBanner = (n) => m('.notif-banner', [
   m('span.notif-banner-text', [m('strong', n.title), n.body ? ` — ${n.body}` : '']),
   m('button.home-popout', {
-    onclick: () => { setView(n.link); peerNotifications.dismiss(n.id); },
+    onclick: () => { keepDiscoverKey(n); setView(n.link); peerNotifications.dismiss(n.id); },
   }, n.link === 'discover' ? 'View in Discover' : 'View network'),
   m('button.notif-banner-x', { 'aria-label': 'Dismiss', onclick: () => peerNotifications.dismiss(n.id) }, '×'),
 ]);
@@ -769,25 +759,14 @@ const content = (showDweb) => {
       evalLoadState === 'unavailable' ? 'The Lab is not available in this build.' : 'Loading the Lab…');
   }
   if (activeView === 'discover' && DWEB_ENABLED) {
-    loadOnboarding();
-    if (!addressFailed) loadAddressSection();
-    if (!starterFailed) loadStarters();
-    if (showDweb && !discoverFailed) loadDiscover();
-    if (!NetworkChoice) return onboardingFailed
-      ? m('button', { onclick: loadOnboarding }, 'Retry loading network controls')
-      : m('p', { role: 'status' }, 'Loading network controls…');
-    return m('div', [
-      m(NetworkChoice, { enabled: !!showDweb, send, reconcileState }),
-      StarterSection ? m(StarterSection, { send, enabled: !!showDweb })
-        : starterFailed ? m('button', { onclick: loadStarters }, 'Retry loading starter Apps')
-          : m('p', { role: 'status' }, 'Loading starter Apps…'),
-      AddressSection ? m(AddressSection, { send, enabled: !!showDweb })
-        : addressFailed ? m('button', { onclick: loadAddressSection }, 'Retry loading App addresses')
-          : m('p', { role: 'status' }, 'Loading App addresses…'),
-      showDweb ? DiscoverSection ? m(DiscoverSection, { send })
-        : discoverFailed ? m('button', {onclick: loadDiscover}, 'Retry loading Explore')
-          : m('p', {role:'status'}, 'Loading Explore…') : null,
-    ]);
+    if (!discoverFailed) loadDiscover();
+    if (!DiscoverSection) return discoverFailed
+      ? m('button', { onclick: loadDiscover }, 'Retry loading Discover')
+      : m('p', { role: 'status' }, 'Loading Discover…');
+    return m(DiscoverSection, {
+      send, enabled: !!showDweb, reconcileState, openKey: discoverOpenKey,
+      onOpenKey: () => { discoverOpenKey = null; }, onLibrary: () => navigateHome('library'),
+    });
   }
   if (activeView === 'contacts' && showDweb) return m(ContactsSection, { send });
   if (activeView === 'network' && showDweb) return m(NetworkSection, { send });

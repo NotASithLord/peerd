@@ -140,7 +140,7 @@ export const PeerNetworkStep = () => {
         m('p', 'Discover, download, and share apps directly with other peers, including WebAssembly apps.'),
         m('p.muted', 'Connecting uses bandwidth and storage, and peers can see your network address. '
           + 'Your private apps, files, chats, and credentials are not published by joining.'),
-        m('p.muted', 'You can change this in Settings or Discover. Letting peers trigger agent work is a separate choice.'),
+        m('p.muted', 'You can change this in Settings. Letting peers trigger agent work is a separate choice.'),
         saved ? m(PeerNetworkStatus, { send }) : null,
         m('.onboarding-actions', stopUnconfirmed ? [
           m('button.secondary', { type: 'button', disabled: busy || refreshing, onclick: () => choose(false) }, 'Retry stopping'),

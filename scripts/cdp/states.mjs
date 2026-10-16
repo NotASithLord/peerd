@@ -39,7 +39,7 @@ import { startWebFixtureServer } from './fixtures/web-suite.mjs';
 import { recordNetworkFloorVector, recordPrivateChildFloor, ordinaryProbeReached } from './network-floor-oracle.mjs';
 import { NOTEBOOK_FETCH_STATE } from './notebook-fetch-state.mjs';
 import { WASMER_STATE } from './wasmer-state.mjs';
-import { STARTER_VISUAL_STATES } from './starter-visuals.mjs';
+import { STARTER_VISUAL_STATES, discoverSurface } from './starter-visuals.mjs';
 import { APP_RUNTIME_STATES } from './app-runtime-state.mjs';
 import { IMMUTABLE_ADDRESS_VISUAL_STATES } from './immutable-address-visuals.mjs';
 import { CONSENT_LOCK_VISUAL_STATES } from './consent-lock-visuals.mjs';
@@ -4288,17 +4288,22 @@ export const STATES = [
         }, { budgetMs: 15_000, pollMs: 50 });
         rec.check('Discover enable persists only network participation, not agent work',
           optedIn?.dwebEnabled === true && optedIn.dwebAgentEnabled === false, JSON.stringify(optedIn));
+        // Discover reads status once the choice lands: connected, looking or offline.
+        const statusLine = '.disc-status-live[role="status"], .disc-head-block [role="status"]';
         const statusVisible = await waitFor(() => evalIn(page,
-          `!!document.querySelector('.peer-network-status [role="status"]')`),
+          `!!document.querySelector(${JSON.stringify(statusLine)})`),
         { budgetMs: 15_000, pollMs: 50 });
         const consentUi = await evalIn(page, `({
-          status: document.querySelector('.peer-network-status [role="status"]')?.textContent?.slice(0, 300) ?? null,
-          turnOffEnabled: !![...document.querySelectorAll('.onboarding-actions button')]
-            .find(button => button.textContent === 'Turn off' && !button.disabled),
+          status: document.querySelector(${JSON.stringify(statusLine)})?.textContent?.trim().slice(0, 300) ?? null,
+          enableOffered: !!document.querySelector('[data-network-choice="enable"]'),
+          controls: [...document.querySelectorAll('.disc-home button')].filter(button => !button.disabled)
+            .map(button => button.textContent.trim()),
           body: document.body.innerText.slice(0, 3000),
         })`);
         rec.check('connection status is separate from saved consent and leaves controls usable',
-          !!statusVisible && consentUi.turnOffEnabled, JSON.stringify(consentUi));
+          !!statusVisible && !consentUi.enableOffered && consentUi.controls.length > 0
+            && /^(Connected to \d+ peers?|Looking for peers…|Peer network is offline)$/.test(consentUi.status ?? ''),
+          JSON.stringify(consentUi));
         await rec.shotPage('discover-network-enabled', page);
         await page.send('Page.reload', { ignoreCache: true });
         await waitFor(() => evalIn(page, `!!document.querySelector('.home-rail')`),
@@ -4308,17 +4313,24 @@ export const STATES = [
           reloaded?.state?.settings?.dwebEnabled === true
             && reloaded.state.settings.dwebChoiceMade === true
             && reloaded.state.settings.dwebAgentEnabled === false, JSON.stringify(reloaded?.state?.settings));
-        await evalIn(page, `location.hash = 'discover'`);
-        await waitFor(() => evalIn(page, `!!document.querySelector('.onboarding-actions button.secondary')`),
-          { budgetMs: 15_000, pollMs: 50 });
-        await clickAndSyncRedraw(page, '.onboarding-actions button.secondary');
+        // Discover only enables. Turning off lives in Settings and the Network view.
+        await evalIn(page, `location.hash = 'network'`);
+        const stopOffered = await waitFor(() => evalIn(page, `[...document.querySelectorAll('button.peerd-net-btn')]
+          .some(button => button.textContent === 'Stop the network' && !button.disabled)`),
+        { budgetMs: 30_000, pollMs: 50 });
+        rec.check('the Network view offers Stop the network while on', !!stopOffered);
+        // why replace confirm: Stop first asks in a blocking dialog. Answer yes, as the user would.
+        await evalIn(page, `(() => {
+          window.confirm = () => true;
+          [...document.querySelectorAll('button.peerd-net-btn')].find(button => button.textContent === 'Stop the network')?.click();
+        })()`);
         const disabled = await waitFor(async () => {
           const r = await rpc(page, { type: 'state/get' });
           const host = await rpc(page, { type: 'bootstrap/ready' });
           return r?.state?.settings?.dwebEnabled === false
             && !['starting', 'active'].includes(host?.featureLeases?.leases?.dweb?.status);
         }, { budgetMs: 20_000, pollMs: 50 });
-        rec.check('Discover turn off revokes the network lease', !!disabled);
+        rec.check('Network view stop revokes the network lease', !!disabled);
 
       } finally { try { page.close(); } catch {} }
     },
@@ -4901,11 +4913,12 @@ export const STATES = [
   },
 
   // Real Explore component with a controlled catalog. Both themes and widths
-  // show the signed-hint caveat and the legacy unknown state.
+  // show the tile grid; an older tree shows its signed-hint filters instead.
   ...[false, true].map(narrow => ({
     name: narrow ? 'home-explore-narrow' : 'home-explore', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
+      const { flow } = discoverSurface();
       const page = await openExtPage(ctx, 'tests/fixtures/explore.html');
       try {
         await page.send('Emulation.setDeviceMetricsOverride', {width:narrow ? 320 : 960,height:narrow ? 1200 : 760,deviceScaleFactor:1,mobile:false});
@@ -4919,6 +4932,24 @@ export const STATES = [
         })()`);
         rec.check('Explore renders all publisher claims including legacy unknown in full view', ready === true && fullView === true);
         await rec.visualPage(narrow ? 'home-explore-narrow' : 'home-explore', page);
+        if (flow) {
+          const pick = (label) => evalIn(page, `(async () => {
+            [...document.querySelectorAll('.disc-pill')].find(pill => pill.textContent === ${JSON.stringify(label)}).click();
+            (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
+            return [...document.querySelectorAll('.disc-tile-name')].map(node => node.textContent);
+          })()`, true);
+          rec.check('From contacts keeps only the saved contact’s app',
+            JSON.stringify(await pick('From contacts')) === JSON.stringify(['Field notes']));
+          rec.check('Updates is empty while every installed app is current', (await pick('Updates')).length === 0
+            && await evalIn(page, `document.body.textContent.includes('No matching apps')`));
+          const included = await pick('Included');
+          rec.check('Included lists both packaged starters and Commons',
+            included.length === 3 && included.includes('Peerd-to-Peerd Commons'));
+          rec.check('All restores every shared app', (await pick('All')).length === 3);
+          rec.check('Explore controls and cards fit the viewport',
+            await evalIn(page, `document.documentElement.scrollWidth <= innerWidth`));
+          return;
+        }
         await evalIn(page, `(() => {const filter=document.querySelector('select');filter.value='yes';filter.dispatchEvent(new Event('change',{bubbles:true}));})()`);
         const filtered = await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 1 && document.querySelector('.disc-name')?.textContent === 'Orbit lab'`), {budgetMs:4000,pollMs:50});
         rec.check('WebAssembly filter selects the declared module App', filtered === true);
@@ -4952,6 +4983,39 @@ export const STATES = [
       } finally { try {page.close();} catch { /* */ } }
     },
   })),
+  // The Included pill: both packaged starters and Commons as tiles, read only.
+  {
+    name: 'home-explore-included', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      if (!discoverSurface().flow) {
+        rec.observe('merge-base surface', { present: false, reason: 'the Included filter was introduced on this branch' });
+        return;
+      }
+      const page = await openExtPage(ctx, 'tests/fixtures/explore.html');
+      try {
+        await page.send('Emulation.setDeviceMetricsOverride', {width:960,height:760,deviceScaleFactor:1,mobile:false});
+        if (!await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 3`), {budgetMs:8000,pollMs:80})) {
+          throw new Error('Explore did not render');
+        }
+        await evalIn(page, `(async () => {
+          [...document.querySelectorAll('.disc-pill')].find(pill => pill.textContent === 'Included').click();
+          (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
+        })()`, true);
+        // why wait for an enabled Commons action: it stays off until the Library read lands.
+        const included = await waitFor(() => evalIn(page, `(() => {
+          const metas = [...document.querySelectorAll('.disc-tile-meta')].map(node => node.textContent);
+          return metas.length === 3 && metas.every(text => text === 'Comes with peerd')
+            && [...document.querySelectorAll('.disc-tile-action')].some(button => button.textContent === 'Add and open Commons' && !button.disabled);
+        })()`), {budgetMs:4000,pollMs:50});
+        rec.check('Included lists both packaged starters and Commons and sends only reads', !!included
+          && await evalIn(page, `window.__exploreFixtureCalls.every(type =>
+            ['apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distributed/info', 'contacts/list'].includes(type))`));
+        rec.check('Explore controls and cards fit the viewport', await evalIn(page, `document.documentElement.scrollWidth <= innerWidth`));
+        await rec.visualPage('home-explore-included', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
 
   // Functional rendered coverage for committed success warnings. This takes a
   // screenshot without creating a local visual authority baseline. CI remains
@@ -4974,12 +5038,13 @@ export const STATES = [
         `), { budgetMs: 8_000, pollMs: 80 });
         rec.check('the narrow warning fixture renders both update actions', !!ready);
 
+        // A tile's Update opens that app's page and sends the update there.
         await evalIn(page, `
           [...document.querySelectorAll('.disc-card button')]
             .find((button) => button.textContent === 'Update')?.click()
         `);
         const discoverWarning = await waitFor(() => evalIn(page, `
-          document.querySelector('.disc-card [role="status"]')?.textContent ?? ''
+          document.querySelector('.disc-panel [role="status"]')?.textContent ?? ''
         `), { budgetMs: 4_000, pollMs: 50 });
 
         await evalIn(page, `
@@ -4989,7 +5054,7 @@ export const STATES = [
         const warningLayout = await waitFor(() => evalIn(page, `(() => {
           const statuses = [
             document.querySelector('section[aria-labelledby="library-warning-heading"] p.muted[role="status"]'),
-            document.querySelector('.disc-card [role="status"]'),
+            document.querySelector('.disc-panel [role="status"]'),
           ].filter(Boolean);
           if (statuses.length !== 2) return null;
           return {
