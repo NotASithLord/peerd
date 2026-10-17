@@ -119,11 +119,15 @@ const FLOW_FRAMES = [
   ['connected-empty', 'empty', has('No apps shared yet'), []],
   ['tiles', 'tiles', `${cards(3)} && ${has('Update ready')} && ${has('Can’t run in this browser')}`, []],
   ['offline', 'offline', `${has('Peer network is offline')} && ${cards(1)}`, []],
+  ['offline-empty', 'offline-empty', `${has('Peer network is offline')} && ${has('Apps you install from peers show up here.')}`, []],
   ['installing', 'installing', has('You can leave this page. The install keeps going.'), ['dweb/base/install']],
-  ['installed', 'installed', `${focused('.disc-panel .disc-primary')} && document.activeElement.textContent === 'Open'`, ['dweb/base/install']],
+  // why the status line: focus never lands on Open, which runs the app.
+  ['installed', 'installed', `${focused('.disc-panel .disc-installed')} && ${has('In your Library.')}`, ['dweb/base/install']],
   ['install-failed', 'failed', has('peerd could not install this app. Try again.'), ['dweb/base/install']],
   ['install-unknown', 'unknown', has('peerd could not confirm whether the install finished.'), ['dweb/base/install']],
   ['update-conflict', 'conflict', has('Locally modified'), ['dweb/base/update-app']],
+  ['update-ready', 'update', `${focused('.disc-back')} && ${has('Update ready')}`, []],
+  ['update-cant-run', 'update-cant-run', `${focused('.disc-back')} && ${has('This update can’t run in this browser.')}`, []],
   ['cant-run', 'cant-run', `${focused('.disc-back')} && ${has('This app can’t run in this browser.')}`, []],
   ['maker', 'maker', `${focused('.disc-back')} && ${has('Saved as a contact on this device')}`, []],
 ];

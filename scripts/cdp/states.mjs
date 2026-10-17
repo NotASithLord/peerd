@@ -5043,8 +5043,9 @@ export const STATES = [
           [...document.querySelectorAll('.disc-card button')]
             .find((button) => button.textContent === 'Update')?.click()
         `);
+        // why the footnote: the installed line is a status too, and it comes first.
         const discoverWarning = await waitFor(() => evalIn(page, `
-          document.querySelector('.disc-panel [role="status"]')?.textContent ?? ''
+          document.querySelector('.disc-panel .disc-footnote[role="status"]')?.textContent ?? ''
         `), { budgetMs: 4_000, pollMs: 50 });
 
         await evalIn(page, `
@@ -5054,7 +5055,7 @@ export const STATES = [
         const warningLayout = await waitFor(() => evalIn(page, `(() => {
           const statuses = [
             document.querySelector('section[aria-labelledby="library-warning-heading"] p.muted[role="status"]'),
-            document.querySelector('.disc-panel [role="status"]'),
+            document.querySelector('.disc-panel .disc-footnote[role="status"]'),
           ].filter(Boolean);
           if (statuses.length !== 2) return null;
           return {

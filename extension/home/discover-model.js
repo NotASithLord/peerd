@@ -7,15 +7,21 @@
 
 /** @typedef {{ dwapp_id?: string, uri?: string, name?: string, slug?: string, seq?: number, publisher?: string, from?: string, version_id?: string, description?: string, size?: number, includes_wasm?: boolean|null, runtimeCompatibility?: {status:string,message:string} }} DwebApp */
 /** @typedef {{action:'install'|'update', versionId:string|null, seq:number|null, uri:string|null}} PendingTarget */
+/** @typedef {{appId?:string, notice?:string, failure?:string}} LinkOutcome */
 /**
  * Effect custody that must outlive one mount of the section: the page says
  * "You can leave this page. The install keeps going." (see createEffects).
+ * `commons` fences "Add and open Commons" while an add runs and after an
+ * unconfirmed one. `link` is the share-link install in flight, so a view
+ * mounted while it runs follows the same outcome.
  * @typedef {{
  *   busy: Record<string, string>,
  *   unconfirmed: Map<string, PendingTarget>,
  *   installedId: Record<string, string|null>,
  *   notices: Record<string, string>,
  *   conflicts: Map<string, {token:number, versionId:string|null}>,
+ *   commons: 'adding'|'unknown'|null,
+ *   link: {address:string, outcome:Promise<LinkOutcome>}|null,
  * }} DiscoverEffects
  */
 /** @typedef {'all'|'updates'|'contacts'|'included'} Pill */
@@ -30,7 +36,7 @@
 /** A fresh, empty custody record. The section keeps one per page load.
  * @returns {DiscoverEffects} */
 export const createEffects = () => ({
-  busy: {}, unconfirmed: new Map(), installedId: {}, notices: {}, conflicts: new Map(),
+  busy: {}, unconfirmed: new Map(), installedId: {}, notices: {}, conflicts: new Map(), commons: null, link: null,
 });
 
 const IN_FLIGHT = Object.freeze(['installing', 'updating']);
@@ -123,33 +129,59 @@ export const libraryStatus = ({ ready, failed }) => {
 };
 
 /**
+ * The share row's words for a link the parser rejects. The parser's own text
+ * names retired things ("App address", "dwapp URI", "manifest hash").
+ * @param {unknown} message the immutableAppRoot error message
+ * @returns {string}
+ */
+export const shareLinkError = (message) => String(message).startsWith('File paths are not supported')
+  ? 'File paths are not supported. Paste the share link of the app itself.'
+  : 'This is not a share link. Paste the whole link you were sent.';
+
+/**
+ * A newer version on offer for an installed app, other than the user's own:
+ * 'update', or 'update-cant-run' when the new version needs a feature this
+ * browser lacks. The installed version still opens either way.
+ * @param {{installed:boolean, updatable:boolean, mine:boolean, incompatible:boolean}} card
+ * @returns {'update'|'update-cant-run'|null}
+ */
+export const updateOffer = ({ installed, updatable, mine, incompatible }) => {
+  if (!installed || !updatable || mine) return null;
+  return incompatible ? 'update-cant-run' : 'update';
+};
+
+// why "can't run" for an installed app only at this version: the runtime
+// flag rides the card. An installed app of another version keeps working, so
+// it offers Open. `sameVersion`: the Library holds this card's version.
+/**
  * First match wins. In-flight tiles carry text and no button; failed and
  * unknown tiles say Review because the app page carries that state.
- * @param {{incompatible:boolean, busy?:string, uncertain:boolean, installed:boolean, updatable:boolean, mine:boolean}} card
+ * @param {{incompatible:boolean, busy?:string, uncertain:boolean, installed:boolean, sameVersion:boolean, updatable:boolean, mine:boolean}} card
  * @returns {{kind:'status', text:string}|{kind:'update'|'open'|'review'}}
  */
-export const tileAction = ({ incompatible, busy, uncertain, installed, updatable, mine }) => {
-  if (incompatible) return { kind: 'status', text: 'Can’t run in this browser' };
+export const tileAction = (card) => {
+  const { incompatible, busy, uncertain, installed, sameVersion } = card;
+  if (incompatible && (!installed || sameVersion)) return { kind: 'status', text: 'Can’t run in this browser' };
   if (busy === 'installing') return { kind: 'status', text: 'Installing…' };
   if (busy === 'updating') return { kind: 'status', text: 'Updating…' };
   if (uncertain || isFailure(busy)) return { kind: 'review' };
-  if (installed && updatable && !mine) return { kind: 'update' };
+  if (updateOffer(card) === 'update') return { kind: 'update' };
   if (installed) return { kind: 'open' };
   return { kind: 'review' };
 };
 
 /**
- * @param {{incompatible:boolean, conflict:boolean, busy?:string, uncertain:boolean, installed:boolean}} card
+ * @param {{incompatible:boolean, conflict:boolean, busy?:string, uncertain:boolean, installed:boolean, sameVersion:boolean}} card
  * @returns {'cant-run'|'conflict'|InstallState}
  */
-export const pageState = ({ incompatible, conflict, busy, uncertain, installed }) => {
-  if (incompatible) return 'cant-run';
+export const pageState = ({ incompatible, conflict, busy, uncertain, installed, sameVersion }) => {
+  const have = installed || busy === 'installed';
+  if (incompatible && (!have || sameVersion)) return 'cant-run';
   if (busy === 'installing' || busy === 'updating') return 'installing';
   if (uncertain) return 'unknown';
   if (conflict) return 'conflict';
   if (isFailure(busy)) return 'failed';
-  if (installed || busy === 'installed') return 'installed';
-  return 'review';
+  return have ? 'installed' : 'review';
 };
 
 const STEPS = Object.freeze([
@@ -200,8 +232,23 @@ export const savedContactNames = (rows) => {
 };
 
 /**
+ * The heard cards the offline grid can still use: the latest read, plus
+ * earlier cards that `keep` names (apps in the Library or with an effect in
+ * flight). Without it the cache holds every card peers ever announced.
+ * @param {ReadonlyMap<string, DwebApp>} cache @param {DwebApp[]} latest
+ * @param {(id: string) => boolean} keep
+ * @returns {Map<string, DwebApp>}
+ */
+export const keptCards = (cache, latest, keep) => {
+  const next = new Map([...cache].filter(([id]) => keep(id)));
+  for (const app of latest) if (app.dwapp_id) next.set(app.dwapp_id, app);
+  return next;
+};
+
+/**
  * Library records that came from peers, for the offline grid. The catalog
- * carries no description or size, so a card heard earlier this visit fills them.
+ * carries no description or size, so a card heard earlier this visit fills
+ * them, but only a card for the version the Library holds.
  * @param {ReadonlyArray<CatalogRecord>} records the 'apps/list' apps
  * @param {ReadonlyMap<string, DwebApp>} heard last heard card per dwapp_id
  * @returns {DwebApp[]}
@@ -209,7 +256,8 @@ export const savedContactNames = (rows) => {
 export const libraryPeerApps = (records, heard) => records.flatMap(record => {
   const dweb = record?.dweb;
   if (typeof record?.id !== 'string' || typeof dweb?.uri !== 'string') return [];
-  const card = typeof dweb.dwapp_id === 'string' ? heard.get(dweb.dwapp_id) : undefined;
+  const latest = typeof dweb.dwapp_id === 'string' ? heard.get(dweb.dwapp_id) : undefined;
+  const card = typeof dweb.version_id === 'string' && latest?.version_id === dweb.version_id ? latest : undefined;
   return [{
     dwapp_id: typeof dweb.dwapp_id === 'string' ? dweb.dwapp_id : dweb.uri,
     uri: dweb.uri,

@@ -5,6 +5,8 @@
 // sends: discover-section.js computes every value and passes every handler.
 // Publisher text (app names, descriptions) renders with dir="auto", so its
 // direction stays inside its own element and cannot flow into "Made by".
+// A maker name or short key next to other text sits in a <bdi> for the same
+// reason: a right-to-left contact name cannot reorder " · 48 KB".
 
 import m from '/vendor/mithril/mithril.js';
 import { installSteps } from './discover-model.js';
@@ -27,11 +29,18 @@ export const letterAvatar = ({ letter, tone, variant }) => m(`div.disc-letter.di
 }, letter);
 
 /** @param {Maker} maker */
-export const makerText = (maker) => maker.name ? `Made by ${maker.name}` : ['Made by ', m('span.type-code.disc-maker-key', maker.key)];
+export const makerText = (maker) => ['Made by ', maker.name ? m('bdi', maker.name) : m('bdi.type-code.disc-maker-key', maker.key)];
 
 /** "Made by Ana · 48 KB", either part optional.
  * @param {Maker|null} maker @param {string|null} kb */
 export const makerMeta = (maker, kb) => [maker ? makerText(maker) : null, kb ? `${maker ? ' · ' : ''}${kb}` : null];
+
+/**
+ * Parts keyed by name, nulls left out. A keyed part keeps its DOM node while
+ * the parts around it change, so focus and typed text stay put.
+ * @param {Record<string, unknown>} parts
+ */
+export const keyedParts = (parts) => Object.entries(parts).flatMap(([key, part]) => part ? [m.fragment({ key }, part)] : []);
 
 /** @param {ButtonProps} props */
 export const primaryButton = ({ label, onclick, disabled }) => m('button.disc-primary', { type: 'button', disabled, onclick }, label);
@@ -135,12 +144,12 @@ export const shareRow = ({ value, inputDisabled, checkDisabled, status, note, er
     error ? m('p.error', { role: 'alert' }, error) : null,
   ]);
 
-/** @param {{text:string, count:string|null, buttons:unknown[]}} props */
+/** @param {{text:string, count:string|null, buttons:Record<string, unknown>}} props */
 export const statusRow = ({ text, count, buttons }) => m('.disc-status', [
   m('span.type-body-sm.disc-status-live', { role: 'status', 'aria-live': 'polite' }, [icon('globe', 16), text]),
   count ? m('span.type-body-sm.disc-status-count', count) : null,
   m('span.spacer'),
-  ...buttons,
+  keyedParts(buttons),
 ]);
 
 /** @param {{spinning:boolean, onclick:()=>void}} props */
@@ -160,11 +169,11 @@ export const searchInput = ({ value, oninput }) => m('input.disc-search', {
   oninput: (/** @type {{target:HTMLInputElement}} */ event) => oninput(event.target.value),
 });
 
-/** @param {{title:string, text:string, actions:unknown[], boxed?:boolean, status?:boolean}} props */
+/** @param {{title?:string, text:string, actions:unknown[], boxed?:boolean, status?:boolean}} props */
 export const emptyState = ({ title, text, actions, boxed, status }) => m('.disc-empty', {
   class: boxed ? 'disc-empty--boxed' : '', role: status ? 'status' : undefined,
 }, [
-  m('h2.type-heading', title),
+  title ? m('h2.type-heading', title) : null,
   m('p.type-body-sm', text),
   actions.some(Boolean) ? m('.disc-empty-actions', actions) : null,
 ]);
@@ -199,14 +208,20 @@ const stepMark = (state, n) => state === 'done' ? icon('check', 14)
   : state === 'working' ? m('span.peerd-spinner', { 'aria-hidden': 'true' })
     : state === 'failed' ? icon('x', 13) : String(n);
 
+// why the installed line takes focus (tabindex -1), never Open: Open runs
+// peer code, so one stray key press after the install must not reach it.
+// The action is keyed by its label for the same reason: a fast reply turns
+// "Install and share" into "Open" in one redraw, and a reused node would
+// keep the focus.
 /**
  * The action panel with the three install steps. `message` is the state line
  * (failure or unknown text, or the in-flight note); `notice` is a committed
- * warning after success; `error` is an Open failure.
+ * warning after success; `error` is an Open failure. `otherVersion`: the
+ * Library holds another version, so the installed line claims no version.
  * @param {{state:InstallState, message:string|null, notice:string|null, error:string|null,
- *   primary:ButtonProps|null, secondary:ButtonProps|null}} props
+ *   primary:ButtonProps|null, otherVersion?:boolean}} props
  */
-export const installPanel = ({ state, message, notice, error, primary, secondary }) => m('.disc-panel', [
+export const installPanel = ({ state, message, notice, error, primary, otherVersion }) => m('.disc-panel', [
   m('ol.disc-steps', { 'aria-label': 'Install steps' }, installSteps(state).map((step, i) =>
     m(`li.disc-step.is-${step.state}`, { 'aria-current': ARIA_CURRENT.has(step.state) ? 'step' : undefined }, [
       m('span.disc-step-mark', stepMark(step.state, i + 1)),
@@ -216,15 +231,30 @@ export const installPanel = ({ state, message, notice, error, primary, secondary
       ]),
     ]))),
   state === 'installing' && message ? m('p.type-small.disc-footnote', { role: 'status' }, message) : null,
-  state === 'installed' ? m('p.type-body-sm', 'In your Library. Peers can get this version from you while your peer network is on.') : null,
+  state === 'installed' ? m('p.type-body-sm.disc-installed', { tabindex: -1, role: 'status' }, otherVersion
+    ? 'In your Library. Open runs the version you have.'
+    : 'In your Library. Peers can get this version from you while your peer network is on.') : null,
   state === 'failed' && message ? m('p.error.disc-panel-error', { role: 'alert' }, message) : null,
   state === 'unknown' && message ? m('p.type-body-sm', { role: 'status' }, message) : null,
   notice ? m('p.type-small.disc-footnote', { role: 'status' }, notice) : null,
   error ? m('p.error', { role: 'alert' }, error) : null,
-  primary || secondary ? m('.disc-panel-actions', [
-    primary ? primaryButton(primary) : null,
-    secondary ? secondaryButton(secondary) : null,
-  ]) : null,
+  primary ? m('.disc-panel-actions', keyedParts({ [primary.label]: primaryButton(primary) })) : null,
+]);
+
+/**
+ * An installed app with a newer version on offer. Open runs the installed
+ * version, so nothing here says the user has or shares the new one. `update`
+ * is null when the new version can't run in this browser.
+ * @param {{update:ButtonProps|null, open:ButtonProps, notice:string|null, error:string|null}} props
+ */
+export const updatePanel = ({ update, open, notice, error }) => m('.disc-panel', [
+  update ? m('.type-label-strong', 'Update ready') : m('p.type-body-sm', [
+    m('strong', 'This update can’t run in this browser.'),
+    ' It needs a feature peerd can’t use here. Technical details lists it.',
+  ]),
+  notice ? m('p.type-small.disc-footnote', { role: 'status' }, notice) : null,
+  error ? m('p.error', { role: 'alert' }, error) : null,
+  m('.disc-panel-actions', keyedParts(update ? { update: primaryButton(update), open: secondaryButton(open) } : { open: primaryButton(open) })),
 ]);
 
 /** @param {{disabled:boolean, onFork:()=>void, onReplace:()=>void, onCancel:()=>void}} props */
@@ -280,11 +310,13 @@ export const techDetails = ({ id, open, onToggle, facts, footnote, note }) => m(
   open && note ? m('p.type-small.disc-footnote', { role: 'status' }, note) : null,
 ]);
 
+// why the code style without a saved name: the title is then the short key,
+// drawn as "Made by" draws it everywhere else.
 /** @param {{title:string, letter:string, tone:string, saved:boolean}} props */
 export const makerHead = ({ title, letter, tone, saved }) => m('.disc-person-head', [
   letterAvatar({ letter, tone, variant: 'person' }),
   m('.disc-person-id', [
-    m('h2.type-page-title', { dir: 'auto' }, title),
+    m('h2.type-page-title', { dir: 'auto' }, saved ? title : m('bdi.type-code', title)),
     saved ? m('.type-small', 'Saved as a contact on this device') : null,
   ]),
 ]);

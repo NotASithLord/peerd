@@ -477,6 +477,8 @@ button.linklike.disc-app-maker { padding: 0; font-size: 13px; text-align: left; 
 .disc-panel p { margin: 0; }
 .disc-panel .error { font-size: 14px; }
 .disc-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* why: after an install, focus moves to this line (never to Open). */
+.disc-installed:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .disc-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0; }
 .disc-step { display: flex; gap: 12px; align-items: flex-start; padding: 8px 0; }
 .disc-step-mark { flex: none; width: 28px; height: 28px; border-radius: 50%; border: 1.5px solid var(--border-strong); display: inline-flex; align-items: center; justify-content: center; font: 600 12px/1 var(--font-mono); color: var(--muted); }
@@ -514,6 +516,7 @@ button.linklike.disc-tech-toggle { display: inline-flex; align-items: center; ga
 .disc-person-id { flex: 1; min-width: 0; }
 .disc-person-id h2 { margin: 0; overflow-wrap: anywhere; }
 .disc-home .disc-person-id h2 { font-size: 22px; }
+.disc-person-id h2 .type-code { font-size: inherit; }
 .disc-person-id > div { color: var(--secondary); }
 .disc-app-list { list-style: none; margin: 0; padding: 0; }
 .disc-app-row { position: relative; display: flex; align-items: center; gap: 16px; padding: 14px 0; border-top: 1px solid var(--border); }

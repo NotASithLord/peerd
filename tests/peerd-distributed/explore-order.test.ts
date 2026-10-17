@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { exploreOrder, nextSuggestion, suggestionKey, SURPRISE_HISTORY_LIMIT } from '../../extension/home/explore-order.js';
-const apps = Array.from({ length: 120 }, (_, i) => ({ dwapp_id: `app-${i}`, publisher: i < 100 ? 'prolific' : `publisher-${i}`, name: `App ${i}`, includes_wasm: i % 3 === 0 ? true : i % 3 === 1 ? false : null }));
+const apps = Array.from({ length: 120 }, (_, i) => ({ dwapp_id: `app-${i}`, publisher: i < 100 ? 'prolific' : `publisher-${i}`, name: `App ${i}` }));
 test('Explore balances publisher rounds without duplicate apps or arrival-order ranking', () => {
   const ordered = exploreOrder(apps, { seed: 42 });
   expect(ordered).toHaveLength(120);
@@ -9,13 +9,8 @@ test('Explore balances publisher rounds without duplicate apps or arrival-order 
   expect(exploreOrder([...apps, apps[0]!], { seed: 42 })).toEqual(ordered);
   expect(exploreOrder(apps, { seed: 871 })).not.toEqual(ordered);
 });
-test('Explore filters exact signed claims without guessing from names and searches full publisher identity', () => {
-  for (const [wasm, value] of [['yes', true], ['no', false], ['unknown', null]] as const) {
-    const selected = exploreOrder(apps, { wasm });
-    expect(selected).toHaveLength(40); expect(selected.every(a => a.includes_wasm === value)).toBe(true);
-  }
+test('Explore searches the full publisher identity and the description', () => {
   expect(exploreOrder(apps, { query: 'publisher-110' }).map(a => a.dwapp_id)).toEqual(['app-110']);
-  expect(exploreOrder([{dwapp_id:'legacy',name:'WebAssembly app'}], {wasm:'yes'})).toEqual([]);
   expect(exploreOrder([{dwapp_id:'legacy',description:'A physics simulator'}], {query:'PHYSICS'})).toHaveLength(1);
 });
 

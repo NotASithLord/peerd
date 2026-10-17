@@ -109,7 +109,8 @@ const loadDiscover = () => {
     .finally(() => { discoverLoading = false; m.redraw(); });
 };
 // A "New app to install" notification carries the app's dwapp_id. Discover
-// answers it once, with the first heard read after it, then clears this.
+// answers it once: at once when the app is already heard, otherwise with the
+// first heard read while the user stays on the root. Then it clears this.
 /** @type {string | null} */
 let discoverOpenKey = null;
 /** @param {import('/shared/peer-notifications.js').PeerNotification} n */

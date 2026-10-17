@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  appCountLabel, bytesLabel, createEffects, installSteps, isFailure, kbLabel, letterOf, libraryPeerApps, libraryStatus,
-  matchQuery, networkState, pageState, peerCountLabel, pillFilter, rootView, savedContactNames, shortKey, tileAction,
-  toneOf, TONES, wasmLabel,
+  appCountLabel, bytesLabel, createEffects, installSteps, isFailure, kbLabel, keptCards, letterOf, libraryPeerApps,
+  libraryStatus, matchQuery, networkState, pageState, peerCountLabel, pillFilter, rootView, savedContactNames,
+  shareLinkError, shortKey, tileAction, toneOf, TONES, updateOffer, wasmLabel,
 } from '../../extension/home/discover-model.js';
 import type { DwebApp } from '../../extension/home/discover-model.js';
+import { encodeDidKey } from '../../extension/shared/address/did.js';
+import { formatDwappUri } from '../../extension/shared/address/dwapp-uri.js';
+import { immutableAppRoot } from '../../extension/shared/address/immutable-app-root.js';
 
 // The shipped avatar palette, in order, that the token list replaces.
 const SHIPPED_HEX = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF'];
@@ -64,6 +67,19 @@ describe('discover labels', () => {
     expect(wasmLabel(false)).toBe('No detected WebAssembly files');
     expect(wasmLabel(null)).toBe('WebAssembly not specified');
   });
+
+  test('a rejected share link says what to paste, never the parser text', () => {
+    const address = formatDwappUri({ did: encodeDidKey(new Uint8Array(32).fill(1)), hash: 'a'.repeat(64) });
+    const errorOf = (input: string) => {
+      try { immutableAppRoot(input); return null; } catch (cause) { return shareLinkError((cause as Error).message); }
+    };
+    expect(errorOf(`${address}/index.html`)).toBe('File paths are not supported. Paste the share link of the app itself.');
+    // Not a link, a leading space, no hash, no maker key, empty.
+    for (const input of ['hello', ` ${address}`, address.slice(0, address.lastIndexOf('/')), `dwapp://content/${'a'.repeat(64)}`, '']) {
+      expect(errorOf(input)).toBe('This is not a share link. Paste the whole link you were sent.');
+    }
+    expect(shareLinkError(undefined)).toBe('This is not a share link. Paste the whole link you were sent.');
+  });
 });
 
 describe('network and root state', () => {
@@ -117,10 +133,15 @@ describe('network and root state', () => {
 });
 
 describe('tile and page states', () => {
-  const card = { incompatible: false, busy: undefined, uncertain: false, installed: false, updatable: false, mine: false };
+  const card = { incompatible: false, busy: undefined, uncertain: false, installed: false, sameVersion: false, updatable: false, mine: false };
 
   test('tile action ladder: can’t run, in flight, failed or unknown, update, open, review', () => {
-    expect(tileAction({ ...card, incompatible: true, installed: true, updatable: true }))
+    expect(tileAction({ ...card, incompatible: true })).toEqual({ kind: 'status', text: 'Can’t run in this browser' });
+    // The runtime flag rides the version on offer: an installed app of another version still opens.
+    expect(tileAction({ ...card, incompatible: true, installed: true, updatable: true })).toEqual({ kind: 'open' });
+    expect(tileAction({ ...card, incompatible: true, installed: true })).toEqual({ kind: 'open' });
+    // The Library holds the very version the card flags: it can't run here either.
+    expect(tileAction({ ...card, incompatible: true, installed: true, sameVersion: true }))
       .toEqual({ kind: 'status', text: 'Can’t run in this browser' });
     expect(tileAction({ ...card, busy: 'installing' })).toEqual({ kind: 'status', text: 'Installing…' });
     expect(tileAction({ ...card, busy: 'updating', installed: true })).toEqual({ kind: 'status', text: 'Updating…' });
@@ -134,8 +155,11 @@ describe('tile and page states', () => {
   });
 
   test('page state puts an unknown outcome ahead of a stale conflict or failure', () => {
-    const page = { incompatible: false, conflict: false, busy: undefined, uncertain: false, installed: false };
+    const page = { incompatible: false, conflict: false, busy: undefined, uncertain: false, installed: false, sameVersion: false };
     expect(pageState({ ...page, incompatible: true })).toBe('cant-run');
+    expect(pageState({ ...page, incompatible: true, installed: true })).toBe('installed');
+    expect(pageState({ ...page, incompatible: true, busy: 'installed' })).toBe('installed');
+    expect(pageState({ ...page, incompatible: true, installed: true, sameVersion: true })).toBe('cant-run');
     expect(pageState({ ...page, busy: 'updating' })).toBe('installing');
     expect(pageState({ ...page, uncertain: true, conflict: true, busy: 'text' })).toBe('unknown');
     expect(pageState({ ...page, conflict: true, installed: true })).toBe('conflict');
@@ -143,6 +167,15 @@ describe('tile and page states', () => {
     expect(pageState({ ...page, installed: true })).toBe('installed');
     expect(pageState({ ...page, busy: 'installed' })).toBe('installed');
     expect(pageState(page)).toBe('review');
+  });
+
+  test('an update is on offer only for an installed app of another maker; a new version that can’t run says so', () => {
+    const app = { installed: true, updatable: true, mine: false, incompatible: false };
+    expect(updateOffer(app)).toBe('update');
+    expect(updateOffer({ ...app, incompatible: true })).toBe('update-cant-run');
+    expect(updateOffer({ ...app, installed: false })).toBe(null);
+    expect(updateOffer({ ...app, updatable: false })).toBe(null);
+    expect(updateOffer({ ...app, mine: true })).toBe(null);
   });
 
   test('failure text is any busy value that is not a state word', () => {
@@ -168,9 +201,13 @@ describe('tile and page states', () => {
     const two = createEffects();
     one.busy.a = 'installing';
     one.conflicts.set('a', { token: 1, versionId: 'a-v2' });
+    one.commons = 'unknown';
+    one.link = { address: 'dwapp://content/a', outcome: Promise.resolve({}) };
     expect(two.busy).toEqual({});
     expect(two.conflicts.size).toBe(0);
     expect(two.unconfirmed.size).toBe(0);
+    expect(two.commons).toBe(null);
+    expect(two.link).toBe(null);
   });
 });
 
@@ -221,11 +258,31 @@ describe('filters and contacts', () => {
       { id: 'local-only', name: 'Made here' },
       { name: 'No id', dweb: { uri: 'peerd://x/3' } },
     ];
-    const heard = new Map([['a', { dwapp_id: 'a', description: 'Split costs.', size: 48213, name: 'Card name' }]]);
+    const heard = new Map([['a', { dwapp_id: 'a', version_id: '1', description: 'Split costs.', size: 48213, name: 'Card name' }]]);
     expect(libraryPeerApps(records, heard)).toEqual([
       { dwapp_id: 'a', uri: 'peerd://a/1', name: 'Expense splitter', publisher: ana, version_id: '1', description: 'Split costs.', size: 48213 },
       { dwapp_id: 'peerd://l/2', uri: 'peerd://l/2', name: 'Linked app', publisher: bob, version_id: undefined, description: undefined, size: undefined },
     ]);
+    // A newer card describes a version the Library does not hold: nothing is borrowed from it.
+    const newer = new Map([['a', { dwapp_id: 'a', version_id: '2', description: 'Adds cloud sync.', size: 900000 }]]);
+    expect(libraryPeerApps(records.slice(0, 1), newer)).toEqual([
+      { dwapp_id: 'a', uri: 'peerd://a/1', name: 'Expense splitter', publisher: ana, version_id: '1', description: undefined, size: undefined },
+    ]);
+  });
+
+  test('the heard cache keeps the latest read and only the earlier cards it is told to keep', () => {
+    const old: DwebApp = { dwapp_id: 'kept', name: 'Old kept card' };
+    const cache = new Map<string, DwebApp>([['kept', old], ['gone', { dwapp_id: 'gone' }], ['still', { dwapp_id: 'still', name: 'Old card' }]]);
+    const latest: DwebApp[] = [{ dwapp_id: 'still', name: 'New card' }, { dwapp_id: 'new' }, { name: 'No id' }];
+    const next = keptCards(cache, latest, id => id === 'kept');
+    expect([...next.keys()].sort()).toEqual(['kept', 'new', 'still']);
+    expect(next.get('kept')).toBe(old);
+    expect(next.get('still')?.name).toBe('New card');
+    expect(cache.size).toBe(3);
+    // Bounded by the latest read plus the kept ids, not by every card ever heard.
+    let grown: Map<string, DwebApp> = new Map();
+    for (let round = 0; round < 50; round++) grown = keptCards(grown, [{ dwapp_id: `card-${round}` }], id => id === 'card-0');
+    expect([...grown.keys()]).toEqual(['card-0', 'card-49']);
   });
 
   test('included search matches name and description without case', () => {

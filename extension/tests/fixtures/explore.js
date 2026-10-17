@@ -20,16 +20,19 @@ const apps = [
   return {...app,dwapp_id:`fixture-${i}`,publisher,version_id,seq:2,size:1024 * (i+1),uri:`peerd://${publisher}/${version_id}`};
 });
 const [orbit, notes, garden] = apps;
-if (['cant-run', 'tiles'].includes(frame)) Object.assign(garden, { runtimeCompatibility: { status: 'unsupported', message: 'Unsupported App runtime target: wasi.' } });
+const UNSUPPORTED = { status: 'unsupported', message: 'Unsupported App runtime target: wasi.' };
+if (['cant-run', 'tiles'].includes(frame)) Object.assign(garden, { runtimeCompatibility: UNSUPPORTED });
+if (frame === 'update-cant-run') Object.assign(notes, { runtimeCompatibility: UNSUPPORTED });
 
 /** @param {string} id @param {typeof orbit} app @param {Record<string, unknown>} [dweb] */
 const record = (id, app, dweb = {}) => ({ id, name: app.name, dweb: {
   uri: app.uri, dwapp_id: app.dwapp_id, version_id: app.version_id, seq: app.seq, publisher: app.publisher, ...dweb,
 } });
 let notesInstalled = false;
-const library = () => [
+const library = () => frame === 'offline-empty' ? [] : [
   record('local-orbit', orbit),
-  ...['conflict', 'tiles'].includes(frame) ? [record('local-notes', notes, { version_id: 'local-notes-v1', seq: 1 })] : [],
+  ...['conflict', 'tiles', 'update', 'update-cant-run'].includes(frame)
+    ? [record('local-notes', notes, { version_id: 'local-notes-v1', seq: 1 })] : [],
   ...notesInstalled ? [record('local-notes', notes)] : [],
 ];
 const heard = ['looking', 'empty'].includes(frame) ? [] : apps;
@@ -51,7 +54,7 @@ const send = async message => {
   if (message.type === 'contacts/list') return {ok:true,contacts:[{did:notes.publisher,name:'Ana',saved:true}]};
   if (message.type === 'bootstrap/ready') return {ok:true,featureLeases:{leases:{dweb:{status:'active'}}}};
   if (message.type === 'dweb/distributed/info') {
-    return {ok:true,running:frame !== 'offline',linkedCount:frame === 'looking' ? 0 : 3,did:encodeDidKey(new Uint8Array(32).fill(9))};
+    return {ok:true,running:!['offline', 'offline-empty'].includes(frame),linkedCount:frame === 'looking' ? 0 : 3,did:encodeDidKey(new Uint8Array(32).fill(9))};
   }
   if (message.type === 'dweb/base/install' && EFFECTS[frame]) return EFFECTS[frame]();
   if (message.type === 'dweb/base/update-app' && frame === 'conflict') return {ok:false,error:'local-changes',conflictToken:7};
@@ -70,7 +73,8 @@ const STEPS = {
 };
 const OPEN_KEYS = /** @type {Record<string, string>} */ ({
   app: notes.dwapp_id, installing: notes.dwapp_id, installed: notes.dwapp_id, failed: notes.dwapp_id,
-  unknown: notes.dwapp_id, maker: notes.dwapp_id, 'cant-run': garden.dwapp_id,
+  unknown: notes.dwapp_id, maker: notes.dwapp_id, 'cant-run': garden.dwapp_id, update: notes.dwapp_id,
+  'update-cant-run': notes.dwapp_id,
 });
 /** @type {string|null} */ let openKey = OPEN_KEYS[frame] ?? null;
 
