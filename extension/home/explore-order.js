@@ -1,6 +1,5 @@
 // @ts-check
 // Local presentation only: signatures and admission belong to discovery.
-export const EXPLORE_PAGE = 24;
 export const EXPLORE_WINDOW = 96;
 /** @param {string} value @param {number} seed */
 const rank = (value, seed) => {
@@ -12,19 +11,16 @@ const rank = (value, seed) => {
 /**
  * One publisher per round. A seed changes only on explicit Shuffle; polling
  * cannot reshuffle existing cards. DID diversity is not Sybil resistance.
- * @template {{dwapp_id?:string,publisher?:string,name?:string,slug?:string,description?:string,includes_wasm?:boolean|null}} T
- * @param {T[]} apps @param {{query?:string, wasm?:string, seed?:number}} [options]
+ * @template {{dwapp_id?:string,publisher?:string,name?:string,slug?:string,description?:string}} T
+ * @param {T[]} apps @param {{query?:string, seed?:number}} [options]
  */
-export const exploreOrder = (apps, { query = '', wasm = 'all', seed = 0 } = {}) => {
+export const exploreOrder = (apps, { query = '', seed = 0 } = {}) => {
   const search = query.trim().toLowerCase();
   /** @type {Map<string,T[]>} */ const groups = new Map();
   const seen = new Set();
   for (const app of apps) {
     if (!app.dwapp_id || seen.has(app.dwapp_id)) continue;
     seen.add(app.dwapp_id);
-    if (wasm === 'yes' && app.includes_wasm !== true) continue;
-    if (wasm === 'no' && app.includes_wasm !== false) continue;
-    if (wasm === 'unknown' && typeof app.includes_wasm === 'boolean') continue;
     if (search && !`${app.name ?? ''} ${app.slug ?? ''} ${app.publisher ?? ''} ${app.description ?? ''}`.toLowerCase().includes(search)) continue;
     const publisher = app.publisher || 'unspecified';
     const group = groups.get(publisher) ?? [];
@@ -51,7 +47,8 @@ export const SURPRISE_HISTORY_LIMIT = 512;
 /** @param {{dwapp_id?:string,version_id?:string,uri?:string}} app */
 export const suggestionKey = (app) => JSON.stringify([app.dwapp_id, app.version_id ?? app.uri ?? null]);
 /** Candidates are already locally filtered and publisher-balanced. No network
- * availability is inferred. History resets only through an explicit action.
+ * availability is inferred. The caller owns the history: Discover clears
+ * `seen` after a full pass.
  * @template {{dwapp_id?:string,version_id?:string,uri?:string,publisher?:string,runtimeCompatibility?:{status:string}}} T
  * @param {T[]} apps @param {Set<string>} seen @param {string|null} lastPublisher
  * @returns {T|null}

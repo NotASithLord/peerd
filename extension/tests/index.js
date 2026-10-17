@@ -143,14 +143,13 @@ import './unit/options/provider-races.test.js';
 import './unit/options/git-credentials.test.js';
 import './unit/options/transfer-identity.test.js';
 import './unit/options/contributor-metrics.test.js';
+import './unit/options/starter-review.test.js';
 
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';
 import './unit/home/discover-section.test.js';
-import './unit/home/immutable-address-section.test.js';
 import './unit/home/actors-section.test.js';
 import './unit/home/contacts-section.test.js';
 import './unit/home/network-section.test.js';
 
-import './unit/home/starter-section.test.js';
 import './unit/engine-tabs/app-tab/starter-apps.test.js';
