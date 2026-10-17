@@ -110,7 +110,8 @@ const loadDiscover = () => {
 };
 // A "New app to install" notification carries the app's dwapp_id. Discover
 // answers it once: at once when the app is already heard, otherwise with the
-// first heard read while the user stays on the root. Then it clears this.
+// first heard read that starts after the click, success or failure, unless
+// the user navigates first. Then it clears this.
 /** @type {string | null} */
 let discoverOpenKey = null;
 /** @param {import('/shared/peer-notifications.js').PeerNotification} n */
@@ -154,12 +155,19 @@ const setView = (v) => {
 };
 // SPA navigation keeps the rail mounted, so explicitly land keyboard and AT
 // users in the new content instead of leaving focus on a now-stale trigger.
-const focusActiveContent = () => requestAnimationFrame(() => {
-  const target = document.querySelector('.home-content textarea, .home-content h1, .home-content h2');
-  if (!(target instanceof HTMLElement)) return;
-  if (!target.matches('textarea, button, input, select, a[href]')) target.setAttribute('tabindex', '-1');
-  target.focus();
-});
+// why the check: a view that placed focus in its content while it rendered
+// (Discover opening a notification's app page on its back link) keeps it.
+const focusActiveContent = () => {
+  const before = document.activeElement;
+  requestAnimationFrame(() => {
+    const active = document.activeElement;
+    if (active && active !== before && active !== document.body && active.closest('.home-content')) return;
+    const target = document.querySelector('.home-content textarea, .home-content h1, .home-content h2');
+    if (!(target instanceof HTMLElement)) return;
+    if (!target.matches('textarea, button, input, select, a[href]')) target.setAttribute('tabindex', '-1');
+    target.focus();
+  });
+};
 /** @param {string} view */
 const navigateHome = (view) => {
   setView(view);

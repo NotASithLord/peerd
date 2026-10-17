@@ -367,7 +367,7 @@
 .disc-view { display: flex; flex-direction: column; gap: 24px; }
 /* why 640px: the frames draw single-column views at 696px with 28px padding. */
 .disc-view.disc-page, .disc-view.disc-start-view { max-width: 640px; }
-.disc-view .error { margin: 0; }
+.disc-view .error, .disc-view > p { margin: 0; }
 .disc-intro { display: flex; flex-direction: column; gap: 10px; padding-bottom: 4px; }
 .disc-intro h1 { margin: 0; }
 .disc-intro p { margin: 0; color: var(--secondary); max-width: 46ch; }

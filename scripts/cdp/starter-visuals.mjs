@@ -18,6 +18,8 @@ const READS = ['apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distribu
 const has = text => `document.body.textContent.includes(${JSON.stringify(text)})`;
 const cards = n => `document.querySelectorAll('.disc-card').length === ${n}`;
 const focused = selector => `!!document.activeElement?.matches(${JSON.stringify(selector)})`;
+const panelButtons = labels => `JSON.stringify([...document.querySelectorAll('.disc-panel button')]
+  .map(button => button.textContent.trim())) === ${JSON.stringify(JSON.stringify(labels))}`;
 // why a synchronous redraw: tab-heavy headless runs can defer Mithril's
 // scheduled redraw after a scripted click; commit it before asserting.
 const clickSync = (page, selector, label = null) => evalIn(page, `(async () => {
@@ -120,16 +122,33 @@ const FLOW_FRAMES = [
   ['tiles', 'tiles', `${cards(3)} && ${has('Update ready')} && ${has('Can’t run in this browser')}`, []],
   ['offline', 'offline', `${has('Peer network is offline')} && ${cards(1)}`, []],
   ['offline-empty', 'offline-empty', `${has('Peer network is offline')} && ${has('Apps you install from peers show up here.')}`, []],
+  // why not the empty line: it claims what the Library holds, so it waits for a good read.
+  ['offline-reading', 'offline-reading', `${has('Peer network is offline')} && ${has('Checking your Library…')}
+    && !${has('Apps you install from peers')}`, []],
+  ['offline-failed', 'offline-failed', `${has('Peer network is offline')} && ${has('Could not read your Library.')}
+    && !${has('Apps you install from peers')}`, []],
   ['installing', 'installing', has('You can leave this page. The install keeps going.'), ['dweb/base/install']],
   // why the status line: focus never lands on Open, which runs the app.
   ['installed', 'installed', `${focused('.disc-panel .disc-installed')} && ${has('In your Library.')}`, ['dweb/base/install']],
   ['install-failed', 'failed', has('peerd could not install this app. Try again.'), ['dweb/base/install']],
   ['install-unknown', 'unknown', has('peerd could not confirm whether the install finished.'), ['dweb/base/install']],
   ['update-conflict', 'conflict', has('Locally modified'), ['dweb/base/update-app']],
+  // why Open too: the installed version still runs after a failed or unconfirmed update.
+  ['update-failed', 'update-failed', `${has('peerd could not update this app. Try again.')} && ${panelButtons(['Try again', 'Open'])}`,
+    ['dweb/base/update-app']],
+  ['update-unknown', 'update-unknown', `${has('peerd could not confirm whether the update finished.')}
+    && ${panelButtons(['Refresh', 'Open'])}`, ['dweb/base/update-app']],
   ['update-ready', 'update', `${focused('.disc-back')} && ${has('Update ready')}`, []],
   ['update-cant-run', 'update-cant-run', `${focused('.disc-back')} && ${has('This update can’t run in this browser.')}`, []],
   ['cant-run', 'cant-run', `${focused('.disc-back')} && ${has('This app can’t run in this browser.')}`, []],
   ['maker', 'maker', `${focused('.disc-back')} && ${has('Saved as a contact on this device')}`, []],
+  // The maker of a share link whose apps no peer shares.
+  ['maker-empty', 'maker-empty', `${focused('.disc-back')} && ${has('Apps from this maker appear here when your peers share them.')}`,
+    ['dweb/base/inspect-address']],
+  // why the margins: the line sits in the 24px rhythm of the view, as every other line does.
+  ['commons-unknown', 'commons-unknown', `[...document.querySelectorAll('.disc-view > p')]
+    .some(line => line.textContent.startsWith('Could not confirm whether Commons was added or opened.')
+      && getComputedStyle(line).marginTop === '0px' && getComputedStyle(line).marginBottom === '0px')`, ['dweb/open-commons']],
 ];
 
 const frameState = ([mode, frame, ready, effects]) => ({

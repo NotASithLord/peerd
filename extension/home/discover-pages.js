@@ -218,10 +218,11 @@ const stepMark = (state, n) => state === 'done' ? icon('check', 14)
  * (failure or unknown text, or the in-flight note); `notice` is a committed
  * warning after success; `error` is an Open failure. `otherVersion`: the
  * Library holds another version, so the installed line claims no version.
+ * `secondary` sits next to `primary`.
  * @param {{state:InstallState, message:string|null, notice:string|null, error:string|null,
- *   primary:ButtonProps|null, otherVersion?:boolean}} props
+ *   primary:ButtonProps|null, secondary?:ButtonProps|null, otherVersion?:boolean}} props
  */
-export const installPanel = ({ state, message, notice, error, primary, otherVersion }) => m('.disc-panel', [
+export const installPanel = ({ state, message, notice, error, primary, secondary, otherVersion }) => m('.disc-panel', [
   m('ol.disc-steps', { 'aria-label': 'Install steps' }, installSteps(state).map((step, i) =>
     m(`li.disc-step.is-${step.state}`, { 'aria-current': ARIA_CURRENT.has(step.state) ? 'step' : undefined }, [
       m('span.disc-step-mark', stepMark(step.state, i + 1)),
@@ -238,7 +239,9 @@ export const installPanel = ({ state, message, notice, error, primary, otherVers
   state === 'unknown' && message ? m('p.type-body-sm', { role: 'status' }, message) : null,
   notice ? m('p.type-small.disc-footnote', { role: 'status' }, notice) : null,
   error ? m('p.error', { role: 'alert' }, error) : null,
-  primary ? m('.disc-panel-actions', keyedParts({ [primary.label]: primaryButton(primary) })) : null,
+  primary ? m('.disc-panel-actions', keyedParts({
+    [primary.label]: primaryButton(primary), ...(secondary ? { [secondary.label]: secondaryButton(secondary) } : {}),
+  })) : null,
 ]);
 
 /**

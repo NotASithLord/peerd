@@ -5017,6 +5017,109 @@ export const STATES = [
     },
   },
 
+  // Home's own glue for a notification's app page, mounted for real: the bell
+  // keeps the key, Discover answers it once and clears it, and leaving
+  // Discover drops a request that still waits. One profile hears no peer app,
+  // so the page answers the heard read itself; every other read is real.
+  {
+    name: 'home-discover-notification', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const available = await evalIn(ctx.page, `(async () =>
+        (await import('/shared/channel-config.js')).DWEB_ENABLED)()`, true);
+      if (!available) { rec.check('unsupported host shows no peer notifications', true); return; }
+      if (!discoverSurface().flow) {
+        rec.observe('merge-base surface', { present: false, reason: 'notification app pages were introduced on this branch' });
+        return;
+      }
+      const wasOn = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings?.dwebEnabled === true;
+      await chooseFixtureNetwork(ctx, true);
+      const page = await openWidePage(ctx, 'home/home.html#library');
+      const key = 'e2e-notified-app';
+      const tile = `[data-key=${JSON.stringify(key)}] .disc-tile-open`;
+      const opened = `document.querySelector('.disc-app-title')?.textContent === 'Notified app'`;
+      // why two frames: Home moves focus into new content one frame after it renders.
+      const frames = () => evalIn(page, `new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))`, true);
+      const clickNotification = async () => {
+        await evalIn(page, `document.querySelector('.notif-bell')?.click()`);
+        const listed = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.notif-item')]
+          .some(item => item.textContent.includes('Notified app'))`), { budgetMs: 5_000, pollMs: 50 });
+        if (!listed) throw new Error('the notification is not in the bell');
+        // A real click focuses the control first.
+        await evalIn(page, `(() => {
+          const item = [...document.querySelectorAll('.notif-item')].find(node => node.textContent.includes('Notified app'));
+          item.focus(); item.click();
+        })()`);
+      };
+      try {
+        // why the page answers the heard read: `hold` parks the next reply.
+        const stubbed = await evalIn(page, `(async () => {
+          const { encodeDidKey } = await import('/shared/address/did.js');
+          const publisher = encodeDidKey(new Uint8Array(32).fill(5));
+          const version_id = '5'.repeat(64);
+          const card = { dwapp_id: ${JSON.stringify(key)}, name: 'Notified app', slug: 'notified', seq: 1, version_id, publisher,
+            uri: 'peerd://' + publisher + '/' + version_id };
+          const heard = window.__e2eHeard = { card, apps: [card], hold: null, release: () => {} };
+          const api = globalThis.browser ?? globalThis.chrome;
+          const real = api.runtime.sendMessage.bind(api.runtime);
+          const stub = (message, ...rest) => message?.type !== 'dweb/base/heard' ? real(message, ...rest)
+            : (heard.hold ?? Promise.resolve()).then(() => ({ ok: true, apps: heard.apps }));
+          api.runtime.sendMessage = stub;
+          return api.runtime.sendMessage === stub;
+        })()`, true);
+        if (!stubbed) throw new Error('the page could not answer the heard read');
+        // The offscreen host broadcasts this message; another extension page can too.
+        await evalIn(ctx.page, `new Promise(done => chrome.runtime.sendMessage({ type: 'dweb/notify', notification: {
+          id: 'app-e2e-notified', ts: Date.now(), kind: 'app', key: ${JSON.stringify(key)},
+          title: 'New app to install', body: 'Notified app', link: 'discover',
+        } }, () => { void chrome.runtime.lastError; done(true); }))`, true);
+        const badge = await waitFor(() => evalIn(page, `!!document.querySelector('.notif-badge')`), { budgetMs: 10_000, pollMs: 50 });
+        rec.check('the notification reaches the Home bell', !!badge);
+
+        await clickNotification();
+        rec.check('the bell opens the notified app page in Discover',
+          !!await waitFor(() => evalIn(page, opened), { budgetMs: 10_000, pollMs: 50 }));
+        await evalIn(page, `document.querySelector('.disc-back')?.click()`);
+        await waitFor(() => evalIn(page, `!document.querySelector('.disc-back') && !!document.querySelector(${JSON.stringify(tile)})`),
+          { budgetMs: 5_000, pollMs: 50 });
+        // Discover is open now: the same notification must open its page again,
+        // which it can only if Discover cleared the key it answered.
+        await clickNotification();
+        const reopened = await waitFor(() => evalIn(page, opened), { budgetMs: 10_000, pollMs: 50 });
+        await frames();
+        rec.check('an answered key is cleared, so the same notification opens its page again', !!reopened);
+        rec.check('the app page keeps focus on its back link after Home moves focus',
+          await evalIn(page, `!!document.activeElement?.matches('.disc-back')`),
+          await evalIn(page, `document.activeElement?.outerHTML?.slice(0, 120) ?? ''`));
+
+        // Not heard yet: the request waits for a heard read, and leaving
+        // Discover before it lands drops the request.
+        await evalIn(page, `document.querySelector('.disc-back')?.click()`);
+        await evalIn(page, `(() => { window.__e2eHeard.apps = []; window.dispatchEvent(new Event('focus')); })()`);
+        await waitFor(() => evalIn(page, `!document.querySelector(${JSON.stringify(tile)})`), { budgetMs: 5_000, pollMs: 50 });
+        await evalIn(page, `window.__e2eHeard.hold = new Promise(done => { window.__e2eHeard.release = done; })`);
+        await clickNotification();
+        await frames();
+        rec.check('a notification for an app not heard yet waits on the root',
+          await evalIn(page, `!!document.querySelector('.disc-home') && !document.querySelector('.disc-back')`));
+        await evalIn(page, `document.querySelector('[data-home-view="library"]')?.click()`);
+        await waitFor(() => evalIn(page, `!document.querySelector('.disc-home')`), { budgetMs: 5_000, pollMs: 50 });
+        await evalIn(page, `(() => {
+          const heard = window.__e2eHeard;
+          heard.apps = [heard.card]; heard.hold = null; heard.release();
+        })()`);
+        await evalIn(page, `document.querySelector('[data-home-view="discover"]')?.click()`);
+        const root = await waitFor(() => evalIn(page, `!!document.querySelector(${JSON.stringify(tile)})`), { budgetMs: 10_000, pollMs: 50 });
+        await frames();
+        rec.check('leaving Discover drops a waiting notification, so Discover opens on its root',
+          !!root && await evalIn(page, `!document.querySelector('.disc-back')`));
+      } finally {
+        try { page.close(); } catch { /* */ }
+        if (!wasOn) await chooseFixtureNetwork(ctx, false);
+      }
+    },
+  },
+
   // Functional rendered coverage for committed success warnings. This takes a
   // screenshot without creating a local visual authority baseline. CI remains
   // the only source of Linux pixel baselines.

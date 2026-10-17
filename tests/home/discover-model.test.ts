@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   appCountLabel, bytesLabel, createEffects, installSteps, isFailure, kbLabel, keptCards, letterOf, libraryPeerApps,
-  libraryStatus, matchQuery, networkState, pageState, peerCountLabel, pillFilter, rootView, savedContactNames,
+  libraryStatus, matchQuery, networkState, noSuggestionNote, pageState, peerCountLabel, pillFilter, rootView, savedContactNames,
   shareLinkError, shortKey, tileAction, toneOf, TONES, updateOffer, wasmLabel,
 } from '../../extension/home/discover-model.js';
 import type { DwebApp } from '../../extension/home/discover-model.js';
@@ -130,6 +130,14 @@ describe('network and root state', () => {
       .toBe('Could not refresh your Library. Surprise me stays off until peerd can read it.');
     expect(libraryStatus({ ready: true, failed: false })).toBe(null);
   });
+
+  test('Surprise me names the filters only while one is on, and the Library only when every app is in it', () => {
+    const filters = 'No new suggestions match these filters. Change your search or filters.';
+    expect(noSuggestionNote({ filtered: true, allInLibrary: true })).toBe(filters);
+    expect(noSuggestionNote({ filtered: true, allInLibrary: false })).toBe(filters);
+    expect(noSuggestionNote({ filtered: false, allInLibrary: true })).toBe('No new suggestions. Every app here is already in your Library.');
+    expect(noSuggestionNote({ filtered: false, allInLibrary: false })).toBe('No new suggestions.');
+  });
 });
 
 describe('tile and page states', () => {
@@ -203,11 +211,15 @@ describe('tile and page states', () => {
     one.conflicts.set('a', { token: 1, versionId: 'a-v2' });
     one.commons = 'unknown';
     one.link = { address: 'dwapp://content/a', outcome: Promise.resolve({}) };
+    one.committed.set('a', { appId: 'local-a', version_id: 'a-v2', seq: 2, read: 1 });
+    one.reads = 3;
     expect(two.busy).toEqual({});
     expect(two.conflicts.size).toBe(0);
     expect(two.unconfirmed.size).toBe(0);
     expect(two.commons).toBe(null);
     expect(two.link).toBe(null);
+    expect(two.committed.size).toBe(0);
+    expect(two.reads).toBe(0);
   });
 });
 

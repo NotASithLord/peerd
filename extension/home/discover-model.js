@@ -13,7 +13,10 @@
  * "You can leave this page. The install keeps going." (see createEffects).
  * `commons` fences "Add and open Commons" while an add runs and after an
  * unconfirmed one. `link` is the share-link install in flight, so a view
- * mounted while it runs follows the same outcome.
+ * mounted while it runs follows the same outcome. `reads` counts Library
+ * reads as they start. `committed` holds each committed update with that
+ * count at its commit, so a read that started earlier cannot bring back the
+ * version the update replaced.
  * @typedef {{
  *   busy: Record<string, string>,
  *   unconfirmed: Map<string, PendingTarget>,
@@ -22,6 +25,8 @@
  *   conflicts: Map<string, {token:number, versionId:string|null}>,
  *   commons: 'adding'|'unknown'|null,
  *   link: {address:string, outcome:Promise<LinkOutcome>}|null,
+ *   committed: Map<string, {appId:string, version_id:string|null, seq:number, read:number}>,
+ *   reads: number,
  * }} DiscoverEffects
  */
 /** @typedef {'all'|'updates'|'contacts'|'included'} Pill */
@@ -37,6 +42,7 @@
  * @returns {DiscoverEffects} */
 export const createEffects = () => ({
   busy: {}, unconfirmed: new Map(), installedId: {}, notices: {}, conflicts: new Map(), commons: null, link: null,
+  committed: new Map(), reads: 0,
 });
 
 const IN_FLIGHT = Object.freeze(['installing', 'updating']);
@@ -126,6 +132,17 @@ export const libraryStatus = ({ ready, failed }) => {
   if (!failed) return ready ? null : 'Checking your Library…';
   return ready ? 'Could not refresh your Library. Surprise me stays off until peerd can read it.'
     : 'Could not read your Library. Install stays off until peerd can read it.';
+};
+
+/**
+ * Why Surprise me opened no page. Only a filter or a search can be changed to
+ * find more, so the line names them only while one is on.
+ * @param {{filtered:boolean, allInLibrary:boolean}} grid
+ * @returns {string}
+ */
+export const noSuggestionNote = ({ filtered, allInLibrary }) => {
+  if (filtered) return 'No new suggestions match these filters. Change your search or filters.';
+  return allInLibrary ? 'No new suggestions. Every app here is already in your Library.' : 'No new suggestions.';
 };
 
 /**
