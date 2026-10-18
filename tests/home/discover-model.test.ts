@@ -129,6 +129,12 @@ describe('network and root state', () => {
     expect(libraryStatus({ ready: true, failed: true }))
       .toBe('Could not refresh your Library. Surprise me stays off until peerd can read it.');
     expect(libraryStatus({ ready: true, failed: false })).toBe(null);
+    // The offline root offers neither Install nor Surprise me, so its lines name what it shows.
+    expect(libraryStatus({ ready: false, failed: true, offline: true }))
+      .toBe('Could not read your Library. Your apps from peers are not listed until peerd can read it.');
+    expect(libraryStatus({ ready: true, failed: true, offline: true })).toBe('Could not refresh your Library. This list may be out of date.');
+    expect(libraryStatus({ ready: false, failed: false, offline: true })).toBe('Checking your Library…');
+    expect(libraryStatus({ ready: true, failed: false, offline: true })).toBe(null);
   });
 
   test('Surprise me names the filters only while one is on, and the Library only when every app is in it', () => {
@@ -154,6 +160,9 @@ describe('tile and page states', () => {
     expect(tileAction({ ...card, busy: 'installing' })).toEqual({ kind: 'status', text: 'Installing…' });
     expect(tileAction({ ...card, busy: 'updating', installed: true })).toEqual({ kind: 'status', text: 'Updating…' });
     expect(tileAction({ ...card, busy: 'peerd could not install this app. Try again.' })).toEqual({ kind: 'review' });
+    // A failure is stale once the Library holds this exact version (a share link, another tab); another version keeps it.
+    expect(tileAction({ ...card, busy: 'peerd could not install this app. Try again.', installed: true, sameVersion: true })).toEqual({ kind: 'open' });
+    expect(tileAction({ ...card, busy: 'peerd could not update this app. Try again.', installed: true })).toEqual({ kind: 'review' });
     expect(tileAction({ ...card, uncertain: true, installed: true, updatable: true })).toEqual({ kind: 'review' });
     expect(tileAction({ ...card, installed: true, updatable: true })).toEqual({ kind: 'update' });
     expect(tileAction({ ...card, installed: true, updatable: true, mine: true })).toEqual({ kind: 'open' });
@@ -172,6 +181,7 @@ describe('tile and page states', () => {
     expect(pageState({ ...page, uncertain: true, conflict: true, busy: 'text' })).toBe('unknown');
     expect(pageState({ ...page, conflict: true, installed: true })).toBe('conflict');
     expect(pageState({ ...page, busy: 'peerd could not update this app. Try again.', installed: true })).toBe('failed');
+    expect(pageState({ ...page, busy: 'peerd could not install this app. Try again.', installed: true, sameVersion: true })).toBe('installed');
     expect(pageState({ ...page, installed: true })).toBe('installed');
     expect(pageState({ ...page, busy: 'installed' })).toBe('installed');
     expect(pageState(page)).toBe('review');
@@ -213,6 +223,7 @@ describe('tile and page states', () => {
     one.link = { address: 'dwapp://content/a', outcome: Promise.resolve({}) };
     one.committed.set('a', { appId: 'local-a', version_id: 'a-v2', seq: 2, read: 1 });
     one.reads = 3;
+    one.commonsAdded = 2;
     expect(two.busy).toEqual({});
     expect(two.conflicts.size).toBe(0);
     expect(two.unconfirmed.size).toBe(0);
@@ -220,6 +231,7 @@ describe('tile and page states', () => {
     expect(two.link).toBe(null);
     expect(two.committed.size).toBe(0);
     expect(two.reads).toBe(0);
+    expect(two.commonsAdded).toBe(null);
   });
 });
 

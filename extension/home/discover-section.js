@@ -67,10 +67,12 @@ const COMMONS_NAME = 'Peerd-to-Peerd Commons';
 const CHOICE_ERROR = 'Your network choice could not be confirmed. Refresh status before choosing again.';
 const RECEIPT_HELD = 'peerd could not confirm whether the install finished. It may still finish, so another install stays blocked.';
 const KEEPS_GOING = 'You can leave this page. The install keeps going.';
+const CHECKING_LINK = 'Checking the link. peerd downloads the app and checks every file…';
 const INSTALL_UNKNOWN = 'peerd could not confirm whether the install finished. Refresh to check before trying again.';
 const COMMONS_UNKNOWN = 'Could not confirm whether Commons was added or opened. Check your Library and tabs before trying again.';
 const COMMONS_FAILED = 'peerd could not add or open Commons. Try again.';
-const OFFLINE_EMPTY = 'Apps you install from peers show up here. New apps need the peer network.';
+const NEEDS_NETWORK = 'New apps need the peer network.';
+const OFFLINE_EMPTY = `Apps you install from peers show up here. ${NEEDS_NETWORK}`;
 const MAKER_EMPTY = 'Apps from this maker appear here when your peers share them.';
 // why: a heard card carries the maker's own WebAssembly claim. A share link
 // shows what peerd found in the files instead.
@@ -191,7 +193,11 @@ export const DiscoverSection = (initialVnode) => {
         for (const [id, commit] of committed) if (started > commit.read) committed.delete(id);
         commonsId = rows.find(a => a?.dweb?.seed === 'commons')?.id ?? null;
         // why: Commons in the catalog is the receipt the unknown add waited for.
-        if (commonsId) effects.commons = null;
+        // A confirmed add made Commons before it replied, so a read that
+        // started later and lists no Commons says the user deleted it since.
+        if (commonsId || (effects.commons === 'adding' && effects.commonsAdded !== null && started > effects.commonsAdded)) {
+          effects.commons = null;
+        }
         localReady = true;
         localFailed = false;
         for (const [id, target] of unconfirmed) {
@@ -327,7 +333,9 @@ export const DiscoverSection = (initialVnode) => {
     void loadContacts();
     timer = setInterval(() => { if (!document.hidden) poll(); }, POLL_MS);
     // Returning to the tab should re-sync at once, not after the next 4s tick.
-    onVisible = () => { if (!document.hidden) poll(); };
+    // why contacts here, not in the poll: another Home tab can save a maker
+    // as a contact meanwhile, and the read also walks the audit log.
+    onVisible = () => { if (!document.hidden) { poll(); void loadContacts(); } };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', onVisible);
   };
@@ -397,7 +405,14 @@ export const DiscoverSection = (initialVnode) => {
     redraw();
     try { await attrs.send({ type: 'dweb/base/start' }); }
     catch { /* show the read-back result rather than replaying a mutation */ }
-    finally { retrying = false; await readStatus(); }
+    finally {
+      retrying = false;
+      await readStatus();
+      // why after the read-back: Retry went off while it ran, so focus fell
+      // to the body. Land on Retry if still offline, else on Refresh.
+      pendingFocus = { selector: net?.kind === 'offline' ? '.disc-status button' : '.disc-refresh', fallback: 'h1', scroll: null, ifLost: true };
+      redraw();
+    }
   };
 
   /** @param {string} appId */
@@ -420,9 +435,11 @@ export const DiscoverSection = (initialVnode) => {
     ? 'installing' : [...unconfirmed.values()].some(target => target.uri === uri) ? 'unknown' : null;
   // why: a committed share-link install is in the Library before a Library
   // read shows it. Its id stands for the heard card of that version, so that
-  // card never offers a second install.
+  // card never offers a second install. Only the card its publisher signed:
+  // any peer can sign a card that names this uri.
   /** @param {DwebApp} app */
-  const linkedId = (app) => (linkAppId && app.uri && linkPreview?.uri === app.uri ? linkAppId : null);
+  const linkedId = (app) => (linkAppId && app.uri && linkPreview?.uri === app.uri && linkPreview.publisher === app.publisher
+    ? linkAppId : null);
   // why the mirror: a settled heard install or update is in the Library
   // before a Library read shows it. Its receipt stands for the share-link
   // page of that version, so that page offers Open, as its app page does.
@@ -605,7 +622,13 @@ export const DiscoverSection = (initialVnode) => {
       }
     } catch {
       if (requestEpoch === linkEpoch) linkError = 'Could not check this app. Try again when the peer network is available.';
-    } finally { linkBusy = ''; redraw(); }
+    } finally {
+      linkBusy = '';
+      // why: Check link went off while the check ran, so focus fell to the
+      // body. A failure returns it to the link, where the fix is.
+      if (linkError) pendingFocus = { selector: '.disc-start-form input', scroll: null, ifLost: true };
+      redraw();
+    }
   };
 
   // why: an uncertain install may commit after the renderer deadline or a
@@ -702,7 +725,7 @@ export const DiscoverSection = (initialVnode) => {
     // explanation must outlive a page change and a remount, as an install's
     // do, and loading the seed takes a moment. So the last redraw has no
     // dead guard: a remounted view must see the fence lift.
-    effects.commons = 'adding';
+    effects.commons = 'adding'; effects.commonsAdded = null;
     commonsBusy = true; alertLine = null;
     redraw();
     let sent = false;
@@ -718,10 +741,11 @@ export const DiscoverSection = (initialVnode) => {
       } });
       sent = true;
       const reply = await attrs.send({ type: 'dweb/open-commons', seed: commonsSeed });
-      // why only a refusal lifts the fence here: after a success, Commons in
-      // a Library read is the receipt that lifts it (see loadLocal).
+      // why only a refusal lifts the fence here: after a success, the next
+      // Library read is the receipt that lifts it (see loadLocal).
       if (reply?.outcomeKnown === false) effects.commons = 'unknown';
       else if (!reply?.ok) { effects.commons = null; alertLine = { key: 'commons', text: COMMONS_FAILED }; }
+      else effects.commonsAdded = effects.reads;
       await reloadLocal();
     } catch (cause) {
       if (sent) effects.commons = 'unknown';
@@ -766,14 +790,28 @@ export const DiscoverSection = (initialVnode) => {
     copyState = null;
     alertLine = null;
     surpriseNote = null;
+    // why the heading as fallback: the tile may be gone (filtered, past the
+    // window, or no longer heard). The heading lands focus at the top of the
+    // root, as home.js does for a view change.
     pendingFocus = {
       selector: key === 'paste' ? (shareOpen ? '.disc-start-form button' : '[data-paste-link]')
         : key ? `[data-key="${CSS.escape(key)}"] .disc-tile-open` : null,
+      fallback: 'h1',
       scroll: origin?.scroll ?? 0,
     };
     origin = null;
   };
   const openShare = () => { shareOpen = true; pendingFocus = { selector: '.disc-start-form input', scroll: null }; };
+  // why the epoch: a check still running must not open its page after the
+  // row closed. The typed link stays for the next open, as after Back.
+  const closeShare = () => {
+    linkEpoch++; shareOpen = false; linkError = '';
+    pendingFocus = { selector: '[data-paste-link]', scroll: null };
+  };
+  // why: Show more goes away after the last batch, and the new tiles start
+  // where it stood.
+  /** @param {DwebApp} app */
+  const focusTile = (app) => { pendingFocus = { selector: `[data-key="${CSS.escape(app.dwapp_id ?? '')}"] .disc-tile-open`, scroll: null }; };
   // A "New app to install" notification names its dwapp_id. The click is an
   // explicit request, so an app already in the heard list opens from any
   // page, a restored share-link page too. The bell can be clicked before the
@@ -827,7 +865,12 @@ export const DiscoverSection = (initialVnode) => {
     const id = app.dwapp_id ?? '';
     const tracked = committed.get(id) ?? installedByDwappId.get(id);
     const linked = linkedId(app);
-    const localId = installedId[id] || (app.uri ? installedByUri.get(app.uri) : null) || tracked?.appId || linked || null;
+    // why the publisher in the uri: any peer can sign a card that names
+    // another maker's uri. Only a card under its own publisher stands for the
+    // Library record at that uri, as the share-link page borrows a name only
+    // from the card its publisher signed.
+    const byUri = app.uri && app.publisher && app.uri.startsWith(`peerd://${app.publisher}/`) ? installedByUri.get(app.uri) ?? null : null;
+    const localId = installedId[id] || byUri || tracked?.appId || linked || null;
     // why: until the Library shows the app, a share-link install of it decides
     // its state here too: running, or unconfirmed with Refresh.
     const held = !localId && linkHolds(app);
@@ -837,7 +880,7 @@ export const DiscoverSection = (initialVnode) => {
       // version may be called "this version" or flagged as unable to run.
       // The catalog's version decides, as it does for an update offer.
       sameVersion: tracked ? !!app.version_id && tracked.version_id === app.version_id
-        : !!installedId[id] || (!!app.uri && installedByUri.has(app.uri)) || !!linked,
+        : !!installedId[id] || !!byUri || !!linked,
       updatable: !!tracked && !!app.version_id
         && app.version_id !== tracked.version_id && (app.seq ?? 0) > (tracked.seq ?? 0),
       uncertain: unconfirmed.has(id) || (held && linkBusy !== 'install'),
@@ -885,6 +928,7 @@ export const DiscoverSection = (initialVnode) => {
       key: f.id, name, letter: letterOf(name), tone: toneOf(f.id),
       meta: makerMeta(makerOf(app.publisher), kbLabel(app.size)), description: app.description,
       updateReady: action.kind === 'update',
+      error: alertLine?.key === f.id ? alertLine.text : null,
       // why keyed by kind: a poll can turn a focused Open into Update, or
       // Review into Open. A new node drops the focus, so one key press never
       // runs an action the user did not choose.
@@ -908,7 +952,7 @@ export const DiscoverSection = (initialVnode) => {
       },
       pending, contacts: contactNames,
     });
-    const balanced = exploreOrder(candidates, { query, seed });
+    const balanced = exploreOrder(candidates, { query, seed, names: contactNames });
     const byId = new Map(balanced.map(app => [app.dwapp_id, app]));
     const ids = orderedIds.filter(id => byId.has(id));
     const known = new Set(ids);
@@ -924,8 +968,7 @@ export const DiscoverSection = (initialVnode) => {
   /** @param {DwebApp[]} list */
   const surpriseCandidates = (list) => list.filter(app => {
     const id = app.dwapp_id;
-    return !!id && !installedId[id] && !installedByDwappId.has(id)
-      && !(app.uri && installedByUri.has(app.uri)) && !busy[id] && !unconfirmed.has(id);
+    return !!id && !facts(app).localId && !busy[id] && !unconfirmed.has(id);
   });
   /** @param {DwebApp[]} shown the apps the grid lists under the pill and search */
   const surprise = (shown) => {
@@ -976,9 +1019,10 @@ export const DiscoverSection = (initialVnode) => {
     value: linkInput,
     inputDisabled: !!linkPending || linkBusy === 'receipt',
     checkDisabled: !attrs.enabled || !!linkBusy || (!linkPending && !linkInput),
-    status: linkPending ? (linkBusy === 'install' ? KEEPS_GOING : RECEIPT_HELD) : null,
+    status: linkPending ? (linkBusy === 'install' ? KEEPS_GOING : RECEIPT_HELD) : linkBusy === 'inspect' ? CHECKING_LINK : null,
     note: attrs.enabled ? null : 'Join the peer network first.',
     error: linkError,
+    onCancel: linkPending || linkBusy === 'receipt' ? null : closeShare,
     oninput: (value) => {
       linkInput = value; linkEpoch++; linkPreview = null; linkAppId = null;
       linkError = ''; linkFailure = ''; linkNotice = '';
@@ -989,8 +1033,9 @@ export const DiscoverSection = (initialVnode) => {
     ? m('p.error', { role: 'alert', 'aria-live': 'assertive' }, 'peerd could not refresh peer apps. Retry when the network is available.')
     : null;
   const rootAlert = () => alertLine ? m('p.error', { role: 'alert' }, alertLine.text) : null;
-  const libraryLine = () => {
-    const note = libraryStatus({ ready: localReady, failed: localFailed });
+  /** @param {boolean} offline */
+  const libraryLine = (offline) => {
+    const note = libraryStatus({ ready: localReady, failed: localFailed, offline });
     return note ? m('p.type-small.disc-footnote', { role: 'status' }, note) : null;
   };
   // why: the looking and empty roots draw no pills, but Included lists the
@@ -1114,6 +1159,7 @@ export const DiscoverSection = (initialVnode) => {
     return matchQuery([...starters, commons], query).map(item => tile({
       key: item.key, name: item.name, letter: letterOf(item.name), tone: toneOf(item.tone),
       meta: 'Comes with peerd', description: item.description, action: item.action,
+      error: alertLine?.key === item.key ? alertLine.text : null,
     }));
   };
 
@@ -1128,9 +1174,8 @@ export const DiscoverSection = (initialVnode) => {
       title: m('h1.type-page-title', 'Discover'),
       status: statusFor(offline ? 'offline' : 'connected', shownApps),
       heardError: offline ? null : heardError(),
-      library: libraryLine(),
+      library: libraryLine(offline),
       suggestion: surpriseNote ? m('p.type-small.disc-footnote', { role: 'status', 'aria-live': 'polite' }, surpriseNote) : null,
-      alert: rootAlert(),
       // why neutral: the add may still finish, as an unknown install may.
       commons: pill === 'included' && effects.commons === 'unknown' && !commonsId
         ? m('p.type-body-sm', { role: 'status' }, COMMONS_UNKNOWN) : null,
@@ -1145,7 +1190,8 @@ export const DiscoverSection = (initialVnode) => {
         title: 'No matching apps', text: 'Change your search or filters.', boxed: true, status: true,
         actions: [secondaryButton({ label: 'Clear filters', onclick: clearFilters })],
       }) : null,
-      more: pill !== 'included' && shownApps.length > limit ? showMore(() => { limit += EXPLORE_WINDOW; }) : null,
+      more: pill !== 'included' && shownApps.length > limit
+        ? showMore(() => { focusTile(shownApps[limit]); limit += EXPLORE_WINDOW; }) : null,
     });
   };
 
@@ -1188,19 +1234,22 @@ export const DiscoverSection = (initialVnode) => {
     // new version, which the user does not have yet.
     const offer = state === 'installed' && localId
       ? updateOffer({ installed: true, updatable: f.updatable, mine: f.mine, incompatible: f.incompatible }) : null;
+    // why: an install needs the peer network, so it waits, and the line says so.
+    const offline = net?.kind === 'offline';
     /** @type {ButtonProps|null} */ let primary = null;
     if (state === 'review') {
-      primary = { label: 'Install and share', disabled: !app.uri || !localReady, onclick: () => { void install(app); } };
+      primary = { label: 'Install and share', disabled: !app.uri || !localReady || offline, onclick: () => { void install(app); } };
     }
     if (state === 'installed') primary = { label: 'Open', disabled: !localId, onclick: () => { void openApp(localId, f.id); } };
     if (state === 'failed') {
-      primary = { label: 'Try again', onclick: () => { void (f.localId ? update(app, f.localId) : install(app)); } };
+      primary = { label: 'Try again', disabled: offline, onclick: () => { void (f.localId ? update(app, f.localId) : install(app)); } };
     }
     if (state === 'unknown') primary = { label: 'Refresh', disabled: refreshing, onclick: () => { void manualRefresh(); } };
     // why Open next to them on an update page: the installed version still runs.
     const secondary = (state === 'failed' || state === 'unknown') && localId
       ? { label: 'Open', onclick: () => { void openApp(localId, f.id); } } : null;
-    const notice = notices[f.id] ?? (state === 'review' && !localReady ? libraryStatus({ ready: false, failed: localFailed }) : null);
+    const notice = notices[f.id] ?? (state === 'review' && !localReady ? libraryStatus({ ready: false, failed: localFailed })
+      : offline && (state === 'review' || state === 'failed') ? NEEDS_NETWORK : null);
     const error = alertLine?.key === f.id ? alertLine.text : null;
     const panel = state === 'cant-run' ? cantRunPanel()
       : state === 'conflict' ? conflictPanel({
@@ -1291,18 +1340,20 @@ export const DiscoverSection = (initialVnode) => {
   const makerPage = (did) => {
     const name = contactNames.get(did) ?? null;
     const title = name ?? shortKey(did);
-    const made = apps.filter(app => app.publisher === did);
+    // why the Library list offline: the offline root lists only Library apps,
+    // each with Open, and a card heard before may name a version to fetch.
+    const offline = net?.kind === 'offline';
+    const made = (offline ? offlineApps() : apps).filter(app => app.publisher === did);
     return m('.disc-home.disc-view.disc-page', { key: `maker:${did}` }, [
       backLink({ onclick: goBack }),
       makerHead({ title, letter: letterOf(title), tone: toneOf(did), saved: !!name }),
       m('.disc-section.disc-section--tight', [
         m('.type-label-strong', ['Apps from ', name ? m('bdi', name) : m('bdi.type-code.disc-maker-key', title)]),
         // why a line: a share link's maker often has no app that peers share.
-        made.length ? m('ul.disc-app-list', made.slice(0, makerLimit).map(app => appRow(appTileProps(app, false))))
+        made.length ? m('ul.disc-app-list', made.slice(0, makerLimit).map(app => appRow(appTileProps(app, offline))))
           : m('p.type-body-sm.disc-footnote', MAKER_EMPTY),
       ]),
-      made.length > makerLimit ? showMore(() => { makerLimit += EXPLORE_WINDOW; }) : null,
-      rootAlert(),
+      made.length > makerLimit ? showMore(() => { focusTile(made[makerLimit]); makerLimit += EXPLORE_WINDOW; }) : null,
       techView([{ label: 'Made by', value: did, code: true, copy: copyButton(`maker:${did}:did`, did) }]),
     ]);
   };
@@ -1327,7 +1378,10 @@ export const DiscoverSection = (initialVnode) => {
     // to meanwhile.
     if (ifLost && document.activeElement && document.activeElement !== document.body) return;
     const target = (selector ? rootDom.querySelector(selector) : null) ?? (fallback ? rootDom.querySelector(fallback) : null);
-    if (target instanceof HTMLElement) target.focus({ preventScroll: scroll !== null });
+    if (!(target instanceof HTMLElement)) return;
+    // why tabindex -1: a heading takes focus only with it, as in home.js.
+    if (target.matches('h1')) target.setAttribute('tabindex', '-1');
+    target.focus({ preventScroll: scroll !== null });
   };
 
   return {
@@ -1371,6 +1425,9 @@ export const DiscoverSection = (initialVnode) => {
     view(vnode) {
       attrs = vnode.attrs;
       if (viewEnabled && !attrs.enabled) { linkEpoch++; linkPreview = null; route = { page: 'root' }; }
+      // why the heading: Enable peer network went off while it saved, so
+      // focus fell to the body. Land on the new root, as home.js does.
+      if (!viewEnabled && attrs.enabled) pendingFocus = { selector: 'h1', scroll: null, ifLost: true };
       viewEnabled = attrs.enabled;
       answerKey(attrs.openKey);
       if (!attrs.enabled) return [startView()];

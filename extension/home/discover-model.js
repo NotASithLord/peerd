@@ -16,7 +16,8 @@
  * mounted while it runs follows the same outcome. `reads` counts Library
  * reads as they start. `committed` holds each committed update with that
  * count at its commit, so a read that started earlier cannot bring back the
- * version the update replaced.
+ * version the update replaced. `commonsAdded` holds it at a confirmed add,
+ * so only a read that started later can say Commons was deleted since.
  * @typedef {{
  *   busy: Record<string, string>,
  *   unconfirmed: Map<string, PendingTarget>,
@@ -27,6 +28,7 @@
  *   link: {address:string, outcome:Promise<LinkOutcome>}|null,
  *   committed: Map<string, {appId:string, version_id:string|null, seq:number, read:number}>,
  *   reads: number,
+ *   commonsAdded: number|null,
  * }} DiscoverEffects
  */
 /** @typedef {'all'|'updates'|'contacts'|'included'} Pill */
@@ -42,7 +44,7 @@
  * @returns {DiscoverEffects} */
 export const createEffects = () => ({
   busy: {}, unconfirmed: new Map(), installedId: {}, notices: {}, conflicts: new Map(), commons: null, link: null,
-  committed: new Map(), reads: 0,
+  committed: new Map(), reads: 0, commonsAdded: null,
 });
 
 const IN_FLIGHT = Object.freeze(['installing', 'updating']);
@@ -124,12 +126,17 @@ export const rootView = ({ enabled, net, heardCount, loading, failed, included }
 
 /**
  * The Library line on the root and the app page. Until one catalog read
- * lands, an installed app looks new, so Install stays off.
- * @param {{ready:boolean, failed:boolean}} library
+ * lands, an installed app looks new, so Install stays off. The offline root
+ * offers neither Install nor Surprise me, so its lines name what it shows.
+ * @param {{ready:boolean, failed:boolean, offline?:boolean}} library
  * @returns {string|null}
  */
-export const libraryStatus = ({ ready, failed }) => {
+export const libraryStatus = ({ ready, failed, offline = false }) => {
   if (!failed) return ready ? null : 'Checking your Library…';
+  if (offline) {
+    return ready ? 'Could not refresh your Library. This list may be out of date.'
+      : 'Could not read your Library. Your apps from peers are not listed until peerd can read it.';
+  }
   return ready ? 'Could not refresh your Library. Surprise me stays off until peerd can read it.'
     : 'Could not read your Library. Install stays off until peerd can read it.';
 };
@@ -170,6 +177,9 @@ export const updateOffer = ({ installed, updatable, mine, incompatible }) => {
 // why "can't run" for an installed app only at this version: the runtime
 // flag rides the card. An installed app of another version keeps working, so
 // it offers Open. `sameVersion`: the Library holds this card's version.
+// why the Library wins over a failure at this version: the install may have
+// been done since from a share link or another tab. The failure is then stale,
+// and a retry would send an update of the version the Library already holds.
 /**
  * First match wins. In-flight tiles carry text and no button; failed and
  * unknown tiles say Review because the app page carries that state.
@@ -181,7 +191,7 @@ export const tileAction = (card) => {
   if (incompatible && (!installed || sameVersion)) return { kind: 'status', text: 'Can’t run in this browser' };
   if (busy === 'installing') return { kind: 'status', text: 'Installing…' };
   if (busy === 'updating') return { kind: 'status', text: 'Updating…' };
-  if (uncertain || isFailure(busy)) return { kind: 'review' };
+  if (uncertain || (isFailure(busy) && !(installed && sameVersion))) return { kind: 'review' };
   if (updateOffer(card) === 'update') return { kind: 'update' };
   if (installed) return { kind: 'open' };
   return { kind: 'review' };
@@ -197,7 +207,7 @@ export const pageState = ({ incompatible, conflict, busy, uncertain, installed, 
   if (busy === 'installing' || busy === 'updating') return 'installing';
   if (uncertain) return 'unknown';
   if (conflict) return 'conflict';
-  if (isFailure(busy)) return 'failed';
+  if (isFailure(busy) && !(have && sameVersion)) return 'failed';
   return have ? 'installed' : 'review';
 };
 

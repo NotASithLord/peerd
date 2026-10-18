@@ -524,6 +524,11 @@ button.linklike.disc-tech-toggle { display: inline-flex; align-items: center; ga
 .disc-app-row-id > .type-subheading { font-size: 15px; }
 .disc-app-row-id > .type-small { color: var(--secondary); }
 .disc-app-row-id > .type-body-sm { color: var(--text); }
+/* why wrap: peer text (a name, a description with a link) and a long contact
+   name have no space to break at, and content wraps rather than scrolls. */
+.disc-app-row-id > *, .disc-tile-meta, button.linklike.disc-app-maker, .disc-section--tight > .type-label-strong { overflow-wrap: anywhere; }
+button.linklike.disc-app-maker { max-width: 100%; }
+.disc-tile > .error, .disc-app-row-id > .error { margin: 0; }
 .disc-app-row-action { position: relative; z-index: 1; flex: none; }
 .disc-app-row .disc-tile-open::after { border-radius: var(--r2); }
 

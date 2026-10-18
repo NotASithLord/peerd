@@ -141,6 +141,17 @@ const click = async (root, label) => {
 };
 /** A real click focuses the control first. @param {ParentNode} root @param {string} label */
 const press = async (root, label) => { button(root, label)?.focus(); await click(root, label); };
+/**
+ * A press on a control that then goes off. Chrome drops its focus (the focus
+ * fixup rule); Gecko keeps it on the disabled control. Discover ships on
+ * Chrome, so the test settles on its state.
+ * @param {ParentNode} root @param {string} label
+ */
+const pressOff = async (root, label) => {
+  await press(root, label);
+  const active = document.activeElement;
+  if (active instanceof HTMLButtonElement && active.disabled) active.blur();
+};
 /** @param {Node} root */
 const text = (root) => root.textContent ?? '';
 /** @param {ParentNode} root @param {string} key */
@@ -389,13 +400,19 @@ describe('home.discover root states', () => {
       expect(text(/** @type {Element} */ (libraryLine(view.root)))).toBe('Checking your Library…');
       expect(text(view.root).includes(OFFLINE_EMPTY)).toBe(false);
       first.resolve({ ok: false }); await settle();
+      // The offline root offers no Install, so the line names what it shows.
       expect(text(/** @type {Element} */ (libraryLine(view.root))))
-        .toBe('Could not read your Library. Install stays off until peerd can read it.');
+        .toBe('Could not read your Library. Your apps from peers are not listed until peerd can read it.');
       expect(text(view.root).includes(OFFLINE_EMPTY)).toBe(false);
       await focusPoll();
       expect(text(view.root).includes(OFFLINE_EMPTY)).toBe(false);
       await focusPoll();
       expect(libraryLine(view.root)).toBe(null);
+      expect(text(el(view.root, '.disc-empty'))).toBe(OFFLINE_EMPTY);
+      // A failed refresh keeps the list and says it may be out of date; there is no Surprise me offline.
+      replies.push({ ok: false });
+      await focusPoll();
+      expect(text(/** @type {Element} */ (libraryLine(view.root)))).toBe('Could not refresh your Library. This list may be out of date.');
       expect(text(el(view.root, '.disc-empty'))).toBe(OFFLINE_EMPTY);
       expect(host.writes().length).toBe(0);
     } finally { first.resolve({ ok: false }); view.close(); }
@@ -778,6 +795,50 @@ describe('home.discover tiles and filters', () => {
       expect(text(view.root)).toContain('No matching apps');
       expect(host.count('dweb/base/install')).toBe(1);
     } finally { install.resolve({ ok: false }); view.close(); }
+  });
+
+  // Any peer can sign a card that names another maker's uri. Only the card its
+  // own publisher signed stands for the Library record at that uri.
+  it('a card that names another maker\'s installed version is not that app: Review, no installed line, and no Open', async () => {
+    const address = formatDwappUri({ did: ANA, hash: 'a'.repeat(64) });
+    const target = immutableAppRoot(address);
+    const signed = card('signed', 'Signed app', ANA, { version_id: target.hash });
+    const forged = card('forged', 'peerd Wallet (official)', BOB, {
+      version_id: target.hash, uri: target.uri, description: 'Reviewed and approved by the peerd team.',
+    });
+    const host = fakeHost({ heard: [signed, forged] }, {
+      'dweb/base/inspect-address': () => ({ ok: true, summary: { ...target, name: 'Signed app', decodedBytes: 3, fileCount: 1, entryFile: 'index.html', containsWasm: false } }),
+      'dweb/base/install-address': () => ({ ok: true, app: { id: 'app-link' } }),
+      'apps/open': () => ({ ok: true }),
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      // The share link of this version installs it. Its receipt stands for the signed card only.
+      await click(view.root, 'Paste link');
+      enterLink(view.root, address);
+      await click(view.root, 'Check link');
+      await click(view.root, 'Install and share');
+      await click(view.root, 'Discover');
+      expect(tileAction(view.root, 'signed')).toBe('Open');
+      expect(tileAction(view.root, 'forged')).toBe('Review');
+      // So does the Library record at this uri, once the receipt is gone.
+      await click(view.root, 'Paste link');
+      enterLink(view.root, '');
+      host.state.library = [{ id: 'app-link', dweb: { uri: target.uri, hash: target.hash, publisher: target.publisher } }];
+      await focusPoll();
+      expect(tileAction(view.root, 'signed')).toBe('Open');
+      expect(tileAction(view.root, 'forged')).toBe('Review');
+      await openTile(view.root, 'forged');
+      expect(button(view.root, 'Install and share')).toBeTruthy();
+      expect(view.root.querySelector('.disc-panel .disc-installed')).toBe(null);
+      expect(button(panel(view.root), 'Open')).toBe(undefined);
+      await click(view.root, 'Discover');
+      // Surprise me still has it to suggest: it is not in the Library.
+      await click(view.root, 'Surprise me');
+      expect(text(el(view.root, '.disc-app-title'))).toBe('peerd Wallet (official)');
+      expect(host.writes().map(call => call.type)).toEqual(['dweb/base/inspect-address', 'dweb/base/install-address']);
+    } finally { view.close(); sessionStorage.removeItem(KEY); }
   });
 });
 
@@ -1365,14 +1426,16 @@ describe('home.discover app page', () => {
     });
   }
 
-  it('a failed Open says so in an alert and never offers Install again', async () => {
+  it('a failed Open says so in an alert inside its tile and never offers Install again', async () => {
     const app = card('a', 'App A', ANA);
     const host = fakeHost({ heard: [app], library: [local('local-a', app)] }, { 'apps/open': () => ({ ok: false }) });
     const view = mount({ send: host.send });
     try {
       await settle();
       el(view.root, '[data-key="a"] .disc-tile-action').click(); await settle();
-      expect(text(el(view.root, '[role="alert"]'))).toBe(OPEN_FAILED);
+      // why inside the tile: a line above a long grid sits off screen for the tile the user clicked.
+      expect(text(el(view.root, '[data-key="a"] [role="alert"]'))).toBe(OPEN_FAILED);
+      expect(view.root.querySelector('.disc-view > [role="alert"]')).toBe(null);
       expect(tileAction(view.root, 'a')).toBe('Open');
       await openTile(view.root, 'a');
       await click(view.root, 'Open');
@@ -1381,10 +1444,10 @@ describe('home.discover app page', () => {
       expect(button(view.root, 'Try again')).toBe(undefined);
       expect(button(panel(view.root), 'Open')?.disabled).toBe(false);
       expect(host.writes()).toEqual([{ type: 'apps/open', appId: 'local-a' }, { type: 'apps/open', appId: 'local-a' }]);
-      // A row on the maker page says so too, under its list.
+      // A row on the maker page says so too, inside that row.
       await click(view.root, `Made by ${shortKey(ANA)}`);
       el(view.root, '[data-key="a"] .disc-tile-action').click(); await settle();
-      expect(text(el(view.root, '.disc-section--tight + [role="alert"]'))).toBe(OPEN_FAILED);
+      expect(text(el(view.root, '[data-key="a"] [role="alert"]'))).toBe(OPEN_FAILED);
       expect(host.count('apps/open')).toBe(3);
     } finally { view.close(); }
   });
@@ -1995,6 +2058,8 @@ describe('home.discover share link', () => {
       expect(status()).toBe('You can leave this page. The install keeps going.');
       install.resolve({ ok: false, outcomeKnown: false }); await settle();
       expect(status()).toBe('peerd could not confirm whether the install finished. It may still finish, so another install stays blocked.');
+      // The row explains the held receipt, so it cannot be closed.
+      expect(button(view.root, 'Cancel')).toBe(undefined);
       expect(host.count('dweb/base/install-address')).toBe(1);
     } finally { install.resolve({ ok: false }); view.close(); sessionStorage.removeItem(KEY); }
   });
@@ -2141,6 +2206,70 @@ describe('home.discover share link', () => {
       } finally { reply.resolve({ ok: false }); read.resolve({ ok: false }); view.close(); sessionStorage.removeItem(KEY); }
     });
   }
+
+  it('a failed install is stale once the Library holds this version: the tile and page say Open, and Try again never sends an update', async () => {
+    const same = card('same', 'Same app', ANA, { version_id: target.hash });
+    const host = fakeHost({ heard: [same] }, {
+      'dweb/base/install': () => ({ ok: false, error: 'raw host install text' }),
+      'dweb/base/inspect-address': () => ({ ok: true, summary }),
+      'dweb/base/install-address': () => {
+        host.state.library = [{ id: 'app-link', dweb: { uri: target.uri, hash: target.hash, publisher: target.publisher } }];
+        return { ok: true, app: { id: 'app-link' } };
+      },
+      'apps/open': () => ({ ok: true }),
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'same');
+      await click(view.root, 'Install and share');
+      expect(button(view.root, 'Try again')).toBeTruthy();
+      // The same version then arrives from its share link.
+      await click(view.root, 'Discover');
+      await click(view.root, 'Paste link');
+      enterLink(view.root, address);
+      await click(view.root, 'Check link');
+      await click(view.root, 'Install and share');
+      await click(view.root, 'Discover');
+      expect(tileAction(view.root, 'same')).toBe('Open');
+      await openTile(view.root, 'same');
+      expect(text(el(view.root, '.disc-panel .disc-installed'))).toContain('In your Library.');
+      expect(view.root.querySelector('.disc-panel [role="alert"]')).toBe(null);
+      expect(button(view.root, 'Try again')).toBe(undefined);
+      await click(view.root, 'Open');
+      expect(host.writes().map(call => call.type)).toEqual(['dweb/base/install', 'dweb/base/inspect-address', 'dweb/base/install-address', 'apps/open']);
+    } finally { view.close(); sessionStorage.removeItem(KEY); }
+  });
+
+  it('Check link says it is checking while the app downloads; Cancel and Escape close the row and return focus to Paste link', async () => {
+    const slow = deferred();
+    const host = fakeHost({ heard: [peerApp] }, { 'dweb/base/inspect-address': () => slow.promise });
+    const view = mount({ send: host.send });
+    const status = () => view.root.querySelector('.disc-start-row.is-open [role="status"]');
+    try {
+      await settle();
+      await click(view.root, 'Paste link');
+      expect(status()).toBe(null);
+      enterLink(view.root, address);
+      await click(view.root, 'Check link');
+      expect(text(/** @type {Element} */ (status()))).toBe('Checking the link. peerd downloads the app and checks every file…');
+      // Cancel while the check runs: the row closes, and the late result opens nothing.
+      await press(view.root, 'Cancel');
+      expect(view.root.querySelector('.disc-start-form')).toBe(null);
+      expect(document.activeElement).toBe(view.root.querySelector('[data-paste-link]'));
+      slow.resolve({ ok: true, summary }); await settle();
+      expect(view.root.querySelector('.disc-back')).toBe(null);
+      // Escape in the link input closes the row too, and keeps the typed link.
+      await click(view.root, 'Paste link');
+      const input = /** @type {HTMLInputElement} */ (el(view.root, '.disc-start-form input'));
+      expect(input.value).toBe(address);
+      expect(status()).toBe(null);
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await settle();
+      expect(view.root.querySelector('.disc-start-form')).toBe(null);
+      expect(document.activeElement).toBe(view.root.querySelector('[data-paste-link]'));
+      expect(host.count('dweb/base/inspect-address')).toBe(1);
+    } finally { slow.resolve({ ok: false }); view.close(); }
+  });
 
   it('a version the Library gains while the share-link page is open shows as installed, and Open opens that copy', async () => {
     const host = fakeHost({ heard: [peerApp] }, {
@@ -2355,6 +2484,176 @@ describe('home.discover makers', () => {
       expect(view.root.querySelectorAll('li.disc-app-row').length).toBe(96);
       expect(host.writes().length).toBe(0);
     } finally { view.close(); }
+  });
+
+  it('search finds the saved name a tile shows, and a contact saved after mount shows on the next focus', async () => {
+    const host = fakeHost({ heard: [card('a', 'Expense splitter', ANA), card('b', 'Trip planner', BOB)] });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      expect(text(el(view.root, '[data-key="a"] .disc-tile-meta'))).toBe(`Made by ${shortKey(ANA)}`);
+      // Saved in another Home tab: the next return to this tab shows it.
+      host.state.contacts = [{ did: ANA, name: 'Ana', saved: true }];
+      await focusPoll();
+      expect(text(el(view.root, '[data-key="a"] .disc-tile-meta'))).toBe('Made by Ana');
+      search(view.root, 'ana');
+      expect(tileKeys(view.root)).toEqual(['a']);
+      await click(view.root, 'From contacts');
+      expect(tileKeys(view.root)).toEqual(['a']);
+      expect(host.writes().length).toBe(0);
+    } finally { view.close(); }
+  });
+
+  it('offline, the maker page lists the Library apps of the maker with Open, and a heard app page offers no Install', async () => {
+    const installed = card('a', 'Ana app', ANA);
+    const host = fakeHost({
+      heard: [card('a', 'Ana app', ANA, { version_id: 'a-v2', seq: 2 }), card('n', 'New Ana app', ANA), card('m', 'Other Ana app', ANA)],
+      library: [local('lib-a', installed)], contacts: [{ did: ANA, name: 'Ana', saved: true }],
+    }, { 'dweb/base/install': () => ({ ok: false, error: 'raw host install text' }), 'apps/open': () => ({ ok: true }) });
+    const view = mount({ send: host.send });
+    const rows = () => [...view.root.querySelectorAll('li.disc-app-row')].map(row => row.getAttribute('data-key'));
+    try {
+      await settle();
+      await openTile(view.root, 'n');
+      await click(view.root, 'Install and share');
+      expect(button(view.root, 'Try again')?.disabled).toBe(false);
+      // The heard read fails while the network is offline, so the heard cards stay in memory.
+      host.state.running = false;
+      host.state.heardFails = true;
+      await focusPoll();
+      expect(button(view.root, 'Try again')?.disabled).toBe(true);
+      expect(text(panel(view.root))).toContain('New apps need the peer network.');
+      await click(view.root, 'Made by Ana');
+      expect(rows()).toEqual(['a']);
+      expect(text(el(view.root, '[data-key="a"] .disc-app-row-action'))).toBe('Open');
+      el(view.root, '[data-key="a"] .disc-tile-action').click(); await settle();
+      expect(host.writes().at(-1)).toEqual({ type: 'apps/open', appId: 'lib-a' });
+      // A card heard before the network went off: its page says what it waits for.
+      await click(view.root, 'Discover');
+      view.set({ openKey: 'm' }); await settle();
+      expect(text(el(view.root, '.disc-app-title'))).toBe('Other Ana app');
+      expect(button(view.root, 'Install and share')?.disabled).toBe(true);
+      expect(text(panel(view.root))).toContain('New apps need the peer network.');
+      // The other offline shape: the host answers with no heard cards. The Library still names the maker's apps.
+      host.state.heardFails = false;
+      host.state.heard = [];
+      await focusPoll();
+      await click(view.root, 'Discover');
+      await openTile(view.root, 'a');
+      await click(view.root, 'Made by Ana');
+      expect(rows()).toEqual(['a']);
+      expect(host.count('dweb/base/install')).toBe(1);
+    } finally { view.close(); }
+  });
+
+  it('long peer text wraps inside maker rows, tiles and the app page at a narrow width, never under the action', async () => {
+    const token = 'x'.repeat(92);
+    const long = card('long', 'A'.repeat(64), ANA, { description: `${token} short tail` });
+    const contact = 'B'.repeat(40);
+    const host = fakeHost({ heard: [long, card('b', 'Chess clock', BOB)], contacts: [{ did: ANA, name: contact, saved: true }] });
+    const links = ['/sidepanel/styles.css', '/options/options.css', '/home/home.css'].map(href => {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet'; link.href = href;
+      return link;
+    });
+    const wrap = document.createElement('div');
+    wrap.className = 'home-content';
+    wrap.style.cssText = 'width:320px;box-sizing:border-box;overflow:auto';
+    document.body.append(wrap);
+    const view = mount({ send: host.send }, { parent: wrap });
+    const fits = () => wrap.scrollWidth <= wrap.clientWidth;
+    /** The box of the text itself, which can run past its element. @param {Element} node */
+    const textRight = (node) => { const range = document.createRange(); range.selectNodeContents(node); return range.getBoundingClientRect().right; };
+    try {
+      await Promise.all(links.map(link => new Promise((resolve, reject) => { link.onload = resolve; link.onerror = reject; document.head.append(link); })));
+      await settle();
+      expect(fits()).toBe(true);
+      await openTile(view.root, 'long');
+      expect(fits()).toBe(true);
+      await click(view.root, `Made by ${contact}`);
+      const row = el(view.root, '[data-key="long"]');
+      const action = el(row, '.disc-app-row-action').getBoundingClientRect().left;
+      for (const part of row.querySelectorAll('.disc-app-row-id > *')) expect(textRight(part) <= action).toBe(true);
+      expect(fits()).toBe(true);
+    } finally { view.close(); wrap.remove(); for (const link of links) link.remove(); }
+  });
+});
+
+describe('home.discover keyboard focus', () => {
+  const address = formatDwappUri({ did: ANA, hash: 'a'.repeat(64) });
+
+  it('Enable peer network lands focus on the heading of the new root', async () => {
+    const save = deferred();
+    // The lease is still starting, as it is right after the choice, so the looking root stays.
+    const host = fakeHost({ lease: 'starting' }, {
+      'settings/update': () => save.promise,
+      'state/get': () => ({ ok: true, state: { settings: { dwebChoiceMade: true, dwebEnabled: true } } }),
+    });
+    const view = mount({ send: host.send, enabled: false, reconcileState: async () => {} });
+    try {
+      await settle();
+      await pressOff(view.root, 'Enable peer network');
+      // The button is off while the choice saves, so focus fell to the body.
+      expect(document.activeElement).toBe(document.body);
+      save.resolve({ ok: true }); await settle();
+      // home.js turns the view on once the choice is saved.
+      view.set({ enabled: true }); await settle();
+      const heading = el(view.root, 'h1');
+      expect(document.activeElement).toBe(heading);
+      expect(heading.getAttribute('tabindex')).toBe('-1');
+    } finally { save.resolve({ ok: false }); view.close(); }
+  });
+
+  it('Retry connection lands on Retry while still offline, and on Refresh once connected', async () => {
+    /** @type {unknown[]} */ const starts = [{ ok: false, error: 'signaling: websocket error' }, { ok: true }];
+    const host = fakeHost({ heard: [card('a', 'App', ANA)], running: false }, { 'dweb/base/start': () => starts.shift() });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await press(view.root, 'Retry connection');
+      expect(document.activeElement).toBe(button(view.root, 'Retry connection'));
+      host.state.running = true;
+      await press(view.root, 'Retry connection');
+      expect(text(el(view.root, '.disc-status-live'))).toBe('Connected to 3 peers');
+      expect(document.activeElement).toBe(view.root.querySelector('.disc-refresh'));
+      expect(host.count('dweb/base/start')).toBe(2);
+    } finally { view.close(); }
+  });
+
+  it('a failed Check link returns focus to the link; Show more lands on the first new tile; Back to a missing tile lands on the heading', async () => {
+    const heard = Array.from({ length: 100 }, (_, i) => card(`app-${i}`, `App ${i}`, ANA));
+    const inspect = deferred();
+    const host = fakeHost({ heard }, { 'dweb/base/inspect-address': () => inspect.promise });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await click(view.root, 'Paste link');
+      enterLink(view.root, address);
+      await pressOff(view.root, 'Check link');
+      // The button is off while the check runs, so focus fell to the body.
+      expect(document.activeElement).toBe(document.body);
+      inspect.resolve({ ok: false }); await settle();
+      expect(text(el(view.root, '.disc-start-row [role="alert"]'))).toContain('Could not verify this app.');
+      expect(document.activeElement).toBe(view.root.querySelector('.disc-start-form input'));
+      await press(view.root, 'Show more');
+      const keys = /** @type {string[]} */ (tileKeys(view.root));
+      expect(keys.length).toBe(100);
+      expect(document.activeElement).toBe(view.root.querySelector(`[data-key="${keys[96]}"] .disc-tile-open`));
+      // Back from the page of a card that left the heard list meanwhile.
+      await openTile(view.root, keys[0]);
+      host.state.heard = heard.slice(1);
+      await focusPoll();
+      await click(view.root, 'Discover');
+      expect(document.activeElement).toBe(el(view.root, 'h1'));
+      // The maker page adds rows the same way.
+      await openTile(view.root, keys[1]);
+      await click(view.root, `Made by ${shortKey(ANA)}`);
+      await press(view.root, 'Show more');
+      const rows = [...view.root.querySelectorAll('li.disc-app-row')].map(row => row.getAttribute('data-key'));
+      expect(rows.length).toBe(99);
+      expect(document.activeElement).toBe(view.root.querySelector(`[data-key="${rows[96]}"] .disc-tile-open`));
+      expect(host.writes().map(call => call.type)).toEqual(['dweb/base/inspect-address']);
+    } finally { inspect.resolve({ ok: false }); view.close(); }
   });
 });
 
@@ -2648,7 +2947,7 @@ describe('home.discover entry points', () => {
       await click(view.root, 'Included');
       await click(view.root, 'Add and open Commons');
       await until(() => host.count('dweb/open-commons') === 1 && !!view.root.querySelector('[role="alert"]'));
-      expect(text(el(view.root, '[role="alert"]'))).toBe(COMMONS_FAILED);
+      expect(text(el(view.root, '[data-key="commons"] [role="alert"]'))).toBe(COMMONS_FAILED);
       expect(commonsNote(view.root)).toBe(null);
       expect(effects.commons).toBe(null);
       expect(button(view.root, 'Add and open Commons')?.disabled).toBe(false);
@@ -2692,30 +2991,61 @@ describe('home.discover entry points', () => {
     } finally { reply.resolve({ ok: false }); view.close(); }
   });
 
-  it('Commons: a settled add keeps the fence until a Library read shows Commons', async () => {
-    const host = fakeHost({ heard: [card('a', 'App', ANA)] }, { 'dweb/open-commons': () => ({ ok: true }) });
+  // The host creates Commons before it replies ok. A Library read that starts
+  // after that reply and lists no Commons means the user deleted it since.
+  it('Commons: a confirmed add lifts its fence on the first later Library read, so a Commons deleted meanwhile can be added again', async () => {
+    const reply = deferred();
+    const host = fakeHost({ heard: [card('a', 'App', ANA)] }, { 'dweb/open-commons': () => reply.promise });
     const effects = createEffects();
     let view = mount({ send: host.send, effects });
     try {
       await settle();
       await click(view.root, 'Included');
-      const reads = host.count('apps/list');
       await click(view.root, 'Add and open Commons');
-      // The Library read after the reply does not list Commons yet.
-      await until(() => host.count('dweb/open-commons') === 1 && host.count('apps/list') > reads);
-      await settle();
-      expect(button(view.root, 'Opening…')?.disabled).toBe(true);
+      await until(() => host.count('dweb/open-commons') === 1);
+      // The user leaves while the add runs. It is confirmed, then Commons is deleted in the Library.
       view.close();
+      reply.resolve({ ok: true, appId: 'app-commons' }); await settle();
+      // The closed view's read is dropped, so the fence waits for the mounted view.
+      expect(effects.commons).toBe('adding');
       view = mount({ send: host.send, effects });
       await settle();
       await click(view.root, 'Included');
-      expect(button(view.root, 'Opening…')?.disabled).toBe(true);
-      host.state.library = [{ id: 'app-commons', dweb: { seed: 'commons' } }];
+      expect(effects.commons).toBe(null);
+      expect(button(view.root, 'Add and open Commons')?.disabled).toBe(false);
+      await click(view.root, 'Add and open Commons');
+      await until(() => host.count('dweb/open-commons') === 2);
+    } finally { reply.resolve({ ok: false }); view.close(); }
+  });
+
+  it('Commons: a Library read that started before the add was confirmed cannot lift the fence', async () => {
+    const first = deferred();
+    const second = deferred();
+    /** @type {Promise<unknown>[]} */ let held = [];
+    const host = fakeHost({ heard: [card('a', 'App', ANA)] }, {
+      'dweb/open-commons': () => ({ ok: true, appId: 'app-commons' }),
+      'apps/list': () => held.length ? held.shift() : { ok: true, apps: host.state.library },
+    });
+    const effects = createEffects();
+    const view = mount({ send: host.send, effects });
+    try {
+      await settle();
+      await click(view.root, 'Included');
+      // A poll's read is in flight when the add is sent and confirmed.
+      held = [first.promise, second.promise];
       await focusPoll();
+      await click(view.root, 'Add and open Commons');
+      await until(() => host.count('dweb/open-commons') === 1);
+      // It lands with the Library as it was: no Commons yet, and the fence stays.
+      first.resolve({ ok: true, apps: [] }); await settle();
+      expect(effects.commons).toBe('adding');
+      expect(button(view.root, 'Opening…')?.disabled).toBe(true);
+      // The read that started after the reply is the receipt.
+      second.resolve({ ok: true, apps: [{ id: 'app-commons', dweb: { seed: 'commons' } }] }); await settle();
       expect(effects.commons).toBe(null);
       expect(button(view.root, 'Open')?.disabled).toBe(false);
       expect(host.count('dweb/open-commons')).toBe(1);
-    } finally { view.close(); }
+    } finally { first.resolve({ ok: false }); second.resolve({ ok: false }); view.close(); }
   });
 
   it('Commons: an add that settles after a remount keeps its fence until the mounted view reads the Library', async () => {

@@ -13,6 +13,12 @@ test('Explore searches the full publisher identity and the description', () => {
   expect(exploreOrder(apps, { query: 'publisher-110' }).map(a => a.dwapp_id)).toEqual(['app-110']);
   expect(exploreOrder([{dwapp_id:'legacy',description:'A physics simulator'}], {query:'PHYSICS'})).toHaveLength(1);
 });
+test('Explore searches the saved contact name a tile shows, keyed by the full did', () => {
+  const cards = [{ dwapp_id: 'x', publisher: 'did:key:zMaker', name: 'Expense splitter' }, { dwapp_id: 'y', publisher: 'did:key:zOther', name: 'Trip planner' }];
+  const names = new Map([['did:key:zMaker', 'Ana Lima']]);
+  expect(exploreOrder(cards, { query: 'ana lima', names }).map(a => a.dwapp_id)).toEqual(['x']);
+  expect(exploreOrder(cards, { query: 'ana lima' })).toEqual([]);
+});
 
 
 test('Surprise me rotates publishers and immutable versions without implying availability', () => {

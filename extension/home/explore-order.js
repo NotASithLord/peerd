@@ -11,17 +11,20 @@ const rank = (value, seed) => {
 /**
  * One publisher per round. A seed changes only on explicit Shuffle; polling
  * cannot reshuffle existing cards. DID diversity is not Sybil resistance.
+ * `names`: saved contact names by full did, so a search finds the maker
+ * name a tile shows.
  * @template {{dwapp_id?:string,publisher?:string,name?:string,slug?:string,description?:string}} T
- * @param {T[]} apps @param {{query?:string, seed?:number}} [options]
+ * @param {T[]} apps @param {{query?:string, seed?:number, names?:ReadonlyMap<string,string>}} [options]
  */
-export const exploreOrder = (apps, { query = '', seed = 0 } = {}) => {
+export const exploreOrder = (apps, { query = '', seed = 0, names } = {}) => {
   const search = query.trim().toLowerCase();
   /** @type {Map<string,T[]>} */ const groups = new Map();
   const seen = new Set();
   for (const app of apps) {
     if (!app.dwapp_id || seen.has(app.dwapp_id)) continue;
     seen.add(app.dwapp_id);
-    if (search && !`${app.name ?? ''} ${app.slug ?? ''} ${app.publisher ?? ''} ${app.description ?? ''}`.toLowerCase().includes(search)) continue;
+    const text = `${app.name ?? ''} ${app.slug ?? ''} ${app.publisher ?? ''} ${names?.get(app.publisher ?? '') ?? ''} ${app.description ?? ''}`;
+    if (search && !text.toLowerCase().includes(search)) continue;
     const publisher = app.publisher || 'unspecified';
     const group = groups.get(publisher) ?? [];
     group.push(app); groups.set(publisher, group);

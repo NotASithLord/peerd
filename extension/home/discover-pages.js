@@ -73,11 +73,13 @@ const nameView = ({ name, cls, onOpen }) => onOpen
   ? m(`button.disc-tile-open${cls}`, { type: 'button', dir: 'auto', title: name, onclick: onOpen }, name)
   : m(`div${cls}`, { dir: 'auto', title: name }, name);
 
+// why the error inside the tile or row: a line above a long grid or list sits
+// off screen for the tile the user clicked.
 /**
  * @param {{key:string, name:string, letter:string, tone:string, meta:unknown, description?:string,
- *   updateReady?:boolean, action:unknown, onOpen?:()=>void}} props
+ *   updateReady?:boolean, action:unknown, error?:string|null, onOpen?:()=>void}} props
  */
-export const tile = ({ key, name, letter, tone, meta, description, updateReady, action, onOpen }) =>
+export const tile = ({ key, name, letter, tone, meta, description, updateReady, action, error, onOpen }) =>
   m('.disc-card.disc-tile', { key, 'data-key': key }, [
     letterAvatar({ letter, tone, variant: 'tile' }),
     m('.disc-tile-id', [
@@ -87,19 +89,21 @@ export const tile = ({ key, name, letter, tone, meta, description, updateReady, 
     description ? m('p.type-body-sm.disc-tile-desc', { dir: 'auto' }, description) : null,
     updateReady ? m('span.type-small.disc-tile-flag', 'Update ready') : null,
     m('.disc-actions', action),
+    error ? m('p.error.type-small', { role: 'alert' }, error) : null,
   ]);
 
 /**
  * @param {{key:string, name:string, letter:string, tone:string, meta:unknown, description?:string,
- *   action:unknown, onOpen?:()=>void}} props
+ *   action:unknown, error?:string|null, onOpen?:()=>void}} props
  */
-export const appRow = ({ key, name, letter, tone, meta, description, action, onOpen }) =>
+export const appRow = ({ key, name, letter, tone, meta, description, action, error, onOpen }) =>
   m('li.disc-app-row', { key, 'data-key': key }, [
     letterAvatar({ letter, tone, variant: 'row' }),
     m('.disc-app-row-id', [
       nameView({ name, cls: '.type-subheading', onOpen }),
       m('.type-small', meta),
       description ? m('.type-body-sm', { dir: 'auto' }, description) : null,
+      error ? m('p.error.type-small', { role: 'alert' }, error) : null,
     ]),
     m('.disc-app-row-action', action),
   ]);
@@ -116,11 +120,13 @@ export const startRow = ({ icon: name, title, text, action, extra }) => m('li.di
 
 /**
  * The share row, opened in place by "Paste link". `status` explains a held
- * install receipt; `note` says why "Check link" is off.
+ * install receipt or a check in progress; `note` says why "Check link" is
+ * off. `onCancel` closes the row (Cancel, or Escape in the input); null while
+ * a receipt is held, because only its outcome releases the row.
  * @param {{value:string, inputDisabled:boolean, checkDisabled:boolean, status:string|null, note:string|null, error:string,
- *   oninput:(value:string)=>void, onCheck:()=>void}} props
+ *   oninput:(value:string)=>void, onCheck:()=>void, onCancel:(()=>void)|null}} props
  */
-export const shareRow = ({ value, inputDisabled, checkDisabled, status, note, error, oninput, onCheck }) =>
+export const shareRow = ({ value, inputDisabled, checkDisabled, status, note, error, oninput, onCheck, onCancel }) =>
   m('li.disc-start-row.is-open', [
     m('.disc-start-main', [
       m('span.disc-start-icon', icon('ext', 20)),
@@ -136,8 +142,10 @@ export const shareRow = ({ value, inputDisabled, checkDisabled, status, note, er
         type: 'text', value, maxlength: 4096, 'aria-label': 'Share link', placeholder: 'dwapp://…',
         disabled: inputDisabled,
         oninput: (/** @type {{target:HTMLInputElement}} */ event) => oninput(event.target.value),
+        onkeydown: (/** @type {KeyboardEvent} */ event) => { if (event.key === 'Escape' && onCancel) onCancel(); },
       }),
       m('button.secondary.disc-btn', { type: 'submit', disabled: checkDisabled }, 'Check link'),
+      onCancel ? m('button.secondary.disc-btn', { type: 'button', onclick: onCancel }, 'Cancel') : null,
     ]),
     status ? m('p.type-small.disc-footnote', { role: 'status' }, status) : null,
     note ? m('p.type-small.disc-footnote', note) : null,
