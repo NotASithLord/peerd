@@ -21,7 +21,7 @@
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSocket } from 'node:dgram';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,7 +30,7 @@ import {
 } from '../acceptance/git-smart-http-fixture.mjs';
 import {
   rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage, attach,
-  reloadReadyPanel,
+  reloadReadyPanel, launchPeerd,
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
   NETWORK_GUARD_CONTROLLER_PORT, NETWORK_GUARD_OWNED_HOST,
   NETWORK_GUARD_UNRELATED_HOST, SITE_CLIENT_FIXTURE_TLS_PORT,
@@ -45,6 +45,7 @@ import { IMMUTABLE_ADDRESS_VISUAL_STATES } from './immutable-address-visuals.mjs
 import { CONSENT_LOCK_VISUAL_STATES } from './consent-lock-visuals.mjs';
 import { PEER_NETWORK_STATUS_STATES } from './peer-network-status-states.mjs';
 import { armVaultLockStages } from './vault-lock-stages.mjs';
+import { createConsentDiagnostics, observeHosts } from './network-consent-cold.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -2055,6 +2056,129 @@ export const STATES = [
     name: 'idle-unlocked', kind: 'visual', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) { await rec.visual('idle-unlocked'); },
+  },
+
+  {
+    name: 'backup-network-policy', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const evidence = { schema: 1, phase: 'fresh', events: [], observerErrors: [] };
+      const diagnostic = createConsentDiagnostics(evidence, () => {});
+      const fresh = await launchPeerd({ extensionDir: ctx.extensionDir, panelPath: 'home/home.html' });
+      const directory = await mkdtemp(join(tmpdir(), 'peerd-backup-policy-'));
+      let observer;
+      const click = async (selector) => {
+        if (!await waitFor(() => evalIn(fresh.page, `!!document.querySelector(${JSON.stringify(selector)})`),
+          { budgetMs: 20_000 }) || !await clickAndSyncRedraw(fresh.page, selector)) throw new Error(`missing real control ${selector}`);
+      };
+      const exportBackup = async (mode, expectedDid = null) => {
+        evidence.phase = mode;
+        const start = { events: evidence.events.length,
+          hosts: await evalIn(fresh.swConn, 'globalThis.__backupHostCalls.length') };
+        const destination = await mkdtemp(join(directory, `${mode}-`));
+        const page = await openWidePage(fresh, 'options/options.html#!/transfer', { ready: '#exppass2' });
+        try {
+          await page.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: destination });
+          await evalIn(page, `(() => {
+            'use strict';
+            for (const id of ['exppass', 'exppass2']) {
+              const input = document.getElementById(id); input.value = ${JSON.stringify(PASSPHRASE)};
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+          })()`);
+          if (!await clickAndSyncRedraw(page, '.transfer-section > div > button')) throw new Error('Download backup is missing');
+          const status = await waitFor(() => evalIn(page, `(() => {
+            const status = document.querySelector('.transfer-status');
+            return status ? { text: status.textContent, success: status.classList.contains('transfer-status--success'),
+              retained: document.querySelector('#exppass').value.length > 0 && document.querySelector('#exppass2').value.length > 0,
+              enabled: [...document.querySelectorAll('.transfer-section button')].some((button) => button.textContent === 'Download backup' && !button.disabled) } : null;
+          })()`), { budgetMs: 60_000, pollMs: 100 });
+          if (!status?.enabled) throw new Error(`backup ${mode} did not settle`);
+          let payload, inspected;
+          if (status.success) {
+            payload = await waitFor(async () => {
+              const names = (await readdir(destination)).filter((name) => name.endsWith('.json'));
+              return names.length === 1 ? readFile(join(destination, names[0]), 'utf8').then(JSON.parse).catch(() => null) : null;
+            }, { budgetMs: 15_000, pollMs: 50 });
+            if (!payload) throw new Error(`backup ${mode} reported success without a real JSON download`);
+            inspected = await privateTransferRpc(page, { type: 'transfer/inspectImport', payload });
+            if (inspected?.ok !== true) throw new Error(`backup ${mode} could not inspect its actual download`);
+          }
+          await observer.barrier();
+          const events = evidence.events.slice(start.events);
+          const hosts = await evalIn(fresh.swConn, 'globalThis.__backupHostCalls.slice(' + start.hosts + ')');
+          const files = await readdir(destination);
+          const identity = payload?.dweb?.identityRecord;
+          const off = mode !== 'identity-on';
+          const noHost = hosts.length === 0 && !events.some((event) => event.href?.includes('/offscreen/offscreen.html'));
+          const noTransport = !events.some((event) => ['WebSocket', 'RTCPeerConnection', 'native-websocket'].includes(event.kind));
+          const result = { status, files, hosts, noHost, noTransport, did: identity?.did ?? null,
+            format: payload?.format ?? null, summary: inspected?.summary ?? null };
+          rec.observe(`actual backup ${mode}`, result);
+          if (baseRender && off) rec.observe(`merge-base backup ${mode}`, result);
+          else if (expectedDid && off) {
+            rec.check('identity-off refuses the download with distinct network guidance', !status.success && status.retained
+              && files.length === 0 && status.text.includes('Turn it on in Settings > Decentralized web')
+              && status.text.includes('Nothing was downloaded'));
+          } else {
+            rec.check(`${mode} downloads an inspectable real backup`, status.success && payload.format === 'peerd-export');
+            rec.check(`${mode} includes only the expected identity`, expectedDid
+              ? identity?.did === expectedDid && typeof identity.capsule === 'string' && identity.capsule.length > 0
+                && inspected.summary?.hasIdentityRecord === true && inspected.summary.identityDid === expectedDid
+              : !identity && inspected.summary?.hasIdentityRecord === false);
+          }
+          if (!baseRender && off) rec.check(`${mode} constructs no host or network transport`, noHost && noTransport);
+          rec.check(`${mode} export makes no model inference`, fresh.modelCallCount() === 0);
+          await rec.visualPage(mode === 'no-choice' ? 'backup-network-policy' : `backup-${mode}`, page);
+        } finally { await page.close(); }
+      };
+      try {
+        const initial = await rpc(fresh.page, { type: 'state/get' });
+        rec.check('backup policy starts in a real fresh vault', initial?.ok && initial.state?.vault?.initialized === false);
+        const existing = await evalIn(fresh.page, 'chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] })', true);
+        if (!Array.isArray(existing) || existing.length) throw new Error('a host exists before backup observation');
+        await evalIn(fresh.swConn, `(() => {
+          'use strict';
+          globalThis.__backupHostCalls = [];
+          const createDocument = chrome.offscreen.createDocument.bind(chrome.offscreen);
+          chrome.offscreen.createDocument = (...args) => {
+            globalThis.__backupHostCalls.push({ url: args[0]?.url }); return createDocument(...args);
+          };
+        })()`);
+        observer = await observeHosts(fresh, evidence, diagnostic, () => {});
+        const initialized = await rpc(fresh.page, { type: 'vault/initialize', passphrase: PASSPHRASE }, { timeoutMs: 120_000 });
+        if (initialized?.ok !== true) throw new Error('the fresh backup vault did not initialize');
+        const noChoice = (await rpc(fresh.page, { type: 'state/get' }))?.state?.settings;
+        rec.check('fresh backup has no inherited network choice', noChoice?.dwebChoiceMade === false && noChoice.dwebEnabled === false);
+        await exportBackup('no-choice');
+        await click('.onboarding-skip');
+        await click('[data-network-choice=skip]');
+        for (const field of ['.peer-name-input', '#onb-call', '#onb-notes']) {
+          if (!await waitFor(() => evalIn(fresh.page, `!!document.querySelector(${JSON.stringify(field)})`),
+            { budgetMs: 20_000 })) throw new Error(`missing personal setup ${field}`);
+          await click('.onboarding-skip');
+        }
+        const off = (await rpc(fresh.page, { type: 'state/get' }))?.state?.settings;
+        rec.check('Not now is a real persisted off choice', off?.dwebChoiceMade === true && off.dwebEnabled === false);
+        await exportBackup('no-identity-off');
+        evidence.phase = 'explicit-enable';
+        await evalIn(fresh.page, `location.hash = 'discover'`);
+        await click('[data-network-choice=enable]');
+        const started = await rpc(fresh.page, { type: 'dweb/base/start' });
+        if (started?.ok !== true || started.running !== true || !started.did?.startsWith('did:key:')) throw new Error('explicit network opt-in did not create the real identity');
+        const signaled = await waitFor(() => evidence.events.some((event) => event.phase === 'explicit-enable'
+          && event.kind === 'WebSocket'), { budgetMs: 30_000, pollMs: 100 });
+        rec.check('explicit opt-in proves the native transport observer works', !!signaled);
+        await exportBackup('identity-on', started.did);
+        const disabled = await rpc(fresh.page, { type: 'settings/update', patch: { dwebEnabled: false } });
+        if (disabled?.ok !== true || disabled.settings?.dwebEnabled !== false) throw new Error('the peer network did not turn off');
+        await exportBackup('identity-off', started.did);
+      } finally {
+        rec.observe('backup host and transport evidence', evidence);
+        try { if (observer) await observer.close(); }
+        finally { await fresh.close(); await rm(directory, { recursive: true, force: true }); }
+      }
+    },
   },
 
   // --- functional: the goal-mode autonomous loop -----------------------------

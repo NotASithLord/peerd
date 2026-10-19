@@ -290,6 +290,7 @@ describe('transfer/export', () => {
         },
       },
     });
+    deps.settingsStore.get = () => ({ dwebEnabled: true });
     const res = await makeSettingsRoutes(deps)['transfer/export'](authorized({ passphrase: 'long-enough-for-backup' }));
     expect(res.ok).toBe(true);
     expect(decrypted).toEqual(['anthropic.key']);
@@ -302,7 +303,87 @@ describe('transfer/export', () => {
     const { deps } = baseDeps({
       dwebTransfer: { exportRecord: async () => { throw new Error('offscreen failed'); } },
     });
+    deps.settingsStore.get = () => ({ dwebEnabled: true });
+    deps.vault.listSecretNames = async () => ['distributed/identity/v1'];
     expect(await makeSettingsRoutes(deps)['transfer/export'](authorized({ passphrase: 'long-enough-for-backup' })))
       .toEqual({ ok: false, error: 'identity-export-failed' });
+  });
+});
+
+describe('offline backup identity policy', () => {
+  for (const names of [[], ['anthropic.key'], ['distributed/device-key/v1', 'distributed/self-records/v1']]) {
+    test(`network off exports without waking custody when no identity exists: ${names.join(',') || 'empty vault'}`, async () => {
+      const { deps, calls } = baseDeps();
+      deps.vault.listSecretNames = async () => names;
+      let input: any;
+      const build = deps.buildExport;
+      deps.buildExport = async (value: any) => { input = value; return build(value); };
+      const reply = await makeSettingsRoutes(deps)['transfer/export'](authorized({ passphrase: 'long-enough-for-backup' }));
+      expect(reply).toMatchObject({ ok: true, identityIncluded: false, identityDid: null });
+      expect(calls.identityExport).toEqual([]);
+      expect(calls.getSecret).toEqual(names.filter((name) => !deps.isCustodySecretName(name)));
+      expect(input).toMatchObject({
+        storedSettings: { providerModel: 'm' }, memory: { docs: [] }, hooks: [], skills: [], providerEndpoints: null, dweb: null,
+      });
+      expect(Object.keys(input.secrets)).toEqual(calls.getSecret);
+    });
+  }
+
+  for (const name of ['distributed/identity/v1', 'distributed/identity/v2']) {
+    test(`network off refuses before decryption or backup creation when ${name} exists`, async () => {
+      const { deps, calls } = baseDeps();
+      deps.vault.listSecretNames = async () => ['anthropic.key', name];
+      let builds = 0;
+      deps.buildExport = async () => { builds += 1; return {}; };
+      expect(await makeSettingsRoutes(deps)['transfer/export'](authorized({ passphrase: 'long-enough-for-backup' })))
+        .toEqual({ ok: false, error: 'identity-export-network-off' });
+      expect(calls.identityExport).toEqual([]);
+      expect(calls.getSecret).toEqual([]);
+      expect(builds).toBe(0);
+    });
+  }
+
+  for (const initiallyEnabled of [false, true]) {
+    test(`one network snapshot controls the export when it starts ${initiallyEnabled ? 'on' : 'off'}`, async () => {
+      const { deps, calls } = baseDeps();
+      let enabled = initiallyEnabled;
+      let reads = 0;
+      deps.settingsStore.get = () => { reads += 1; return { dwebEnabled: enabled }; };
+      deps.vault.getSecret = async (name: string) => {
+        calls.getSecret.push(name); enabled = !initiallyEnabled; return 'sk-secret';
+      };
+      deps.dwebTransfer.exportRecord = async () => {
+        calls.identityExport.push('host'); throw new Error('host unavailable after choice changed');
+      };
+      const reply = await makeSettingsRoutes(deps)['transfer/export'](authorized({ passphrase: 'long-enough-for-backup' }));
+      expect(reads).toBe(1);
+      expect(enabled).toBe(!initiallyEnabled);
+      expect(calls.identityExport).toEqual(initiallyEnabled ? ['host'] : []);
+      expect(reply).toMatchObject(initiallyEnabled
+        ? { ok: false, error: 'identity-export-failed' }
+        : { ok: true, identityIncluded: false, identityDid: null });
+    });
+  }
+
+  test('network on still reaches custody with no identity and keeps its host fault distinct', async () => {
+    const { deps, calls } = baseDeps();
+    deps.settingsStore.get = () => ({ dwebEnabled: true });
+    deps.vault.listSecretNames = async () => [];
+    deps.dwebTransfer.exportRecord = async () => {
+      calls.identityExport.push('host'); throw new Error('custody host failed');
+    };
+    let builds = 0;
+    deps.buildExport = async () => { builds += 1; return {}; };
+    expect(await makeSettingsRoutes(deps)['transfer/export'](authorized({ passphrase: 'long-enough-for-backup' })))
+      .toEqual({ ok: false, error: 'identity-export-failed' });
+    expect(calls.identityExport).toEqual(['host']);
+    expect(builds).toBe(0);
+  });
+
+  test('a Store backup needs neither a custody owner nor a network-setting read', async () => {
+    const { deps } = baseDeps({ dwebTransfer: null, CHANNEL: 'store' });
+    deps.settingsStore.get = () => { throw new Error('unexpected network read'); };
+    expect(await makeSettingsRoutes(deps)['transfer/export'](authorized({ passphrase: 'long-enough-for-backup' })))
+      .toMatchObject({ ok: true, identityIncluded: false, identityDid: null });
   });
 });
