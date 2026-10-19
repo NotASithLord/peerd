@@ -122,7 +122,7 @@ export const WEBVM_TERMINAL_STATE = {
       const stored = await vm.run(`od -An -v -tx1 ${quote(`${directory}/human.txt`)}; cat ${quote(`${directory}/human.txt`)}; printf '\\n'`);
       rec.observe('real human input bytes', stored);
       if (!base) rec.check('human input retains its UTF-8 bytes', compactHex(stored.split('\n')[0]) === hex('café'));
-      await rec.visualPage('webvm-terminal-ready', vm.page);
+      await rec.visualPage('webvm-terminal-live', vm.page);
       await vm.metrics(900, 600);
       const resized = await vm.run('stty size; tput cols; tput lines; true');
       rec.observe('resized real guest', resized);
