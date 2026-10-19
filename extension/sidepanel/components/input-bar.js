@@ -61,6 +61,7 @@ import {
  * @property {string} transcriptBaseline
  * @property {Trigger|null} trigger
  * @property {number} paletteIndex
+ * @property {string|null} dismissed   draft text whose popup Escape closed
  * @property {PaletteItems} items
  * @property {string|null} itemsKey
  * @property {HTMLTextAreaElement|null} el
@@ -154,6 +155,7 @@ const autosize = (el) => {
 const closePalette = (ui) => {
   ui.trigger = null;
   ui.paletteIndex = 0;
+  ui.dismissed = null;
 };
 
 // Fetch candidate data for the current trigger type, then redraw. Cached
@@ -296,6 +298,7 @@ export const InputBar = {
     // Composer palette state.
     vnode.state.trigger = null;       // current activeTrigger() result | null
     vnode.state.paletteIndex = 0;     // active option in the popup
+    vnode.state.dismissed = null;     // text whose popup Escape closed
     vnode.state.items = {};           // { commands?, tabs?, files? } cache
     vnode.state.itemsKey = null;      // which type the cache currently holds
     vnode.state.el = null;            // the textarea DOM node
@@ -354,6 +357,8 @@ export const InputBar = {
         ? 'Peerd has an unconfirmed message for this chat. Check delivery before sending again.'
         : null;
       ui._sid = sid;
+      // The popup belonged to the previous chat's draft.
+      closePalette(ui);
     }
     // A first send creates its session inside the worker. If the state push with
     // that new id wins the race against a lost send reply, the pending fence was
@@ -666,6 +671,11 @@ export const InputBar = {
     const refreshTrigger = () => {
       const el = ui.el;
       if (!el) { closePalette(ui); return; }
+      // why: Escape closes the popup on keydown, but the keyup (and a click)
+      // lands here with the same text and would reopen it. Stay closed until
+      // the text changes.
+      if (ui.dismissed === el.value) return;
+      ui.dismissed = null;
       const trig = activeTrigger(el.value, el.selectionStart ?? el.value.length);
       const changed = (trig?.type !== ui.trigger?.type) || (trig?.kind !== ui.trigger?.kind);
       ui.trigger = trig;
@@ -707,6 +717,14 @@ export const InputBar = {
       // user loses their half-composed text. isComposing + the legacy keyCode
       // 229 both mark an in-progress composition.
       const composing = e.isComposing || e.keyCode === 229;
+      // Escape closes the popup whether or not it has matches ("No matching
+      // commands" is a popup too) and marks the text as dismissed.
+      if (ui.trigger && e.key === 'Escape' && !composing) {
+        e.preventDefault();
+        closePalette(ui);
+        ui.dismissed = ui.value;
+        return;
+      }
       // Palette is open: intercept navigation keys so they drive the
       // popup, not the textarea.
       if (ui.trigger) {
@@ -735,11 +753,6 @@ export const InputBar = {
               return;
             }
           }
-          if (e.key === 'Escape') {
-            e.preventDefault();
-            closePalette(ui);
-            return;
-          }
         }
       }
       // Enter sends; Shift+Enter inserts a newline (textarea default).
@@ -767,9 +780,12 @@ export const InputBar = {
           : 'Message peerd…';
 
     // aria-activedescendant points at the active option when the palette
-    // is open, so screen readers announce the highlighted candidate.
+    // lists one, so screen readers announce the highlighted candidate. An
+    // empty "no matches" popup has no option, so it names no descendant.
     const paletteOpen = !!ui.trigger;
-    const activeDesc = paletteOpen ? PALETTE_OPTION_ID(ui.paletteIndex) : undefined;
+    const optionCount = paletteOpen ? visibleCandidates(ui.trigger, ui.items).length : 0;
+    const activeDesc = optionCount > 0
+      ? PALETTE_OPTION_ID(Math.min(ui.paletteIndex, optionCount - 1)) : undefined;
 
     // The mic→send morph. A draft arms the send disc — EXCEPT while the
     // mic is actively listening: transcript chunks make the value

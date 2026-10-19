@@ -253,6 +253,27 @@ describe('reduceChat', () => {
     expect(switched.lastError).toBe(null);
   });
 
+  test('a failed turn keeps its error banner through the trailing turn/state; the next send or a chat switch clears it', () => {
+    const raw = "Provider 'ollama' HTTP 401: {\"error\":{\"type\":\"authentication_error\"}}";
+    const messages = [{ id: 'u1', role: 'user', content: 'hi' }, { id: 'a1', role: 'assistant', content: '', streaming: true }];
+    const live = reduceChat(withSession('A', messages), { type: 'turn/streaming', sessionId: 'A', streaming: true });
+    // the port order of a failed turn: error, the loop's final snapshot, stop, streaming:false
+    const errored = reduceChat(live, { type: 'turn/error', sessionId: 'A', messageId: 'a1', error: raw });
+    const snapshot = reduceChat(errored, { type: 'turn/state', session: { sessionId: 'A',
+      messages: [messages[0], { ...messages[1], streaming: false, error: raw }] } });
+    const settled = reduceChat(reduceChat(snapshot, { type: 'turn/stop', sessionId: 'A', messageId: 'a1' }),
+      { type: 'turn/streaming', sessionId: 'A', streaming: false });
+    expect(settled.streaming).toBe(false);
+    expect(settled.lastError).toBe(raw);
+
+    // a background chat's send leaves the viewed banner alone
+    expect(reduceChat(settled, { type: 'turn/streaming', sessionId: 'B', streaming: true }).lastError).toBe(raw);
+    // the next send in this chat clears it
+    expect(reduceChat(settled, { type: 'turn/streaming', sessionId: 'A', streaming: true }).lastError).toBe(null);
+    // so does switching chats
+    expect(reduceChat(settled, { type: 'state', state: { session: { sessionId: 'B', messages: [] } } }).lastError).toBe(null);
+  });
+
   test('async-tasks/update keys the snapshot by parent session', () => {
     const s1 = reduceChat(INITIAL_STATE, { type: 'async-tasks/update', parentSessionId: 'p1', tasks: [{ taskId: 'as-1' }] });
     expect(s1.asyncTasks.p1).toEqual([{ taskId: 'as-1' }]);
