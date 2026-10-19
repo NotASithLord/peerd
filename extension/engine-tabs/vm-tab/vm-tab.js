@@ -39,6 +39,7 @@ import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
 import { stripChunk } from '/engine-tabs/vm-tab/marker-strip.js';
 import { ERRFILE_PREFIX, buildWrappedCommand, parseRunCapture } from '/engine-tabs/vm-tab/run-capture.js';
 import { buildFirefoxWebVmNote } from '/engine-tabs/vm-tab/firefox-webvm-note.js';
+import { holdDiskLock } from '/engine-tabs/vm-tab/disk-lock.js';
 
 // WebVM needs a cross-origin-isolated page (for SharedArrayBuffer). Chrome grants
 // it via the COOP/COEP manifest keys; Firefox doesn't honor them, so
@@ -1178,6 +1179,18 @@ const boot = async () => {
   // once one exists so the button can never fire against nothing.
   DOM.exportBtn.hidden = false;
   trace('info', `vm record loaded: id=${vmId} name=${vmName} disk=${diskOverlayKey}`);
+
+  // 1b. One tab per disk (see disk-lock.js): refuse before any device mounts.
+  const diskLock = await holdDiskLock(diskOverlayKey);
+  if (diskLock !== 'held') {
+    // why drop the hash: after a service-worker restart the tab tracker adopts
+    // every tab whose URL names this VM, and the last one wins. A refused tab
+    // must not be a candidate, or agent commands land on a page with no VM.
+    history.replaceState(null, '', location.pathname);
+    if (diskLock === 'busy') failBoot('VM already open in another tab', 'close this tab and use the open one');
+    else failBoot('Could not lock the VM disk', 'close this tab and reopen the VM to try again');
+    return;
+  }
 
   // 2. Pre-flight: cross-origin isolation (manifest already sets this)
   const isolated = globalThis.crossOriginIsolated === true;
