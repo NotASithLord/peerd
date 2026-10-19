@@ -940,12 +940,19 @@ export const LibrarySection = {
           renaming
             ? m('input', {
                 style: 'width:100%; font-size:14px;',
+                'aria-label': `Rename ${app.name}`,
                 value: ui.renameValue,
-                oncreate: (/** @type {{ dom: HTMLInputElement }} */ v) => v.dom.focus(),
+                // why select: the field opens holding the current name, and a
+                // new name typed at once must replace it, not append to it.
+                oncreate: (/** @type {{ dom: HTMLInputElement }} */ v) => { v.dom.focus(); v.dom.select(); },
                 oninput: (/** @type {{ target: HTMLInputElement }} */ e) => { ui.renameValue = e.target.value; },
+                // why redraw before the restore: focusLibraryAction runs next
+                // frame and yields to a foreign focus owner; without a queued
+                // redraw the input still holds focus then and the restore is
+                // skipped. Blur (a click elsewhere) keeps the user's target.
                 onkeydown: (/** @type {KeyboardEvent} */ e) => {
-                  if (e.key === 'Enter') LibrarySection.commitRename(vnode, app);
-                  if (e.key === 'Escape') { ui.renamingId = null; m.redraw(); }
+                  if (e.key === 'Enter') { LibrarySection.commitRename(vnode, app); m.redraw(); focusLibraryAction(app.id, 'more'); }
+                  if (e.key === 'Escape') { ui.renamingId = null; m.redraw(); focusLibraryAction(app.id, 'more'); }
                 },
                 onblur: () => LibrarySection.commitRename(vnode, app),
               })
