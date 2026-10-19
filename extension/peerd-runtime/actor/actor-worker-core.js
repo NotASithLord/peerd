@@ -169,13 +169,10 @@ export const runActorLoop = async (deps, req) => {
   let toolCalls = 0;
   let stopReason;
   let errorEvent;
-  // Per-turn scoping (the in-SW path's `before`/slice guard): the worker session
-  // is SEEDED with the actor's prior history (statefulness), so finalAssistantText
-  // over the WHOLE transcript would return a PRIOR turn's reply when THIS turn
-  // emits none (Stop/error) — the stale-reply bug. Capture the length BEFORE the
-  // turn and read only the messages it adds.
+  let outcomeUnknown = false;
+  // why: return only this turn. A prior reply must not hide a failed turn.
   const before = (await sessions.get(sessionId))?.messages?.length ?? 0;
-  for await (const ev of runUserTurn({
+  try { for await (const ev of runUserTurn({
     sessionId,
     userText,
     callModel,
@@ -220,13 +217,15 @@ export const runActorLoop = async (deps, req) => {
       usage.cacheWriteTokens += ev.usage.cacheWriteTokens || 0;
     }
     onEvent?.(ev);
+  } } catch (cause) {
+    const detail = /** @type {{outcomeKnown?:boolean,message?:string}} */ (cause);
+    if (detail?.outcomeKnown !== false) throw cause;
+    // why: the loop saved the unknown receipt before it threw. Let the host stamp it.
+    outcomeUnknown = true; errorEvent = detail.message ?? String(cause); stopReason = 'error';
   }
-  // Only THIS turn's messages — the full transcript slice (user + assistant
-  // rounds + tool_use/tool_result), so the SW can persist the WHOLE exchange to
-  // the real session (not a lossy user+finalText pair) and statefulness holds.
   const all = (await sessions.get(sessionId))?.messages ?? [];
   const newMessages = all.slice(before);
   const finalText = finalAssistantText({ messages: newMessages });
-  const error = (!finalText && errorEvent) ? String(errorEvent) : undefined;
+  const error = ((outcomeUnknown || !finalText) && errorEvent) ? String(errorEvent) : undefined;
   return { finalText, newMessages, usage, stopReason, toolCalls, ...(error ? { error } : {}) };
 };
