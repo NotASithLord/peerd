@@ -68,6 +68,7 @@ import {
  * @property {string|null} attachError
  * @property {string|null} sendError
  * @property {UnconfirmedSend|null} unconfirmedSend
+ * @property {string|null} [adoptedOperationId]  the pending record whose text filled the composer
  * @property {HTMLInputElement|null} fileInputEl
  * @property {string|null} [sendAccent]
  * @property {(() => void)|null} [resizeListener]
@@ -305,6 +306,7 @@ export const InputBar = {
     vnode.state.unconfirmedSend = loadUnconfirmed(vnode.state._sid)
       ?? (vnode.state._sid ? loadUnconfirmed(null) : null);
     if (vnode.state.unconfirmedSend && !vnode.state.value) {
+      vnode.state.adoptedOperationId = vnode.state.unconfirmedSend.operationId;
       vnode.state.value = vnode.state.unconfirmedSend.text;
       saveDraft(vnode.state._sid, vnode.state.value);
     }
@@ -359,12 +361,19 @@ export const InputBar = {
     // that new id wins the race against a lost send reply, the pending fence was
     // necessarily persisted under `new`; adopt it conservatively rather than
     // letting the newly identified chat expose an unfenced Send button.
-    if (!ui.unconfirmedSend && sid) {
+    // why !ui.busy on both adoption branches: this composer's own send persists
+    // its record BEFORE awaiting the reply, and Mithril redraws as soon as the
+    // submit handler yields. Adopting that record would put the sent text back
+    // into the composer, where Enter sends it again.
+    if (!ui.unconfirmedSend && sid && !ui.busy) {
       const freshPending = loadUnconfirmed(null);
       if (freshPending) {
         ui.unconfirmedSend = freshPending;
-        ui.value = freshPending.text;
-        saveDraft(sid, ui.value);
+        if (!ui.value.trim()) {
+          ui.adoptedOperationId = freshPending.operationId;
+          ui.value = freshPending.text;
+          saveDraft(sid, ui.value);
+        }
         saveDraft(null, '');
         ui.sendError = 'Peerd has an unconfirmed message for this chat. Check delivery before sending again.';
         saveUnconfirmed(sid, freshPending);
@@ -372,13 +381,22 @@ export const InputBar = {
       }
     }
     const persistedPending = loadUnconfirmed(sid) ?? (sid ? loadUnconfirmed(null) : null);
-    if (!ui.unconfirmedSend && persistedPending) {
+    if (!ui.unconfirmedSend && persistedPending && !ui.busy) {
       ui.unconfirmedSend = persistedPending;
-      ui.value = persistedPending.text;
-      saveDraft(sid, ui.value);
+      // why fill only an empty composer: the record may belong to another
+      // window's send; that window owns the text, this one keeps its own draft.
+      if (!ui.value.trim()) {
+        ui.adoptedOperationId = persistedPending.operationId;
+        ui.value = persistedPending.text;
+        saveDraft(sid, ui.value);
+      }
       ui.sendError = 'Message unconfirmed.';
     } else if (ui.unconfirmedSend && !persistedPending && !ui.busy) {
-      if (ui.unconfirmedSend.source === 'starter' && ui.value === ui.unconfirmedSend.text) {
+      // The record settled elsewhere: clear only a copy this composer adopted
+      // from it, never text the user typed.
+      const adopted = ui.unconfirmedSend.source === 'starter'
+        || ui.adoptedOperationId === ui.unconfirmedSend.operationId;
+      if (adopted && ui.value === ui.unconfirmedSend.text) {
         ui.value = '';
         saveDraft(sid, '');
       }
@@ -482,10 +500,10 @@ export const InputBar = {
       ui.attachments = [];
       ui.attachError = null;
       closePalette(ui);
-      // Render the in-flight ownership immediately. Mithril does not redraw an
-      // async event handler until its promise settles, which can leave the
-      // stale draft and enabled Send button visible for the entire worker/host
-      // wait. The component state already retains the exact recovery copy.
+      // Render the in-flight ownership immediately. Mithril's own redraw after
+      // this handler yields waits for the next frame, which would leave the
+      // stale draft and enabled Send button visible until then. The component
+      // state already retains the exact recovery copy.
       m.redraw.sync();
       try {
         const reply = await sendAgentWithCustody({
