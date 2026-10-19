@@ -2313,10 +2313,12 @@ describe('home.discover share link', () => {
     try {
       await settle();
       await click(view.root, 'Paste link');
-      expect(status()).toBe(null);
+      const idleStatus = el(view.root, '.disc-start-row.is-open [role="status"]');
+      expect(idleStatus.textContent).toBe('');
       enterLink(view.root, address);
       await click(view.root, 'Check link');
-      expect(text(/** @type {Element} */ (status()))).toBe('Checking the link. peerd downloads the app and checks every file…');
+      expect(status()).toBe(idleStatus);
+      expect(text(idleStatus)).toBe('Checking the link. peerd downloads the app and checks every file…');
       // Cancel while the check runs: the row closes, and the late result opens nothing.
       await press(view.root, 'Cancel');
       expect(view.root.querySelector('.disc-start-form')).toBe(null);
@@ -2327,7 +2329,7 @@ describe('home.discover share link', () => {
       await click(view.root, 'Paste link');
       const input = /** @type {HTMLInputElement} */ (el(view.root, '.disc-start-form input'));
       expect(input.value).toBe(address);
-      expect(status()).toBe(null);
+      expect(status()?.textContent).toBe('');
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await settle();
       expect(view.root.querySelector('.disc-start-form')).toBe(null);
       expect(document.activeElement).toBe(view.root.querySelector('[data-paste-link]'));

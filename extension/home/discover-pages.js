@@ -119,9 +119,9 @@ export const startRow = ({ icon: name, title, text, action, extra }) => m('li.di
 ]);
 
 /**
- * The share row, opened in place by "Paste link". `status` explains a held
- * install receipt or a check in progress; `note` says why "Check link" is
- * off. `onCancel` closes the row (Cancel, or Escape in the input); null while
+ * why a stable status node: a live region must exist before its text changes.
+ * Only its empty state leaves the flex flow, so it adds no gap.
+ * `onCancel` closes the row (Cancel, or Escape in the input); null while
  * a receipt is held, because only its outcome releases the row.
  * @param {{value:string, inputDisabled:boolean, checkDisabled:boolean, status:string|null, note:string|null, error:string,
  *   oninput:(value:string)=>void, onCheck:()=>void, onCancel:(()=>void)|null}} props
@@ -147,7 +147,7 @@ export const shareRow = ({ value, inputDisabled, checkDisabled, status, note, er
       m('button.secondary.disc-btn', { type: 'submit', disabled: checkDisabled }, 'Check link'),
       onCancel ? m('button.secondary.disc-btn', { type: 'button', onclick: onCancel }, 'Cancel') : null,
     ]),
-    status ? m('p.type-small.disc-footnote', { role: 'status' }, status) : null,
+    m('p.type-small.disc-footnote', { role: 'status', style: status ? null : 'position:absolute' }, status),
     note ? m('p.type-small.disc-footnote', note) : null,
     error ? m('p.error', { role: 'alert' }, error) : null,
   ]);
