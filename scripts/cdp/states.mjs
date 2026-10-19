@@ -2104,6 +2104,8 @@ export const STATES = [
             inspected = await privateTransferRpc(page, { type: 'transfer/inspectImport', payload });
             if (inspected?.ok !== true) throw new Error(`backup ${mode} could not inspect its actual download`);
           }
+          rec.observe(`settled backup receipt ${mode}`, { status, files: await readdir(destination),
+            format: payload?.format ?? null, summary: inspected?.summary ?? null });
           await observer.barrier();
           const events = evidence.events.slice(start.events);
           const hosts = await evalIn(fresh.swConn, 'globalThis.__backupHostCalls.slice(' + start.hosts + ')');
@@ -2164,8 +2166,26 @@ export const STATES = [
         evidence.phase = 'explicit-enable';
         await evalIn(fresh.page, `location.hash = 'discover'`);
         await click('[data-network-choice=enable]');
-        const started = await rpc(fresh.page, { type: 'dweb/base/start' });
-        if (started?.ok !== true || started.running !== true || !started.did?.startsWith('did:key:')) throw new Error('explicit network opt-in did not create the real identity');
+        const readback = { choice: null, ready: null, info: null };
+        const saved = await waitFor(async () => {
+          const reply = await rpc(fresh.page, { type: 'state/get' });
+          readback.choice = { ok: reply?.ok, dwebChoiceMade: reply?.state?.settings?.dwebChoiceMade,
+            dwebEnabled: reply?.state?.settings?.dwebEnabled };
+          return readback.choice.ok === true && readback.choice.dwebChoiceMade === true
+            && readback.choice.dwebEnabled === true;
+        }, { budgetMs: 30_000, pollMs: 100 });
+        rec.observe('explicit peer-network choice read-back', readback.choice);
+        if (!saved) throw new Error(`explicit network choice did not persist: ${JSON.stringify(readback)}`);
+        const running = await waitFor(async () => {
+          readback.ready = await rpc(fresh.page, { type: 'bootstrap/ready' });
+          if (readback.ready?.ok !== true || readback.ready.featureLeases?.leases?.dweb?.status !== 'active') return false;
+          readback.info = await rpc(fresh.page, { type: 'dweb/distributed/info' });
+          return readback.info?.ok === true && readback.info.running === true
+            && readback.info.did?.startsWith('did:key:');
+        }, { budgetMs: 60_000, pollMs: 100 });
+        rec.observe('native peer-network startup read-back', readback);
+        if (!running) throw new Error(`native network opt-in did not create the real identity: ${JSON.stringify(readback)}`);
+        const started = readback.info;
         const signaled = await waitFor(() => evidence.events.some((event) => event.phase === 'explicit-enable'
           && event.kind === 'WebSocket'), { budgetMs: 30_000, pollMs: 100 });
         rec.check('explicit opt-in proves the native transport observer works', !!signaled);
