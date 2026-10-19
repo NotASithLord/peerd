@@ -88,6 +88,7 @@ const REQUIRED_CTX = [
 const DISPATCH_DEADLINE_MS = 10 * 60_000;
 const UNKNOWN_TOOL_OUTCOME = 'outcome_unknown: Verify the target before retrying.';
 const UNKNOWN_TURN_OUTCOME = 'Turn outcome unknown. Check the session before retrying.';
+const TRUNCATED_TOOL_CALL = 'not_run: The output limit cut this call before its arguments ended. Split the work into smaller calls.';
 const REASONING_BUDGET_TOKENS = 2048;
 const REASONING_EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
 const DEFAULT_REASONING_EFFORT = 'medium';
@@ -305,6 +306,7 @@ export async function* runUserTurn(ctx) {
   // chat, nothing durable, and a re-prompt restarted the same doomed
   // reasoning from scratch. Bounded so a pathological prompt can't loop
   // the provider forever; the 64k default ceiling makes this rare.
+  // A tool call cut at the ceiling shares the bound (the not_run round below).
   const MAX_TRUNCATION_CONTINUES = 2;
   let truncationContinues = 0;
   /** @type {InternalMessage | null} */
@@ -844,6 +846,48 @@ export async function* runUserTurn(ctx) {
 
     if (errored) return;
     if (stopReason !== 'tool_use' || toolUses.length === 0) {
+      // A tool call cut by the output limit never ran: its arguments are
+      // incomplete (an unparseable buffer reads as `{}`), so dispatching it
+      // would act on nothing. Answer every cut tool_use with a not_run result
+      // (the next model call must pair each tool_use) and continue, bounded
+      // like the thinking-only truncation below, so the model can split the
+      // work instead of leaving a dangling call the panel shows as running.
+      // why the abort guard and the bound run BEFORE the append: a history
+      // that ends on a user message with tool results reads as resumable
+      // (resume-detect 'model-call-pending'), so auto-resume would re-drive
+      // the turn past the bound on every chat open and undo a Stop. Ending
+      // here instead leaves the last cut call a dangling tool_use on the
+      // aborted / max_tokens message: not resumable, settled in the panel,
+      // and paired by the format layer's orphan repair on the next turn.
+      if (stopReason === 'max_tokens' && toolUses.length > 0) {
+        if (wasAborted()) {
+          if (!await finalizeAbort(assistantStub.id, undefined)) {
+            yield {
+              type: 'stop', sessionId,
+              messageId: assistantStub.id, stopReason: 'aborted',
+            };
+          }
+          return;
+        }
+        if (truncationContinues >= MAX_TRUNCATION_CONTINUES) return;
+        truncationContinues += 1;
+        /** @type {InternalMessage} */
+        const notRunMessage = {
+          role: 'user',
+          content: '',
+          toolResults: toolUses.map((tu) => ({
+            tool_use_id: tu.id,
+            content: TRUNCATED_TOOL_CALL,
+            is_error: true,
+            outcomeKnown: true,
+          })),
+          id: uuidv7(now),
+          when: now(),
+        };
+        session = await sessions.appendMessage(sessionId, notRunMessage);
+        yield { type: 'state', session };
+        continue;
+      }
       // Thinking-only truncation → auto-continue (see counter above).
       // Continuation rides a synthetic USER turn — the API-sanctioned
       // shape (a trailing assistant message would be a prefill, which

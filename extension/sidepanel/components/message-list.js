@@ -67,6 +67,39 @@ const actorOutcomeUnknownFailure = (_text) =>
 /** @typedef {{ toolUse: ToolUse, toolResult: ToolResult|null }} PairedTool */
 
 /**
+ * The resting label of a tool_use that never got a result on a finished turn.
+ * @typedef {'cancelled'|'outcome unknown'|'not run'} SettledLabel
+ */
+
+/**
+ * How a tool_use with NO result rests once its turn is over, or null while
+ * the turn can still produce the result. why stopReason 'tool_use' with no
+ * error stays live: the loop saves the assistant message as streaming:false +
+ * 'tool_use' BEFORE it dispatches, and a SW restart resumes such a turn
+ * (resume-detect 'tools-pending'); only an error ends it. why 'outcome
+ * unknown' is not 'cancelled': Stop cannot prove that a tool which was
+ * already running also stopped (outcomeKnown false), so only an aborted
+ * turn may claim 'cancelled'. Every other end (max_tokens, end_turn, an
+ * error) simply never ran the call.
+ * @param {ChatMessage} message
+ * @returns {SettledLabel|null}
+ */
+const settledLabel = (message) => {
+  if (message.stopReason === 'aborted') return 'cancelled';
+  const over = !!message.error
+    || (!message.streaming && !!message.stopReason && message.stopReason !== 'tool_use');
+  if (!over) return null;
+  return message.outcomeKnown === false ? 'outcome unknown' : 'not run';
+};
+
+/** The expanded body of a settled tool_use, per label. */
+const SETTLED_NOTES = Object.freeze({
+  'cancelled': 'Cancelled. The turn was stopped before this tool ran.',
+  'outcome unknown': 'Outcome unknown. The turn was stopped while this tool ran. Check the session before retrying.',
+  'not run': 'Not run. The turn ended before this tool ran.',
+});
+
+/**
  * An inline "peerd opened a tab" notice event.
  * @typedef {Object} TabEvent
  * @property {string} key
@@ -657,9 +690,9 @@ const AssistantMessage = {
               key: toolUse.id,
               toolUse,
               toolResult,
-              // an aborted turn never produced this tool's result — render it
-              // 'cancelled', not a perpetual 'running…' (see ToolCall).
-              interrupted: message.stopReason === 'aborted',
+              // a finished turn never produced this tool's result: render it
+              // settled, not a perpetual 'running…' (see settledLabel + ToolCall).
+              interrupted: settledLabel(message),
               liveStream: vmStreams?.[toolUse.id] ?? null,
               spawned,
               actors,
@@ -828,7 +861,7 @@ const ToolCall = {
    * @param {{
    *   attrs: {
    *     toolUse: ToolUse, toolResult: ToolResult|null,
-   *     interrupted?: boolean,
+   *     interrupted?: SettledLabel|null,
    *     liveStream?: { stdout: string, stderr: string }|null,
    *     spawned?: TranscriptArgs['spawned'],
    *     actors?: Record<string, any>,
@@ -855,6 +888,8 @@ const ToolCall = {
     // spend-limit / steer) is NOT still running — without this it shows
     // "running…" with a pulsing dot forever, and persists that way across a
     // reload. 'cancelled' gives the card a terminal, honest resting state.
+    // The label (`interrupted`) says HOW the call settled: cancelled, outcome
+    // unknown or not run; 'cancelled' is the shared resting status underneath.
     const status = toolResult
       ? (toolResult.is_error ? 'failed' : 'ok')
       : (interrupted ? 'cancelled' : 'pending');
@@ -881,7 +916,7 @@ const ToolCall = {
       }, [
         m('span.disclosure', ui.expanded ? '▼' : '▶'),
         m(`span.tool-status-dot.dot-${status}`,
-          { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
+          { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? (interrupted ?? 'cancelled') : 'ok' }),
         m('span.tool-name', toolUse.name),
         m('span.tool-args', argsSummary(toolUse.input)),
         policyStatus
@@ -896,7 +931,7 @@ const ToolCall = {
           : null,
         m('.spacer'),
         status === 'pending' ? m('span.tool-pending', 'running…')
-          : status === 'cancelled' ? m('span.tool-cancelled', 'cancelled')
+          : status === 'cancelled' ? m('span.tool-cancelled', interrupted ?? 'cancelled')
           : meta ? m('span.tool-duration', `${meta.durationMs}ms`) : null,
       ]),
       // why: a vm_boot can take many seconds to finish (pip install,
@@ -953,7 +988,7 @@ const ToolCall = {
         m('.tool-result', [
           toolResult
             ? m('pre.tool-result-content', formatResultContent(toolResult))
-            : m('p.muted', interrupted ? 'Cancelled — the turn was stopped before this tool ran.' : 'Result pending…'),
+            : m('p.muted', interrupted ? SETTLED_NOTES[interrupted] : 'Result pending…'),
         ]),
       ]) : null,
     ]);
@@ -969,7 +1004,7 @@ const ToolCall = {
 // MAX_NESTED_DEPTH visually; deeper runs are still inspectable.
 /**
  * @param {{
- *   toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: boolean,
+ *   toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: SettledLabel|null,
  *   spawned?: TranscriptArgs['spawned'], actors?: Record<string, any>,
  *   loadActor?: (sessionId: string, retry?: boolean) => void,
  *   peerName?: string, depth: number, ui: ToolCallState,
@@ -985,7 +1020,7 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
   const task = childSession?.task ?? toolUse.input?.task ?? '';
   const tooDeep = depth + 1 > MAX_NESTED_DEPTH;
   const terminalLabel = status === 'pending' ? 'running…'
-    : status === 'cancelled' ? 'cancelled'
+    : status === 'cancelled' ? (interrupted ?? 'cancelled')
     : status === 'failed' ? (outcomeUnknown ? 'Outcome unknown' : 'failed')
     : 'done';
 
@@ -1040,7 +1075,7 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
 // by this tool_use id). The tool RESULT is just the async "delivered" ack, so the
 // card's live state (streaming / error / cost) — not the result — drives the chip.
 /**
- * @param {{ toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: boolean,
+ * @param {{ toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: SettledLabel|null,
  *   actors?: Record<string, any>, spawned?: TranscriptArgs['spawned'],
  *   loadActor?: (sessionId: string) => void, peerName?: string, depth: number, ui: ToolCallState }} a
  */
@@ -1099,7 +1134,7 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
   const completedAwait = !card && !!toolResult && toolResult.is_error !== true
     && toolUse.input?.await === true && !handedOff;
   const terminalLabel = status === 'pending' ? 'working…'
-    : status === 'cancelled' ? 'cancelled'
+    : status === 'cancelled' ? ((card || toolResult) ? 'cancelled' : (interrupted ?? 'cancelled'))
     : status === 'failed' ? (outcomeUnknown ? 'Outcome unknown' : notRun ? 'Not run' : 'failed')
     : handedOff ? 'handed off'
     : acceptedAsync ? 'accepted'
