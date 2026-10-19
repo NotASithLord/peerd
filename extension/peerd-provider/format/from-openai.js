@@ -111,8 +111,15 @@ export async function* fromOpenAiStream(body, { provider = 'openrouter' } = {}) 
 
     if (payload.error) {
       const msg = payload.error?.message ?? JSON.stringify(payload.error);
+      // why: a mid-stream error chunk (OpenRouter documents one, with
+      // finish_reason 'error') is terminal and names its cause. Flush any
+      // billed usage, then stop here as from-anthropic does: falling through
+      // to the synthesized 'incomplete' stop would let the loop overwrite this
+      // error with a generic stream-drop note and auto-resume the turn.
+      if (payload.usage) pendingUsage = normalizeUsage(payload.usage);
+      if (pendingUsage) yield { type: 'usage', usage: pendingUsage };
       yield { type: 'error', error: `${provider}: ${msg}` };
-      continue;
+      return;
     }
 
     // Usage rides its own (usually choice-less) chunk near the end. Read
