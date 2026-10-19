@@ -74,7 +74,7 @@ describe('minimal vault authority-kernel prototype', () => {
     vault.lock();
   });
 
-  test('first-paint state is explicit about unavailable semantic execution', () => {
+  test('first-paint state keeps a controller that has not started neutral', () => {
     const state = buildVaultKernelState({
       kernel: KERNEL,
       status: { initialized: false, prfEnrolled: false, hasRecovery: false },
@@ -88,8 +88,7 @@ describe('minimal vault authority-kernel prototype', () => {
       prfEnrolled: false, hasRecovery: false, lockReason: null,
     });
     expect(state.capabilities.actorExecution).toEqual({
-      status: 'temporarily_unavailable', host: 'offscreen-document-worker',
-      reason: 'controller-not-ready', retryable: true,
+      status: 'not-started', host: 'offscreen-document-worker', reason: null, retryable: false,
     });
     expect(state.session.sessionId).toBeNull();
     expect(state.providers).toEqual({ current: '', model: '', hasKey: false });

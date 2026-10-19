@@ -5,7 +5,7 @@
 // Worker per turn, relays exact model-authority stream requests and tool-dispatch
 // requests to the SW, forwards loop events, and resolves with the turn result.
 
-import { ACTOR_WORKER_PROTOCOL, ACTOR_WORKER_STARTUP_MS, validActorWorkerRealm } from './actor-worker-protocol.js';
+import { ACTOR_WORKER_PROTOCOL, ACTOR_WORKER_STARTUP_MS, validActorWorkerRealm } from '/shared/actor-worker-protocol.js';
 import {
   AGENT_PROGRAM,
   describeExecution,

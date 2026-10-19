@@ -4,6 +4,7 @@ import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';
 import { ActorIsolationBanner } from '/sidepanel/components/actor-isolation-banner.js';
 import { MessageList } from '/sidepanel/components/message-list.js';
+import { EmptyState } from '/sidepanel/components/chat-view.js';
 
 const flush = async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -11,6 +12,30 @@ const flush = async () => {
 };
 
 describe('sidepanel actor isolation UX', () => {
+  it('keeps not-started neutral and blocks cards for every actual or unknown failure', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    try {
+      for (const status of ['not-started', 'available', 'temporarily_unavailable', 'unsupported', 'unknown']) {
+        m.mount(root, null);
+        const capability = { status, host: 'background-page-worker', reason: null, retryable: false };
+        m.mount(root, { view: () => m('div', [
+          m(ActorIsolationBanner, { capability, send: async () => ({ ok: false }) }),
+          m(EmptyState, { canSend: true, actorExecution: capability,
+            sessionId: 'actor-cold-status-test', send: async () => ({ ok: false }) }),
+        ]) });
+        await flush();
+        const unavailable = !['not-started', 'available'].includes(status);
+        expect(!!root.querySelector('.actor-isolation-banner')).toBe(unavailable);
+        const cards = [...root.querySelectorAll('.path-card')];
+        expect(cards.length).toBeGreaterThan(1);
+        for (const card of cards) {
+          expect(/** @type {HTMLButtonElement} */ (card).disabled)
+            .toBe(unavailable && card.getAttribute('data-path') !== 'ask');
+        }
+      }
+    } finally { m.mount(root, null); root.remove(); }
+  });
   it('shows a persistent polite status and offers retry only for a temporary host failure', async () => {
     /** @type {Array<Record<string, unknown>>} */
     const sent = [];

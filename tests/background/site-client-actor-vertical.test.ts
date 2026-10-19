@@ -5,7 +5,7 @@ import { startActorWorker } from '../../extension/offscreen/actor-worker-runtime
 import {
   ACTOR_REALM_FACT_KEYS,
   ACTOR_WORKER_PROTOCOL,
-} from '../../extension/offscreen/actor-worker-protocol.js';
+} from '../../extension/shared/actor-worker-protocol.js';
 import { projectControllerToolSurface } from '../../extension/peerd-runtime/controller-tool-projection.js';
 import { canonicalCloneDigest } from '../../extension/shared/canonical-clone-digest.js';
 import { controllerDomainOperationPayloadCap } from '../../extension/shared/controller-kernel-quota.js';

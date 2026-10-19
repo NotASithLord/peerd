@@ -2851,8 +2851,8 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
           focused: receipts.length === 1 && document.activeElement === receipts[0],
         };
         const healthyOrDemandDeferred = proof.state?.status === 'available'
-          || (proof.state?.status === 'temporarily_unavailable'
-            && proof.state?.reason === 'controller-not-ready');
+          || (proof.state?.status === 'not-started'
+            && proof.state?.reason === null && proof.state?.retryable === false);
         done(healthyOrDemandDeferred
           && proof.heartbeat === null
           && proof.failureKeys.length === 0
@@ -2864,8 +2864,8 @@ const runActorKeepaliveLossSmoke = async ({ providerServer }) => {
       }, (error) => done({ error: error?.message || String(error) }));
     `, [LIFETIME_HEARTBEAT_KEY]), { budgetMs: 30_000, pollMs: 100 });
     assert((recovered?.state?.status === 'available'
-      || (recovered?.state?.status === 'temporarily_unavailable'
-        && recovered?.state?.reason === 'controller-not-ready'))
+      || (recovered?.state?.status === 'not-started'
+        && recovered?.state?.reason === null && recovered?.state?.retryable === false))
       && recovered?.heartbeat === null
       && recovered?.failureKeys?.length === 0
       && recovered?.receiptCount === 1
@@ -3259,9 +3259,9 @@ const runBrokenWorkerSmoke = async ({ providerServer }) => {
     `);
     assert(initialized?.ok === true, 'the broken-worker package initializes the real vault and provider',
       JSON.stringify(initialized));
-    assert(initialized?.capability?.status === 'temporarily_unavailable'
+    assert(initialized?.capability?.status === 'not-started'
       && initialized?.capability?.host === 'background-page-worker'
-      && initialized?.capability?.reason === 'controller-not-ready',
+      && initialized?.capability?.reason === null && initialized?.capability?.retryable === false,
     'Firefox keeps actor health demand-deferred before the worker is first started',
     JSON.stringify(initialized?.capability));
 
@@ -5160,10 +5160,10 @@ const main = async () => {
     // why: state/get is an authority-only cold route. It must not wake the
     // semantic controller merely to advertise actor capability; the demand
     // sublanes below prove the Firefox Worker becomes available on real use.
-    assert(background?.capabilities?.actorExecution?.status === 'temporarily_unavailable'
+    assert(background?.capabilities?.actorExecution?.status === 'not-started'
       && background?.capabilities?.actorExecution?.host === 'background-page-worker'
-      && background?.capabilities?.actorExecution?.reason === 'controller-not-ready'
-      && background?.capabilities?.actorExecution?.retryable === true,
+      && background?.capabilities?.actorExecution?.reason === null
+      && background?.capabilities?.actorExecution?.retryable === false,
     'Firefox cold state keeps actor execution behind controller demand',
     JSON.stringify(background?.capabilities));
     assert(background?.capabilities?.sealedJobs?.status === 'unsupported'

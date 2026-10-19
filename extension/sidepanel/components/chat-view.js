@@ -742,7 +742,7 @@ export const EmptyState = {
       ? m('.path-menu', { class: isHome ? 'path-menu--home' : '' }, prompts.map((p, i) => {
           const shown = ui.shown?.[i] ?? Infinity;
           const done = shown >= p.text.length;
-          const actorUnavailable = attrs.actorExecution && attrs.actorExecution.status !== 'available' && p.type !== 'ask';
+          const actorUnavailable = attrs.actorExecution && !['available', 'not-started'].includes(attrs.actorExecution.status ?? '') && p.type !== 'ask';
           const blocked = p.blocked === true;
           // cursor shows only once this tile has STARTED typing and isn't done
           const typing = (ui.started?.[i] ?? true) && !done;
