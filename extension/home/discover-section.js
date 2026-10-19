@@ -93,7 +93,7 @@ const sharedEffects = createEffects();
 export const DiscoverSection = (initialVnode) => {
   let attrs = initialVnode.attrs;
   const effects = attrs.effects ?? sharedEffects;
-  const { busy, notices, unconfirmed, installedId, conflicts, committed } = effects;
+  const { busy, running, notices, unconfirmed, installedId, conflicts, committed } = effects;
   let dead = false;
   /** @type {Element|null} */ let rootDom = null;
   let viewEnabled = attrs.enabled;
@@ -137,7 +137,7 @@ export const DiscoverSection = (initialVnode) => {
   let techOpen = false;
   /** @type {{field:string, value:string, status:'pending'|'copied'|'failed'}|null} */ let copyState = null;
   /** @type {ReturnType<typeof setTimeout>|null} */ let copyTimer = null;
-  /** @type {{key:string, text:string}|null} */ let alertLine = null;
+  /** @type {{key:string, text:string, unknown?:boolean}|null} */ let alertLine = null;
 
   let shareOpen = false;
   let linkInput = '';
@@ -188,11 +188,11 @@ export const DiscoverSection = (initialVnode) => {
         records = rows;
         installedByUri = byUri;
         installedByDwappId = byId;
-        // why only a read that started later: one that started before an
-        // update committed lists the version the update replaced.
+        // why only a read that started later: an older read can omit an
+        // install or list the version an update replaced.
         for (const [id, commit] of committed) if (started > commit.read) committed.delete(id);
         commonsId = rows.find(a => a?.dweb?.seed === 'commons')?.id ?? null;
-        // why: Commons in the catalog is the receipt the unknown add waited for.
+        // why: Commons in the catalog confirms a settled or unknown add.
         // A confirmed add made Commons before it replied, so a read that
         // started later and lists no Commons says the user deleted it since.
         if (commonsId || (effects.commons === 'adding' && effects.commonsAdded !== null && started > effects.commonsAdded)) {
@@ -430,9 +430,12 @@ export const DiscoverSection = (initialVnode) => {
   // why the mirror: dweb/base/install-address does not see a heard install
   // or update of the same version that runs or stays unconfirmed. A
   // share-link install of it could add a second copy too.
-  /** @param {string} uri @returns {'installing'|'unknown'|null} */
-  const heardHolds = (uri) => apps.some(app => app.uri === uri && ['installing', 'updating'].includes(busy[app.dwapp_id ?? '']))
-    ? 'installing' : [...unconfirmed.values()].some(target => target.uri === uri) ? 'unknown' : null;
+  /** @param {string} uri */
+  const heardHolds = (uri) => {
+    const active = [...running.values()].find(target => target.uri === uri);
+    const unknown = [...unconfirmed.values()].find(target => target.uri === uri);
+    return active ? { action: active.action, running: true } : unknown ? { action: unknown.action, running: false } : null;
+  };
   // why: a committed share-link install is in the Library before a Library
   // read shows it. Its id stands for the heard card of that version, so that
   // card never offers a second install. Only the card its publisher signed:
@@ -444,7 +447,7 @@ export const DiscoverSection = (initialVnode) => {
   // before a Library read shows it. Its receipt stands for the share-link
   // page of that version, so that page offers Open, as its app page does.
   /** @param {string} uri @returns {string|null} */
-  const heardId = (uri) => apps.filter(app => app.uri === uri).map(facts)
+  const heardId = (uri) => [...committed.values()].find(target => target.uri === uri)?.appId ?? apps.filter(app => app.uri === uri).map(facts)
     .find(f => f.sameVersion && f.localId)?.localId ?? null;
 
   /** @param {DwebApp} app */
@@ -457,6 +460,7 @@ export const DiscoverSection = (initialVnode) => {
     if (!id || !localReady || app.runtimeCompatibility?.status === 'unsupported' || unconfirmed.has(id)
         || ['installing', 'updating'].includes(busy[id]) || linkHolds(app) || linkedId(app)) return;
     busy[id] = 'installing';
+    running.set(id, { action: 'install', uri: app.uri });
     delete notices[id];
     alertLine = null;
     redraw();
@@ -468,6 +472,7 @@ export const DiscoverSection = (initialVnode) => {
         busy[id] = 'installed';
         if (r.warning === 'audit-write-failed') notices[id] = 'Installed, but the security audit entry could not be written.';
         installedId[id] = r.app?.id ?? r.appId ?? null;
+        if (installedId[id]) committed.set(id, { appId: installedId[id], version_id: app.version_id ?? null, seq: app.seq ?? 0, read: effects.reads, uri: app.uri });
         announceInstalled(/** @type {string} */ (installedId[id]));
         if (route.page === 'app' && route.key === id) pendingFocus = { selector: '.disc-panel .disc-installed', scroll: null, ifLost: true };
         void reloadLocal();
@@ -475,6 +480,7 @@ export const DiscoverSection = (initialVnode) => {
         markFailure(id, 'install', app, r);
       }
     } catch { markUnknown(id, 'install', app); }
+    finally { running.delete(id); }
     // why no dead guard: the custody maps outlive this mount, so a remounted
     // view must see the settled state now, not on the next poll.
     m.redraw();
@@ -491,6 +497,7 @@ export const DiscoverSection = (initialVnode) => {
     const conflictToken = strategy ? liveConflict(app) : undefined;
     if (strategy && conflictToken === undefined) return;
     busy[id] = 'updating';
+    running.set(id, { action: 'update', uri: app.uri });
     delete notices[id];
     alertLine = null;
     redraw();
@@ -504,7 +511,7 @@ export const DiscoverSection = (initialVnode) => {
         conflicts.delete(id);
         // why: until a Library read that starts after this commit lands, the
         // updated version is the one installed, whatever an older read says.
-        committed.set(id, { appId, version_id: app.version_id ?? null, seq: app.seq ?? 0, read: effects.reads });
+        committed.set(id, { appId, version_id: app.version_id ?? null, seq: app.seq ?? 0, read: effects.reads, uri: app.uri });
         const warnings = new Set(Array.isArray(r.warnings) ? r.warnings : []);
         if (r.warning) warnings.add(r.warning);
         const warningMessages = [];
@@ -531,6 +538,7 @@ export const DiscoverSection = (initialVnode) => {
         markFailure(id, 'update', app, r);
       }
     } catch { markUnknown(id, 'update', app); }
+    finally { running.delete(id); }
     m.redraw();
   };
 
@@ -541,7 +549,7 @@ export const DiscoverSection = (initialVnode) => {
     try {
       const result = await attrs.send({ type: 'apps/open', appId });
       if (!result?.ok) alertLine = { key, text: 'peerd could not open this app. Try again.' };
-    } catch { alertLine = { key, text: 'peerd could not confirm whether the app opened. Check your tabs.' }; }
+    } catch { alertLine = { key, text: 'peerd could not confirm whether the app opened. Check your tabs.', unknown: true }; }
     redraw();
   };
 
@@ -757,7 +765,7 @@ export const DiscoverSection = (initialVnode) => {
     if (!commonsId || commonsBusy) return;
     commonsBusy = true; alertLine = null;
     try { if (!(await attrs.send({ type: 'apps/open', appId: commonsId }))?.ok) alertLine = { key: 'commons', text: 'Could not open Commons.' }; }
-    catch { alertLine = { key: 'commons', text: 'Could not confirm whether Commons opened. Check your tabs.' }; }
+    catch { alertLine = { key: 'commons', text: 'Could not confirm whether Commons opened. Check your tabs.', unknown: true }; }
     finally { commonsBusy = false; redraw(); }
   };
 
@@ -928,7 +936,7 @@ export const DiscoverSection = (initialVnode) => {
       key: f.id, name, letter: letterOf(name), tone: toneOf(f.id),
       meta: makerMeta(makerOf(app.publisher), kbLabel(app.size)), description: app.description,
       updateReady: action.kind === 'update',
-      error: alertLine?.key === f.id ? alertLine.text : null,
+      error: rootAlert(f.id, true),
       // why keyed by kind: a poll can turn a focused Open into Update, or
       // Review into Open. A new node drops the focus, so one key press never
       // runs an action the user did not choose.
@@ -1032,7 +1040,9 @@ export const DiscoverSection = (initialVnode) => {
   const heardError = () => heardFailed
     ? m('p.error', { role: 'alert', 'aria-live': 'assertive' }, 'peerd could not refresh peer apps. Retry when the network is available.')
     : null;
-  const rootAlert = () => alertLine ? m('p.error', { role: 'alert' }, alertLine.text) : null;
+  /** @param {string} [key] @param {boolean} [small] */
+  const rootAlert = (key, small = false) => alertLine && (!key || alertLine.key === key)
+    ? m(small ? 'p.type-small' : 'p', { class: alertLine.unknown ? 'type-body-sm' : 'error', role: alertLine.unknown ? 'status' : 'alert' }, alertLine.text) : null;
   /** @param {boolean} offline */
   const libraryLine = (offline) => {
     const note = libraryStatus({ ready: localReady, failed: localFailed, offline });
@@ -1159,7 +1169,7 @@ export const DiscoverSection = (initialVnode) => {
     return matchQuery([...starters, commons], query).map(item => tile({
       key: item.key, name: item.name, letter: letterOf(item.name), tone: toneOf(item.tone),
       meta: 'Comes with peerd', description: item.description, action: item.action,
-      error: alertLine?.key === item.key ? alertLine.text : null,
+      error: rootAlert(item.key, true),
     }));
   };
 
@@ -1250,7 +1260,7 @@ export const DiscoverSection = (initialVnode) => {
       ? { label: 'Open', onclick: () => { void openApp(localId, f.id); } } : null;
     const notice = notices[f.id] ?? (state === 'review' && !localReady ? libraryStatus({ ready: false, failed: localFailed })
       : offline && (state === 'review' || state === 'failed') ? NEEDS_NETWORK : null);
-    const error = alertLine?.key === f.id ? alertLine.text : null;
+    const error = rootAlert(f.id);
     const panel = state === 'cant-run' ? cantRunPanel()
       : state === 'conflict' ? conflictPanel({
         disabled: effectBusy || !f.localId,
@@ -1292,13 +1302,13 @@ export const DiscoverSection = (initialVnode) => {
     // why: a heard install or update of this version decides this page until
     // it settles: running, or unconfirmed with Refresh, as on its app page.
     const held = heardHolds(target.uri);
-    const installing = (!!linkPending && linkBusy === 'install') || held === 'installing';
+    const installing = (!!linkPending && linkBusy === 'install') || held?.running === true;
     const localId = linkAppId ?? installedByUri.get(target.uri) ?? heardId(target.uri);
     // A share link names one exact version, so an installed one is this version.
     const state = pageState({
       incompatible: linkPreview?.runtimeCompatibility?.status === 'unsupported', conflict: false,
       busy: installing ? 'installing' : linkFailure || undefined,
-      uncertain: !installing && (!!linkPending || held === 'unknown'), installed: !!localId, sameVersion: true,
+      uncertain: !installing && (!!linkPending || !!held), installed: !!localId, sameVersion: true,
     });
     const blocked = !attrs.enabled || !!linkBusy;
     /** @type {ButtonProps|null} */ const primary = state === 'review'
@@ -1324,11 +1334,11 @@ export const DiscoverSection = (initialVnode) => {
       }),
       state === 'cant-run' ? cantRunPanel() : installPanel({
         state: state === 'conflict' ? 'review' : state,
-        message: state === 'installing' ? KEEPS_GOING
-          : state === 'unknown' ? INSTALL_UNKNOWN
+        message: state === 'installing' ? `You can leave this page. The ${held?.action ?? 'install'} keeps going.`
+          : state === 'unknown' ? `peerd could not confirm whether the ${held?.action ?? 'install'} finished. Refresh to check before trying again.`
             : state === 'failed' ? linkFailure : null,
         notice: linkNotice || null,
-        error: alertLine?.key === 'link' ? alertLine.text : null,
+        error: rootAlert('link'),
         primary,
       }),
       state === 'cant-run' ? null : safetyLines(),

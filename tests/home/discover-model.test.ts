@@ -218,6 +218,7 @@ describe('tile and page states', () => {
     const one = createEffects();
     const two = createEffects();
     one.busy.a = 'installing';
+    one.running.set('a', { action: 'install', uri: 'peerd://a' });
     one.conflicts.set('a', { token: 1, versionId: 'a-v2' });
     one.commons = 'unknown';
     one.link = { address: 'dwapp://content/a', outcome: Promise.resolve({}) };
@@ -225,6 +226,7 @@ describe('tile and page states', () => {
     one.reads = 3;
     one.commonsAdded = 2;
     expect(two.busy).toEqual({});
+    expect(two.running.size).toBe(0);
     expect(two.conflicts.size).toBe(0);
     expect(two.unconfirmed.size).toBe(0);
     expect(two.commons).toBe(null);

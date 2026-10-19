@@ -967,12 +967,14 @@ describe('home.discover app page', () => {
       el(view.root, '[data-key="upd"] .disc-tile-action').click(); await settle();
       expect(text(el(view.root, '.disc-panel [role="alert"]'))).toBe('peerd could not update this app. Try again.');
       expect(labels()).toEqual(['Try again', 'Open']);
+      expect(text(panel(view.root))).toContain('In your Library. Open runs the version you have.');
       await click(view.root, 'Open');
       expect(host.writes().at(-1)).toEqual({ type: 'apps/open', appId: 'local-upd' });
       await click(view.root, 'Try again');
-      expect(text(el(view.root, '.disc-panel [role="status"]')))
+      expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)')))
         .toBe('peerd could not confirm whether the update finished. Refresh to check before trying again.');
       expect(labels()).toEqual(['Refresh', 'Open']);
+      expect(text(panel(view.root))).toContain('In your Library. Open runs the version you have.');
       await click(view.root, 'Discover');
       await openTile(view.root, 'a');
       await click(view.root, 'Install and share');
@@ -996,7 +998,7 @@ describe('home.discover app page', () => {
         await settle();
         await openTile(view.root, 'a');
         await click(view.root, 'Install and share');
-        expect(text(el(view.root, '.disc-panel [role="status"]'))).toBe(UNKNOWN_INSTALL);
+        expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
         expect(panel(view.root).querySelector('[role="alert"]')).toBe(null);
         expect(panel(view.root).querySelector('.disc-step.is-unknown')).toBeTruthy();
         expect(text(view.root).includes('raw renderer transport text')).toBe(false);
@@ -1035,7 +1037,7 @@ describe('home.discover app page', () => {
       el(view.root, '[data-key="upd"] .disc-tile-action').click(); await settle();
       expect(document.activeElement).toBe(view.root.querySelector('.disc-back'));
       expect(host.writes().map(call => [call.type, call.appId])).toEqual([['dweb/base/update-app', 'local-upd']]);
-      expect(text(el(view.root, '.disc-panel [role="status"]'))).toBe('peerd could not confirm whether the update finished. Refresh to check before trying again.');
+      expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe('peerd could not confirm whether the update finished. Refresh to check before trying again.');
       for (const drift of [{ version: 'upd-v1', seq: 1 }, { version: 'upd-other', seq: 2 }]) {
         version = drift.version; seq = drift.seq; refreshLibrary();
         await click(view.root, 'Refresh');
@@ -1066,7 +1068,7 @@ describe('home.discover app page', () => {
       await settle();
       expect(tileAction(view.root, 'a')).toBe('Installing…');
       await openTile(view.root, 'a');
-      expect(text(el(view.root, '.disc-panel [role="status"]'))).toBe('You can leave this page. The install keeps going.');
+      expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe('You can leave this page. The install keeps going.');
       expect(panel(view.root).querySelector('button')).toBe(null);
       install.resolve({ ok: false, outcomeKnown: false }); await settle();
       expect(text(panel(view.root))).toContain(UNKNOWN_INSTALL);
@@ -1093,11 +1095,11 @@ describe('home.discover app page', () => {
       view = mount({ send: host.send, effects });
       await settle();
       await openTile(view.root, 'a');
-      expect(text(el(view.root, '.disc-panel [role="status"]'))).toBe(UNKNOWN_INSTALL);
+      expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
       expect(button(view.root, 'Install and share')).toBe(undefined);
       await click(view.root, 'Discover');
       await openTile(view.root, 'upd');
-      expect(text(el(view.root, '.disc-panel [role="status"]')))
+      expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)')))
         .toBe('peerd could not confirm whether the update finished. Refresh to check before trying again.');
       expect(host.count('dweb/base/install')).toBe(1);
       expect(host.count('dweb/base/update-app')).toBe(1);
@@ -1376,8 +1378,8 @@ describe('home.discover app page', () => {
       expect(tileAction(view.root, 'a')).toBe('Open');
       expect(text(view.root).includes('Update ready')).toBe(false);
       // The read that started after the commit decides from now on.
-      fresh.resolve({ ok: true, apps: host.state.library }); await settle();
-      expect(tileAction(view.root, 'a')).toBe('Open');
+      fresh.resolve({ ok: true, apps: [] }); await settle();
+      expect(tileAction(view.root, 'a')).toBe('Review');
       expect(host.count('dweb/base/update-app')).toBe(1);
     } finally { commit.resolve({ ok: false }); early.resolve({ ok: false }); fresh.resolve({ ok: false }); view.close(); }
   });
@@ -1428,13 +1430,17 @@ describe('home.discover app page', () => {
 
   it('a failed Open says so in an alert inside its tile and never offers Install again', async () => {
     const app = card('a', 'App A', ANA);
-    const host = fakeHost({ heard: [app], library: [local('local-a', app)] }, { 'apps/open': () => ({ ok: false }) });
+    let unknown = false;
+    const host = fakeHost({ heard: [app], library: [local('local-a', app)] }, {
+      'apps/open': () => { if (unknown) throw new Error('renderer deadline'); return { ok: false }; },
+    });
     const view = mount({ send: host.send });
     try {
       await settle();
       el(view.root, '[data-key="a"] .disc-tile-action').click(); await settle();
       // why inside the tile: a line above a long grid sits off screen for the tile the user clicked.
       expect(text(el(view.root, '[data-key="a"] [role="alert"]'))).toBe(OPEN_FAILED);
+      expect(el(view.root, '[data-key="a"] [role="alert"]').classList.contains('error')).toBe(true);
       expect(view.root.querySelector('.disc-view > [role="alert"]')).toBe(null);
       expect(tileAction(view.root, 'a')).toBe('Open');
       await openTile(view.root, 'a');
@@ -1449,6 +1455,14 @@ describe('home.discover app page', () => {
       el(view.root, '[data-key="a"] .disc-tile-action').click(); await settle();
       expect(text(el(view.root, '[data-key="a"] [role="alert"]'))).toBe(OPEN_FAILED);
       expect(host.count('apps/open')).toBe(3);
+      unknown = true;
+      el(view.root, '[data-key="a"] .disc-tile-action').click(); await settle();
+      expect(text(el(view.root, '[data-key="a"] [role="status"]'))).toBe('peerd could not confirm whether the app opened. Check your tabs.');
+      expect(el(view.root, '[data-key="a"]').querySelector('.error')).toBe(null);
+      await openTile(view.root, 'a');
+      await click(view.root, 'Open');
+      expect(text(panel(view.root))).toContain('peerd could not confirm whether the app opened. Check your tabs.');
+      expect(panel(view.root).querySelector('.error')).toBe(null);
     } finally { view.close(); }
   });
 
@@ -1990,9 +2004,12 @@ describe('home.discover share link', () => {
       await click(view.root, 'Install and share');
       await click(view.root, 'Open');
       expect(text(el(view.root, '.disc-panel [role="alert"]'))).toBe(OPEN_FAILED);
+      expect(el(view.root, '.disc-panel [role="alert"]').classList.contains('error')).toBe(true);
       // A thrown send may still have opened it.
       await click(view.root, 'Open');
-      expect(text(el(view.root, '.disc-panel [role="alert"]'))).toBe('peerd could not confirm whether the app opened. Check your tabs.');
+      expect(text(panel(view.root))).toContain('peerd could not confirm whether the app opened. Check your tabs.');
+      expect(panel(view.root).querySelector('.error')).toBe(null);
+      expect([...panel(view.root).querySelectorAll('[role="status"]')].some(node => text(node) === 'peerd could not confirm whether the app opened. Check your tabs.')).toBe(true);
       expect(host.count('apps/open')).toBe(2);
     } finally { view.close(); sessionStorage.removeItem(KEY); }
   });
@@ -2013,11 +2030,11 @@ describe('home.discover share link', () => {
         enterLink(view.root, address);
         await click(view.root, 'Check link');
         await click(view.root, 'Install and share');
-        expect(text(el(view.root, '.disc-panel [role="status"]'))).toBe(KEEPS_GOING);
+        expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(KEEPS_GOING);
         view.close();
         view = mount({ send: host.send, effects }, { keepReceipt: true });
         await settle();
-        expect(text(el(view.root, '.disc-panel [role="status"]'))).toBe(KEEPS_GOING);
+        expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(KEEPS_GOING);
         expect(panel(view.root).querySelector('button')).toBe(null);
         install.resolve(outcome === 'installed' ? { ok: true, app: { id: 'app-link' } } : { ok: false, error: 'raw host install text' });
         await settle();
@@ -2094,7 +2111,7 @@ describe('home.discover share link', () => {
         await click(view.root, 'Discover');
         expect(tileAction(view.root, 'same')).toBe('Installing…');
         await openTile(view.root, 'same');
-        expect(text(el(view.root, '.disc-panel [role="status"]'))).toBe(KEEPS_GOING);
+        expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(KEEPS_GOING);
         expect(panel(view.root).querySelector('button')).toBe(null);
         stale.click(); await settle();
         expect(host.writes().map(call => call.type)).toEqual(['dweb/base/inspect-address', 'dweb/base/install-address']);
@@ -2103,9 +2120,9 @@ describe('home.discover share link', () => {
           install.resolve({ ok: true, app: { id: 'app-link' } }); await settle();
         } else {
           install.resolve({ ok: false, outcomeKnown: false }); await settle();
-          expect(text(el(view.root, '.disc-panel [role="status"]'))).toBe(UNKNOWN_INSTALL);
+          expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
           await click(view.root, 'Refresh');
-          expect(text(el(view.root, '.disc-panel [role="status"]'))).toBe(UNKNOWN_INSTALL);
+          expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
           expect(button(view.root, 'Install and share')).toBe(undefined);
           // The share-link Refresh finds the exact receipt.
           await earlyRead();
@@ -2137,9 +2154,10 @@ describe('home.discover share link', () => {
   // The mirror: dweb/base/install-address does not see a heard install or
   // update that runs or stays unconfirmed, so a second install would add a
   // second copy. Once it settles, the page says what its app page says.
-  for (const effect of /** @type {const} */ (['an install', 'an unknown install', 'an update'])) {
+  for (const effect of /** @type {const} */ (['an install', 'an unknown install', 'an update', 'an unknown update'])) {
     it(`${effect} from the heard page holds the share-link page of that version, which never sends a second install`, async () => {
-      const update = effect === 'an update';
+      const update = effect.endsWith('update');
+      const unknown = effect.includes('unknown');
       const same = card('same', 'Same app', ANA, { version_id: target.hash, seq: 2 });
       const type = update ? 'dweb/base/update-app' : 'dweb/base/install';
       const appId = update ? 'local-same' : 'app-same';
@@ -2168,12 +2186,13 @@ describe('home.discover share link', () => {
         await click(view.root, 'Discover');
         await openTile(view.root, 'same');
         await click(view.root, update ? 'Update' : 'Install and share');
-        if (effect === 'an unknown install') { reply.resolve({ ok: false, outcomeKnown: false }); await settle(); }
+        if (unknown) { reply.resolve({ ok: false, outcomeKnown: false }); await settle(); }
         await click(view.root, 'Discover');
         await click(view.root, 'Paste link');
         await click(view.root, 'Check link');
-        const unknown = effect === 'an unknown install';
-        expect(text(el(view.root, '.disc-panel [role="status"]'))).toBe(unknown ? UNKNOWN_INSTALL : KEEPS_GOING);
+        const message = unknown ? `peerd could not confirm whether the ${update ? 'update' : 'install'} finished. Refresh to check before trying again.`
+          : `You can leave this page. The ${update ? 'update' : 'install'} keeps going.`;
+        expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(message);
         expect(button(view.root, 'Install and share')).toBe(undefined);
         stale.click(); await settle();
         if (unknown) {
@@ -2181,7 +2200,7 @@ describe('home.discover share link', () => {
           const reads = host.count('apps/list');
           await click(view.root, 'Refresh');
           expect(host.count('apps/list')).toBeGreaterThan(reads);
-          expect(text(el(view.root, '.disc-panel [role="status"]'))).toBe(UNKNOWN_INSTALL);
+          expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(message);
           expect(button(view.root, 'Install and share')).toBe(undefined);
         }
         expect(host.writes().map(call => call.type)).toEqual(['dweb/base/inspect-address', type, 'dweb/base/inspect-address']);
@@ -2204,6 +2223,51 @@ describe('home.discover share link', () => {
         await click(view.root, 'Open');
         expect(host.writes().slice(3)).toEqual([{ type: 'apps/open', appId }]);
       } finally { reply.resolve({ ok: false }); read.resolve({ ok: false }); view.close(); sessionStorage.removeItem(KEY); }
+    });
+  }
+
+  for (const action of /** @type {const} */ (['install', 'update'])) {
+    it(`a heard ${action} keeps its target and receipt across a remount with no heard card`, async () => {
+      const same = card('same', 'Same app', ANA, { version_id: target.hash, seq: 2 });
+      const type = action === 'update' ? 'dweb/base/update-app' : 'dweb/base/install';
+      const appId = 'local-same';
+      const reply = deferred();
+      const host = fakeHost({
+        heard: [same], library: action === 'update' ? [local(appId, same, { uri: 'peerd://older', version_id: 'same-v1', seq: 1 })] : [],
+      }, { 'dweb/base/inspect-address': () => ({ ok: true, summary }), [type]: () => reply.promise, 'apps/open': () => ({ ok: true }) });
+      const effects = createEffects();
+      let view = mount({ send: host.send, effects });
+      try {
+        await settle();
+        await openTile(view.root, 'same');
+        await click(view.root, action === 'update' ? 'Update' : 'Install and share');
+        view.close();
+        host.state.heard = [];
+        view = mount({ send: host.send, effects });
+        await settle();
+        await click(view.root, 'Paste link');
+        enterLink(view.root, address);
+        await click(view.root, 'Check link');
+        expect(text(panel(view.root))).toContain(`You can leave this page. The ${action} keeps going.`);
+        expect(button(view.root, 'Install and share')).toBe(undefined);
+        // A failed heard read must not release the shared target either.
+        host.state.heardFails = true;
+        await focusPoll();
+        expect(button(view.root, 'Install and share')).toBe(undefined);
+        reply.resolve(action === 'update' ? { ok: true } : { ok: true, app: { id: appId } });
+        await settle();
+        // The closed view's read is ignored. The receipt still prevents a
+        // second install before this mounted view reads the Library again.
+        expect(text(panel(view.root))).toContain('In your Library.');
+        expect(button(view.root, 'Install and share')).toBe(undefined);
+        await click(view.root, 'Open');
+        expect(host.writes().at(-1)).toEqual({ type: 'apps/open', appId });
+        expect(host.count('dweb/base/install-address')).toBe(0);
+        host.state.library = [local(appId, same)];
+        await focusPoll();
+        expect(effects.committed.size).toBe(0);
+        expect(text(panel(view.root))).toContain('In your Library.');
+      } finally { reply.resolve({ ok: false }); view.close(); sessionStorage.removeItem(KEY); }
     });
   }
 
@@ -2857,6 +2921,30 @@ describe('home.discover entry points', () => {
     } finally { early.resolve({ ok: false }); late.resolve({ ok: false }); view.close(); }
   });
 
+  it('openKey: a read that lands before the next redraw keeps the page the user just opened', async () => {
+    const held = deferred();
+    let hold = false;
+    let cleared = 0;
+    const first = card('a', 'App A', ANA);
+    const host = fakeHost({}, {
+      'dweb/base/heard': () => hold ? held.promise : { ok: true, apps: [first] },
+    });
+    /** @type {ReturnType<typeof mount>|null} */ let view = null;
+    view = mount({ send: host.send, onOpenKey: () => { cleared++; if (view) view.attrs.openKey = null; } });
+    try {
+      await settle();
+      hold = true;
+      view.set({ openKey: 'b' }); await settle();
+      expect(cleared).toBe(0);
+      // No redraw between this click and the reply: settleKey must check the route.
+      el(view.root, '[data-key="a"] .disc-tile-open').click();
+      held.resolve({ ok: true, apps: [first, card('b', 'App B', BOB)] });
+      await settle();
+      expect(text(el(view.root, '.disc-app-title'))).toBe('App A');
+      expect(cleared).toBe(1);
+    } finally { held.resolve({ ok: false }); view.close(); }
+  });
+
   // A UI send throws when it times out or loses its transport.
   for (const [label, reply] of /** @type {const} */ ([
     ['an unknown reply', () => ({ ok: false, outcomeKnown: false })],
@@ -2914,8 +3002,9 @@ describe('home.discover entry points', () => {
   }
 
   it('Commons: Open sends apps/open; a Commons deleted elsewhere never turns a focused Open into an add', async () => {
+    let openOutcome = 'ok';
     const installed = fakeHost({ heard: [card('a', 'App', ANA)], library: [{ id: 'app-commons', dweb: { seed: 'commons' } }] }, {
-      'apps/open': () => ({ ok: true }),
+      'apps/open': () => { if (openOutcome === 'unknown') throw new Error('renderer deadline'); return { ok: openOutcome === 'ok' }; },
     });
     const second = mount({ send: installed.send });
     try {
@@ -2924,6 +3013,13 @@ describe('home.discover entry points', () => {
       expect(button(second.root, 'Add and open Commons')).toBe(undefined);
       await click(second.root, 'Open');
       expect(installed.writes()).toEqual([{ type: 'apps/open', appId: 'app-commons' }]);
+      openOutcome = 'failed';
+      await click(second.root, 'Open');
+      expect(text(el(second.root, '[data-key="commons"] .error[role="alert"]'))).toBe('Could not open Commons.');
+      openOutcome = 'unknown';
+      await click(second.root, 'Open');
+      expect(text(el(second.root, '[data-key="commons"] [role="status"]'))).toBe('Could not confirm whether Commons opened. Check your tabs.');
+      expect(el(second.root, '[data-key="commons"]').querySelector('.error')).toBe(null);
       // Commons is deleted elsewhere while Open has focus: the add is a new
       // node, so a stray key press adds nothing.
       button(second.root, 'Open')?.focus();
@@ -2932,6 +3028,28 @@ describe('home.discover entry points', () => {
       expect(button(second.root, 'Add and open Commons')).toBeTruthy();
       expect(document.activeElement === button(second.root, 'Add and open Commons')).toBe(false);
     } finally { second.close(); }
+  });
+
+  it('Commons: a seed-load failure lifts the fence before any add is sent', async () => {
+    const original = window.fetch;
+    const host = fakeHost({ heard: [card('a', 'App', ANA)] });
+    const effects = createEffects();
+    const view = mount({ send: host.send, effects });
+    Object.defineProperty(window, 'fetch', { configurable: true, writable: true,
+      value: async (/** @type {RequestInfo|URL} */ input, /** @type {RequestInit|undefined} */ init) => String(input).includes('/peerd-distributed/apps/commons/')
+        ? new Response('', { status: 500 }) : original(input, init),
+    });
+    try {
+      await settle();
+      await click(view.root, 'Included');
+      await click(view.root, 'Add and open Commons');
+      await until(() => !!view.root.querySelector('[role="alert"]'));
+      expect(text(el(view.root, '[data-key="commons"] [role="alert"]'))).toBe('Could not load packaged Commons.');
+      expect(effects.commons).toBe(null);
+      expect(commonsNote(view.root)).toBe(null);
+      expect(button(view.root, 'Add and open Commons')?.disabled).toBe(false);
+      expect(host.count('dweb/open-commons')).toBe(0);
+    } finally { window.fetch = original; view.close(); }
   });
 
   it('Commons: a settled refusal lifts the fence and says why; a remount during an add shows no reason until its outcome', async () => {

@@ -11,22 +11,25 @@
 /**
  * Effect custody that must outlive one mount of the section: the page says
  * "You can leave this page. The install keeps going." (see createEffects).
- * `commons` fences "Add and open Commons" while an add runs and after an
- * unconfirmed one. `link` is the share-link install in flight, so a view
+ * `commons` fences "Add and open Commons" until a refusal, a failure before
+ * the send, or a Library read confirms the outcome. `link` is the share-link
+ * install in flight, so a view
  * mounted while it runs follows the same outcome. `reads` counts Library
- * reads as they start. `committed` holds each committed update with that
+ * reads as they start. `running` keeps each target across a remount.
+ * `committed` holds each committed install or update with that
  * count at its commit, so a read that started earlier cannot bring back the
  * version the update replaced. `commonsAdded` holds it at a confirmed add,
  * so only a read that started later can say Commons was deleted since.
  * @typedef {{
  *   busy: Record<string, string>,
+ *   running: Map<string, {action:'install'|'update', uri:string|undefined}>,
  *   unconfirmed: Map<string, PendingTarget>,
  *   installedId: Record<string, string|null>,
  *   notices: Record<string, string>,
  *   conflicts: Map<string, {token:number, versionId:string|null}>,
  *   commons: 'adding'|'unknown'|null,
  *   link: {address:string, outcome:Promise<LinkOutcome>}|null,
- *   committed: Map<string, {appId:string, version_id:string|null, seq:number, read:number}>,
+ *   committed: Map<string, {appId:string, version_id:string|null, seq:number, read:number, uri?:string}>,
  *   reads: number,
  *   commonsAdded: number|null,
  * }} DiscoverEffects
@@ -43,7 +46,7 @@
 /** A fresh, empty custody record. The section keeps one per page load.
  * @returns {DiscoverEffects} */
 export const createEffects = () => ({
-  busy: {}, unconfirmed: new Map(), installedId: {}, notices: {}, conflicts: new Map(), commons: null, link: null,
+  busy: {}, running: new Map(), unconfirmed: new Map(), installedId: {}, notices: {}, conflicts: new Map(), commons: null, link: null,
   committed: new Map(), reads: 0, commonsAdded: null,
 });
 

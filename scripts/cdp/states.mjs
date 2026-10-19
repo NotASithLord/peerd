@@ -5034,6 +5034,8 @@ export const STATES = [
       }
       const wasOn = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings?.dwebEnabled === true;
       await chooseFixtureNetwork(ctx, true);
+      const panelUrl = await evalIn(ctx.page, 'location.href');
+      let panelRetired = false;
       const page = await openWidePage(ctx, 'home/home.html#library');
       const key = 'e2e-notified-app';
       const tile = `[data-key=${JSON.stringify(key)}] .disc-tile-open`;
@@ -5113,8 +5115,36 @@ export const STATES = [
         await frames();
         rec.check('leaving Discover drops a waiting notification, so Discover opens on its root',
           !!root && await evalIn(page, `!document.querySelector('.disc-back')`));
+
+        // why retire the panel: only the Home chat owner can show its banner.
+        panelRetired = true;
+        await ctx.page.send('Page.navigate', { url: 'about:blank' });
+        if (!await waitFor(() => evalIn(ctx.page, `location.href === 'about:blank'`).catch(() => false),
+          { budgetMs: 5_000, pollMs: 50 })) throw new Error('notification fixture did not release the side-panel document');
+        // Home adds Chats only after the surface update releases chat ownership.
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('[data-home-view="chat"]')`),
+          { budgetMs: 10_000, pollMs: 50 })) throw new Error('Home did not receive chat ownership');
+        await evalIn(page, `document.querySelector('[data-home-view="chat"]').click()`);
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('.home-chat form.input-bar textarea')`),
+          { budgetMs: 20_000, pollMs: 80 })) throw new Error('Home chat did not show its composer');
+        await evalIn(ctx.swConn, `new Promise(done => chrome.runtime.sendMessage({ type: 'dweb/notify', notification: {
+          id: 'app-e2e-banner', ts: Date.now(), kind: 'app', key: ${JSON.stringify(key)},
+          title: 'New app to install', body: 'Notified app', link: 'discover',
+        } }, () => { void chrome.runtime.lastError; done(true); }))`, true);
+        if (!await waitFor(() => evalIn(page, `document.querySelector('.notif-banner .home-popout')?.textContent === 'View in Discover'`),
+          { budgetMs: 5_000, pollMs: 50 })) throw new Error('Home chat did not show the app notification');
+        await evalIn(page, `(() => { const button = document.querySelector('.notif-banner .home-popout'); button.focus(); button.click(); })()`);
+        rec.check('the chat banner opens the notified app page in Discover',
+          !!await waitFor(() => evalIn(page, opened), { budgetMs: 10_000, pollMs: 50 }));
       } finally {
-        try { page.close(); } catch { /* */ }
+        try { await page.close(); } catch { /* */ }
+        if (panelRetired) {
+          await ctx.page.send('Page.navigate', { url: panelUrl });
+          await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
+          if (!await waitFor(() => evalIn(ctx.page,
+            `document.documentElement.dataset.peerdBootStage === 'app-ready' && !!document.querySelector('.input-bar textarea')`).catch(() => false),
+          { budgetMs: 20_000, pollMs: 80 })) throw new Error('notification fixture did not restore the side panel');
+        }
         if (!wasOn) await chooseFixtureNetwork(ctx, false);
       }
     },

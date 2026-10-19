@@ -63,7 +63,8 @@ const send = async message => {
   if (message.type === 'dweb/distributed/info') {
     return {ok:true,running:!OFFLINE.includes(frame),linkedCount:frame === 'looking' ? 0 : 3,did:encodeDidKey(new Uint8Array(32).fill(9))};
   }
-  if (message.type === 'dweb/base/install' && EFFECTS[frame]) return EFFECTS[frame]();
+  if (message.type === 'dweb/base/install' && Object.hasOwn(EFFECTS, frame)) return EFFECTS[frame]();
+  if (message.type === 'dweb/base/install' && frame === 'open-unknown') return EFFECTS.installed();
   if (message.type === 'dweb/base/update-app' && frame === 'conflict') return {ok:false,error:'local-changes',conflictToken:7};
   if (message.type === 'dweb/base/update-app' && frame === 'update-failed') return EFFECTS.failed();
   if (message.type === 'dweb/base/update-app' && frame === 'update-unknown') return EFFECTS.unknown();
@@ -79,6 +80,7 @@ const send = async message => {
 const STEPS = {
   installing: [['.disc-primary', 'Install and share']],
   installed: [['.disc-primary', 'Install and share']],
+  'open-unknown': [['.disc-primary', 'Install and share'], ['.disc-primary', 'Open']],
   failed: [['.disc-primary', 'Install and share']],
   unknown: [['.disc-primary', 'Install and share']],
   conflict: [['.disc-tile-action', 'Update']],
@@ -92,6 +94,7 @@ const STEPS = {
 };
 const OPEN_KEYS = /** @type {Record<string, string>} */ ({
   installing: notes.dwapp_id, installed: notes.dwapp_id, failed: notes.dwapp_id,
+  'open-unknown': notes.dwapp_id,
   unknown: notes.dwapp_id, maker: notes.dwapp_id, 'cant-run': garden.dwapp_id, update: notes.dwapp_id,
   'update-cant-run': notes.dwapp_id, 'update-failed': notes.dwapp_id, 'update-unknown': notes.dwapp_id,
 });

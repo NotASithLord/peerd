@@ -77,7 +77,7 @@ const nameView = ({ name, cls, onOpen }) => onOpen
 // off screen for the tile the user clicked.
 /**
  * @param {{key:string, name:string, letter:string, tone:string, meta:unknown, description?:string,
- *   updateReady?:boolean, action:unknown, error?:string|null, onOpen?:()=>void}} props
+ *   updateReady?:boolean, action:unknown, error?:unknown, onOpen?:()=>void}} props
  */
 export const tile = ({ key, name, letter, tone, meta, description, updateReady, action, error, onOpen }) =>
   m('.disc-card.disc-tile', { key, 'data-key': key }, [
@@ -89,12 +89,12 @@ export const tile = ({ key, name, letter, tone, meta, description, updateReady, 
     description ? m('p.type-body-sm.disc-tile-desc', { dir: 'auto' }, description) : null,
     updateReady ? m('span.type-small.disc-tile-flag', 'Update ready') : null,
     m('.disc-actions', action),
-    error ? m('p.error.type-small', { role: 'alert' }, error) : null,
+    error,
   ]);
 
 /**
  * @param {{key:string, name:string, letter:string, tone:string, meta:unknown, description?:string,
- *   action:unknown, error?:string|null, onOpen?:()=>void}} props
+ *   action:unknown, error?:unknown, onOpen?:()=>void}} props
  */
 export const appRow = ({ key, name, letter, tone, meta, description, action, error, onOpen }) =>
   m('li.disc-app-row', { key, 'data-key': key }, [
@@ -103,7 +103,7 @@ export const appRow = ({ key, name, letter, tone, meta, description, action, err
       nameView({ name, cls: '.type-subheading', onOpen }),
       m('.type-small', meta),
       description ? m('.type-body-sm', { dir: 'auto' }, description) : null,
-      error ? m('p.error.type-small', { role: 'alert' }, error) : null,
+      error,
     ]),
     m('.disc-app-row-action', action),
   ]);
@@ -227,7 +227,7 @@ const stepMark = (state, n) => state === 'done' ? icon('check', 14)
  * warning after success; `error` is an Open failure. `otherVersion`: the
  * Library holds another version, so the installed line claims no version.
  * `secondary` sits next to `primary`.
- * @param {{state:InstallState, message:string|null, notice:string|null, error:string|null,
+ * @param {{state:InstallState, message:string|null, notice:string|null, error:unknown,
  *   primary:ButtonProps|null, secondary?:ButtonProps|null, otherVersion?:boolean}} props
  */
 export const installPanel = ({ state, message, notice, error, primary, secondary, otherVersion }) => m('.disc-panel', [
@@ -240,13 +240,13 @@ export const installPanel = ({ state, message, notice, error, primary, secondary
       ]),
     ]))),
   state === 'installing' && message ? m('p.type-small.disc-footnote', { role: 'status' }, message) : null,
-  state === 'installed' ? m('p.type-body-sm.disc-installed', { tabindex: -1, role: 'status' }, otherVersion
+  state === 'installed' || (secondary && otherVersion) ? m('p.type-body-sm.disc-installed', { tabindex: -1, role: 'status' }, otherVersion
     ? 'In your Library. Open runs the version you have.'
     : 'In your Library. Peers can get this version from you while your peer network is on.') : null,
   state === 'failed' && message ? m('p.error.disc-panel-error', { role: 'alert' }, message) : null,
   state === 'unknown' && message ? m('p.type-body-sm', { role: 'status' }, message) : null,
   notice ? m('p.type-small.disc-footnote', { role: 'status' }, notice) : null,
-  error ? m('p.error', { role: 'alert' }, error) : null,
+  error,
   primary ? m('.disc-panel-actions', keyedParts({
     [primary.label]: primaryButton(primary), ...(secondary ? { [secondary.label]: secondaryButton(secondary) } : {}),
   })) : null,
@@ -256,7 +256,7 @@ export const installPanel = ({ state, message, notice, error, primary, secondary
  * An installed app with a newer version on offer. Open runs the installed
  * version, so nothing here says the user has or shares the new one. `update`
  * is null when the new version can't run in this browser.
- * @param {{update:ButtonProps|null, open:ButtonProps, notice:string|null, error:string|null}} props
+ * @param {{update:ButtonProps|null, open:ButtonProps, notice:string|null, error:unknown}} props
  */
 export const updatePanel = ({ update, open, notice, error }) => m('.disc-panel', [
   update ? m('.type-label-strong', 'Update ready') : m('p.type-body-sm', [
@@ -264,7 +264,7 @@ export const updatePanel = ({ update, open, notice, error }) => m('.disc-panel',
     ' It needs a feature peerd can’t use here. Technical details lists it.',
   ]),
   notice ? m('p.type-small.disc-footnote', { role: 'status' }, notice) : null,
-  error ? m('p.error', { role: 'alert' }, error) : null,
+  error,
   m('.disc-panel-actions', keyedParts(update ? { update: primaryButton(update), open: secondaryButton(open) } : { open: primaryButton(open) })),
 ]);
 

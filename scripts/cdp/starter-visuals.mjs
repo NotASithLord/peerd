@@ -130,6 +130,9 @@ const FLOW_FRAMES = [
   ['installing', 'installing', has('You can leave this page. The install keeps going.'), ['dweb/base/install']],
   // why the status line: focus never lands on Open, which runs the app.
   ['installed', 'installed', `${focused('.disc-panel .disc-installed')} && ${has('In your Library.')}`, ['dweb/base/install']],
+  ['open-unknown', 'open-unknown', `[...document.querySelectorAll('.disc-panel [role="status"]')]
+    .some(line => line.textContent === 'peerd could not confirm whether the app opened. Check your tabs.' && !line.classList.contains('error'))`,
+  ['dweb/base/install', 'apps/open']],
   ['install-failed', 'failed', has('peerd could not install this app. Try again.'), ['dweb/base/install']],
   ['install-unknown', 'unknown', has('peerd could not confirm whether the install finished.'), ['dweb/base/install']],
   ['update-conflict', 'conflict', has('Locally modified'), ['dweb/base/update-app']],
