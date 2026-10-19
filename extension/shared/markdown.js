@@ -57,25 +57,45 @@ const renderInline = (escaped) => {
     return SENTINEL + (codeSpans.length - 1) + SENTINEL;
   });
 
+  // Bold then italic (bold first so ** isn't eaten by the single-* rule).
+  // why: `_` and `__` follow the CommonMark intraword rule - no emphasis
+  // when both sides are letters or digits - so identifiers like
+  // MAX_RETRY_COUNT and my_config_file.py keep their underscores.
+  /** @param {string} t */
+  const emphasize = (t) => t
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^\p{L}\p{N}_])__([^_]+)__(?![\p{L}\p{N}_])/gu, '$1<strong>$2</strong>')
+    .replace(/(^|[^*])\*(?!\s)([^*]+?)\*(?!\*)/g, '$1<em>$2</em>')
+    .replace(/(^|[^\p{L}\p{N}_])_(?!\s)([^_]+?)_(?![\p{L}\p{N}_])/gu, '$1<em>$2</em>');
+
   // Links: [text](url). `text` is already escaped; sanitize the href.
+  // why: the generated opening <a ...> tag is stashed in a placeholder
+  // (two NULs, digits, one NUL - still nothing but NUL and digits) so
+  // the emphasis pass below never rewrites an underscore inside its href
+  // or target="_blank". The link text gets its emphasis pass here instead.
+  /** @type {string[]} */
+  const linkTags = [];
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (whole, text, rawUrl) => {
     // The url arrives HTML-escaped (e.g. &amp;); unescape just enough to
     // scheme-check, then re-escape for the attribute.
     const decoded = rawUrl.replace(/&amp;/g, '&');
     const href = safeHref(decoded);
     if (!href) return whole;
-    return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+    linkTags.push(`<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">`);
+    return `${SENTINEL}${SENTINEL}${linkTags.length - 1}${SENTINEL}${emphasize(text)}</a>`;
   });
 
-  // Bold then italic (bold first so ** isn't eaten by the single-* rule).
-  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
-  s = s.replace(/(^|[^*])\*(?!\s)([^*]+?)\*(?!\*)/g, '$1<em>$2</em>');
-  s = s.replace(/(^|[^_])_(?!\s)([^_]+?)_(?!_)/g, '$1<em>$2</em>');
+  s = emphasize(s);
 
-  // Restore code spans.
+  // Restore link tags, then code spans (a code span can sit inside link
+  // text). One pass each, no loop, so a fake marker in the input can't
+  // grow; an out-of-range index renders as nothing, never "undefined".
+  s = s.replace(new RegExp(`${SENTINEL}${SENTINEL}(\\d+)${SENTINEL}`, 'g'), (_m, i) => linkTags[Number(i)] ?? '');
   const restore = new RegExp(`${SENTINEL}(\\d+)${SENTINEL}`, 'g');
-  s = s.replace(restore, (_m, i) => `<code>${codeSpans[Number(i)]}</code>`);
+  s = s.replace(restore, (_m, i) => {
+    const code = codeSpans[Number(i)];
+    return code === undefined ? '' : `<code>${code}</code>`;
+  });
   return s;
 };
 
