@@ -30,7 +30,7 @@ import {
 } from '../acceptance/git-smart-http-fixture.mjs';
 import {
   rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage, attach,
-  reloadReadyPanel,
+  reloadReadyPanel, resetSession,
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
   NETWORK_GUARD_CONTROLLER_PORT, NETWORK_GUARD_OWNED_HOST,
   NETWORK_GUARD_UNRELATED_HOST, SITE_CLIENT_FIXTURE_TLS_PORT,
@@ -2055,6 +2055,127 @@ export const STATES = [
     name: 'idle-unlocked', kind: 'visual', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) { await rec.visual('idle-unlocked'); },
+  },
+
+  {
+    name: 'spend-limit-admission', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('The first model reply crosses the spend limit.') }),
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const initial = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings;
+      if (!initial?.providerModel) throw new Error('the current model is unavailable');
+      const pricingOverrides = { ...initial.pricingOverrides,
+        [initial.providerModel]: { input: 1_000_000, output: 1_000_000 } };
+      const settings = await openWidePage(ctx, 'options/options.html#!/costs', {
+        ready: 'input[aria-label="Session spend limit in US dollars"]',
+      });
+      const view = () => evalIn(ctx.page, `(async () => {
+        'use strict';
+        (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
+        return { banner: document.querySelector('.error-banner')?.innerText ?? '',
+          settings: !!document.querySelector('.error-banner button'),
+          halted: !!document.querySelector('.cost-chip--halt'),
+          unknown: document.body.innerText.includes('Turn outcome unknown'),
+          busy: !!document.querySelector('form.input-bar button.stop, .message-assistant.streaming') };
+      })()`, true);
+      const send = async (text) => {
+        const before = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.messages?.length ?? 0;
+        await ctx.page.send('Page.bringToFront');
+        await evalIn(ctx.page, `(() => {
+          'use strict';
+          const input = document.querySelector('form.input-bar textarea');
+          if (!input || input.disabled) throw new Error('composer is unavailable');
+          input.focus(); input.select();
+        })()`);
+        await ctx.page.send('Input.insertText', { text });
+        if (!await waitFor(() => evalIn(ctx.page,
+          `!!document.querySelector('form.input-bar button.send-btn:not(:disabled)')`), { budgetMs: 5_000 })
+          || !await clickAndSyncRedraw(ctx.page, 'form.input-bar button.send-btn')) throw new Error('composer send is unavailable');
+        const state = await waitFor(async () => {
+          const next = (await rpc(ctx.page, { type: 'state/get' }))?.state;
+          const messages = next?.session?.messages ?? [];
+          return messages.length >= before + 2 && messages.at(-1)?.role === 'assistant'
+            && messages.at(-1)?.streaming !== true && !(await view()).busy ? next : null;
+        }, { budgetMs: 30_000, pollMs: 50 });
+        if (!state) throw new Error('the real send did not settle with a durable reply');
+        return state;
+      };
+      const checkKnownHalt = async (name, state) => {
+        const rendered = await view();
+        if (baseRender) rec.observe(`merge-base ${name}`, { rendered, cost: state.session.cost,
+          messages: state.session.messages.map(({ role, stopReason, errorCode, outcomeKnown }) => ({ role, stopReason, errorCode, outcomeKnown })) });
+        else {
+          rec.check(`${name} keeps the spend notice and Settings action`, rendered.banner.includes('Spend limit reached')
+            && rendered.settings && rendered.halted && !rendered.busy, JSON.stringify(rendered));
+          rec.check(`${name} stays known`, !rendered.unknown && state.session.messages.every((message) =>
+            message.outcomeKnown !== false && !message.error), JSON.stringify(state.session.messages.at(-1)));
+        }
+      };
+      const readAudit = async () => {
+        const reply = await rpc(ctx.page, { type: 'audit/list', limit: 800 });
+        if (reply?.ok !== true || !Array.isArray(reply.entries)) throw new Error('the tool audit is unavailable');
+        return reply.entries;
+      };
+      let pendingTool = false;
+      ctx.setModelResponder(() => ({ sse: pendingTool
+        ? sseToolCall('script', { code: 'return 6 * 7;' }, { text: 'The spend halt must stop this pending computation.' })
+        : sseText('The first model reply crosses the spend limit.') }));
+      try {
+        const updated = await rpc(settings, { type: 'settings/update', patch: { pricingOverrides } });
+        if (updated?.ok !== true) throw new Error('the fixture rate did not save');
+        await evalIn(settings, `(() => {
+          'use strict';
+          const input = document.querySelector('input[aria-label="Session spend limit in US dollars"]');
+          input.value = '1'; input.dispatchEvent(new Event('change', { bubbles: true }));
+        })()`);
+        if (!await waitFor(async () => (await rpc(settings, { type: 'state/get' }))?.state?.settings?.spendLimitUsd === 1,
+          { budgetMs: 10_000 })) throw new Error('the real Settings cap did not save');
+        const totalBefore = await rpc(ctx.page, { type: 'cost/total' });
+        const first = await send('Answer once, then honor this chat spend limit.');
+        rec.check('one admitted model call records the fixture price in the real ledger',
+          ctx.modelCallCount() === 1 && first.session.cost?.cost === 3, JSON.stringify(first.session.cost));
+        await checkKnownHalt('the settled crossing', first);
+        await rec.visual('spend-limit-admission');
+        for (const text of ['Try this chat again.', 'Check the same limit once more.']) {
+          const priorCalls = ctx.modelCallCount(), priorCost = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.cost?.cost;
+          const refused = await send(text);
+          if (baseRender) rec.observe('merge-base repeated send', { calls: ctx.modelCallCount() - priorCalls,
+            priorCost, cost: refused.session.cost?.cost });
+          else {
+            rec.check('an over-cap composer send makes no extra model call or ledger charge',
+              ctx.modelCallCount() === priorCalls && refused.session.cost?.cost === priorCost);
+            rec.check('the refused message has a durable factual reply', refused.session.messages.at(-2)?.content === text
+              && refused.session.messages.at(-1)?.content.includes('This message was not sent to the model.'));
+          }
+          await checkKnownHalt('the settled refusal', refused);
+        }
+        const totalAfter = await rpc(ctx.page, { type: 'cost/total' });
+        if (!baseRender) rec.check('the aggregate real ledger also keeps only one fixture charge',
+          totalBefore?.ok && totalAfter?.ok && totalAfter.usd - totalBefore.usd === 3, JSON.stringify({ totalBefore, totalAfter }));
+        await rec.visual('spend-limit-refused-send');
+        await resetSession(ctx);
+        pendingTool = true;
+        const callsBefore = ctx.modelCallCount();
+        const auditsBefore = new Set((await readAudit()).map((entry) => entry.id));
+        const stopped = await send('Start a fresh chat and stop before its pending computation.');
+        rec.check('a fresh chat still admits one model call', ctx.modelCallCount() === callsBefore + 1 && stopped.session.cost?.cost === 3);
+        const toolEffects = (await readAudit()).filter((entry) => !auditsBefore.has(entry.id)
+          && entry.type === 'tool_executed' && entry.details?.tool === 'script');
+        rec.check('usage-time halt never dispatches the pending computation', toolEffects.length === 0
+          && !stopped.session.messages.some((message) => message.toolResults?.length), JSON.stringify(toolEffects));
+        await checkKnownHalt('the pending-tool halt', stopped);
+        if (!baseRender) rec.check('the usage-time halt is a known aborted assistant',
+          stopped.session.messages.at(-1)?.stopReason === 'aborted');
+        await rec.visual('spend-limit-pending-tool');
+      } finally {
+        await rpc(ctx.page, { type: 'agent/stop' });
+        const restored = await rpc(settings, { type: 'settings/update', patch: {
+          spendLimitUsd: initial.spendLimitUsd ?? 0, pricingOverrides: initial.pricingOverrides ?? {},
+        } });
+        await settings.close();
+        if (restored?.ok !== true) throw new Error('the original cost settings did not restore');
+      }
+    },
   },
 
   // --- functional: the goal-mode autonomous loop -----------------------------

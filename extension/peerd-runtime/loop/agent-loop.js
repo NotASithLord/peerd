@@ -800,6 +800,12 @@ export async function* runUserTurn(ctx) {
       }
     }
 
+    // why: the sealed host closes ordinary writes on abort. Settle first.
+    if (wasAborted() && typeof ctx.finalizeAbort === 'function') {
+      await finalizeAbort(assistantStub.id, textBuf);
+      return;
+    }
+
     // Parse tool-use input JSON. Anthropic streams partial_json
     // fragments; we concatenate, then JSON.parse the whole thing. An
     // empty buffer means the model passed `{}` implicitly.
@@ -884,17 +890,8 @@ export async function* runUserTurn(ctx) {
       return;
     }
 
-    // Re-check abort AFTER the stream ended, BEFORE any side-effecting dispatch.
-    // why: a hard spend-limit halt / Stop / steer can abort() in the GAP between
-    // the stream finishing and dispatch — the limit's abort() rides the `usage`
-    // event, which adapters emit one event BEFORE `message-stop`, so the
-    // for-await ends normally and the mid-stream AbortError branch (:563) never
-    // sees it. Without this guard the loop would run every already-emitted
-    // tool_use this step (writes / call_api / vm / edit / app side effects) and
-    // persist their results before the next loop-top check (:303) finally
-    // catches the abort. Mark the turn aborted — so detectInterruptedTurn treats
-    // it as a deliberate stop, NOT a resumable tools-pending interruption — and
-    // short-circuit before the dispatch waves.
+    // why: raw-loop callers retain pending tool records before this guard.
+    // Stop between the stream and dispatch must not run pending effects.
     if (wasAborted()) {
       if (!await finalizeAbort(assistantStub.id, undefined)) {
         yield {
