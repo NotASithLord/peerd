@@ -115,3 +115,60 @@ describe('renderMarkdown - underscores in links and identifiers', () => {
     expect(out).not.toContain('<code>');
   });
 });
+
+describe('renderMarkdown - lists as written', () => {
+  test('a loose numbered list stays one <ol> numbered 1, 2, 3', () => {
+    const out = renderMarkdown('1. **Install**\n\n2. **Configure**\n\n3. **Run**');
+    expect(out).toBe('<ol><li><strong>Install</strong></li><li><strong>Configure</strong></li><li><strong>Run</strong></li></ol>');
+  });
+
+  test('a list starting at 3 gets start="3"', () => {
+    expect(renderMarkdown('3. three\n4. four')).toBe('<ol start="3"><li>three</li><li>four</li></ol>');
+  });
+
+  test('nested bullets become a nested <ul>', () => {
+    expect(renderMarkdown('- a\n  - nested\n- b')).toBe('<ul><li>a<ul><li>nested</li></ul></li><li>b</li></ul>');
+  });
+
+  test('a sub-bullet under a step keeps the next step numbered', () => {
+    expect(renderMarkdown('1. Step one\n   - detail a\n2. Step two'))
+      .toBe('<ol><li>Step one<ul><li>detail a</li></ul></li><li>Step two</li></ol>');
+  });
+
+  test('an indented fence inside an item becomes <pre> inside the <li>', () => {
+    const out = renderMarkdown('1. Install:\n   ```bash\n   npm i\n\n   npm test\n   ```\n2. Done');
+    expect(out).toBe('<ol><li>Install:<pre><code>npm i\n\nnpm test</code></pre></li><li>Done</li></ol>');
+  });
+
+  test('a fence body inside a nested item keeps its indentation', () => {
+    const out = renderMarkdown('- a\n  - b\n    ```\n    if (x) {\n      <y>\n    }\n    ```');
+    expect(out).toBe('<ul><li>a<ul><li>b<pre><code>if (x) {\n  &lt;y&gt;\n}</code></pre></li></ul></li></ul>');
+  });
+
+  test('escaped HTML inside an item stays escaped', () => {
+    const out = renderMarkdown('1. x\n   - <img src=x onerror=alert(1)>');
+    expect(out).not.toContain('<img');
+    expect(out).toContain('&lt;img src=x onerror=alert(1)&gt;');
+  });
+
+  test('a javascript: link inside an item is neutralised', () => {
+    const out = renderMarkdown('- a\n  - [click](javascript:alert(1))');
+    expect(out).not.toContain('<a ');
+    expect(out).not.toContain('href="javascript');
+  });
+
+  test('the start number is digits only', () => {
+    expect(renderMarkdown('007. x')).toBe('<ol start="7"><li>x</li></ol>');
+  });
+
+  test('nesting stops at the depth cap', () => {
+    const src = Array.from({ length: 9 }, (_v, depth) => `${'  '.repeat(depth)}- l${depth}`).join('\n');
+    const out = renderMarkdown(src);
+    expect(out.split('<ul>').length - 1).toBe(8);
+    expect(out).toContain('l7<br>- l8');
+  });
+
+  test('a paragraph after a blank line ends the list', () => {
+    expect(renderMarkdown('- a\n\npara')).toBe('<ul><li>a</li></ul>\n<p>para</p>');
+  });
+});

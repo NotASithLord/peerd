@@ -99,28 +99,53 @@ const renderInline = (escaped) => {
   return s;
 };
 
+// List item marker: indent, bullet or number, then at least one space.
+const LIST_ITEM = /^(\s*)([-*+]|\d+\.)(\s+)(.*)$/;
+
+// why: nesting is recursive, so a hostile reply of thousands of indented
+// bullets must not build an unbounded tree; past this depth an item's
+// body renders as flat text.
+const MAX_LIST_DEPTH = 8;
+
+/** @param {string} line */
+const startsBlock = (line) => /^\s*$/.test(line)
+  || /^```/.test(line)
+  || /^(#{1,6})\s+/.test(line)
+  || LIST_ITEM.test(line)
+  || /^\s*>\s?/.test(line);
+
+/** @param {string} line */
+const indentOf = (line) => line.length - line.trimStart().length;
+
 /**
- * Render a Markdown string to a trusted HTML string. Block-level parse
- * is line-based and intentionally small — it covers the constructs a
- * chat model actually emits (headings, fenced + inline code, bold/em,
- * links, ordered/unordered lists, blockquotes, paragraphs).
+ * Block-level parse of `lines` into HTML chunks. `depth` counts the list
+ * levels already open around these lines.
  *
- * @param {string} src
- * @returns {string} HTML (safe to pass to m.trust)
+ * @param {string[]} lines
+ * @param {number} depth
+ * @returns {string[]}
  */
-export const renderMarkdown = (src) => {
-  if (typeof src !== 'string' || src.length === 0) return '';
-  const lines = src.replace(/\r\n?/g, '\n').split('\n');
+const renderBlocks = (lines, depth) => {
+  /** @type {string[]} */
   const out = [];
   let i = 0;
 
   /**
-   * @param {string[]} items
-   * @param {boolean} ordered
+   * One list item: its first line plus dedented continuation lines. The
+   * leading plain lines render inline (a tight item stays `<li>text</li>`);
+   * anything after them (sub-lists, fences, paragraphs) recurses.
+   * @param {string[]} body
    */
-  const flushList = (items, ordered) => {
-    const tag = ordered ? 'ol' : 'ul';
-    out.push(`<${tag}>${items.map((it) => `<li>${renderInline(escapeHtml(it))}</li>`).join('')}</${tag}>`);
+  const renderItem = (body) => {
+    let lead = 0;
+    while (lead < body.length && (lead === 0 || !startsBlock(body[lead]))) lead++;
+    const head = body.slice(0, lead).map((l) => renderInline(escapeHtml(l.trim()))).join('<br>');
+    const rest = body.slice(lead);
+    if (!rest.some((l) => !/^\s*$/.test(l))) return `<li>${head}</li>`;
+    const nested = depth + 1 < MAX_LIST_DEPTH
+      ? renderBlocks(rest, depth + 1).join('\n')
+      : `<br>${rest.filter((l) => !/^\s*$/.test(l)).map((l) => renderInline(escapeHtml(l.trim()))).join('<br>')}`;
+    return `<li>${head}${nested}</li>`;
   };
 
   while (i < lines.length) {
@@ -148,25 +173,58 @@ export const renderMarkdown = (src) => {
     // Blank line — block boundary.
     if (/^\s*$/.test(line)) { i++; continue; }
 
-    // Unordered list.
-    if (/^\s*[-*+]\s+/.test(line)) {
+    // List (ordered or unordered). Items are siblings at the first item's
+    // indent; a deeper-indented line continues the current item (nested
+    // list, fence, more text) with its indent stripped up to the item's
+    // content column. why: models emit loose lists (blank line between
+    // steps) and indent sub-bullets and fences under a step; ending the
+    // list at either restarts the numbering at 1.
+    const first = line.match(LIST_ITEM);
+    if (first) {
+      const baseIndent = first[1].length;
+      const ordered = /\d/.test(first[2]);
+      /** @type {string[][]} */
       const items = [];
-      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\s*[-*+]\s+/, ''));
+      let contentIndent = 0;
+      /** @param {string} candidate */
+      const isSibling = (candidate) => {
+        const item = candidate.match(LIST_ITEM);
+        return item !== null && item[1].length === baseIndent && /\d/.test(item[2]) === ordered ? item : null;
+      };
+      while (i < lines.length) {
+        const current = lines[i];
+        const indent = indentOf(current);
+        // why: a deeper line (the common case inside a nested list) is a
+        // continuation without running the item regex at all, which keeps
+        // re-scanning each nesting level cheap.
+        if (indent > baseIndent && indent < current.length) {
+          items[items.length - 1].push(current.slice(Math.min(indent, contentIndent)));
+          i++;
+          continue;
+        }
+        if (indent === current.length) {
+          // Blank: keep the list open only if what follows is a sibling
+          // item or an indented continuation.
+          let next = i;
+          while (next < lines.length && lines[next].trim() === '') next++;
+          if (next >= lines.length) break;
+          if (isSibling(lines[next])) { i = next; continue; }
+          if (indentOf(lines[next]) <= baseIndent) break;
+          for (; i < next; i++) items[items.length - 1].push('');
+          continue;
+        }
+        const item = isSibling(current);
+        if (!item) break;
+        items.push([item[4]]);
+        contentIndent = item[1].length + item[2].length + item[3].length;
         i++;
       }
-      flushList(items, false);
-      continue;
-    }
-
-    // Ordered list.
-    if (/^\s*\d+\.\s+/.test(line)) {
-      const items = [];
-      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\s*\d+\.\s+/, ''));
-        i++;
-      }
-      flushList(items, true);
+      const tag = ordered ? 'ol' : 'ul';
+      // why: the start number is digits only (from the marker regex), so it
+      // can't carry markup into the attribute; 1 is the default, omitted.
+      const startNumber = ordered ? first[2].slice(0, -1).replace(/^0+(?=\d)/, '') : '1';
+      const startAttr = startNumber === '1' ? '' : ` start="${startNumber}"`;
+      out.push(`<${tag}${startAttr}>${items.map(renderItem).join('')}</${tag}>`);
       continue;
     }
 
@@ -183,20 +241,26 @@ export const renderMarkdown = (src) => {
 
     // Paragraph — gather consecutive plain lines, join with <br>.
     const para = [];
-    while (
-      i < lines.length
-      && !/^\s*$/.test(lines[i])
-      && !/^```/.test(lines[i])
-      && !/^(#{1,6})\s+/.test(lines[i])
-      && !/^\s*[-*+]\s+/.test(lines[i])
-      && !/^\s*\d+\.\s+/.test(lines[i])
-      && !/^\s*>\s?/.test(lines[i])
-    ) {
+    while (i < lines.length && !startsBlock(lines[i])) {
       para.push(lines[i]);
       i++;
     }
     out.push(`<p>${para.map((l) => renderInline(escapeHtml(l))).join('<br>')}</p>`);
   }
 
-  return out.join('\n');
+  return out;
+};
+
+/**
+ * Render a Markdown string to a trusted HTML string. Block-level parse
+ * is line-based and intentionally small - it covers the constructs a
+ * chat model actually emits (headings, fenced + inline code, bold/em,
+ * links, ordered/unordered lists, blockquotes, paragraphs).
+ *
+ * @param {string} src
+ * @returns {string} HTML (safe to pass to m.trust)
+ */
+export const renderMarkdown = (src) => {
+  if (typeof src !== 'string' || src.length === 0) return '';
+  return renderBlocks(src.replace(/\r\n?/g, '\n').split('\n'), 0).join('\n');
 };
