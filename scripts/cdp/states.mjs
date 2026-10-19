@@ -30,7 +30,7 @@ import {
 } from '../acceptance/git-smart-http-fixture.mjs';
 import {
   rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage, attach,
-  reloadReadyPanel,
+  reloadReadyPanel, resetSession,
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
   NETWORK_GUARD_CONTROLLER_PORT, NETWORK_GUARD_OWNED_HOST,
   NETWORK_GUARD_UNRELATED_HOST, SITE_CLIENT_FIXTURE_TLS_PORT,
@@ -97,6 +97,20 @@ const chooseFixtureNetwork = async (ctx, enabled) => {
       }
     } finally { await home.close(); }
   }
+};
+
+const submitActorStopMessage = async (page, text) => {
+  await page.send('Page.bringToFront');
+  await evalIn(page, `(() => {
+    'use strict';
+    const input = document.querySelector('form.input-bar textarea');
+    if (!input || input.disabled) throw new Error('composer is unavailable');
+    input.focus(); input.select();
+  })()`);
+  await page.send('Input.insertText', { text });
+  const ready = await waitFor(() => evalIn(page,
+    `!!document.querySelector('form.input-bar button.send-btn:not(:disabled)')`), { budgetMs: 5_000 });
+  if (!ready || !await clickAndSyncRedraw(page, 'form.input-bar button.send-btn')) throw new Error('composer send is unavailable');
 };
 
 const SMOKE_TEXT = 'e2e-smoke-ok';
@@ -2055,6 +2069,155 @@ export const STATES = [
     name: 'idle-unlocked', kind: 'visual', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) { await rec.visual('idle-unlocked'); },
+  },
+
+  {
+    name: 'actors-stop-hydration', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('This chat is idle.') }),
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const held = [], requests = [];
+      let owner = null;
+      const view = () => evalIn(ctx.page, `(async () => {
+        'use strict';
+        (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
+        return { user: [...document.querySelectorAll('.message-user .bubble')].at(-1)?.textContent,
+          stop: !!document.querySelector('form.input-bar button.stop'),
+          streaming: !!document.querySelector('.message-assistant.streaming'), text: document.body.innerText };
+      })()`, true);
+      const checkStop = async (name, expected) => {
+        if (!baseRender) await waitFor(async () => (await view())?.stop === expected,
+          { budgetMs: 5_000, pollMs: 50 });
+        const current = await view();
+        if (baseRender) rec.observe(`merge-base ${name}`, current);
+        else rec.check(name, current?.stop === expected, JSON.stringify(current));
+      };
+      const switchTo = async (sessionId, text) => {
+        const reply = await rpc(ctx.page, { type: 'session/switch', sessionId });
+        if (!reply?.ok || !await waitFor(async () => (await view())?.user === text,
+          { budgetMs: 10_000, pollMs: 50 })) throw new Error('chat switch did not mount its owner');
+      };
+      try {
+        await submitActorStopMessage(ctx.page, 'Keep this chat idle.');
+        if (!await waitFor(async () => (await view())?.text.includes('This chat is idle.') && !(await view())?.streaming,
+          { budgetMs: 20_000 })) throw new Error('idle chat did not settle');
+        const idle = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId;
+        await resetSession(ctx);
+        ctx.setModelResponder(async (_index, request) => {
+          requests.push(request.postData);
+          await new Promise((resolve) => held.push(resolve));
+          return { sse: sseText('A stopped response must not appear.') };
+        });
+        await submitActorStopMessage(ctx.page, 'Wait for this model reply.');
+        if (!await waitFor(async () => held.length === 1 && (await view())?.stop,
+          { budgetMs: 20_000 })) throw new Error('the real model request did not start');
+        owner = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId;
+        const priorDocument = await evalIn(ctx.page, 'performance.timeOrigin');
+        await reloadReadyPanel(ctx, { expectedSessionId: owner });
+        rec.check('reload mounts a new document while the real request remains pending',
+          priorDocument !== await evalIn(ctx.page, 'performance.timeOrigin') && held.length === 1 && (await view())?.streaming);
+        await checkStop('the reopened owner keeps its Stop', true);
+        await rec.visualPage('actors-stop-hydration', ctx.page, { beforeShot: () => checkStop('reopened Stop survives each theme', true) });
+        await switchTo(idle, 'Keep this chat idle.');
+        await checkStop('an idle chat has no Stop from another owner', false);
+        await rec.visualPage('actors-stop-idle-chat', ctx.page, { beforeShot: () => checkStop('idle Stop stays absent in each theme', false) });
+        await switchTo(owner, 'Wait for this model reply.');
+        await checkStop('switching back restores the live owner Stop', true);
+        await submitActorStopMessage(ctx.page, 'Steer this pending reply.');
+        if (!await waitFor(() => held.length === 2, { budgetMs: 20_000 })) throw new Error('steer did not reach the model');
+        held[0]();
+        const superseded = await waitFor(async () => {
+          const state = (await rpc(ctx.page, { type: 'state/get' }))?.state;
+          return state?.session?.messages?.some((message) => message.stopReason === 'aborted')
+            && state.session.messages.at(-1)?.streaming === true;
+        }, { budgetMs: 15_000, pollMs: 50 });
+        rec.check('a real steer settles the old turn while its replacement stays live', !!superseded && requests.length === 2);
+        await checkStop('old settlement does not hide the replacement Stop', true);
+        await rec.visualPage('actors-stop-steered', ctx.page, { beforeShot: () => checkStop('steered Stop survives each theme', true) });
+        if ((await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId !== owner) throw new Error('Stop has the wrong chat owner');
+        if (await evalIn(ctx.page, `!!document.querySelector('form.input-bar button.stop')`)) {
+          await clickAndSyncRedraw(ctx.page, 'form.input-bar button.stop');
+        } else if (baseRender) await rpc(ctx.page, { type: 'agent/stop' });
+        else throw new Error('the replacement turn has no Stop');
+        held[1]();
+        if (!await waitFor(async () => !(await view())?.streaming, { budgetMs: 15_000 })) throw new Error('Stop did not settle the owner');
+        rec.check('Stop never renders either held reply', !(await view())?.text.includes('A stopped response must not appear.'));
+        await reloadReadyPanel(ctx, { expectedSessionId: owner });
+        rec.check('the finished owner reloads without a dead Stop', (await view())?.stop === false);
+      } finally {
+        if (owner) {
+          await rpc(ctx.page, { type: 'session/switch', sessionId: owner });
+          await rpc(ctx.page, { type: 'agent/stop' });
+        }
+        for (const release of held) release();
+        await setEmulatedTheme(ctx.page, 'light');
+      }
+    },
+  },
+  {
+    name: 'actors-incomplete-reply', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('Ready.') }),
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      let spawned = 0, childCalls = 0, wakeCalls = 0, scriptResult = '';
+      const prior = new Set((await auditEntries(ctx)).map((entry) => entry.id));
+      ctx.setModelResponder((_index, request) => {
+        const body = request.postData ?? '';
+        if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
+          childCalls++;
+          if (childCalls === 1) return { sse: sseToolCall('script', { code: 'return 6 * 7;' }) };
+          scriptResult = toolResultsIn(body).at(-1) ?? '';
+          return { sse: sseText('') };
+        }
+        if (body.includes('An actor you started earlier')) {
+          wakeCalls++;
+          return { sse: sseText('The child ended without a final reply. Check its saved computation before retrying.') };
+        }
+        if (!spawned++) return { sse: sseToolCall('actor_create', {
+          task: 'Compute six times seven, then end without reply text.', tools: ['script'], sync: false,
+        }) };
+        return { sse: sseText('The isolated computation is running.') };
+      });
+      try {
+        await submitActorStopMessage(ctx.page, 'Delegate one computation and preserve its terminal report.');
+        const owner = await waitFor(async () => (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId,
+          { budgetMs: 10_000 });
+        const completed = await waitFor(async () => (await auditEntries(ctx)).find((entry) =>
+          !prior.has(entry.id) && entry.type === 'actor_completed'), { budgetMs: 30_000, pollMs: 100 });
+        if (!completed) throw new Error('the real child did not complete');
+        if (!baseRender && !await waitFor(() => evalIn(ctx.page,
+          `!!document.querySelector('.message-actor-reply.failed') && document.body.innerText.includes('Check its saved transcript before retrying.')`),
+        { budgetMs: 20_000, pollMs: 50 })) throw new Error('the child terminal report did not render');
+        if (!await waitFor(() => evalIn(ctx.page,
+          `!document.querySelector('.message-assistant.streaming') && !document.querySelector('form.input-bar button.stop')`),
+        { budgetMs: 15_000, pollMs: 50 })) {
+          rec.observe('unsettled terminal report', { spawned, childCalls, wakeCalls,
+            view: await evalIn(ctx.page, 'document.body.innerText'),
+            bundle: (await rpc(ctx.page, { type: 'session/debugBundle', sessionId: owner }))?.bundle });
+          throw new Error('the terminal report did not settle');
+        }
+        const bundle = (await rpc(ctx.page, { type: 'session/debugBundle', sessionId: owner }))?.bundle;
+        const child = bundle?.childSessions?.find((session) => session.kind === 'spawned');
+        const parentCall = bundle?.session?.messages?.flatMap((message) => message.toolUses ?? [])
+          .find((call) => call.name === 'actor_create');
+        const replies = bundle?.session?.messages?.filter((message) => message.actorReply) ?? [];
+        const scripts = (await auditEntries(ctx)).filter((entry) => !prior.has(entry.id)
+          && entry.type === 'tool_executed' && entry.details?.tool === 'script');
+        rec.check('the real child ran one computation and made two model calls', childCalls === 2 && scripts.length === 1 && scriptResult.includes('42'));
+        rec.check('the child transcript retains its exact computation call and result',
+          child?.messages?.some((message) => message.toolUses?.some((call) => call.name === 'script'))
+          && child.messages.some((message) => message.toolResults?.length === 1));
+        if (baseRender) rec.observe('merge-base incomplete delivery', { wakeCalls, replies, completion: completed.details });
+        else {
+          rec.check('the incomplete child wakes its exact parent once', wakeCalls === 1 && replies.length === 1 && typeof parentCall?.id === 'string'
+            && replies[0].actorReply.failed === true && replies[0].actorReply.parentToolUseId === parentCall?.id
+            && replies[0].id === replies[0].actorReply.actorDeliveryId);
+          rec.check('the parent receives a bounded factual report with no false Stop claim',
+            replies[0].content.length < 2_000 && !replies[0].content.includes('stopped before it produced a reply'));
+        }
+        await rec.visual('actors-incomplete-reply');
+      } finally { await rpc(ctx.page, { type: 'agent/stop' }); }
+    },
   },
 
   // --- functional: the goal-mode autonomous loop -----------------------------

@@ -23,6 +23,7 @@ export const createKernelTurnCustody = (deps) => {
   const memory = createMemoryStore({ idb: deps.idb });
   const turnSlots = makeTurnSlots({
     onAbort: deps.onAbort,
+    onIdle: (sessionId) => deps.uiPorts.broadcast({ type: 'turn/streaming', sessionId, streaming: false }),
     forceReleaseMs: deps.turnForceReleaseMs,
   });
   const pageActivity = (deps.makePageActivity ?? createPageActivityReporter)({

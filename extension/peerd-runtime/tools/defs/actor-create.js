@@ -28,7 +28,7 @@ const MAX_RESULT_CHARS = 200 * 1024;
  * @typedef {{
  *   result: string, sessionId: string | null, toolCalls: number,
  *   durationMs: number, depth: number, exceeded?: true, refused?: true,
- *   timedOut?: true, stopped?: true, executionFailed?: true, outcomeKnown?: boolean,
+ *   timedOut?: true, stopped?: true, incomplete?: true, executionFailed?: true, outcomeKnown?: boolean,
  * }} SpawnActorResult
  */
 /**
@@ -135,9 +135,9 @@ export const actorCreateTool = composeTool("actor_create", {
       return {
         ok: false,
         error: formatActorResult(out),
-        performed: false,
+        ...(out.incomplete ? {} : { performed: false }),
         outcomeKnown: true,
-        retryable: true,
+        retryable: out.incomplete !== true,
       };
     }
     return { ok: true, content: formatActorResult(out) };
@@ -154,10 +154,11 @@ const formatActorResult = (out) => {
   const outcomeUnknown = out.outcomeKnown === false
     || (out.executionFailed === true && out.outcomeKnown !== true);
   const flag = outcomeUnknown ? ': EXECUTION FAILED AFTER WORK BEGAN'
-    : out.executionFailed ? ': FAILED BEFORE TARGET WORK RAN'
+    : out.executionFailed ? (out.incomplete ? ': FAILED BEFORE FINISHING' : ': FAILED BEFORE TARGET WORK RAN')
     : out.timedOut ? ': HIT WALL-CLOCK TIMEOUT, result is partial'
     : out.stopped ? ': STOPPED before finishing, result is partial'
-    : out.exceeded ? ': HIT STEP CAP, result may be incomplete' : '';
+    : out.exceeded ? ': HIT STEP CAP, result may be incomplete'
+    : out.incomplete ? ': ENDED WITHOUT A FINAL REPLY, result is partial' : '';
   // why UNTRUSTED (parity with the async path, async-actors.js): the child's
   // result is model-authored from a fresh context over possibly page-derived
   // bytes, so it is DATA to the parent, not instructions. Only the one-line
