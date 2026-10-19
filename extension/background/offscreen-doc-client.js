@@ -19,6 +19,7 @@ const DOCUMENT_ERROR_CODES = new Set([
   'doc_extract_aborted', 'legacy_binary_format', 'unsupported_format',
   'unreadable_container', 'parse_failed', 'fetch_failed', 'is_web_content',
   'ocr_not_installed', 'pdf_extract_failed', 'doc_extract_failed',
+  'document_too_large', 'pdf_password_required',
 ]);
 
 /**

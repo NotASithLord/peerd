@@ -610,6 +610,114 @@ export const STATES = [
     async run(ctx, rec) { await rec.visual('initial-screen'); },
   },
 
+  {
+    name: 'document-attachment-refusals', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const initial = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings;
+      if (!initial) throw new Error('the provider state is unavailable');
+      try {
+        const key = await rpc(ctx.page, { type: 'provider/setKey', provider: 'anthropic', plaintext: 'sk-e2e-document-refusal-only' });
+        const provider = await rpc(ctx.page, { type: 'settings/update', patch: { providerName: 'anthropic', providerModel: '' } });
+        if (key?.ok !== true || provider?.ok !== true) throw new Error('the attachment provider did not initialize');
+        if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('input.attach-input')`), { budgetMs: 15_000 })) throw new Error('the real file picker is unavailable');
+        const legacy = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+        for (const [name, bytes, expected] of [
+          ['report.doc', legacy, 'older or password-protected Office file'],
+          ['locked.docx', legacy, 'without a password, then attach it again'],
+          ['broken.docx', [0x50, 0x4b, 3, 4, 0, 0, 0, 0], 'corrupt, password-protected, or uses unsupported compression'],
+        ]) {
+          await evalIn(ctx.page, `(() => {
+            const files = new DataTransfer();
+            files.items.add(new File([Uint8Array.from(${JSON.stringify(bytes)})], ${JSON.stringify(name)}));
+            const input = document.querySelector('input.attach-input');
+            input.files = files.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+            const composer = document.querySelector('form.input-bar textarea');
+            composer.focus(); composer.select();
+          })()`);
+          await ctx.page.send('Input.insertText', { text: 'Summarize this document.' });
+          if (!await waitFor(() => evalIn(ctx.page, `document.querySelector('.attach-chip-name')?.textContent === ${JSON.stringify(name)} && !!document.querySelector('form.input-bar button.send-btn:not(:disabled)')`), { budgetMs: 10_000 })) throw new Error('the file did not stage for Send');
+          const before = ctx.modelCallCount();
+          if (!await clickAndSyncRedraw(ctx.page, 'form.input-bar button.send-btn')) throw new Error('the real Send control is unavailable');
+          const settled = await waitFor(() => evalIn(ctx.page, `(() => {
+            const error = document.querySelector('.attach-error')?.textContent;
+            const busy = !!document.querySelector('form.input-bar button.stop');
+            return error && !busy ? { error, draft: document.querySelector('form.input-bar textarea')?.value,
+              chip: document.querySelector('.attach-chip-name')?.textContent,
+              users: document.querySelectorAll('.message-user').length } : null;
+          })()`), { budgetMs: 30_000, pollMs: 50 });
+          if (!settled) throw new Error('the real attachment refusal did not settle');
+          rec.check(`${name} refuses before a model request and keeps the draft`, ctx.modelCallCount() === before && settled.draft === 'Summarize this document.' && settled.chip === name && settled.users === 0, JSON.stringify(settled));
+          if (baseRender) rec.observe(`merge-base ${name} refusal`, settled);
+          else rec.check(`${name} gives a safe next step`, settled.error.includes(expected)
+            && !settled.error.includes('WebVM') && !settled.error.includes('Document extraction failed.'), settled.error);
+          await evalIn(ctx.page, `document.querySelector('form.input-bar').scrollIntoView({ block: 'end' })`);
+          await rec.visual(name.endsWith('.doc') ? 'document-attachment-refusals' : `document-attachment-${name.replace('.', '-')}`);
+          await evalIn(ctx.page, `(() => {
+            for (const button of document.querySelectorAll('.attach-chip-remove')) button.click();
+            const input = document.querySelector('form.input-bar textarea'); input.focus(); input.select();
+          })()`);
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+        }
+      } finally {
+        const restored = await rpc(ctx.page, { type: 'settings/update', patch: { providerName: initial.providerName, providerModel: initial.providerModel } });
+        if (restored?.ok !== true) throw new Error('the original provider did not restore');
+      }
+    },
+  },
+  {
+    name: 'composer-file-references', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const files = { 'index.html': '<!doctype html><title>Notes</title><main>Notes</main>',
+        'plain.md': 'Plain document body.', 'my notes.md': 'Document body with spaces.', 'docs/guide.md': 'Nested document body.' };
+      const requests = [];
+      let created = false;
+      ctx.setModelResponder((_index, request) => {
+        const body = JSON.parse(request.postData ?? Buffer.concat((request.postDataEntries ?? []).map((entry) => Buffer.from(entry.bytes ?? '', 'base64'))).toString());
+        const last = body.messages?.at(-1);
+        if (last?.role === 'user') requests.push(typeof last.content === 'string' ? last.content : (last.content ?? []).map((part) => part.text ?? '').join(''));
+        if (!created) { created = true; return { sse: sseToolCall('sandbox_create', { kind: 'app', name: 'Document notes', files }) }; }
+        return { sse: sseText('Document files are ready.') };
+      });
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create the document notes App.' });
+      if (sent?.ok !== true || !await waitFor(() => evalIn(ctx.page, `!document.querySelector('form.input-bar button.stop') && [...document.querySelectorAll('.message-assistant .bubble')].some((bubble) => bubble.textContent.includes('Document files are ready.'))`), { budgetMs: 30_000 })) throw new Error('the real App creation did not settle');
+      const listed = await rpc(ctx.page, { type: 'composer/files' });
+      rec.check('the real App picker lists all stored reference files', listed?.ok === true && ['plain.md', 'my notes.md', 'docs/guide.md'].every((path) => listed.files.some((file) => file.replace(/^\/+/, '') === path)), JSON.stringify(listed));
+      for (const [path, query] of [['plain.md', 'plain'], ['my notes.md', 'my'], ['docs/guide.md', 'guide']]) {
+        await ctx.page.send('Page.bringToFront');
+        await evalIn(ctx.page, `(() => { const input = document.querySelector('form.input-bar textarea'); input.focus(); input.select(); })()`);
+        await ctx.page.send('Input.insertText', { text: `@file:${query}` });
+        if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('#composer-palette .palette-option')`), { budgetMs: 10_000 })) throw new Error('the real file palette did not open');
+        if (path === 'my notes.md') await rec.visual('composer-file-references');
+        await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+        await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+        if (!await waitFor(() => evalIn(ctx.page, `(() => {
+          const input = document.querySelector('form.input-bar textarea');
+          return !document.querySelector('#composer-palette') && document.activeElement === input && input.selectionStart === input.value.length;
+        })()`), { budgetMs: 5_000 })) throw new Error('the file pick did not restore its caret');
+        await ctx.page.send('Input.insertText', { text: 'Summarize this file.' });
+        const before = requests.length;
+        if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar button.send-btn:not(:disabled)')`), { budgetMs: 5_000 })
+          || !await clickAndSyncRedraw(ctx.page, 'form.input-bar button.send-btn')) throw new Error('the file reference could not be sent');
+        if (!await waitFor(async () => {
+          if (requests.length <= before || (await probe(ctx)).busy) return false;
+          const messages = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.messages;
+          return messages?.at(-1)?.role === 'assistant' && messages.at(-1).streaming !== true;
+        }, { budgetMs: 30_000, pollMs: 50 })) throw new Error('the real reference send did not reach the model and settle');
+        const wire = requests.at(-1);
+        const state = (await rpc(ctx.page, { type: 'state/get' }))?.state;
+        const durable = state?.session?.messages?.filter((message) => message.role === 'user').at(-1)?.content;
+        rec.check(`${path} has a durable user message`, typeof durable === 'string');
+        if (baseRender) rec.observe(`merge-base ${path} expansion`, { wire, durable });
+        else rec.check(`${path} reaches the model and durable history as the exact file`, wire.includes(`<peerd_file path="${path}">`)
+          && wire.includes(files[path]) && !wire.includes('could not resolve') && durable.includes(files[path]), JSON.stringify({ wire, durable }));
+        if (path === 'my notes.md') await rec.visual('composer-file-expanded');
+      }
+    },
+  },
+
   // --- functional: one full happy-path turn ----------------------------------
   {
     name: 'smoke', kind: 'functional', phase: 'post-unlock',
