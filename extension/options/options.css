@@ -577,7 +577,7 @@
 }
 .set-why:hover { color: var(--text); }
 .set-why[aria-expanded="true"] { color: var(--text); }
-.set-why:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--border); border-radius: 3px; }
+.set-why:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; border-radius: 3px; }
 .set-why-chev { transition: transform .12s ease; }
 .set-why-chev.is-open { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) { .set-why-chev { transition: none; } }
@@ -605,7 +605,9 @@
 .set-toggle.is-on .set-toggle-knob { background: var(--bg); }
 .set-toggle.is-busy { opacity: .5; cursor: progress; }
 .set-toggle.is-na { border-style: dashed; cursor: not-allowed; opacity: .55; }
-.set-toggle:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--border); }
+/* why an outline, not a --border ring: the ring measured 1.2:1 against the
+   page, invisible, and computed to none in forced-colors mode. */
+.set-toggle:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   .set-toggle, .set-toggle-knob { transition: none; }
 }
@@ -613,4 +615,4 @@
   height: 24px; padding: 0 6px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--bg); color: var(--text); font: 400 11px/1 var(--sans);
 }
-.set-select:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--border); }
+.set-select:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }

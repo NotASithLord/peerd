@@ -143,6 +143,10 @@ import './unit/options/provider-races.test.js';
 import './unit/options/git-credentials.test.js';
 import './unit/options/transfer-identity.test.js';
 import './unit/options/contributor-metrics.test.js';
+import './unit/options/memory-safety.test.js';
+import './unit/options/activity-window.test.js';
+import './unit/options/settings-form-names.test.js';
+import './unit/options/settings-focus-contrast.test.js';
 
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';

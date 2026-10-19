@@ -173,7 +173,13 @@ export const HooksView = {
           ui.busy ? 'Saving…' : 'Save hook'),
       ]) : null,
 
-      ui.note ? m(`p.key-msg${ui.note.ok ? '.ok' : '.err'}`, ui.note.text) : null,
+      // why always mounted + role=status: a live region announces changes
+      // inside a region that already exists; a line inserted with its text
+      // is announced unreliably. Empty it costs no pixels (.key-msg:empty).
+      m('p.key-msg', {
+        role: 'status',
+        class: ui.note ? (ui.note.ok ? 'ok' : 'err') : '',
+      }, ui.note ? ui.note.text : null),
 
       hooks === null
         ? m('p.muted', 'Loading…')

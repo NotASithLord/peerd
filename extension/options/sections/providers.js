@@ -451,6 +451,7 @@ export const ProvidersSection = {
                   type: 'password',
                   autocomplete: 'off',
                   spellcheck: false,
+                  'aria-label': `${p.label} API key`,
                   placeholder: keyPlaceholder(p.name),
                   value: draft,
                   disabled: busy,
@@ -476,8 +477,14 @@ export const ProvidersSection = {
             ])
           : null,
         // Card-level message (Save OR Test) — shows whether the form is open or
-        // collapsed (Test runs while the card is collapsed).
-        msg ? m(`p.key-msg${msg.ok ? '.ok' : '.err'}`, msg.text) : null,
+        // collapsed (Test runs while the card is collapsed). Always mounted with
+        // role=status so the result is announced: a live region announces
+        // changes inside a region that already exists, and this line is
+        // replaced twice within milliseconds after a save.
+        m('p.key-msg', {
+          role: 'status',
+          class: msg ? (msg.ok ? 'ok' : 'err') : '',
+        }, msg ? msg.text : null),
         ui.keyUncertain[p.name] && !p.keyless && draft
           ? m('button.secondary', {
               type: 'button', disabled: !!ui.keyBusy[p.name],
