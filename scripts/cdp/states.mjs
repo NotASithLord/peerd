@@ -2100,7 +2100,13 @@ export const STATES = [
         let options;
         try {
           const untouched = await rpc(fresh.page, { type: 'state/get' });
-          rec.check(`${surface} starts with a real fresh vault`, untouched?.ok && untouched.state?.vault?.initialized === false);
+          rec.check(`${surface} starts with a real fresh locked vault`, untouched?.ok
+            && untouched.state?.vault?.initialized === false && untouched.state.vault.locked === true);
+          const untouchedActor = untouched?.state?.capabilities?.actorExecution;
+          if (baseRender) rec.observe(`merge-base fresh locked ${surface} actor health`, untouchedActor);
+          else rec.check(`${surface} fresh locked state has exact neutral actor health`, untouchedActor?.status === 'not-started'
+            && untouchedActor.host === 'offscreen-document-worker' && untouchedActor.reason === null
+            && untouchedActor.retryable === false, JSON.stringify(untouchedActor));
           const untouchedLease = await rpc(fresh.page, { type: 'bootstrap/ready' });
           rec.check(`${surface} fresh locked state read keeps the controller revoked`, untouchedLease?.ok
             && untouchedLease.featureLeases?.schema === 1
@@ -2120,6 +2126,9 @@ export const STATES = [
             `document.querySelectorAll('.path-card[data-path]').length > 1`), { budgetMs: 20_000, pollMs: 50 });
           if (!ready) throw new Error(`${surface} did not mount its real starter cards`);
           const cold = (await rpc(fresh.page, { type: 'state/get' }))?.state?.capabilities?.actorExecution;
+          // why: provider projection can verify the host before the first unlocked state is published.
+          const safeHealth = ['not-started', 'available'].includes(cold?.status)
+            && cold.host === 'offscreen-document-worker' && cold.reason === null && cold.retryable === false;
           const lease = await rpc(fresh.page, { type: 'bootstrap/ready' });
           const controls = await evalIn(fresh.page, `(() => ({
             banner: !!document.querySelector('.actor-isolation-banner'),
@@ -2129,8 +2138,7 @@ export const STATES = [
           }))()`);
           if (baseRender) rec.observe(`merge-base cold ${surface}`, { cold, controls, leases: lease?.featureLeases });
           else {
-            rec.check(`${surface} has exact neutral cold health`, cold?.status === 'not-started'
-              && cold.host === 'offscreen-document-worker' && cold.reason === null && cold.retryable === false, JSON.stringify(cold));
+            rec.check(`${surface} has exact safe actor health`, safeHealth, JSON.stringify(cold));
             rec.check(`${surface} has enabled starters and no false pause`, !controls.banner
               && controls.cards.length > 1 && controls.cards.every((card) => !card.disabled), JSON.stringify(controls));
           }
@@ -2139,7 +2147,7 @@ export const STATES = [
             && typeof leases.leases === 'object' && !Array.isArray(leases.leases)
             && ['buildId', 'bootId', 'kernelEpoch'].every((key) => typeof leases[key] === 'string' && leases[key].length > 0);
           const coldAudit = await rpc(fresh.page, { type: 'audit/list', limit: 100 });
-          rec.check(`${surface} cold setup starts no actor or model inference`, validLeases && (baseRender || cold?.status === 'not-started')
+          rec.check(`${surface} cold setup starts no actor or model inference`, validLeases && (baseRender || safeHealth)
             && fresh.modelCallCount() === 0 && coldAudit?.ok && Array.isArray(coldAudit.entries)
             && !coldAudit.entries.some((entry) => ['actor_ran_isolated', 'actor_background_turn_refused', 'actor_completed'].includes(entry.type)),
           JSON.stringify({ cold, lease, calls: fresh.modelCallCount(), audit: coldAudit }));
