@@ -25,9 +25,7 @@ import {
   projectSemanticHookManifest,
   UNAVAILABLE_HOOK_RECORDS,
 } from '../../shared/semantic-hook-manifest.js';
-import {
-  bindCurrentChat, DEFAULT_CHAT_PERMISSION,
-} from '../../shared/current-session-binding.js';
+import { createCurrentChat } from '../../shared/current-session-binding.js';
 
 const UNKNOWN_TURN_ERROR = 'Turn outcome unknown. Check the session before retrying.';
 const providerFailureFrom = (/** @type {unknown} */ value) => {
@@ -143,14 +141,10 @@ const runAgentTurn = async (/** @type {any} */ input) => {
     // what the model picker shows. No-op (returns the explicit choice) when a
     // provider is already selected, so the common path adds no probes.
     const ap = await ensureActiveProvider();
-    const created = await sessions.create({
+    sessionId = (await createCurrentChat(sessions, sessionCache, {
       provider: ap.name,
       model: ap.model,
-      permissionMode: DEFAULT_CHAT_PERMISSION.mode,
-      confirmActions: DEFAULT_CHAT_PERMISSION.confirmActions,
-    });
-    sessionId = created.sessionId;
-    await bindCurrentChat(sessionCache, created);
+    })).sessionId;
   }
 
   // Claim THIS session's turn slot. If this chat is already streaming,
