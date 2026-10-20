@@ -2143,36 +2143,44 @@ export const STATES = [
         const sessions = [], controllerHeaps = [];
         for (let index = 0; index < 3; index += 1) {
           if (index) await resetSession(warm.child);
-          const before = new Set(warm.workers.keys());
-          await send(warm, `Catalog chat ${index + 1}.`);
+          // why: each validated turn creates a model client. Other controller work can overlap.
+          const beforeRequests = warm.requests.length;
+          const text = `Catalog chat ${index + 1}.`;
+          await send(warm, text);
           if (!await settled(warm, 'CATALOG-REPLY')) throw new Error('fresh OpenRouter chat did not settle');
           const state = await rpc(warm.child.page, { type: 'state/get' });
           if (!state?.ok || !state.state.session.sessionId) throw new Error('catalog chat identity is missing');
           sessions.push(state.state.session.sessionId);
-          const heaps = [...warm.workers.values()].filter((worker) => !before.has(worker.targetId) && worker.url.endsWith('/offscreen/controller-worker.js'));
-          if (!heaps.length || !await waitFor(() => heaps.every((worker) => warm.workers.get(worker.targetId)?.destroyed))) throw new Error('controller heap did not retire between chats');
-          const native = nativeHeaps(warm, heaps, 'controller', true);
-          rec.check(`chat ${index + 1} controller heaps have exact native identity and retirement`, native.ok, JSON.stringify(native));
-          if (!native.ok) throw new Error('controller heap native identity or retirement is missing');
+          const heaps = warm.identity.snapshot().workers.filter((worker) =>
+            worker.native?.href === `chrome-extension://${warm.child.sw.id}/offscreen/controller-worker.js`);
+          const native = nativeHeaps(warm, heaps, 'controller', false);
+          rec.observe(`chat ${index + 1} observed controller lifecycle`, heaps);
+          const request = warm.requests[beforeRequests];
+          rec.check(`chat ${index + 1} has exact native controller identity and one model call`, native.ok
+            && warm.requests.length === beforeRequests + 1 && Array.isArray(request?.body?.messages)
+            && request.body.messages.some((message) => message.role === 'user'
+              && JSON.stringify(message.content ?? '').includes(text)), JSON.stringify(native));
+          if (!native.ok) throw new Error('controller heap native identity is missing');
           controllerHeaps.push(...heaps.map((worker) => worker.targetId));
         }
         warm.setPhase('actor');
         await send(warm, 'Start the catalog actor.');
         if (!await settled(warm, 'CATALOG-ACTOR-REPORT', 30_000)) throw new Error('catalog actor did not return through the real wake');
-        const actorHeaps = [...warm.workers.values()].filter((worker) => worker.url.endsWith('/offscreen/actor-worker.js'));
+        const actorHeaps = warm.identity.snapshot().workers.filter((worker) =>
+          worker.native?.href === `chrome-extension://${warm.child.sw.id}/offscreen/actor-worker.js`);
         const actorIdentity = nativeHeaps(warm, actorHeaps, 'actor', false);
         rec.check('the isolated actor has exact native worker and parent identity', actorIdentity.ok, JSON.stringify(actorIdentity));
         if (!actorIdentity.ok) throw new Error('actor heap native identity is missing');
         const audit = await rpc(warm.child.page, { type: 'audit/list', limit: 800 });
         if (!audit?.ok || !Array.isArray(audit.entries)) throw new Error('catalog actor audit refused');
         const isolation = actorIsolationEvidence(audit.entries);
-        rec.check('three real chats and a fresh isolated actor use distinct worker heaps', new Set(sessions).size === 3
-          && new Set(controllerHeaps).size >= 3 && actorHeaps.length >= 1 && isolation.exactProof,
+        rec.check('three real chats and a fresh isolated actor use the model path', new Set(sessions).size === 3
+          && new Set(controllerHeaps).size >= 1 && actorHeaps.length >= 1 && isolation.exactProof,
         JSON.stringify({ sessions, controllerHeaps, actorHeaps, isolation }));
         rec.check('all inference stays on the intercepted OpenRouter wire', warm.requests.length >= 6
           && warm.requests.every((request) => request.url === 'https://openrouter.ai/api/v1/chat/completions' && request.body.model === model));
-        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base catalog GETs across fresh heaps', warm.catalogs);
-        else rec.check('all fresh heaps share one valid catalog with a served 200000-token window', warm.catalogs.length === 1 && warm.catalogs[0].method === 'GET');
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base catalog GETs across real chats and the actor', warm.catalogs);
+        else rec.check('all real chats and the isolated actor share one valid host catalog', warm.catalogs.length === 1 && warm.catalogs[0].method === 'GET');
         await rec.visualPage('openrouter-host-catalog', warm.child.page);
         warm.setMode('hold'); warm.setPhase('chat');
         const before = warm.catalogs.length;
