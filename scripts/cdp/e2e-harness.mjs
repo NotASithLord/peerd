@@ -689,7 +689,7 @@ export async function launchPeerd({
       body: Buffer.from(bodyStr).toString('base64'),
     });
     try {
-      if (url.includes('/v1/chat/completions')) {
+      if (url.includes('/v1/chat/completions') || url === 'https://api.anthropic.com/v1/messages') {
         const spec = await currentResponder(modelCalls++, request);
         if (spec?.delayMs) await sleep(spec.delayMs);
         if (spec?.sse != null) await fulfill('text/event-stream', spec.sse, spec.status ?? 200);
@@ -739,6 +739,7 @@ export async function launchPeerd({
     await connection.send('Runtime.enable').catch(() => {});
     await connection.send('Fetch.enable', { patterns: [
       { urlPattern: '*11434*' },
+      { urlPattern: 'https://api.anthropic.com/v1/messages', requestStage: 'Request' },
       { urlPattern: 'https://remote-module.test/*' },
     ] });
     return connection;

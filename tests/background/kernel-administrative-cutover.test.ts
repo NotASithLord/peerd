@@ -154,6 +154,42 @@ describe('sealed administrative root cutover', () => {
         code: 'administrative-hooks-write-unknown' });
   });
 
+  test('invalid parsed skills stay known before durable writes', async () => {
+    const databaseName = `invalid-skills-${crypto.randomUUID()}`;
+    const factory: IDBFactory = new Proxy(indexedDB, {
+      get(target, property) {
+        if (property === 'open') return (_name: string, version?: number) => target.open(databaseName, version);
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const persistence = createKernelSkillPersistence({ idbFactory: factory });
+    const harness = makeHarness({ commitSkill: persistence.commit });
+    for (const [name, description] of [['日本語スキル', 'Valid text'], ['Помощник', 'Valid text'], ['long-description', 'x'.repeat(5000)]]) {
+      const reply = await harness.control.routes['skills/installLocal']({ text: `---\nname: ${name}\ndescription: ${description}\n---\nBody` });
+      expect(reply).toMatchObject({ ok: false, error: 'invalid-skill', detail: expect.stringContaining('Skill not installed:') });
+      expect(reply.outcomeKnown).not.toBe(false);
+    }
+    expect(await persistence.list()).toEqual([]);
+    expect(harness.audits).toEqual([]);
+    const lost = makeHarness({ commitSkill: async () => { throw new TypeError('write failed after dispatch'); } });
+    expect(await lost.control.routes['skills/installLocal']({ text: '---\nname: valid\ndescription: Valid\n---\nBody' }))
+      .toMatchObject({ ok: false, code: 'administrative-skill-install-unknown', outcomeKnown: false });
+  });
+
+  test('invalid compiled hooks stay known before durable writes', async () => {
+    const harness = makeHarness();
+    for (const markdown of [hookMarkdown('onmatch').replace('onMatch:', 'onmatch:'),
+      hookMarkdown('extra').replace('  onMatch:', '  note: extra\n  onMatch:'),
+      hookMarkdown('reason').replace('  onMatch:', '  reason: 404\n  onMatch:'), hookMarkdown('a'.repeat(140))]) {
+      const reply = await harness.control.routes['hooks/save']({ markdown });
+      expect(reply).toMatchObject({ ok: false, error: expect.stringContaining('Hook not saved:') });
+      expect(reply.outcomeKnown).not.toBe(false);
+    }
+    expect(harness.stored.size).toBe(0);
+    expect(harness.audits).toEqual([]);
+  });
+
   test('refuses a hook beyond the durable count before storage write', async () => {
     const harness = makeHarness();
     harness.stored.set('hooks.user.v1', Array.from(
