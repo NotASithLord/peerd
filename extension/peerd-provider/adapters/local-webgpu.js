@@ -40,13 +40,8 @@ export const LOCAL_MODEL_ID = DEFAULT_LOCAL_MODEL_ID;
  * value (the engine-ENFORCED window where the spec declares one) is the
  * bridge-not-wired fallback only.
  *
- * why a wired-but-failing bridge returns null instead of the static value:
- * the caller's controller-side context-window resolver caches a returned number for
- * the SW's lifetime as if it were live. Handing it the static value on a
- * TRANSIENT bridge failure would freeze it in place and stop the retry that
- * would have learned the engine's real answer; null leaves the miss uncached
- * so the next turn asks again, while the trim layer meanwhile uses the same
- * static table on its own (resolveContextWindow's fallback).
+ * why: a failed live read returns null so the next turn can retry.
+ * The trim layer uses its static table until the engine answers.
  *
  * @param {{ model?: string, modelEgress?: ModelEgress, signal?: AbortSignal }} args
  * @returns {Promise<number | null>}

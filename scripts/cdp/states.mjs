@@ -30,7 +30,7 @@ import {
 } from '../acceptance/git-smart-http-fixture.mjs';
 import {
   rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage, attach,
-  reloadReadyPanel,
+  reloadReadyPanel, launchPeerd, unlockAndReady, resetSession,
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
   NETWORK_GUARD_CONTROLLER_PORT, NETWORK_GUARD_OWNED_HOST,
   NETWORK_GUARD_UNRELATED_HOST, SITE_CLIENT_FIXTURE_TLS_PORT,
@@ -45,6 +45,7 @@ import { IMMUTABLE_ADDRESS_VISUAL_STATES } from './immutable-address-visuals.mjs
 import { CONSENT_LOCK_VISUAL_STATES } from './consent-lock-visuals.mjs';
 import { PEER_NETWORK_STATUS_STATES } from './peer-network-status-states.mjs';
 import { armVaultLockStages } from './vault-lock-stages.mjs';
+import { observeCatalogWorkerIdentity } from './catalog-worker-identity.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -2052,9 +2053,323 @@ export const STATES = [
 
   // --- visual: idle unlocked panel -------------------------------------------
   {
+    name: 'openrouter-host-catalog', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const model = 'z-ai/glm-5.1';
+      const createFixture = async (initialMode = 'valid') => {
+        let mode = initialMode, actorStarted = false, phase = 'chat';
+        const catalogs = [], requests = [], errors = [], workers = new Map();
+        const child = await launchPeerd({ extensionDir: ctx.extensionDir, resumeAuxiliaryWorkers: false, modelResponder: (_index, request) => {
+          requests.push({ at: performance.now(), url: request.url, body: JSON.parse(request.postData) });
+          if (request.postData.includes('<actor_agent>')) return { sse: sseText('CATALOG-ACTOR-DONE') };
+          if (phase === 'actor' && !actorStarted) { actorStarted = true; return { sse: sseToolCall('actor_create', { task: 'Return the catalog worker control.', tools: [] }) }; }
+          return { sse: sseText(phase === 'actor'
+            ? request.postData.includes('An actor you started earlier') ? 'CATALOG-ACTOR-REPORT' : 'CATALOG-ACTOR-QUEUED'
+            : 'CATALOG-REPLY') };
+        } });
+        let browser, identity;
+        const close = async () => {
+          try {
+            if (identity) {
+              const evidence = await identity.close();
+              rec.observe('catalog worker identity and cleanup', evidence);
+              const clean = evidence.errors.length === 0
+                && evidence.commands.every((command) => command.status === 'complete')
+                && evidence.workers.every((worker) => worker.released || worker.destroyed);
+              rec.check('catalog worker identity observer closes without errors', clean);
+              if (!clean) throw new Error('catalog worker identity or cleanup failed');
+            }
+          } finally { browser?.close(); await child.close(); }
+        };
+        try {
+          const version = await fetch(`http://127.0.0.1:${child.port}/json/version`).then((reply) => reply.json());
+          browser = await attach(version.webSocketDebuggerUrl);
+          const { sessionId } = await browser.send('Target.attachToTarget', { targetId: child.sw.targetId, flatten: true });
+          browser.on((method, params, message) => {
+            if (['Target.targetCreated', 'Target.targetInfoChanged'].includes(method) && params.targetInfo.type === 'worker') {
+              const target = params.targetInfo;
+              workers.set(target.targetId, { ...(workers.get(target.targetId) ?? {}), ...target });
+            }
+            if (method === 'Target.targetDestroyed' && workers.has(params.targetId)) workers.get(params.targetId).destroyed = true;
+            if (method !== 'Fetch.requestPaused' || message.sessionId !== sessionId) return;
+            const { request, requestId } = params;
+            if (request.url !== 'https://openrouter.ai/api/v1/models') { errors.push('unexpected catalog endpoint'); return; }
+            catalogs.push({ at: performance.now(), method: request.method, mode });
+            if (mode === 'hold') return;
+            const data = mode === 'invalid' ? { data: null } : { data: [{ id: model, context_length: 256_000, top_provider: { context_length: 200_000 } }] };
+            void browser.send('Fetch.fulfillRequest', { requestId, responseCode: 200,
+              responseHeaders: [{ name: 'content-type', value: 'application/json' }],
+              body: Buffer.from(JSON.stringify(data)).toString('base64') }, sessionId).catch((error) => errors.push(String(error)));
+          });
+          await browser.send('Target.setDiscoverTargets', { discover: true });
+          await browser.send('Fetch.enable', { patterns: [{ urlPattern: 'https://openrouter.ai/api/v1/models' }] }, sessionId);
+          await unlockAndReady(child.page);
+          identity = await observeCatalogWorkerIdentity(child, browser);
+          const key = await rpc(child.page, { type: 'provider/setKey', provider: 'openrouter', plaintext: 'sk-or-v1-e2e-catalog-wire-only', activate: false });
+          const settings = await rpc(child.page, { type: 'settings/update', patch: { providerName: 'openrouter', providerModel: model, autoMemoryEnabled: false } });
+          if (!key?.ok || !settings?.ok) throw new Error('OpenRouter wire fixture refused');
+          return { child, catalogs, requests, errors, workers, identity, setMode: (next) => { mode = next; },
+            setPhase: (next) => { phase = next; }, close };
+        } catch (error) { await close(); throw error; }
+      };
+      const send = async (fixture, text) => {
+        const page = fixture.child.page;
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('form.input-bar textarea')`))) throw new Error('catalog composer did not mount');
+        await evalIn(page, `(() => { 'use strict'; const input = document.querySelector('form.input-bar textarea');
+          input.value = ${JSON.stringify(text)}; input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        if (!await waitFor(() => evalIn(page, `document.querySelector('.send-btn')?.disabled === false`))) throw new Error('catalog composer stayed disabled');
+        await clickAndSyncRedraw(page, '.send-btn');
+      };
+      const settled = (fixture, text, budgetMs = 20_000) => waitFor(() => evalIn(fixture.child.page,
+        `${JSON.stringify(text)} === [...document.querySelectorAll('.message-assistant .bubble')].at(-1)?.textContent.trim()
+          && !document.querySelector('form.input-bar button.stop')`), { budgetMs, pollMs: 50 });
+      const nativeHeaps = (fixture, targets, role, retired) => {
+        const evidence = fixture.identity.snapshot();
+        const parent = evidence.parents.length === 1 ? evidence.parents[0] : null;
+        const workers = targets.map((target) => evidence.workers.filter((worker) => worker.targetId === target.targetId));
+        const ok = !!parent && evidence.errors.length === 0 && workers.length > 0
+          && workers.every((matches) => matches.length === 1 && matches.every((worker) =>
+            worker.parentTargetId === parent.target.targetId && worker.targetInfo.parentId === parent.target.targetId
+            && worker.parentSessionId === parent.parentSessionId && worker.targetInfo.type === 'worker'
+            && worker.native?.href === `chrome-extension://${fixture.child.sw.id}/offscreen/${role}-worker.js`
+            && worker.native.name === (role === 'controller' ? 'peerd-controller' : '')
+            && worker.native.constructorName === 'DedicatedWorkerGlobalScope' && !worker.error && worker.released
+            && (!retired || worker.destroyed === true)));
+        return { ok, parent, workers: workers.flat() };
+      };
+      const warm = await createFixture();
+      try {
+        const sessions = [], controllerHeaps = [];
+        for (let index = 0; index < 3; index += 1) {
+          if (index) await resetSession(warm.child);
+          const before = new Set(warm.workers.keys());
+          await send(warm, `Catalog chat ${index + 1}.`);
+          if (!await settled(warm, 'CATALOG-REPLY')) throw new Error('fresh OpenRouter chat did not settle');
+          const state = await rpc(warm.child.page, { type: 'state/get' });
+          if (!state?.ok || !state.state.session.sessionId) throw new Error('catalog chat identity is missing');
+          sessions.push(state.state.session.sessionId);
+          const heaps = [...warm.workers.values()].filter((worker) => !before.has(worker.targetId) && worker.url.endsWith('/offscreen/controller-worker.js'));
+          if (!heaps.length || !await waitFor(() => heaps.every((worker) => warm.workers.get(worker.targetId)?.destroyed))) throw new Error('controller heap did not retire between chats');
+          const native = nativeHeaps(warm, heaps, 'controller', true);
+          rec.check(`chat ${index + 1} controller heaps have exact native identity and retirement`, native.ok, JSON.stringify(native));
+          if (!native.ok) throw new Error('controller heap native identity or retirement is missing');
+          controllerHeaps.push(...heaps.map((worker) => worker.targetId));
+        }
+        warm.setPhase('actor');
+        await send(warm, 'Start the catalog actor.');
+        if (!await settled(warm, 'CATALOG-ACTOR-REPORT', 30_000)) throw new Error('catalog actor did not return through the real wake');
+        const actorHeaps = [...warm.workers.values()].filter((worker) => worker.url.endsWith('/offscreen/actor-worker.js'));
+        const actorIdentity = nativeHeaps(warm, actorHeaps, 'actor', false);
+        rec.check('the isolated actor has exact native worker and parent identity', actorIdentity.ok, JSON.stringify(actorIdentity));
+        if (!actorIdentity.ok) throw new Error('actor heap native identity is missing');
+        const audit = await rpc(warm.child.page, { type: 'audit/list', limit: 800 });
+        if (!audit?.ok || !Array.isArray(audit.entries)) throw new Error('catalog actor audit refused');
+        const isolation = actorIsolationEvidence(audit.entries);
+        rec.check('three real chats and a fresh isolated actor use distinct worker heaps', new Set(sessions).size === 3
+          && new Set(controllerHeaps).size >= 3 && actorHeaps.length >= 1 && isolation.exactProof,
+        JSON.stringify({ sessions, controllerHeaps, actorHeaps, isolation }));
+        rec.check('all inference stays on the intercepted OpenRouter wire', warm.requests.length >= 6
+          && warm.requests.every((request) => request.url === 'https://openrouter.ai/api/v1/chat/completions' && request.body.model === model));
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base catalog GETs across fresh heaps', warm.catalogs);
+        else rec.check('all fresh heaps share one valid catalog with a served 200000-token window', warm.catalogs.length === 1 && warm.catalogs[0].method === 'GET');
+        await rec.visualPage('openrouter-host-catalog', warm.child.page);
+        warm.setMode('hold'); warm.setPhase('chat');
+        const before = warm.catalogs.length;
+        await send(warm, 'Reuse the warm model catalog while its endpoint is held.');
+        const reused = await settled(warm, 'CATALOG-REPLY', 3_000);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base warm catalog hold', { reused, requests: warm.catalogs.length - before });
+        else rec.check('the warm cache avoids the held endpoint and completes the model turn', reused === true && warm.catalogs.length === before);
+        await rec.visualPage('openrouter-warm-held', warm.child.page);
+        if (!reused && !(await rpc(warm.child.page, { type: 'agent/stop' }))?.ok) throw new Error('held catalog Stop refused');
+        rec.check('catalog fixture has no interception error', warm.errors.length === 0, JSON.stringify(warm.errors));
+      } finally { await warm.close(); }
+      for (const mode of ['invalid', 'hold']) {
+        const fresh = await createFixture(mode);
+        try {
+          await send(fresh, `Use the static fallback after the first ${mode} metadata read.`);
+          const completed = await settled(fresh, 'CATALOG-REPLY', mode === 'hold' ? 12_000 : 5_000);
+          const elapsedMs = fresh.requests[0] && fresh.catalogs[0] ? fresh.requests[0].at - fresh.catalogs[0].at : null;
+          if (process.env.PEERD_VISUAL_BASE_RENDER === '1' && mode === 'hold') rec.observe('base stalled first catalog', { completed, elapsedMs });
+          else rec.check(`${mode} first metadata leaves inference available within its bounded deadline`, completed === true
+            && fresh.catalogs.length === 1 && fresh.requests.length === 1
+            && elapsedMs !== null && elapsedMs < (mode === 'hold' ? 11_000 : 5_000), JSON.stringify({ elapsedMs, catalogs: fresh.catalogs }));
+          await rec.visualPage(`openrouter-first-${mode}`, fresh.child.page);
+          if (!completed && !(await rpc(fresh.child.page, { type: 'agent/stop' }))?.ok) throw new Error('stalled first metadata Stop refused');
+          rec.check(`${mode} catalog interception stays local`, fresh.errors.length === 0, JSON.stringify(fresh.errors));
+        } finally { await fresh.close(); }
+      }
+    },
+  },
+  {
     name: 'idle-unlocked', kind: 'visual', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) { await rec.visual('idle-unlocked'); },
+  },
+  {
+    name: 'web-request-outcome-audit', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const received = [], sockets = new Set();
+      const origin = `https://${GIT_FIXTURE_HOST}`;
+      const server = createHttpsServer({ cert: GIT_FIXTURE_TLS_CERT, key: GIT_FIXTURE_TLS_KEY }, (request, response) => {
+        const chunks = [];
+        request.on('data', (chunk) => chunks.push(chunk));
+        request.on('error', () => {});
+        request.on('end', () => {
+          const receipt = { method: request.method, path: request.url, host: request.headers.host,
+            tls: request.socket.encrypted === true, body: Buffer.concat(chunks).toString(), header: request.headers['x-proof'] };
+          received.push(receipt);
+          if (request.url.startsWith('/provider-audit/ok-')) {
+            response.writeHead(200, { 'content-type': 'text/plain', 'cache-control': 'no-store' }); response.end('ok');
+          } else {
+            // why: close the HTTP socket; Bun exposes an inert reset method.
+            request.socket.destroy();
+          }
+        });
+      });
+      server.on('connection', (socket) => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+      await new Promise((resolve, reject) => { server.once('error', reject); server.listen(SITE_CLIENT_FIXTURE_TLS_PORT, '127.0.0.1', resolve); });
+      let active = null, actorCalls = 0, delegated = false;
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir, modelResponder: (_index, request) => {
+        if (request.postData.includes('<actor_agent>')) {
+          if (actorCalls++ === 0) return { sse: sseToolCall('page_code', { code: `return await page.fetch(${JSON.stringify(active.url)}, ${JSON.stringify(active.init)});` }) };
+          return { sse: sseText('RESET-ACTOR-DONE') };
+        }
+        const wake = JSON.parse(request.postData).messages.some((message) => message.role === 'user'
+          && typeof message.content === 'string' && message.content.includes('tool="message_actor"'));
+        if (wake) return { sse: sseText('RESET-PARENT-DONE') };
+        if (!delegated) { delegated = true; return { sse: sseToolCall('message_actor', { to: 'web', message: 'Make the exact requested fixture request once.' }) }; }
+        return { sse: sseText('RESET-PARENT-QUEUED') };
+      } }).catch(async (error) => {
+        for (const socket of sockets) socket.destroy();
+        await new Promise((resolve) => server.close(resolve));
+        throw error;
+      });
+      let notebook, activity;
+      try {
+        await unlockAndReady(child.page);
+        if (!(await rpc(child.page, { type: 'settings/update', patch: { autoMemoryEnabled: false, webActorActionSurface: 'code' } }))?.ok) throw new Error('request audit settings refused');
+        const auditBefore = await rpc(child.page, { type: 'audit/list', limit: 800 });
+        if (!auditBefore?.ok || !Array.isArray(auditBefore.entries)) throw new Error('initial request audit refused');
+        const priorIds = new Set(auditBefore.entries.map((entry) => entry.id));
+        const cases = [];
+        const requireNotebookChat = async () => {
+          const reply = await rpc(child.page, { type: 'state/get' });
+          if (reply?.ok !== true || reply.state?.session?.sessionId !== null) throw new Error('Notebook fixture requires an exact null chat');
+        };
+        const approveAndWait = async (operation, path, method, pathKind) => {
+          let done = false, failure = null, approvals = 0;
+          const pending = operation.then((value) => { done = true; return value; }, (error) => { done = true; failure = error; });
+          const finished = await waitFor(async () => {
+            for (const page of approvals === 0 ? [child.page, notebook].filter(Boolean) : []) {
+              const dialog = await evalIn(page, `(() => { 'use strict';
+                const button = [...document.querySelectorAll('.confirm-modal button')].find((node) => node.textContent.trim().toLowerCase() === 'allow once' && !node.disabled);
+                const modal = button?.closest('.confirm-modal');
+                return modal ? { text: modal.textContent, summary: modal.querySelector('.confirm-summary')?.textContent,
+                  origin: [...modal.querySelectorAll('p')].map((node) => node.textContent).find((text) => text.startsWith('On: ')) } : null;
+              })()`);
+              if (dialog) {
+                if (pathKind === 'notebook') await requireNotebookChat();
+                const host = new URL(origin).host;
+                const matchesDestination = pathKind === 'notebook'
+                  ? dialog.summary === `Allow the WebVM to send a POST request to ${host}? This can send data out of the browser.`
+                    && dialog.origin === `On: ${host}`
+                  : dialog.text.includes(origin);
+                const beforeApproval = received.filter((entry) => entry.path === path);
+                rec.check(`${method} ${path.split('?')[0]} waits for real consent before receipt`, method === 'POST' && approvals === 0
+                  && beforeApproval.length === 0 && matchesDestination, JSON.stringify({ pathKind, dialog, beforeApproval }));
+                if (method !== 'POST' || approvals || beforeApproval.length || !matchesDestination) throw new Error('request consent boundary did not hold');
+                await evalIn(page, `[...document.querySelectorAll('.confirm-modal button')].find((node) => node.textContent.trim().toLowerCase() === 'allow once' && !node.disabled).click()`);
+                approvals += 1;
+                break;
+              }
+            }
+            return done && (await Promise.all([child.page, notebook].filter(Boolean).map((page) =>
+              evalIn(page, `!document.querySelector('.confirm-modal')`)))).every(Boolean);
+          }, { budgetMs: 45_000, pollMs: 80 });
+          if (!finished) throw new Error('real request did not settle');
+          await pending;
+          if (failure) throw failure;
+          rec.check(`${method} uses its normal consent rule`, approvals === (method === 'POST' ? 1 : 0));
+        };
+        for (const pathKind of ['web', 'notebook']) {
+          if (pathKind === 'notebook') {
+            await resetSession(child);
+            await requireNotebookChat();
+            notebook = await openWidePage(child, 'engine-tabs/notebook-tab/index.html#provider-audit-notebook', { ready: '#notebook-app:not([hidden])' });
+          }
+          const command = (message) => evalIn(child.swConn, `(async () => {
+            const tab = (await chrome.tabs.query({})).find((candidate) => candidate.url?.endsWith('#provider-audit-notebook'));
+            if (!tab?.id) throw new Error('real Notebook tab is missing');
+            return chrome.tabs.sendMessage(tab.id, ${JSON.stringify({ notebookId: 'provider-audit-notebook', ...message })});
+          })()`, true);
+          if (pathKind === 'notebook' && !await waitFor(async () => (await command({ type: 'js/list-files' }))?.ok === true)) throw new Error('Notebook command host did not become ready');
+          for (const kind of ['ok', 'reset-get', 'reset-post']) {
+            const method = kind === 'reset-post' ? 'POST' : 'GET';
+            const path = `/provider-audit/${kind}-${pathKind}?private=query-canary`;
+            const init = { method, headers: { 'x-proof': 'header-canary' }, ...(method === 'POST' ? { body: 'body-canary' } : {}) };
+            active = { url: origin + path, init }; actorCalls = 0; delegated = false;
+            let operation;
+            if (pathKind === 'web') {
+              await resetSession(child);
+              operation = (async () => {
+                const sent = await rpc(child.page, { type: 'agent/send', text: `Make one ${method} request to the test fixture.` });
+                if (!sent?.ok) throw new Error('real web request send refused');
+                if (!await waitFor(() => evalIn(child.page, `document.body.textContent.includes('RESET-PARENT-DONE') && !document.querySelector('form.input-bar button.stop')`), { budgetMs: 40_000, pollMs: 80 })) throw new Error('web actor did not return its terminal report');
+              })();
+            } else {
+              await requireNotebookChat();
+              operation = command({ type: 'js/eval', timeoutMs: 40_000,
+                code: `try { const response = await peerd.egress.fetch(${JSON.stringify(active.url)}, ${JSON.stringify(init)}); return { ok: response.ok, status: response.status }; }
+                  catch (error) { return { unknown: true, name: error.name }; }` }).then((result) => {
+                const value = result?.result?.value;
+                if (!result?.ok || !value || (kind === 'ok' ? value.ok !== true || value.status !== 200 : value.unknown !== true)) throw new Error('Notebook eval did not return its real request outcome');
+              });
+            }
+            await approveAndWait(operation, path, method, pathKind);
+            const receipts = received.filter((entry) => entry.path === path);
+            rec.check(`${pathKind} ${kind} reaches the real HTTPS server with the full request`, receipts.length >= 1
+              && receipts.every((entry) => entry.tls === true && entry.host === new URL(origin).host
+                && entry.method === method && entry.header === 'header-canary'
+                && entry.body === (method === 'POST' ? 'body-canary' : '')), JSON.stringify(receipts));
+            cases.push({ pathKind, kind, method, path: path.split('?')[0] });
+          }
+        }
+        const entries = await waitFor(async () => {
+          const audit = await rpc(child.page, { type: 'audit/list', limit: 800 });
+          if (!audit?.ok || !Array.isArray(audit.entries)) throw new Error('settled request audit refused');
+          const rows = audit.entries.filter((entry) => !priorIds.has(entry.id) && entry.type === 'web_fetch' && entry.details?.origin === origin);
+          return process.env.PEERD_VISUAL_BASE_RENDER === '1' || rows.length >= cases.length ? rows : null;
+        });
+        if (!entries) throw new Error('request audit rows did not settle');
+        rec.observe('actual HTTPS receipt and audit evidence', { received, entries });
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base unaudited reset requests', cases);
+        else rec.check('every received request has one safe method and path outcome row', cases.every((item) => {
+          const rows = entries.filter((entry) => entry.details.path === item.path);
+          return rows.length === 1 && rows[0].details.method === item.method
+            && (item.kind === 'ok' ? rows[0].details.outcome === undefined : rows[0].details.outcome === 'unknown');
+        }) && !['query-canary', 'body-canary', 'header-canary'].some((value) => JSON.stringify(entries).includes(value)));
+        activity = await openWidePage(child, 'options/options.html#!/activity');
+        if (!await waitFor(() => evalIn(activity, `!!document.querySelector('.log-filter-level')`))) throw new Error('real Activity did not load');
+        await evalIn(activity, `(() => { 'use strict'; const input = document.querySelector('.log-filter-query');
+          input.value = ${JSON.stringify(origin)}; input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await rec.visualPage('web-request-audit-all', activity);
+        await evalIn(activity, `(() => { 'use strict'; const select = document.querySelector('.log-filter-level');
+          select.value = 'warn'; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+        if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') {
+          const visible = await waitFor(() => evalIn(activity, `[...document.querySelectorAll('.log-row')].filter((row) => row.querySelector('.log-label')?.textContent === 'web request').length === 4`));
+          rec.check('real Activity Issues names all four unknown GET and POST destinations', visible === true
+            && await evalIn(activity, `[...document.querySelectorAll('.log-row')].filter((row) => row.querySelector('.log-label')?.textContent === 'web request').every((row) => row.textContent.includes('unknown') && /GET|POST/.test(row.textContent))`));
+        }
+        rec.check('Activity displays no private request bytes', await evalIn(activity, `!['query-canary', 'body-canary', 'header-canary'].some((value) => document.body.textContent.includes(value))`));
+        await rec.visualPage('web-request-outcome-audit', activity);
+      } finally {
+        if (activity) await activity.close(); if (notebook) await notebook.close(); await child.close();
+        for (const socket of sockets) socket.destroy();
+        await new Promise((resolve) => server.close(resolve));
+      }
+    },
   },
 
   // --- functional: the goal-mode autonomous loop -----------------------------

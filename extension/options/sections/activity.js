@@ -14,6 +14,7 @@ import m from '/vendor/mithril/mithril.js';
 // Map audit event types to a short label + a severity class for the dot.
 /** @type {Record<string, { label: string, level: string }>} */
 const EVENT_META = {
+  web_fetch:                 { label: 'web request',           level: 'info' },
   egress_denied:              { label: 'egress denied',         level: 'warn' },
   denylist_hit:               { label: 'denylist hit',          level: 'warn' },
   denylist_added:             { label: 'denylist pattern added', level: 'ok' },
@@ -83,6 +84,7 @@ const EVENT_META = {
 /** The exact host receipt decides authority severity; operation labels are
  * presentation only and never an allowlist. @param {AuditEntry} entry */
 export const activityEventMeta = (entry) => {
+  if (entry.type === 'web_fetch' && entry.details?.outcome === 'unknown') return { ...EVENT_META.web_fetch, level: 'warn' };
   if (entry.details?.semantic === true) {
     if (entry.details.outcomeKnown === false || entry.details.outcome === 'unknown') {
       return { label: 'semantic call outcome unverified', level: 'danger' };
@@ -190,6 +192,7 @@ const detailLine = (entry) => {
   // A learned host is the content of its row. `origin` remains for older audit
   // entries and for exact-origin events such as actor stops.
   if (d.host) bits.push(d.host);
+  if (d.method) bits.push(d.method);
   if (d.origin) bits.push(d.origin);
   if (d.reason) bits.push(d.reason);
   if (d.provider) bits.push(d.provider);

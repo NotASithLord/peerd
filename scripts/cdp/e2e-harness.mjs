@@ -536,6 +536,8 @@ export async function findPeerdSw(port) {
  * @param {string} [opts.tagsModel]  model name returned by GET /api/tags.
  * @param {boolean} [opts.interceptModel] attach Fetch interception to the
  *   service worker; false for physical lifecycle tests that must not pin it.
+ * @param {boolean} [opts.resumeAuxiliaryWorkers] let another worker observer own
+ *   startup release when false. Fetch interception stays enabled.
  * @param {boolean} [opts.captureBootTimeline] prove and timestamp the visible
  *   inline shell before accepting the evaluated module marker.
  * @param {(page: object) => Promise<void>} [opts.beforePanelNavigate] install
@@ -551,7 +553,7 @@ export async function findPeerdSw(port) {
  */
 export async function launchPeerd({
   modelResponder, tagsModel = 'qwen3:8b', extensionDir = EXT,
-  interceptModel = true, captureBootTimeline = false, beforePanelNavigate,
+  interceptModel = true, resumeAuxiliaryWorkers = true, captureBootTimeline = false, beforePanelNavigate,
   panelPath = 'sidepanel/sidepanel.html', expectedBackgroundEntry, proxyServer,
   webRtcLoopbackAcceptance = false,
   enforceWebSecurity = false, headless = true,
@@ -707,7 +709,7 @@ export async function launchPeerd({
       }
     } catch { /* the worker, controller, or request may have been physically torn down */ }
   };
-  const attachFetchTarget = async (targetId) => {
+  const attachFetchTarget = async (targetId, targetType) => {
     if (!browserConn) throw new Error('browser CDP connection unavailable');
     const { sessionId } = await browserConn.send('Target.attachToTarget', {
       targetId,
@@ -735,10 +737,11 @@ export async function launchPeerd({
       },
     };
     browserConn.on(onTargetEvent);
-    await connection.send('Runtime.runIfWaitingForDebugger');
+    if (targetType !== 'worker' || resumeAuxiliaryWorkers) await connection.send('Runtime.runIfWaitingForDebugger');
     await connection.send('Runtime.enable').catch(() => {});
     await connection.send('Fetch.enable', { patterns: [
       { urlPattern: '*11434*' },
+      { urlPattern: 'https://openrouter.ai/api/v1/chat/completions' },
       { urlPattern: 'https://remote-module.test/*' },
     ] });
     return connection;
@@ -761,7 +764,7 @@ export async function launchPeerd({
         || auxiliaryFetchConnections.has(targetId) || auxiliaryFetchPending.has(targetId)) return;
     auxiliaryFetchPending.add(targetId);
     try {
-      const connection = await attachFetchTarget(targetId);
+      const connection = await attachFetchTarget(targetId, targetInfo.type);
       auxiliaryFetchConnections.set(targetId, connection);
     } catch { /* the short-lived target may retire before attachment */ }
     finally { auxiliaryFetchPending.delete(targetId); }
