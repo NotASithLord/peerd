@@ -6375,14 +6375,14 @@ export const STATES = [
         await rec.visualPage('library-app-reuse', captured);
       } finally {
         try {
+          if (captured && captured !== app) captured.close();
+          runner?.close();
+          app?.close();
           if (appId) for (const target of (await targets()).filter((row) => row.type === 'page'
             && row.url.split('#')[0] === appPage && new URL(row.url).hash.slice(1).split('?')[0] === appId)) {
             await fetch(`http://127.0.0.1:${ctx.port}/json/close/${target.id}`);
           }
         } finally {
-          if (captured && captured !== app) captured.close();
-          runner?.close();
-          app?.close();
           await home?.close();
           await options?.close();
         }
