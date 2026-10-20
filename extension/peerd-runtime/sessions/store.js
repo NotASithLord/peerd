@@ -51,7 +51,7 @@ const MSGS = 'session_messages';
 const MAX_GRANTED_OPERATIONS = 256;
 const MUTABLE_SESSION_FIELDS = new Set([
   'provider', 'model', 'permissionMode', 'confirmActions', 'originState',
-  'cost', 'todos', 'autoMemory', 'routineId',
+  'cost', 'todos', 'autoMemory', 'routineId', 'goalStopNote',
 ]);
 
 const normalizeGrantedOperations = (/** @type {unknown} */ value) => {

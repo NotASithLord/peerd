@@ -13,6 +13,7 @@ export const KERNEL_DEMAND_SUPPORT_ROUTE_NAMES = Object.freeze([
   'denylist/list', 'commands/list', 'composer/files', 'composer/tabs',
   'settings/update', 'settings/reset',
   'paced/list', 'paced/forget', 'paced/clear', 'debug/pacing',
+  'learned/list', 'learned/forget', 'learned/clear',
 ]);
 
 export const KERNEL_SESSION_SUPPORT_ROUTE_NAMES = Object.freeze([

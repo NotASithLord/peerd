@@ -66,6 +66,7 @@ import { validateKernelStateProjection } from '/shared/kernel-state-contract.js'
  * @property {string} [customSystemPrompt]
  * @property {string} [toolManifest]
  * @property {import('/peerd-runtime/todo/core.js').TodoItem[]} [todos]  the goal run's plan-of-record (TodoCard)
+ * @property {{id:string,text:string,at:number}|null} [goalStopNote]
  */
 
 /**
@@ -106,7 +107,7 @@ import { validateKernelStateProjection } from '/shared/kernel-state-contract.js'
  * @property {{ origin: string, untilMs: number, reason: string|null }|null} pacing
  *   a live per-origin pacing wait (#234). Cleared by every lifecycle message
  *   that means the wait is over, exactly like rateLimit.
- * @property {ReadonlyArray<{ id: number, text?: string, action?: any, sessionId?: string | null }>} notices
+ * @property {ReadonlyArray<{ id: number|string, text?: string, action?: any, sessionId?: string | null }>} notices
  * @property {any} agentTab
  * @property {ReadonlyArray<any>} agentTabEvents
  * @property {ReadonlyArray<{ id: string, sessionId: string|null, text: string, at: number }>} confirmEvents
@@ -983,9 +984,11 @@ export const reduceChat = (state, msg) => {
             asyncTasks: msg.state?.asyncTasks && !staleActorSnapshot
               ? msg.state.asyncTasks : state.asyncTasks,
           };
-      const notices = sessionChanged
+      let notices = sessionChanged
         ? state.notices.filter((notice) => !notice.sessionId || notice.sessionId === nextSessionId)
         : state.notices;
+      const goalNote = msg.state?.session?.goalStopNote;
+      if (state.session.goalStopNote?.id !== goalNote?.id) notices = notices.filter((note) => note.id !== state.session.goalStopNote?.id);
       // Confirm settles that happened while NO surface was open (timeout /
       // stop / closed panel) arrive only here, as snapshot notes - fold them
       // into the transcript lines, deduped against any live broadcasts seen.
@@ -1008,7 +1011,7 @@ export const reduceChat = (state, msg) => {
         : acceptsActorEpoch
           ? Math.max(state.actorProjectionRevision, incomingActorRevision ?? 0)
           : state.actorProjectionRevision;
-      return { ...state, ...msg.state, hydrated: true, ...pruneProjections, notices,
+      const next = { ...state, ...msg.state, hydrated: true, ...pruneProjections, notices,
         actorProjectionEpoch,
         actorProjectionRevision,
         pendingConfirm: sessionChanged ? (msg.state?.pendingConfirm ?? null) : state.pendingConfirm,
@@ -1017,6 +1020,9 @@ export const reduceChat = (state, msg) => {
         session: msg.state?.session?.cost ?? state.cost.session,
         limitUsd: msg.state?.settings?.spendLimitUsd ?? state.cost.limitUsd,
         limitReached: stillHalted } };
+      // why: cold hydration must show the saved reason without a controller wake.
+      return goalNote && (sessionChanged || state.session.goalStopNote?.id !== goalNote.id)
+        ? reduceChat(next, { type: 'turn/system-note', ...goalNote, sessionId: nextSessionId }) : next;
     }
     case 'turn/state':
       // Per-session guard: a turn streaming in a BACKGROUND chat must not snap
@@ -1115,8 +1121,9 @@ export const reduceChat = (state, msg) => {
       // unscoped UI feedback visible, but never show a scoped note in a
       // different open chat.
       if (msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
+      if (msg.id && state.notices.some((notice) => notice.id === msg.id)) return state;
       return { ...state, notices: [...state.notices,
-        { id: Date.now() + Math.random(), text: msg.text, action: msg.action ?? null,
+        { id: msg.id ?? Date.now() + Math.random(), text: msg.text, action: msg.action ?? null,
           sessionId: msg.sessionId ?? null }].slice(-3) };
     case 'agent/tab': {
       // The inline "peerd opened a tab" notice: minted the first time peerd OPENS

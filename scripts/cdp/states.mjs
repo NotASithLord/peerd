@@ -30,7 +30,7 @@ import {
 } from '../acceptance/git-smart-http-fixture.mjs';
 import {
   rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage, attach,
-  reloadReadyPanel,
+  reloadReadyPanel, launchPeerd, unlockAndReady,
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
   NETWORK_GUARD_CONTROLLER_PORT, NETWORK_GUARD_OWNED_HOST,
   NETWORK_GUARD_UNRELATED_HOST, SITE_CLIENT_FIXTURE_TLS_PORT,
@@ -4483,6 +4483,96 @@ export const STATES = [
 
   // --- visual: a goal run mid-flight (goal bar + plan todo card) --------------
   {
+    name: 'goal-ended-recovery', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir, modelResponder: () => ({ sse: sseText('Other chat ready.') }) });
+      try {
+        await unlockAndReady(child.page);
+        const settings = await rpc(child.page, { type: 'settings/update', patch: { autoMemoryEnabled: false } });
+        if (!settings?.ok) throw new Error('Goal fixture settings refused');
+        const panelUrl = await evalIn(child.page, 'location.href');
+        const send = async (text, goal = false) => {
+          if (!await waitFor(() => evalIn(child.page, `!!document.querySelector('form.input-bar textarea')`))) throw new Error('Goal composer did not mount');
+          if (goal && !await clickAndSyncRedraw(child.page, '.goal-toggle[aria-pressed="false"]')) throw new Error('Goal toggle did not arm');
+          await evalIn(child.page, `(() => { 'use strict';
+            const input = document.querySelector('form.input-bar textarea'); input.value = ${JSON.stringify(text)};
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+          })()`);
+          if (!await waitFor(() => evalIn(child.page, `document.querySelector('.send-btn')?.disabled === false`))) throw new Error('Goal composer stayed disabled');
+          await clickAndSyncRedraw(child.page, '.send-btn');
+        };
+        await send('Keep this separate chat open.');
+        const otherId = await waitFor(async () => {
+          const result = await rpc(child.page, { type: 'state/get' });
+          return result?.ok && result.state.session.messages.some((message) => message.content === 'Other chat ready.') ? result.state.session.sessionId : null;
+        });
+        if (!otherId) throw new Error('separate chat did not persist');
+        const reset = await rpc(child.page, { type: 'session/reset' });
+        if (!reset?.ok) throw new Error('fresh Goal chat refused');
+        let waiting = false;
+        child.setModelResponder(async (index) => {
+          if (index === 2) { waiting = true; await held; }
+          return { sse: sseText('Continue the requested work.') };
+        });
+        await send('Continue until the Goal turn limit stops this run.', true);
+        if (!await waitFor(() => waiting, { budgetMs: 20_000, pollMs: 50 })) throw new Error('Goal did not reach its held turn');
+        const running = await rpc(child.page, { type: 'state/get' });
+        const goalId = running?.state?.session?.sessionId;
+        const limit = await evalIn(child.page, `Number(document.querySelector('.goal-bar-meta')?.textContent.split(' / ')[1])`);
+        if (!goalId || goalId === otherId || !Number.isSafeInteger(limit) || limit < 3) throw new Error('Goal ownership or turn limit is missing');
+        if (!(await rpc(child.page, { type: 'session/switch', sessionId: otherId }))?.ok) throw new Error('switch away from Goal refused');
+        await child.page.send('Page.navigate', { url: 'about:blank' });
+        if (!await waitFor(() => evalIn(child.page, `location.href === 'about:blank'`))) throw new Error('panel document did not close');
+        release();
+        if (!await waitFor(() => child.modelCallCount() === limit, { budgetMs: 60_000, pollMs: 80 })) throw new Error('closed Goal did not reach its real turn limit');
+        await sleep(500);
+        await child.page.send('Page.navigate', { url: panelUrl });
+        await reloadReadyPanel(child, { expectedSessionId: otherId });
+        rec.check('the other chat does not show the Goal stop reason', await evalIn(child.page, `![...document.querySelectorAll('.notice-text')].some((node) => node.textContent.startsWith('Goal run stopped'))`));
+        if (!(await rpc(child.page, { type: 'session/switch', sessionId: goalId }))?.ok) throw new Error('return to Goal chat refused');
+        const readReason = async () => {
+          const result = await rpc(child.page, { type: 'state/get' });
+          if (!result?.ok || result.state?.session?.sessionId !== goalId) return null;
+          return { note: result.state.session.goalStopNote ?? null,
+            notices: await evalIn(child.page, `[...document.querySelectorAll('.notice-text')].map((node) => node.textContent).filter((text) => text.startsWith('Goal run stopped'))`) };
+        };
+        const returned = process.env.PEERD_VISUAL_BASE_RENDER === '1' ? await readReason()
+          : await waitFor(async () => { const value = await readReason(); return value?.note && value.notices.length === 1 ? value : null; });
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Goal end after close and switch', returned);
+        else rec.check('the returned Goal chat shows its exact durable reason once', returned?.notices.length === 1
+          && returned.note.text === `Goal run stopped after reaching the ${limit}-turn limit.`);
+        await rec.visualPage('goal-ended-returned', child.page);
+        await reloadReadyPanel(child, { expectedSessionId: goalId });
+        const reopened = await readReason();
+        if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') rec.check('a new panel document replays the same reason once', reopened?.note?.id === returned?.note?.id && reopened?.notices.length === 1);
+        const oldWorker = await child.stopServiceWorker();
+        const newWorker = await child.restartServiceWorker(oldWorker);
+        const posture = await rpc(child.page, { type: 'state/get' });
+        if (!posture?.ok) throw new Error('cold state read refused');
+        if (posture.state.vault.locked && !(await rpc(child.page, { type: 'vault/unlock', passphrase: PASSPHRASE }))?.ok) throw new Error('cold Goal vault unlock refused');
+        if (!await waitFor(() => evalIn(child.page, `!!document.querySelector('form.input-bar')`))) throw new Error('cold Goal panel did not mount');
+        const restarted = process.env.PEERD_VISUAL_BASE_RENDER === '1' ? await readReason()
+          : await waitFor(async () => { const value = await readReason(); return value?.notices.length === 1 ? value : null; });
+        const bootstrap = await rpc(child.page, { type: 'bootstrap/ready' });
+        if (!bootstrap?.ok || !bootstrap.featureLeases || bootstrap.featureLeases.schema !== 1
+            || !bootstrap.featureLeases.leases || typeof bootstrap.featureLeases.leases !== 'object') throw new Error('cold controller lease evidence is missing');
+        rec.check('worker restart preserves chat ownership without another model call', newWorker.targetId !== oldWorker.targetId && child.modelCallCount() === limit);
+        rec.check('cold reason hydration does not start the controller', !['starting', 'active', 'unknown'].includes(bootstrap.featureLeases.leases.controller?.status), JSON.stringify(bootstrap.featureLeases));
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Goal end after worker restart', restarted);
+        else rec.check('worker restart replays the durable reason once', restarted?.note?.id === returned?.note?.id && restarted?.notices.length === 1);
+        await rec.visualPage('goal-ended-recovery', child.page);
+        child.setModelResponder(() => ({ sse: sseText('The new user turn is complete.') }));
+        await send('Start a new user turn in this chat.');
+        if (!await waitFor(() => evalIn(child.page, `document.body.textContent.includes('The new user turn is complete.')`))) throw new Error('new user turn did not settle');
+        const cleared = await readReason();
+        rec.check('the next real user send clears the old Goal reason', cleared?.note === null && cleared?.notices.length === 0);
+      } finally { release(); await child.close(); }
+    },
+  },
+  {
     name: 'goal-running', kind: 'visual', phase: 'post-unlock',
     // Set up the plan, tick one item, then HANG so the goal bar + todo card
     // stay on screen for the capture (resetSession aborts the pending call
@@ -5647,6 +5737,42 @@ export const STATES = [
         }, { budgetMs: 8_000, pollMs: 80 });
         rec.check('Options confirmed Remove forgets only the selected learned host', removed === true);
         if (!removed) throw new Error('Options learned host removal did not settle');
+        const seed = async (origin) => {
+          const enabled = await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+          const learned = await rpc(ctx.page, { type: 'debug/originLock', origin, seedReason: 'password-field' });
+          const disabled = await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } });
+          if (!enabled?.ok || !disabled?.ok || !learned?.ok || learned.learned !== true) throw new Error('real learn path refused');
+        };
+        const inspect = async (origin) => {
+          const result = await rpc(ctx.page, { type: 'debug/originLock', origin });
+          if (!result?.ok || typeof result.learned !== 'boolean') throw new Error('classifier read refused');
+          return result.learned;
+        };
+        const forgotten = await inspect('https://accounts.acme.test:8443');
+        await seed('https://later.example');
+        const afterLearn = await rpc(page, { type: 'learned/list' });
+        if (!afterLearn?.ok || !Array.isArray(afterLearn.origins)) throw new Error('post-learn list refused');
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base removal and later learn', { forgotten, afterLearn });
+        else rec.check('Remove changes the live classifier and a later learn cannot restore the host', forgotten === false
+          && afterLearn.origins.map((entry) => entry.host).sort().join(',') === 'later.example,portal.globex.test');
+        await page.send('Page.reload', { ignoreCache: true });
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('[data-learned-host="portal.globex.test"]')`))) throw new Error('learned list did not reload');
+        await clickAndSyncRedraw(page, '[data-learned-role="trigger"][data-learned-host="portal.globex.test"]');
+        await Promise.all([
+          clickAndSyncRedraw(page, '[data-learned-role="confirm"][data-learned-host="portal.globex.test"]'),
+          seed('https://concurrent.example'),
+        ]);
+        if (!await waitFor(() => evalIn(page, `document.querySelector('.learned-sites .key-msg.ok')?.textContent === 'Removed portal.globex.test.'`))) throw new Error('raced Remove did not receive its receipt');
+        const raced = await rpc(page, { type: 'learned/list' });
+        const protectedAfterRace = await inspect('https://concurrent.example');
+        if (!raced?.ok || !Array.isArray(raced.origins)) throw new Error('raced list refused');
+        rec.check('a concurrent learn remains protected', protectedAfterRace === true);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Remove and learn overlap', raced);
+        else rec.check('Remove and learn share one ordered durable set', raced.origins.map((entry) => entry.host).sort().join(',') === 'concurrent.example,later.example'
+          && await inspect('https://portal.globex.test') === false);
+        await page.send('Page.reload', { ignoreCache: true });
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('[data-learned-role="trigger-all"]')`))) throw new Error('raced learned list did not reload');
+        await rec.visualPage('options-learned-after-remove', page);
         // why: the separate store read can see a committed removal before the
         // UI receives its receipt. Wait for that receipt above, not the number
         // of trigger buttons (arming the first confirm already lowers it).
@@ -5661,6 +5787,16 @@ export const STATES = [
         rec.check('Options confirmed Forget all clears the remaining learned hosts', cleared === true,
           JSON.stringify({ armedAll, confirmedAll, cleared }));
         if (!cleared) throw new Error('Options learned sites clear did not settle');
+        const clearedClassifier = await inspect('https://concurrent.example');
+        await seed('https://after-clear.example');
+        const afterClear = await rpc(page, { type: 'learned/list' });
+        if (!afterClear?.ok || !Array.isArray(afterClear.origins)) throw new Error('post-clear list refused');
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base clear and later learn', { clearedClassifier, afterClear });
+        else rec.check('Forget all changes the classifier and stays cleared after another learn', clearedClassifier === false
+          && afterClear.origins.length === 1 && afterClear.origins[0].host === 'after-clear.example');
+        await page.send('Page.reload', { ignoreCache: true });
+        if (!await waitFor(() => evalIn(page, `document.querySelector('.learned-sites')?.textContent.includes('after-clear.example')`))) throw new Error('post-clear learned list did not reload');
+        await rec.visualPage('options-learned-after-clear', page);
       } finally {
         await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
         if (priorEntries) {

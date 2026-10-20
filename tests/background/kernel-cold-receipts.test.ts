@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import {
   createKernelColdReceipts,
   KERNEL_COLD_RECEIPTS_KEY,
@@ -69,6 +69,49 @@ const registerRequiredRecoveries = (
 };
 
 describe('native kernel cold receipts', () => {
+  test('immediate decisions skip storage while pending and thrown decisions keep custody', async () => {
+    const counts = { reads: 0, writes: 0 };
+    const store = memoryStore();
+    const receipts = createKernelColdReceipts({
+      identity: identity('immediate'), firefox: true,
+      store: {
+        get: async (key) => { counts.reads += 1; return store.get(key); },
+        set: async (key, value) => { counts.writes += 1; await store.set(key, value); },
+      },
+    });
+    await receipts.snapshot();
+    counts.reads = 0; counts.writes = 0;
+    const request = rawEvent();
+    let resolve!: (value: object) => void;
+    const pending = new Promise<object>((done) => { resolve = done; });
+    let decision: object | Promise<object> = {};
+    let thrown = false;
+    receipts.event('webRequest.onBeforeRequest', request, 'firefox-request-owner')?.addListener(
+      () => { if (thrown) throw new Error('decision failed'); return decision; },
+      { urls: ['<all_urls>'] }, ['blocking'],
+    );
+    for (let index = 0; index < 300; index += 1) expect(request.emit({ tabId: 7 })).toBe(decision);
+    await receipts.snapshot();
+    expect(counts).toEqual({ reads: 0, writes: 0 });
+    decision = pending;
+    expect(request.emit({ tabId: 7 })).toBe(pending);
+    expect((await waitForCount(receipts, 1)).entries[0].event).toBe('webRequest.onBeforeRequest');
+    resolve({ cancel: true });
+    await pending;
+    await waitForCount(receipts, 0);
+    expect(counts).toEqual({ reads: 2, writes: 2 });
+    const reported: unknown[] = [];
+    const reporter = spyOn(globalThis, 'reportError').mockImplementation((error) => { reported.push(error); });
+    try {
+      thrown = true;
+      expect(request.emit({ tabId: 7 })).toBeUndefined();
+      expect((await waitForCount(receipts, 1)).entries[0].event).toBe('webRequest.onBeforeRequest');
+      expect(counts).toEqual({ reads: 3, writes: 3 });
+      expect(reported).toHaveLength(1);
+      expect(reported[0]).toBeInstanceOf(Error);
+    } finally { reporter.mockRestore(); }
+  });
+
   test('settles unrelated alarms but retains the exact schedule wake on owner failure', async () => {
     const receipts = createKernelColdReceipts({
       store: memoryStore(), identity: identity('schedule-filter'),
@@ -351,5 +394,28 @@ describe('combined native kernel event and recovery custody', () => {
     });
     await successor.recover();
     expect((await successor.snapshot()).entries).toEqual([]);
+  });
+
+  test('a retired late settle cannot erase a new successor receipt or its owner', async () => {
+    const store = memoryStore();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const first = createKernelColdReceipts({ store, identity: identity('late-old') });
+    const oldEvent = rawEvent();
+    first.event('runtime.onStartup', oldEvent, 'startup-owner')?.addListener(() => held);
+    oldEvent.emit();
+    await waitForCount(first, 1);
+    const successor = createKernelColdReceipts({ store, identity: identity('late-new') });
+    await successor.ready();
+    const newEvent = rawEvent();
+    successor.event('tabs.onCreated', newEvent, 'tab-owner')?.addListener(() => new Promise(() => {}));
+    newEvent.emit({ id: 17 });
+    await waitForCount(successor, 2);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const stored = await store.get(KERNEL_COLD_RECEIPTS_KEY);
+    expect(stored.ownerIdentity).toEqual(identity('late-new'));
+    expect(stored.entries.some((entry: any) => entry.event === 'tabs.onCreated' && entry.payload.tabId === 17)).toBe(true);
+    expect(stored.entries).toHaveLength(2);
   });
 });

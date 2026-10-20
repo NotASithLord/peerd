@@ -47,10 +47,7 @@ import {
   makeSerializedDnrSessionRules,
   makeStartupPopupNetworkGuard,
 } from './startup-popup-network-guard.js';
-import {
-  makeKernelLearnedOriginRoutes,
-  makeSettingsStore,
-} from './settings-store.js';
+import { makeSettingsStore } from './settings-store.js';
 import {
   createKernelDenylistPolicy,
   makeKernelDenylistRoutes,
@@ -466,7 +463,7 @@ const stateSnapshot = async (authority = lockLifecycle.state() && vault.isLocked
   let session = {
     sessionId: null, messages: [], cost: null,
     permission: { mode: 'act', confirmActions: false },
-    provider: null, customSystemPrompt: null, toolManifest: null,
+    provider: null, customSystemPrompt: null, toolManifest: null, goalStopNote: null,
   };
   let profile = null;
   let currentSession = null;
@@ -485,6 +482,7 @@ const stateSnapshot = async (authority = lockLifecycle.state() && vault.isLocked
       provider: currentSession?.provider ?? null,
       customSystemPrompt: currentSession?.customSystemPrompt ?? null,
       toolManifest: currentSession?.toolManifest ?? null,
+      goalStopNote: currentSession?.goalStopNote ?? null,
     };
     const durableProfile = await kernelProfile.reconcile();
     profile = {
@@ -1025,7 +1023,6 @@ const routes = {
   'repository/kernel-fetch': async () => ({
     ok: false, error: 'repository-private-channel-required', outcomeKnown: true,
   }),
-  ...makeKernelLearnedOriginRoutes({ kv, auditLog }),
   'sidepanel/close': closeKernelPanel,
   ...indexedVaultRoutes,
   ...confirmation.routes,
