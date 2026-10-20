@@ -4,6 +4,7 @@ import { describe, it, expect } from '../../framework.js';
 import { StarterSection } from '/home/starter-section.js';
 import { makeOptionsApp } from '/options/components/options-app-core.js';
 import { StarterReview } from '/options/sections/starter-review.js';
+import { OUTCOME_UNKNOWN_USER_FAILURE } from '/shared/bounded-module-load.js';
 const flush = async () => { await new Promise(resolve => setTimeout(resolve, 0)); m.redraw.sync(); };
 /** @param {()=>boolean} ready */
 const until = async ready => { const end = performance.now() + 5000; while (!ready()) { if (performance.now() > end) throw new Error('starter state did not settle'); await flush(); } };
@@ -108,7 +109,7 @@ describe('packaged starters', () => {
     } finally { release({ok:false,outcomeKnown:false}); view.close(); }
   });
   it('missing, malformed, rejected and unknown apply replies clear the payload without claiming failure or retrying', async () => {
-    for (const result of [null, undefined, {ok:true}, {ok:true,kind:'app'}, {ok:true,kind:'app',id:''}, {ok:false,outcomeKnown:false}, 'throw']) {
+    for (const result of [null, undefined, {ok:true}, {ok:true,kind:'app'}, {ok:true,kind:'app',id:''}, {ok:false,outcomeKnown:false}, {ok:false,outcomeKnown:false,error:OUTCOME_UNKNOWN_USER_FAILURE}, 'throw']) {
       let applied = 0;
       const view = mount(StarterReview, { starter:'csv-lab', send:async (/** @type {any} */ message) => {
         if (message.type === 'import/inspect') return {ok:true,summary:{kind:'app',size:2,fileCount:2}};
@@ -119,7 +120,8 @@ describe('packaged starters', () => {
         button(view.root, 'Apply: add local copy')?.click(); await flush();
         expect(applied).toBe(1);
         expect(button(view.root, 'Apply: add local copy')).toBe(undefined);
-        expect(view.root.textContent).toContain('Check your Library');
+        expect(view.root.querySelector('[role="alert"]')?.textContent).toBe('peerd could not confirm whether the starter was added. Check your Library before reviewing another copy.');
+        expect(/Refresh|reconcile/.test(view.root.textContent ?? '')).toBe(false);
         expect(view.root.textContent?.includes('starter was not added')).toBe(false);
       } finally { view.close(); }
     }

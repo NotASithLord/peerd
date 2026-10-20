@@ -2,7 +2,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { packagedStarter, loadPackagedStarter } from '/shared/starter-catalog.js';
 import { openHome } from '/shared/open-home.js';
-import { isUnknownMutationOutcome, unknownMutationCopy } from '../mutation-custody.js';
+import { isUnknownMutationOutcome } from '../mutation-custody.js';
 /** @typedef {import('./reset-row.js').Send} Send */
 export const StarterReview = () => {
   let dead = false, loading = true, busy = false, unknown = false, installed = false;
@@ -45,7 +45,7 @@ export const StarterReview = () => {
       loading ? m('p', { role: 'status' }, 'Inspecting packaged App…') : null,
       summary ? m('p', `${summary.fileCount} ${summary.fileCount === 1 ? 'file' : 'files'}; ${summary.size} bundle bytes.`) : null,
       error ? m('p', { role: 'alert' }, error) : null,
-      unknown ? m('p', { role: 'alert' }, `${unknownMutationCopy('adding the starter')} Check your Library before reviewing another copy.`) : null,
+      unknown ? m('p', { role: 'alert' }, 'peerd could not confirm whether the starter was added. Check your Library before reviewing another copy.') : null,
       installed ? m('p', { role: 'status' }, 'Local copy added. Open it from your Library when you are ready.') : null,
       envelope && !installed && !unknown ? m('button.secondary', { disabled: busy, onclick: () => apply(send) }, busy ? 'Adding…' : 'Apply: add local copy') : null,
       m('button.secondary', { onclick: () => openHome('library') }, 'View in Library'),
