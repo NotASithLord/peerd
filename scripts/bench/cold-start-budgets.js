@@ -137,10 +137,10 @@ export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
 });
 export const FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Exact shared authority closure including synchronous session revocation.
-  modules: 88, graphBytes: 660_979, entryBytes: 239, directImports: 3,
+  modules: 88, graphBytes: 661_122, entryBytes: 239, directImports: 3,
 });
 export const PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  modules: 90, graphBytes: 668_610, entryBytes: 250, directImports: 2,
+  modules: 90, graphBytes: 668_753, entryBytes: 250, directImports: 2,
 });
 
 // The offscreen entry is a broker/supervisor, not a feature host. Its former
@@ -235,7 +235,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
   preview: Object.freeze({
     chrome: Object.freeze({
       serviceWorker: Object.freeze({
-        modules: 416, graphBytes: 2_213_778, entryBytes: 207,
+        modules: 416, graphBytes: 2_214_288, entryBytes: 207,
         inputSha256: '58d2f25738ab54bc3d031da25c83859d31d29c5759b2459aeb9739b2bca138fd',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),

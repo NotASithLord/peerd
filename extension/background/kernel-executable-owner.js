@@ -239,7 +239,7 @@ export const createKernelExecutableControl = (deps) => {
     relay: owns.offscreen,
     engine: (/** @type {string} */ route, /** @type {any} */ sender,
       /** @type {any} */ message) => {
-      if (route === 'vm/tab-ready') {
+      if (route === 'vm/tab-ready' || route === 'vm/tab-failed') {
         return typeof message?.vmId === 'string'
           && ownsTab(sender, paths.vm, message.vmId);
       }
