@@ -8,6 +8,9 @@ import {
 } from '../../extension/peerd-runtime/actor/spawn.js';
 import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '../../extension/peerd-runtime/errors.js';
 import { projectControllerToolSurface } from '../../extension/peerd-runtime/controller-tool-projection.js';
+import { createSessionStore } from '../../extension/peerd-runtime/sessions/store.js';
+import { makeTurnSlots } from '../../extension/peerd-runtime/loop/turn-slots.js';
+import { makeMockIdb } from '../../extension/tests/mocks/idb.js';
 
 // ---- pure helpers ---------------------------------------------------------
 
@@ -224,6 +227,37 @@ const baseDeps = (store: any, loop: any, extra: any = {}) => {
 };
 
 describe('makeSpawnActor', () => {
+  test.each(['Stop', 'host refusal', 'no host', 'started unknown'])(
+    'same-millisecond %s preserves all three child transcripts', async (mode) => {
+      const store = createSessionStore({ idb: makeMockIdb(), now: () => 1000 });
+      const parent = await store.create();
+      const slots = makeTurnSlots({ forceReleaseMs: 20 });
+      const entered = Promise.withResolvers<void>();
+      let active = 0;
+      const { deps, audits } = baseDeps(store, null, {
+        now: () => 1000, turnSlots: slots,
+        runChildOffscreen: mode === 'no host' ? null : async (job: any, { signal }: any) => {
+          if (mode === 'host refusal') return { ok: false, started: false, phase: 'startup', error: 'host refused' };
+          if (mode === 'started unknown') return { ok: false, started: true, outcomeKnown: false, error: 'worker lost',
+            newMessages: [{ id: `worker-${job.sessionId}`, role: 'user', content: job.task }] };
+          return new Promise((resolve) => {
+            signal.addEventListener('abort', () => resolve({ ok: true, started: true, aborted: true, newMessages: [], finalText: '' }), { once: true });
+            if (++active === 3) entered.resolve();
+          });
+        },
+      });
+      const spawn = makeSpawnActor(deps);
+      const pending = ['first', 'second', 'third'].map((task) => spawn({ task, tools: [], parentSessionId: parent.sessionId }));
+      if (mode === 'Stop') { await entered.promise; expect(spawn.stopSubtree(parent.sessionId)).toHaveLength(3); }
+      const settled = await Promise.allSettled(pending);
+      expect(settled.every((result) => result.status === 'fulfilled')).toBe(true);
+      const transcripts = await Promise.all(settled.map(async (result: any) => store.get(result.value.sessionId)));
+      expect(transcripts.map((session) => session!.messages.length)).toEqual([2, 2, 2]);
+      expect(new Set(transcripts.flatMap((session) => session!.messages.map((message) => message.id))).size).toBe(6);
+      expect(audits.some((entry) => entry.type === 'actor_persistence_failed')).toBe(false);
+      if (mode === 'started unknown') for (const result of settled as any[]) expect(result.value.outcomeKnown).toBe(false);
+    },
+  );
   test('refuses when no dedicated worker host is wired', async () => {
     const store = makeStore();
     const parent = await store.create({});

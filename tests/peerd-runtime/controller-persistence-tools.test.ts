@@ -16,7 +16,7 @@ describe('controller-owned persistence semantics', () => {
       },
     );
     expect(scopes).toEqual([{ kind: 'project', workspace: 'https://example.test' }]);
-    expect(result).toEqual({ ok: true, content: 'project facts' });
+    expect(result).toEqual({ ok: true, content: 'project facts', paged: true });
   });
 
   test('keeps memory write shaping controller-side and delegates one exact mutation', async () => {
