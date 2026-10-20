@@ -3,6 +3,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';
 import { InputBar } from '/sidepanel/components/input-bar.js';
+import { ConfirmModal } from '/sidepanel/components/app.js';
 
 const settle = async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -19,9 +20,10 @@ const mountInput = (state, options = {}) => {
     sent.push(msg);
     return options.send ? options.send(msg) : { ok: true };
   };
-  m.mount(root, { view: () => m(InputBar, {
-    state, send, voiceManager: null, goalArmed: options.goalArmed,
-  }) });
+  m.mount(root, { view: () => [
+    options.prompt ? m(ConfirmModal, { prompt: options.prompt }) : null,
+    m(InputBar, { state, send, voiceManager: null, goalArmed: options.goalArmed }),
+  ] });
   return {
     root,
     sent,
@@ -30,6 +32,98 @@ const mountInput = (state, options = {}) => {
 };
 
 describe('session-aware composer readiness', () => {
+  it('focuses the ready composer when it replaces the body focus', () => {
+    /** @type {HTMLElement|null} */ (document.activeElement)?.blur();
+    expect(document.activeElement).toBe(document.body);
+    const mounted = mountInput({
+      session: { sessionId: 'composer-focus-body', provider: 'ollama' },
+      providers: { current: 'ollama', hasKey: false, model: 'local' },
+      composer: { provider: 'ollama', model: 'local', canSend: true, reason: null },
+      capabilities: {},
+    });
+    try {
+      const field = mounted.root.querySelector('textarea');
+      expect(field instanceof HTMLTextAreaElement).toBe(true);
+      expect(document.activeElement).toBe(field);
+      expect(field?.getAttribute('role')).toBe(null);
+    } finally {
+      mounted.unmount();
+      localStorage.removeItem('peerd.draft.composer-focus-body');
+    }
+  });
+
+  it('keeps focus on another control when the composer mounts', () => {
+    const other = document.createElement('button');
+    other.textContent = 'Other control';
+    document.body.append(other);
+    other.focus();
+    const mounted = mountInput({
+      session: { sessionId: 'composer-focus-other', provider: 'ollama' },
+      providers: { current: 'ollama', hasKey: false, model: 'local' },
+      composer: { provider: 'ollama', model: 'local', canSend: true, reason: null },
+      capabilities: {},
+    });
+    try {
+      expect(document.activeElement).toBe(other);
+      expect(mounted.root.querySelector('textarea') instanceof HTMLTextAreaElement).toBe(true);
+    } finally {
+      mounted.unmount();
+      other.remove();
+      localStorage.removeItem('peerd.draft.composer-focus-other');
+    }
+  });
+
+  it('keeps a real confirmation control focused when the composer mounts', () => {
+    /** @type {HTMLElement|null} */ (document.activeElement)?.blur();
+    const mounted = mountInput({
+      session: { sessionId: 'composer-focus-modal', provider: 'ollama' },
+      providers: { current: 'ollama', hasKey: false, model: 'local' },
+      composer: { provider: 'ollama', model: 'local', canSend: true, reason: null },
+      capabilities: {},
+    }, { prompt: {
+      id: 'composer-focus-confirmation', tool: 'click', summary: 'Review this action',
+      origins: ['https://example.com'],
+    } });
+    try {
+      const reject = mounted.root.querySelector('[data-confirm-reject]');
+      expect(reject instanceof HTMLButtonElement).toBe(true);
+      expect(document.activeElement).toBe(reject);
+      expect(mounted.root.querySelector('textarea') instanceof HTMLTextAreaElement).toBe(true);
+    } finally {
+      mounted.unmount();
+      localStorage.removeItem('peerd.draft.composer-focus-modal');
+    }
+  });
+
+  it('keeps the draft field and another control focus through redraws', () => {
+    const mounted = mountInput({
+      session: { sessionId: 'composer-focus-redraw', provider: 'ollama' },
+      providers: { current: 'ollama', hasKey: false, model: 'local' },
+      composer: { provider: 'ollama', model: 'local', canSend: true, reason: null },
+      capabilities: {},
+    });
+    const other = document.createElement('button');
+    other.textContent = 'Other control';
+    document.body.append(other);
+    try {
+      const field = mounted.root.querySelector('textarea');
+      if (!(field instanceof HTMLTextAreaElement)) throw new Error('textarea missing');
+      field.value = 'Keep this draft and focus';
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      other.focus();
+      for (let redraw = 0; redraw < 3; redraw += 1) {
+        m.redraw.sync();
+        expect(mounted.root.querySelector('textarea')).toBe(field);
+        expect(field.value).toBe('Keep this draft and focus');
+        expect(document.activeElement).toBe(other);
+      }
+    } finally {
+      mounted.unmount();
+      other.remove();
+      localStorage.removeItem('peerd.draft.composer-focus-redraw');
+    }
+  });
+
   for (const throws of [false, true]) {
     it(`keeps a goal receipt with its originating chat after ${throws ? 'transport failure' : 'an unknown reply'}`, async () => {
       const sessionA = `goal-receipt-a-${throws}`;
@@ -152,6 +246,7 @@ describe('session-aware composer readiness', () => {
   });
 
   it('keeps a startup draft editable while blocking send with honest recovery copy', async () => {
+    /** @type {HTMLElement|null} */ (document.activeElement)?.blur();
     const mounted = mountInput({
       session: { sessionId: 'composer-controller-startup', provider: 'openai' },
       providers: { current: 'openai', hasKey: true, model: 'gpt-5' },
@@ -161,6 +256,7 @@ describe('session-aware composer readiness', () => {
       capabilities: {},
     });
     try {
+      expect(document.activeElement).toBe(mounted.root.querySelector('textarea'));
       await settle();
       const textarea = mounted.root.querySelector('textarea');
       if (!(textarea instanceof HTMLTextAreaElement)) throw new Error('textarea missing');

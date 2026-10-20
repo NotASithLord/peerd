@@ -3614,11 +3614,20 @@ export const STATES = [
       // why: Qualify the next single attempt without replaying any unlock.
       await requireLocked('corrected passphrase');
       await submit(PASSPHRASE);
-      const ready = await waitFor(() => evalIn(ctx.page,
-        `'use strict'; !!document.querySelector('form.input-bar')`), { budgetMs: 30_000 });
+      const ready = await waitFor(() => evalIn(ctx.page, `(() => {
+        'use strict';
+        const field = document.querySelector('form.input-bar textarea');
+        if (!(field instanceof HTMLTextAreaElement)) return null;
+        return { focused: document.activeElement === field,
+          editable: !field.disabled && !field.readOnly,
+          activeTag: document.activeElement?.tagName,
+          visible: document.visibilityState, documentFocused: document.hasFocus() };
+      })()`), { budgetMs: 30_000 });
+      rec.observe('successful unlock immediate composer focus', ready);
       const accepted = await rpc(ctx.page, { type: 'state/get' }, { timeoutMs: 5000 });
       rec.check('one corrected keyboard attempt unlocks the real vault', !!ready
-        && accepted?.ok === true && accepted.state?.vault?.locked === false, JSON.stringify(accepted));
+        && accepted?.ok === true && accepted.state?.vault?.locked === false
+        && (baseRender || (ready.focused === true && ready.editable)), JSON.stringify({ ready, accepted }));
       if (!ready || accepted?.ok !== true || accepted.state?.vault?.locked !== false) {
         throw new Error('The single corrected-passphrase attempt did not prove an unlocked vault.');
       }
