@@ -21,5 +21,6 @@ export const mutationFailureCopy = (reply, { action, fallback, messages = {} }) 
   if (isUnknownMutationOutcome(reply)) return unknownMutationCopy(action);
   const code = typeof /** @type {{error?:unknown}} */ (reply)?.error === 'string'
     ? /** @type {{error:string}} */ (reply).error : '';
-  return messages[code] ?? fallback;
+  return messages[code] ?? (['locked', 'vault-locked'].includes(code)
+    ? 'Vault is locked. Unlock it in the peerd panel, then try again.' : fallback);
 };

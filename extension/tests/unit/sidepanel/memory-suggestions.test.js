@@ -220,7 +220,7 @@ describe('options.memory-suggestions', () => {
         await flush();
         await flush();
         expect(root.querySelector('.key-msg.err')?.textContent)
-          .toContain('The memory change could not be completed.');
+          .toContain('Vault is locked. Unlock it in the peerd panel, then try again.');
         expect(root.textContent.includes('vault-locked')).toBe(false);
         // Still rendered — nothing was resolved.
         expect(root.querySelectorAll('.memory-suggestion').length).toBe(2);
