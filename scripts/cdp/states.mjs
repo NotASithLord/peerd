@@ -8239,7 +8239,7 @@ Promise.resolve().then(async () => {
         await evalIn(appPage, `document.getElementById('mode-toggle')?.click()`);
         const editorState = await waitFor(() => evalIn(appPage, `(() => {
           const rows = [...document.querySelectorAll('.pe-node.is-readonly')];
-          if (rows.length < 3) return null;
+          if (rows.length < 3 || document.getElementById('editor-panel')?.hidden !== false) return null;
           rows[0].click();
           return {
             labels: rows.map((row) => row.getAttribute('aria-label')),
