@@ -2798,6 +2798,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       isOffscreenSender: deps.isOffscreenSender,
     });
     const appActorChat = makeAppActorChatHandler({
+      isVaultLocked: () => deps.vault.isLocked(),
       isTrustedSender: deps.isTrustedSender, appTabTracker: engine.appTabTracker,
       ensureAppActorBinding, sessions: shared.sessions,
       messageActor: actorMessaging.messageActor,

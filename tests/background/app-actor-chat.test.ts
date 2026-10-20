@@ -61,17 +61,41 @@ describe('App-native actor chat route', () => {
       .toMatchObject({ ok: false, error: 'app_actor_chat_message_too_large' });
     expect(calls).toEqual([]);
   });
-
-  test('bounds a never-settling actor binding and refuses blind delivery replay', async () => {
-    const { handler, calls, sender } = makeHarness({
-      ensureAppActorBinding: async () => new Promise(() => {}),
-      timeoutMs: 5,
-    });
-    await expect(handler({
-      type: 'app/actor-chat', appId: 'app-1', message: 'change it',
-    }, sender)).resolves.toMatchObject({
-      ok: false, code: 'app-actor-chat-timeout', outcomeKnown: false, retryable: false,
-    });
+  test('a locked vault refuses after tab and sender checks without actor work', async () => {
+    let binds = 0;
+    const { handler, calls, sender } = makeHarness({ isVaultLocked: () => true,
+      ensureAppActorBinding: async () => { binds += 1; return 'actor-1'; } });
+    expect(await handler({ type: 'app/actor-chat', appId: 'app-1', message: 'edit' }, sender))
+      .toEqual({ ok: false, error: 'vault-locked', outcomeKnown: true });
+    expect(await handler({ type: 'app/actor-chat', appId: 'app-2', message: 'edit' }, sender))
+      .toMatchObject({ error: 'app_actor_chat_tab_mismatch' });
+    expect(binds).toBe(0);
     expect(calls).toEqual([]);
+  });
+
+  test('bounds each actor phase and stops late reads before delivery', async () => {
+    for (const phase of ['binding', 'session', 'delivery']) {
+      let settle!: (value: any) => void;
+      const pending = new Promise((resolve) => { settle = resolve; });
+      let reads = 0;
+      const deliveries: any[] = [];
+      const { handler, sender } = makeHarness({
+        ensureAppActorBinding: async () => phase === 'binding' ? pending : 'actor-1',
+        sessions: { get: async () => { reads += 1; return phase === 'session' ? pending : { parentSessionId: 'owner-root' }; } },
+        messageActor: async (request: any) => { deliveries.push(request); return pending; },
+        timeoutMs: 5,
+      });
+      await expect(handler({
+        type: 'app/actor-chat', appId: 'app-1', message: 'change it',
+      }, sender)).resolves.toMatchObject({
+        ok: false, code: 'app-actor-chat-timeout', outcomeKnown: false, retryable: false,
+      });
+      expect(deliveries).toHaveLength(phase === 'delivery' ? 1 : 0);
+      if (phase === 'delivery') expect(deliveries[0].awaitSignal.aborted).toBe(true);
+      settle(phase === 'binding' ? 'actor-1' : phase === 'session' ? { parentSessionId: 'owner-root' } : { ok: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(reads).toBe(phase === 'binding' ? 0 : 1);
+      expect(deliveries).toHaveLength(phase === 'delivery' ? 1 : 0);
+    }
   });
 });
