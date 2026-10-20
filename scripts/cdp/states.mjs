@@ -6210,6 +6210,186 @@ export const STATES = [
     },
   },
   {
+    name: 'library-app-reuse', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('No model call is needed to open a local App.') }),
+    async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
+      const base = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const appPage = `chrome-extension://${ctx.sw.id}/engine-tabs/app-tab/index.html`;
+      const targets = async () => fetch(`http://127.0.0.1:${ctx.port}/json/list`).then((reply) => reply.json());
+      const beforeApps = await rpc(ctx.page, { type: 'apps/list' });
+      if (beforeApps?.ok !== true) throw new Error('The App catalog is unavailable');
+      const previousIds = new Set(beforeApps.apps.map((app) => app.id));
+      let appId;
+      let options;
+      let home;
+      let app;
+      let runner;
+      let captured;
+      try {
+        options = await openWidePage(ctx, 'options/options.html#!/transfer?starter=csv-lab', { ready: '.starter-review' });
+        const apply = '.starter-review > button:first-of-type';
+        const reviewReady = await waitFor(() => evalIn(options,
+          `document.querySelector(${JSON.stringify(apply)})?.textContent.trim() === 'Apply: add local copy'
+            && document.querySelector(${JSON.stringify(apply)}).disabled === false`));
+        if (!reviewReady) throw new Error('The packaged CSV Lab review is not ready');
+        await clickAndSyncRedraw(options, apply);
+        const installed = await waitFor(() => evalIn(options,
+          `document.querySelector('.starter-review')?.innerText.includes('Local copy added.')`));
+        rec.check('the real packaged CSV Lab copy is installed', installed === true);
+        if (!installed) throw new Error('The CSV Lab Apply outcome is not known');
+        const listed = await rpc(ctx.page, { type: 'apps/list' });
+        const added = listed?.apps?.filter((row) => !previousIds.has(row.id) && row.name === 'CSV Lab') ?? [];
+        rec.check('the catalog contains one new durable App ID', listed?.ok === true && added.length === 1);
+        if (added.length !== 1) throw new Error('The installed App ID is not unique');
+        appId = added[0].id;
+        await options.close();
+        options = null;
+        home = await openWidePage(ctx, 'home/home.html#library', { ready: '.home-shell' });
+        // why: a hidden Home can defer its redraw. Observe the actual reply without replacing it.
+        await evalIn(home, `(async () => {
+          'use strict';
+          const browser = (await import('/shared/browser-api.js')).default;
+          const send = browser.runtime.sendMessage.bind(browser.runtime);
+          globalThis.__libraryOpenReceipts = [];
+          browser.runtime.sendMessage = (message, ...args) => {
+            const row = message?.type === 'apps/open' ? { appId: message.appId, settled: false } : null;
+            if (row) globalThis.__libraryOpenReceipts.push(row);
+            const pending = send(message, ...args);
+            if (row) Promise.resolve(pending).then(
+              (reply) => { row.reply = reply; row.settled = true; },
+              (error) => { row.error = String(error); row.settled = true; });
+            return pending;
+          };
+        })()`, true);
+        const openSelector = `.library-card[data-app-id="${appId}"] [data-library-action="open"]`;
+        const open = `document.querySelector(${JSON.stringify(openSelector)})`;
+        const buttonReady = await waitFor(() => evalIn(home, `!!(${open}) && !(${open}).disabled`));
+        if (!buttonReady) throw new Error('The Library Open button is not ready');
+        await clickAndSyncRedraw(home, openSelector);
+        const original = await waitFor(async () => (await targets()).find((row) =>
+          row.type === 'page' && row.url.startsWith(`${appPage}#${appId}?owner=`)));
+        if (!original) throw new Error('The first Library Open did not create an App host');
+        const firstReceipt = await waitFor(() => evalIn(home,
+          `globalThis.__libraryOpenReceipts.length === 1 && globalThis.__libraryOpenReceipts[0].settled
+            ? globalThis.__libraryOpenReceipts[0] : null`), { budgetMs: 45_000 });
+        rec.check('the first single Open has a known native receipt', firstReceipt?.appId === appId
+          && firstReceipt.reply?.ok === true, JSON.stringify(firstReceipt));
+        if (firstReceipt?.reply?.ok !== true) throw new Error('The first Open outcome is not known');
+        app = await attach(original.webSocketDebuggerUrl);
+        await app.send('Page.enable');
+        await app.send('Emulation.setDeviceMetricsOverride', { width: 900, height: 620, deviceScaleFactor: 1, mobile: false });
+        const sandbox = await waitFor(async () => {
+          const host = await evalIn(app, `({ ready: !!document.querySelector('#boot.is-hidden')
+            && !document.querySelector('#boot.is-failed'), url: document.querySelector('#app-frame')?.src })`);
+          return host.ready && (await targets()).find((row) => row.type === 'iframe'
+            && row.parentId === original.id && row.url === host.url);
+        });
+        if (!sandbox) throw new Error('The real App sandbox did not become ready');
+        runner = await attach(sandbox.webSocketDebuggerUrl);
+        const sealed = await waitFor(() => evalIn(runner, `(() => {
+          'use strict';
+          const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'peerd');
+          return globalThis.origin === 'null' && document.title === 'CSV Lab'
+            && !!document.querySelector('#csv') && typeof document.querySelector('#analyze')?.onclick === 'function'
+            && descriptor?.writable === false && descriptor.configurable === false && Object.isFrozen(descriptor.value);
+        })()`));
+        rec.check('the exact opaque CSV Lab sandbox is initialized', sealed === true);
+        if (!sealed) throw new Error('The App sandbox identity is not qualified');
+        const identities = [];
+        for (const [target, page] of [[original, app], [sandbox, runner]]) {
+          const contexts = new Map();
+          page.on((method, params) => {
+            if (method === 'Runtime.executionContextCreated') contexts.set(params.context.id, params.context);
+            if (method === 'Runtime.executionContextDestroyed') contexts.delete(params.executionContextId);
+            if (method === 'Runtime.executionContextsCleared') contexts.clear();
+          });
+          await page.send('Runtime.enable');
+          const { frameTree } = await page.send('Page.getFrameTree');
+          const context = await waitFor(() => [...contexts.values()].find((row) =>
+            row.auxData?.isDefault && row.auxData.frameId === frameTree.frame.id));
+          if (!context?.uniqueId) throw new Error('The App heap identity is unavailable');
+          const handle = await page.send('Runtime.evaluate', { expression: 'globalThis', contextId: context.id });
+          if (handle.exceptionDetails || !handle.result?.objectId) throw new Error('The App heap handle is unavailable');
+          identities.push({ target, page, contexts, context, objectId: handle.result.objectId,
+            frame: frameTree.frame, document: await evalIn(page, `({ href: location.href, timeOrigin: performance.timeOrigin })`) });
+        }
+        const owner = new URLSearchParams(new URL(original.url).hash.split('?')[1]).get('owner');
+        const durableOwner = await rpc(home, { type: 'session/get', sessionId: owner });
+        rec.check('the App URL has a real durable owner', !!owner && durableOwner?.ok === true
+          && durableOwner.session?.sessionId === owner);
+        const queryEvidence = await evalIn(home, `(async () => {
+          'use strict';
+          return { canonical: ${JSON.stringify(original.url)},
+            old: await chrome.tabs.query({ url: ${JSON.stringify(`${appPage}#${appId}*`)} }),
+            broad: await chrome.tabs.query({ url: ${JSON.stringify(`${appPage}*`)} }) };
+        })()`, true);
+        rec.observe('native fragment and page queries before reuse', queryEvidence);
+        const readyAgain = await waitFor(() => evalIn(home, `(async () => {
+          'use strict';
+          (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
+          return !!(${open}) && !(${open}).disabled;
+        })()`, true));
+        if (!readyAgain) throw new Error('The first Library Open did not settle');
+        await clickAndSyncRedraw(home, openSelector);
+        const receipts = await waitFor(() => evalIn(home, `globalThis.__libraryOpenReceipts.length === 2
+          && globalThis.__libraryOpenReceipts[1].settled ? globalThis.__libraryOpenReceipts : null`), { budgetMs: 45_000 });
+        if (!base) rec.check('the second single Open has a known native receipt', receipts?.length === 2
+          && receipts.every((row) => row.appId === appId && row.reply?.ok === true), JSON.stringify(receipts));
+        const after = await targets();
+        const live = after.filter((row) => row.type === 'page'
+          && row.url.split('#')[0] === appPage && new URL(row.url).hash.slice(1).split('?')[0] === appId);
+        const heaps = [];
+        for (const identity of identities) {
+          const read = await identity.page.send('Runtime.callFunctionOn', { objectId: identity.objectId,
+            functionDeclaration: 'function () { "use strict"; return { current: this === globalThis, href: location.href, timeOrigin: performance.timeOrigin }; }',
+            returnByValue: true }).catch((error) => ({ error: String(error) }));
+          const { frameTree } = await identity.page.send('Page.getFrameTree');
+          heaps.push({ targetId: identity.target.id, before: identity.document, after: read.result?.value,
+            unchanged: !read.exceptionDetails && read.result?.value?.current === true
+              && identity.contexts.get(identity.context.id)?.uniqueId === identity.context.uniqueId
+              && frameTree.frame.id === identity.frame.id && frameTree.frame.loaderId === identity.frame.loaderId
+              && read.result.value.href === identity.document.href
+              && read.result.value.timeOrigin === identity.document.timeOrigin });
+        }
+        const catalog = await rpc(home, { type: 'apps/list' });
+        rec.check('Open keeps the same durable App catalog entry', catalog?.ok === true
+          && catalog.apps.filter((row) => !previousIds.has(row.id)).length === 1
+          && catalog.apps.some((row) => row.id === appId));
+        rec.check('Library Open needs no model request', ctx.modelCallCount() === 0);
+        const reuse = live.length === 1 && live[0].id === original.id && live[0].url === original.url
+          && heaps.length === 2 && heaps.every((heap) => heap.unchanged);
+        rec.observe('actual Library reuse', { appId, original, live, heaps, reuse, base,
+          receipts: receipts ?? await evalIn(home, 'globalThis.__libraryOpenReceipts') });
+        // why: the base must show its real duplicate host. It predates this reuse fix.
+        if (!base) rec.check('sequential Open keeps one exact tab, URL, document and both heaps', reuse);
+        const capture = live.find((row) => row.id !== original.id) ?? live[0];
+        if (!capture) throw new Error('No actual App host remains for capture');
+        captured = capture.id === original.id ? app : await attach(capture.webSocketDebuggerUrl);
+        await captured.send('Emulation.setDeviceMetricsOverride', { width: 900, height: 620, deviceScaleFactor: 1, mobile: false });
+        const painted = await waitFor(() => evalIn(captured, `document.readyState === 'complete'
+          && (!!document.querySelector('#boot.is-hidden') || !!document.querySelector('#boot.is-failed'))`));
+        if (!painted) throw new Error('The actual App outcome did not render');
+        rec.observe('captured App outcome', await evalIn(captured,
+          `({ href: location.href, title: document.title, text: document.body.innerText.slice(0, 600) })`));
+        await rec.visualPage('library-app-reuse', captured);
+      } finally {
+        try {
+          if (appId) for (const target of (await targets()).filter((row) => row.type === 'page'
+            && row.url.split('#')[0] === appPage && new URL(row.url).hash.slice(1).split('?')[0] === appId)) {
+            await fetch(`http://127.0.0.1:${ctx.port}/json/close/${target.id}`);
+          }
+        } finally {
+          if (captured && captured !== app) captured.close();
+          runner?.close();
+          app?.close();
+          await home?.close();
+          await options?.close();
+        }
+      }
+    },
+  },
+  {
     name: 'app-editor-save-recovery', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex) => ({ sse: callIndex === 0
       ? sseToolCall('sandbox_create', {

@@ -63,13 +63,13 @@ export const createKernelSemanticAuthority = ({
       : typeof app.ownerSessionId === 'string' ? app.ownerSessionId : null;
     const owner = await resolveLaunchOwner(claim);
     const url = `${appTabUrl}#${payload.appId}?owner=${encodeURIComponent(owner)}`;
-    const existing = (await browser?.tabs?.query?.({ url: `${appTabUrl}#${payload.appId}*` }) ?? [])[0];
-    if (typeof existing?.id === 'number') await browser.tabs.update(existing.id, { url, active: true });
+    // why: tabs.query omits fragments. Match the full owner URL after App ID validation.
+    const existing = (await browser?.tabs?.query?.({ url: `${appTabUrl}*` }) ?? []).find((/** @type {any} */ tab) => tab.url === url);
+    if (typeof existing?.id === 'number') await browser.tabs.update(existing.id, { active: true });
     else await browser?.tabs?.create?.({ url, active: true });
     await appCatalog.setDefaultForSession(owner, payload.appId);
     return true;
   };
-  // handle validates every App ID against the retained request before dispatch.
   const calls = Object.freeze({
     'semantic.apps.favorite': (/** @type {any} */ payload) =>
       typeof payload.favorite === 'boolean' && appCatalog
