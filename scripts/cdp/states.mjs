@@ -74,6 +74,26 @@ const clickAndSyncRedraw = (page, selector) => evalIn(page, `(async () => {
   return true;
 })()`, true);
 
+// why: DOM attributes alone do not prove the name Chrome exposes to users.
+const checkAccessibleNames = async (page, rec, label, expected) => {
+  const { root } = await page.send('DOM.getDocument');
+  const controls = [];
+  for (const [selector, name, role = 'button'] of expected) {
+    const { nodeId } = await page.send('DOM.querySelector', { nodeId: root.nodeId, selector });
+    if (!nodeId) throw new Error(`accessible control is missing: ${selector}`);
+    const { nodes } = await page.send('Accessibility.getPartialAXTree', { nodeId, fetchRelatives: false });
+    controls.push({ selector, expected: name, expectedRole: role, name: nodes?.[0]?.name?.value, role: nodes?.[0]?.role?.value });
+  }
+  if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe(`base ${label}`, controls);
+  else rec.check(label, controls.every((control) => control.name === control.expected && control.role === control.expectedRole), JSON.stringify(controls));
+};
+
+const pressNativeKey = async (page, key, shiftKey = false) => {
+  const event = { key, code: key, windowsVirtualKeyCode: key === 'Tab' ? 9 : 27, modifiers: shiftKey ? 8 : 0 };
+  await page.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...event });
+  await page.send('Input.dispatchKeyEvent', { type: 'keyUp', ...event });
+};
+
 // why: these scenarios model a user who already made a network choice. Keep
 // the choice local to their fixtures; fresh-profile consent oracles stay untouched.
 const chooseFixtureNetwork = async (ctx, enabled) => {
@@ -171,6 +191,8 @@ const siteClientConfirmation = (page, budgetMs = 90_000) => waitFor(() => evalIn
   if (modal?.querySelector('h3')?.textContent !== 'Confirm site client') return null;
   return {
     title: modal.querySelector('h3').textContent,
+    role: modal.getAttribute('role'), titleId: modal.getAttribute('aria-labelledby'),
+    rejectFocused: document.activeElement === modal.querySelector('[data-confirm-reject]'),
     code: modal.querySelector('[aria-label="Proposed site-client code"]')?.textContent,
     endpoints: modal.querySelector('[aria-label="Proposed site-client endpoints"]')?.textContent,
     buttons: [...modal.querySelectorAll('button')].map((button) => button.textContent.trim()),
@@ -416,6 +438,10 @@ const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPane
       `!!document.querySelector(${JSON.stringify(cardSelector)})`),
     { budgetMs: 20_000, pollMs: 80 });
     rec.check('visual fixture App appears in the Library', !!appReady);
+    await checkAccessibleNames(page, rec, 'Library glyph controls expose their actions and App name', [
+      ['.library-star:not(.library-card .library-star)', 'Show favorites only'], ['.library-refresh', 'Refresh'],
+      [`${cardSelector} .library-star`, 'Favorite Versioned App'], [`${cardSelector} .library-kebab`, 'More actions for Versioned App'],
+    ]);
     await evalIn(page, `document.querySelector(${JSON.stringify(cardSelector)})?.querySelector('.library-kebab')?.click()`);
     const historyActionReady = await waitFor(() => evalIn(page, `!![...document.querySelector(${JSON.stringify(cardSelector)})?.querySelectorAll('.library-menu-item') ?? []].find((button) => button.textContent === 'History & Git')`),
       { budgetMs: 5_000, pollMs: 50 });
@@ -3020,6 +3046,8 @@ export const STATES = [
             && confirmation?.buttons?.includes('Save client'),
           JSON.stringify(confirmation));
 
+        rec.check('the live consent dialog keeps its title and safe initial focus', confirmation?.role === 'dialog'
+          && confirmation?.titleId === 'peerd-confirm-title' && confirmation?.rejectFocused === true, JSON.stringify(confirmation));
         const callsAtConfirmation = siteClientVertical.actorCalls;
         await sleep(500);
         const stillBlocked = await evalIn(ctx.page,
@@ -3246,6 +3274,135 @@ export const STATES = [
       const chip = await evalIn(ctx.page,
         `document.querySelector('.message-assistant .failure-kind-chip')?.textContent ?? null`);
       rec.check("the failure-class chip renders and reads 'provider'", chip === 'provider', JSON.stringify(chip));
+    },
+  },
+
+  // Core-to-render proof. The live controller can refuse these causes earlier.
+  {
+    name: 'error-copy-causes', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      const page = await openExtPage(ctx, 'tests/fixtures/actor-isolation.html');
+      const callsBefore = ctx.modelCallCount();
+      try {
+        await page.send('Emulation.setDeviceMetricsOverride', { width: 960, height: 900, deviceScaleFactor: 1, mobile: false });
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('.chat-view')`), { budgetMs: 8000 })) throw new Error('The shared fixture did not mount');
+        const result = await evalIn(page, `(async () => {
+          'use strict';
+          const { default: m } = await import('/vendor/mithril/mithril.js');
+          const { default: browser } = await import('/shared/browser-api.js');
+          const { idb } = await import('/peerd-egress/index.js');
+          const { createSessionStore, makeTurnSlots, makeTurnAuthorityDriver, SessionNotFoundError } = await import('/peerd-runtime/index.js');
+          const { listProviderModels, listProviders, providerFailureCode, UnknownProviderError } = await import('/peerd-provider/controller.js');
+          const { INITIAL_STATE, reduceChat } = await import('/sidepanel/chat-reducer.js');
+          const { ChatView } = await import('/sidepanel/components/chat-view.js');
+          const sessions = createSessionStore({ idb });
+          const survivor = await sessions.create({ provider: 'ollama' });
+          globalThis.__errorCopyCleanup = () => idb.del('sessions', survivor.sessionId);
+          const missingId = crypto.randomUUID();
+          const attempts = { model: 0, tool: 0 };
+          const events = [];
+          const providers = listProviders();
+          const states = [survivor.sessionId, missingId].map(sessionId => ({
+            ...INITIAL_STATE, hydrated: true,
+            vault: { ...INITIAL_STATE.vault, initialized: true, locked: false },
+            session: { ...INITIAL_STATE.session, sessionId },
+            providers: { current: 'ollama', hasKey: true, model: '' },
+            settings: { ...INITIAL_STATE.settings, voiceOnboardingDismissed: true },
+          }));
+          const host = document.getElementById('app');
+          m.mount(host, null);
+          host.style.cssText = 'display:flex;flex-direction:row;gap:24px;justify-content:center;padding:24px';
+          const send = message => {
+            if (message.type === 'models/options') return browser.runtime.sendMessage(message);
+            attempts.tool++; throw new Error('The error fixture has no mutation authority');
+          };
+          m.mount(host, { view: () => states.map(state => m('section', {
+            style: 'width:400px;height:850px;display:flex;flex-direction:column',
+          }, m(ChatView, { state, send, voiceManager: null }))) });
+          const causes = [];
+          for (const [index, state] of states.entries()) {
+            const driver = makeTurnAuthorityDriver({
+              vault: { isLocked: () => false }, sessions, turnSlots: makeTurnSlots(),
+              sessionCache: { sessionGet: async () => null, sessionSet: async () => {} },
+              resolvePermission: async () => ({ mode: 'act', confirmActions: false }),
+              memory: { loadAlwaysLoaded: async () => ({ text: '' }) },
+              browser: { tabs: { query: async () => [] } },
+              skillRegistry: { describeForPrompt: async () => '' },
+              settingsStore: { get: () => ({ spendLimitUsd: 0 }) },
+              DWEB_ENABLED: false, dwebEngagedSessions: new Set(),
+              projectToolDescriptors: async () => ({ tools: [], operations: [] }),
+              uiConnected: () => true,
+              uiPorts: { broadcast: message => {
+                events.push(message);
+                states.forEach((value, position) => { states[position] = reduceChat(value, message); });
+                m.redraw.sync();
+              } },
+              auditLog: { append: async () => {} }, trimEnricher: { drain: async () => {} },
+              runUserTurn: async function* (context) {
+                try {
+                  if (index === 0) await listProviderModels('not-registered', {
+                    modelEgress: { readModelInventory: async () => {
+                      attempts.model++; throw new Error('The error fixture has no model authority');
+                    } },
+                  });
+                  else await sessions.appendMessage(context.sessionId, {
+                    id: crypto.randomUUID(), role: 'user', content: context.userText, when: Date.now(),
+                  });
+                } catch (cause) {
+                  causes.push(cause.name);
+                  // Use the controller's real bounded provider-code projection.
+                  const code = providerFailureCode(cause);
+                  if (code) cause.code = code;
+                  throw cause;
+                }
+              },
+            });
+            await driver.runAgentTurn({ sessionId: state.session.sessionId, userText: 'Check this unavailable chat configuration.' });
+          }
+          m.redraw.sync();
+          return {
+            causes, attempts, errors: events.filter(event => event.type === 'turn/error'),
+            idle: states.every(state => !state.streaming),
+            codes: states.map(state => state.lastError),
+            registryIntact: JSON.stringify(listProviders()) === JSON.stringify(providers) && providers.length > 0,
+            survivorIntact: JSON.stringify(await sessions.get(survivor.sessionId)) === JSON.stringify(survivor),
+            missingAbsent: await sessions.get(missingId) === undefined,
+            types: [UnknownProviderError.errorName, SessionNotFoundError.errorName],
+            text: [...document.querySelectorAll('.error-banner > span')].map(node => node.textContent),
+            settingsActions: [...document.querySelectorAll('.error-banner button')].map(node => node.textContent.trim()),
+          };
+        })()`, true);
+        rec.check('real registry and session producers fail through the driver',
+          JSON.stringify(result.causes) === JSON.stringify(result.types) && result.errors.length === 2,
+          JSON.stringify(result));
+        rec.check('both owner errors remain scoped and settle idle', result.idle
+          && JSON.stringify(result.codes) === JSON.stringify(['unknown-provider', 'session-not-found']), JSON.stringify(result.codes));
+        rec.check('registry and durable chat stay intact; missing chat stays absent', result.registryIntact && result.survivorIntact && result.missingAbsent);
+        rec.check('error production invokes no model or tool effect', result.attempts.model === 0 && result.attempts.tool === 0 && ctx.modelCallCount() === callsBefore);
+        rec.check('only the existing provider Settings action renders', JSON.stringify(result.settingsActions) === JSON.stringify(['Open settings']));
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('merge-base error text', result.text);
+        else rec.check('both banners state only what their actual causes prove', JSON.stringify(result.text) === JSON.stringify([
+          'The selected provider is unavailable. Choose another provider in Settings.',
+          'This chat is unavailable. Open another chat or start a new one.',
+        ]), JSON.stringify(result.text));
+        await rec.visualPage('error-copy-causes', page, { beforeShot: async (surface, theme) => {
+          const frame = await evalIn(surface, `(() => {
+            'use strict';
+            return { width: innerWidth, height: innerHeight,
+              banners: [...document.querySelectorAll('.error-banner')].map(node => {
+                const { top, right, bottom, left, width, height } = node.getBoundingClientRect();
+                return { text: node.querySelector('span')?.textContent, visible: node.checkVisibility(),
+                  top, right, bottom, left, width, height };
+              }) };
+          })()`, true);
+          rec.check(`both error banners stay in frame (${theme})`, frame.banners.length === 2
+            && frame.banners.every(row => row.visible && row.width > 0 && row.height > 0
+              && row.top >= 0 && row.left >= 0 && row.right <= frame.width && row.bottom <= frame.height), JSON.stringify(frame));
+        } });
+      } finally {
+        try { await evalIn(page, `globalThis.__errorCopyCleanup?.()`, true); }
+        finally { page.close(); }
+      }
     },
   },
 
@@ -4551,6 +4708,60 @@ export const STATES = [
     },
   },
 
+  {
+    name: 'context-inspector-keyboard', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('CONTEXT-KEYBOARD-DONE') }),
+    async run(ctx, rec) {
+      const before = await rpc(ctx.page, { type: 'state/get' });
+      if (!before?.ok || !before.state?.settings) throw new Error('Context baseline read refused');
+      try {
+        if (!(await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true, autoMemoryEnabled: false } }))?.ok) throw new Error('Context dev mode refused');
+        if (!(await rpc(ctx.page, { type: 'agent/send', text: 'Capture this real model turn for the context inspector.' }))?.ok) throw new Error('Context fixture turn refused');
+        if (!await waitFor(() => evalIn(ctx.page, `document.querySelector('.message-assistant .bubble')?.textContent.trim() === 'CONTEXT-KEYBOARD-DONE' && !document.querySelector('form.input-bar button.stop')`))) throw new Error('Context turn did not settle');
+        const current = await rpc(ctx.page, { type: 'state/get' });
+        const snapshots = await rpc(ctx.page, { type: 'session/contextSnapshots', sessionId: current?.state?.session?.sessionId });
+        if (!snapshots?.ok || !snapshots.snapshots?.some((snapshot) => snapshot.label === 'main')) throw new Error('real model snapshot is missing');
+        const calls = ctx.modelCallCount();
+        await evalIn(ctx.page, `(() => { 'use strict'; const trigger = document.querySelector('.debug-export-btn'); trigger.focus(); trigger.click(); })()`);
+        if (!await waitFor(() => evalIn(ctx.page, `[...document.querySelectorAll('.debug-menu-item')].some((button) => button.textContent === 'context inspector')`))) throw new Error('real Context menu item is missing');
+        await evalIn(ctx.page, `[...document.querySelectorAll('.debug-menu-item')].find((button) => button.textContent === 'context inspector').click()`);
+        if (!await waitFor(() => evalIn(ctx.page, `[...document.querySelectorAll('.ctx-snap-label')].some((label) => label.textContent === 'main')`))) throw new Error('real Context snapshot did not render');
+        const dialog = await evalIn(ctx.page, `(() => { 'use strict'; const dialog = document.querySelector('.context-inspector');
+          return { role: dialog.getAttribute('role'), modal: dialog.getAttribute('aria-modal'), title: dialog.getAttribute('aria-labelledby'),
+            closeFocused: document.activeElement === dialog.querySelector('.ctx-close'), menuClosed: !document.querySelector('.debug-menu') }; })()`);
+        rec.check('Context opens its real snapshot with the debug menu closed', dialog.menuClosed);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Context dialog focus and name', dialog);
+        else rec.check('Context opens a named modal with Close focused', dialog.role === 'dialog' && dialog.modal === 'true'
+          && dialog.title === 'context-inspector-title' && dialog.closeFocused, JSON.stringify(dialog));
+        await checkAccessibleNames(ctx.page, rec, 'Context and Close expose their accessible names', [
+          ['.context-inspector', 'context inspector', 'dialog'], ['.context-inspector .ctx-close', 'Close'],
+        ]);
+        await evalIn(ctx.page, `document.querySelector('.context-inspector .ctx-snap-summary').click()`);
+        if (!await waitFor(() => evalIn(ctx.page, `document.querySelector('.context-inspector .ctx-snap')?.open === true`))) throw new Error('real Context snapshot did not expand');
+        await evalIn(ctx.page, `document.querySelector('.context-inspector .ctx-close').focus()`);
+        await pressNativeKey(ctx.page, 'Tab', true);
+        const reverse = await evalIn(ctx.page, `document.activeElement === [...document.querySelectorAll('.context-inspector summary')].filter((node) => node.getClientRects().length).at(-1)`);
+        await pressNativeKey(ctx.page, 'Tab');
+        const forward = await evalIn(ctx.page, `document.activeElement === document.querySelector('.context-inspector .ctx-close')`);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Context native Tab', { reverse, forward });
+        else rec.check('native Tab includes expanded summaries and stays in Context', reverse && forward);
+        await rec.visualPage('context-inspector-keyboard', ctx.page, { beforeShot: () => evalIn(ctx.page, `(() => { 'use strict';
+          for (const meta of document.querySelectorAll('.ctx-snap-meta')) meta.textContent = meta.textContent.replace(/ · [^·]+$/, ' · 12:00:00'); })()`) });
+        await pressNativeKey(ctx.page, 'Escape');
+        const escaped = await waitFor(() => evalIn(ctx.page, `!document.querySelector('.context-inspector')`), { budgetMs: 1_000, pollMs: 40 });
+        const returned = await evalIn(ctx.page, `document.activeElement === document.querySelector('.debug-export-btn')`);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Context native Escape', { escaped, returned });
+        else rec.check('Escape closes Context and returns focus to the persistent debug button', escaped && returned);
+        if (!escaped) await evalIn(ctx.page, `document.querySelector('.ctx-close').click()`);
+        rec.check('Context inspection makes no extra model call and leaves its menu closed', ctx.modelCallCount() === calls
+          && await evalIn(ctx.page, `!document.querySelector('.context-inspector, .debug-menu')`));
+      } finally {
+        await evalIn(ctx.page, `document.querySelector('.ctx-close')?.click()`);
+        if (!(await rpc(ctx.page, { type: 'settings/update', patch: { devMode: before.state.settings.devMode, autoMemoryEnabled: before.state.settings.autoMemoryEnabled } }))?.ok) throw new Error('Context settings restore refused');
+      }
+    },
+  },
+
   // --- visual: the sessions / chats list -------------------------------------
   {
     name: 'sessions-list', kind: 'visual', phase: 'post-unlock',
@@ -4609,6 +4820,10 @@ export const STATES = [
       })()`), { budgetMs: 8_000, pollMs: 50 });
       rec.check('both persisted fixture sessions render before capture', !!visible);
       if (!visible) throw new Error('sessions-list expected rows did not render');
+      const titles = await evalIn(ctx.page, `[...document.querySelectorAll('.sessions-list .session-title')].map((row) => row.textContent.trim())`);
+      await checkAccessibleNames(ctx.page, rec, 'Archive names identify each persisted chat', expected.map((row) => [
+        `.sessions-list .session-row:nth-child(${titles.indexOf(row.title) + 1}) .session-archive`, `Archive chat “${row.title}”`,
+      ]));
       await rec.visual('sessions-list');
       // Return to the chat view for later states.
       await evalIn(ctx.page, `document.querySelector('.topbar-actions button[title="Chats"]')?.click()`);
@@ -5394,6 +5609,59 @@ export const STATES = [
           JSON.stringify(posture));
         await setEmulatedTheme(page, 'dark');
       } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  {
+    name: 'options-voice-confirm', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const before = await rpc(ctx.page, { type: 'state/get' });
+      const auditBefore = await rpc(ctx.page, { type: 'audit/list', limit: 800 });
+      if (!before?.ok || !before.state?.settings || !auditBefore?.ok || !Array.isArray(auditBefore.entries)) throw new Error('Voice baseline read refused');
+      const priorIds = new Set(auditBefore.entries.map((entry) => entry.id));
+      const keys = ['voiceEnabled', 'voiceEngine', 'voiceVariant', 'voiceSilenceMs', 'ocrEnabled'];
+      const page = await openWidePage(ctx, 'options/options.html#!/voice');
+      const requests = [];
+      let activity;
+      page.on((method, params) => { if (method === 'Network.requestWillBeSent' && params.request.url.startsWith('https://')) requests.push(params.request.url); });
+      try {
+        await page.send('Network.enable');
+        if (!await waitFor(() => evalIn(page, `[...document.querySelectorAll('.voice-section button')].some((button) => button.textContent === 'Upgrade to on-device (Moonshine)' && !button.disabled)`))) throw new Error('real Voice upgrade trigger is missing');
+        await evalIn(page, `(() => { 'use strict'; const trigger = [...document.querySelectorAll('.voice-section button')].find((button) => button.textContent === 'Upgrade to on-device (Moonshine)'); trigger.focus(); trigger.click(); })()`);
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('.voice-section .peerd-modal')`))) throw new Error('real Voice confirmation did not open');
+        const dialog = await evalIn(page, `(() => { 'use strict'; const dialog = document.querySelector('.voice-section .peerd-modal');
+          return { role: dialog.getAttribute('role'), modal: dialog.getAttribute('aria-modal'), title: dialog.getAttribute('aria-labelledby'),
+            cancelFocused: document.activeElement === dialog.querySelector('button.secondary'), text: dialog.textContent }; })()`);
+        rec.check('Voice states download facts before any approval', dialog.text.includes('250 MB') && dialog.text.includes('Download & enable'));
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Voice dialog focus and name', dialog);
+        else rec.check('Voice opens a named modal with Cancel focused', dialog.role === 'dialog' && dialog.modal === 'true'
+          && dialog.title === 'voice-confirm-title' && dialog.cancelFocused, JSON.stringify(dialog));
+        await checkAccessibleNames(page, rec, 'Voice exposes its named download dialog', [['.voice-section .peerd-modal', 'Download on-device voice model?', 'dialog']]);
+        await rec.visualPage('options-voice-confirm', page);
+        await evalIn(page, `document.querySelector('.voice-section .peerd-modal a').focus()`);
+        await pressNativeKey(page, 'Tab', true);
+        const reverse = await evalIn(page, `document.activeElement?.textContent === 'Download & enable'`);
+        await pressNativeKey(page, 'Tab');
+        const forward = await evalIn(page, `document.activeElement === document.querySelector('.voice-section .peerd-modal a')`);
+        await pressNativeKey(page, 'Escape');
+        const escaped = await waitFor(() => evalIn(page, `!document.querySelector('.voice-section .peerd-modal')`), { budgetMs: 1_000, pollMs: 40 });
+        const returned = await evalIn(page, `document.activeElement?.textContent === 'Upgrade to on-device (Moonshine)'`);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Voice native keys', { reverse, forward, escaped, returned });
+        else rec.check('native Tab wraps and Escape returns focus to the Voice trigger', reverse && forward && escaped && returned);
+        if (!escaped) await evalIn(page, `document.querySelector('.voice-section .peerd-modal button.secondary').click()`);
+        if (!await waitFor(() => evalIn(page, `!document.querySelector('.voice-section .peerd-modal')`))) throw new Error('Voice Cancel did not close');
+        rec.check('the real OCR trigger stays disabled while integrity is unpinned', await evalIn(page,
+          `[...document.querySelectorAll('.ocr-section button')].some((button) => button.disabled && button.textContent === 'OCR not available in this build yet')`));
+        const after = await rpc(page, { type: 'state/get' });
+        const auditAfter = await rpc(page, { type: 'audit/list', limit: 800 });
+        if (!after?.ok || !after.state?.settings || !auditAfter?.ok || !Array.isArray(auditAfter.entries)) throw new Error('Voice settled read refused');
+        rec.check('cancelled Voice consent changes no voice setting and starts no model download', keys.every((key) => before.state.settings[key] === after.state.settings[key])
+          && requests.length === 0 && !auditAfter.entries.some((entry) => !priorIds.has(entry.id) && entry.type === 'voice_model_fetch'), JSON.stringify({ requests }));
+        activity = await openWidePage(ctx, 'options/options.html#!/activity');
+        if (!await waitFor(() => evalIn(activity, `!!document.querySelector('.options-page button[title="Refresh"]')`))) throw new Error('real Activity Refresh is missing');
+        await checkAccessibleNames(activity, rec, 'Activity Refresh has its action as its accessible name', [['.options-page button[title="Refresh"]', 'Refresh']]);
+      } finally { if (activity) await activity.close(); await page.close(); }
     },
   },
 

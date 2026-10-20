@@ -14,6 +14,7 @@
 // this build yet" — exactly how voice's Moonshine upgrade behaved pre-pinning.
 
 import m from '/vendor/mithril/mithril.js';
+import { confirmationDialogAttrs } from '/shared/ui-effects.js';
 import { createOcrStore, hasValidOcrSris, OCR_TOTAL_BYTES } from '/peerd-runtime/options.js';
 
 export const OcrSection = {
@@ -40,6 +41,7 @@ export const OcrSection = {
     // extraction would fail. ocrEnabled is persisted INTENT only.
     const ocrReady = ui.installed === true;
     const sizeMb = Math.round(OCR_TOTAL_BYTES / 1_000_000);
+    const closeConfirmation = () => { ui.confirmOpen = false; m.redraw(); };
 
     const enableOcr = async () => {
       if (ui.busy) return;
@@ -103,9 +105,9 @@ export const OcrSection = {
 
       // Download confirmation — facts shown BEFORE any download (the voice rule).
       hostAvailable && ui.confirmOpen ? m('.peerd-modal-backdrop', {
-        onclick: (/** @type {any} */ e) => { if (e.target === e.currentTarget) { ui.confirmOpen = false; m.redraw(); } },
-      }, m('.peerd-modal', [
-        m('h3', 'Download on-device OCR engine?'),
+        onclick: (/** @type {any} */ e) => { if (e.target === e.currentTarget) closeConfirmation(); },
+      }, m('.peerd-modal', confirmationDialogAttrs('ocr-confirm-title', closeConfirmation, ui), [
+        m('h3#ocr-confirm-title', 'Download on-device OCR engine?'),
         m('ul', [
           m('li', `Download size: ~${sizeMb} MB (one time, cached locally after)`),
           m('li', m('strong', 'After download: 100% on-device — page images never leave this device')),
@@ -113,7 +115,7 @@ export const OcrSection = {
           m('li', 'Source: pinned, integrity-checked (SHA-384 SRI)'),
         ]),
         m('.peerd-modal-actions', [
-          m('button.secondary', { type: 'button', disabled: ui.busy, onclick: () => { ui.confirmOpen = false; m.redraw(); } }, 'Cancel'),
+          m('button.secondary', { type: 'button', 'data-confirm-reject': '', disabled: ui.busy, onclick: closeConfirmation }, 'Cancel'),
           m('button', { type: 'button', disabled: ui.busy || !shippable, onclick: enableOcr }, 'Download & enable'),
         ]),
       ])) : null,
