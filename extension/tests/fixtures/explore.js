@@ -65,6 +65,7 @@ const send = async message => {
   }
   if (message.type === 'dweb/base/install' && Object.hasOwn(EFFECTS, frame)) return EFFECTS[frame]();
   if (message.type === 'dweb/base/install' && frame === 'open-unknown') return EFFECTS.installed();
+  if (message.type === 'apps/open' && frame === 'open-unknown') return EFFECTS.unknown();
   if (message.type === 'dweb/base/update-app' && frame === 'conflict') return {ok:false,error:'local-changes',conflictToken:7};
   if (message.type === 'dweb/base/update-app' && frame === 'update-failed') return EFFECTS.failed();
   if (message.type === 'dweb/base/update-app' && frame === 'update-unknown') return EFFECTS.unknown();

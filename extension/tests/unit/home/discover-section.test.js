@@ -1430,9 +1430,12 @@ describe('home.discover app page', () => {
 
   it('a failed Open says so in an alert inside its tile and never offers Install again', async () => {
     const app = card('a', 'App A', ANA);
-    let unknown = false;
+    let openOutcome = 'failed';
     const host = fakeHost({ heard: [app], library: [local('local-a', app)] }, {
-      'apps/open': () => { if (unknown) throw new Error('renderer deadline'); return { ok: false }; },
+      'apps/open': () => {
+        if (openOutcome === 'lost') throw new Error('renderer deadline');
+        return { ok: false, outcomeKnown: openOutcome !== 'unknown' };
+      },
     });
     const view = mount({ send: host.send });
     try {
@@ -1455,14 +1458,16 @@ describe('home.discover app page', () => {
       el(view.root, '[data-key="a"] .disc-tile-action').click(); await settle();
       expect(text(el(view.root, '[data-key="a"] [role="alert"]'))).toBe(OPEN_FAILED);
       expect(host.count('apps/open')).toBe(3);
-      unknown = true;
-      el(view.root, '[data-key="a"] .disc-tile-action').click(); await settle();
-      expect(text(el(view.root, '[data-key="a"] [role="status"]'))).toBe('peerd could not confirm whether the app opened. Check your tabs.');
-      expect(el(view.root, '[data-key="a"]').querySelector('.error')).toBe(null);
-      await openTile(view.root, 'a');
-      await click(view.root, 'Open');
-      expect(text(panel(view.root))).toContain('peerd could not confirm whether the app opened. Check your tabs.');
-      expect(panel(view.root).querySelector('.error')).toBe(null);
+      for (openOutcome of ['unknown', 'lost']) {
+        el(view.root, '[data-key="a"] .disc-tile-action').click(); await settle();
+        expect(text(el(view.root, '[data-key="a"] [role="status"]'))).toBe('peerd could not confirm whether the app opened. Check your tabs.');
+        expect(el(view.root, '[data-key="a"]').querySelector('.error')).toBe(null);
+        await openTile(view.root, 'a');
+        await click(view.root, 'Open');
+        expect(text(panel(view.root))).toContain('peerd could not confirm whether the app opened. Check your tabs.');
+        expect(panel(view.root).querySelector('.error')).toBe(null);
+        await click(view.root, `Made by ${shortKey(ANA)}`);
+      }
     } finally { view.close(); }
   });
 
@@ -1989,7 +1994,7 @@ describe('home.discover share link', () => {
   });
 
   it('a failed Open on the share-link page says what the app page says', async () => {
-    /** @type {unknown[]} */ const opens = [{ ok: false }];
+    /** @type {unknown[]} */ const opens = [{ ok: false, outcomeKnown: true }, { ok: false, outcomeKnown: false }];
     const host = fakeHost({ heard: [peerApp] }, {
       'dweb/base/inspect-address': () => ({ ok: true, summary }),
       'dweb/base/install-address': () => ({ ok: true, app: { id: 'app-link' } }),
@@ -2005,12 +2010,14 @@ describe('home.discover share link', () => {
       await click(view.root, 'Open');
       expect(text(el(view.root, '.disc-panel [role="alert"]'))).toBe(OPEN_FAILED);
       expect(el(view.root, '.disc-panel [role="alert"]').classList.contains('error')).toBe(true);
-      // A thrown send may still have opened it.
-      await click(view.root, 'Open');
-      expect(text(panel(view.root))).toContain('peerd could not confirm whether the app opened. Check your tabs.');
-      expect(panel(view.root).querySelector('.error')).toBe(null);
-      expect([...panel(view.root).querySelectorAll('[role="status"]')].some(node => text(node) === 'peerd could not confirm whether the app opened. Check your tabs.')).toBe(true);
-      expect(host.count('apps/open')).toBe(2);
+      // An admitted failure or a lost reply can leave the App open.
+      for (const expectedCount of [2, 3]) {
+        await click(view.root, 'Open');
+        expect(text(panel(view.root))).toContain('peerd could not confirm whether the app opened. Check your tabs.');
+        expect(panel(view.root).querySelector('.error')).toBe(null);
+        expect([...panel(view.root).querySelectorAll('[role="status"]')].some(node => text(node) === 'peerd could not confirm whether the app opened. Check your tabs.')).toBe(true);
+        expect(host.count('apps/open')).toBe(expectedCount);
+      }
     } finally { view.close(); sessionStorage.removeItem(KEY); }
   });
 
@@ -3006,7 +3013,10 @@ describe('home.discover entry points', () => {
   it('Commons: Open sends apps/open; a Commons deleted elsewhere never turns a focused Open into an add', async () => {
     let openOutcome = 'ok';
     const installed = fakeHost({ heard: [card('a', 'App', ANA)], library: [{ id: 'app-commons', dweb: { seed: 'commons' } }] }, {
-      'apps/open': () => { if (openOutcome === 'unknown') throw new Error('renderer deadline'); return { ok: openOutcome === 'ok' }; },
+      'apps/open': () => {
+        if (openOutcome === 'lost') throw new Error('renderer deadline');
+        return { ok: openOutcome === 'ok', outcomeKnown: openOutcome !== 'unknown' };
+      },
     });
     const second = mount({ send: installed.send });
     try {
@@ -3018,10 +3028,11 @@ describe('home.discover entry points', () => {
       openOutcome = 'failed';
       await click(second.root, 'Open');
       expect(text(el(second.root, '[data-key="commons"] .error[role="alert"]'))).toBe('Could not open Commons.');
-      openOutcome = 'unknown';
-      await click(second.root, 'Open');
-      expect(text(el(second.root, '[data-key="commons"] [role="status"]'))).toBe('Could not confirm whether Commons opened. Check your tabs.');
-      expect(el(second.root, '[data-key="commons"]').querySelector('.error')).toBe(null);
+      for (openOutcome of ['unknown', 'lost']) {
+        await click(second.root, 'Open');
+        expect(text(el(second.root, '[data-key="commons"] [role="status"]'))).toBe('Could not confirm whether Commons opened. Check your tabs.');
+        expect(el(second.root, '[data-key="commons"]').querySelector('.error')).toBe(null);
+      }
       // Commons is deleted elsewhere while Open has focus: the add is a new
       // node, so a stray key press adds nothing.
       button(second.root, 'Open')?.focus();

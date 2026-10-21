@@ -548,6 +548,7 @@ export const DiscoverSection = (initialVnode) => {
     alertLine = null;
     try {
       const result = await attrs.send({ type: 'apps/open', appId });
+      if (result?.outcomeKnown === false) throw new Error('app-open-outcome-unknown');
       if (!result?.ok) alertLine = { key, text: 'peerd could not open this app. Try again.' };
     } catch { alertLine = { key, text: 'peerd could not confirm whether the app opened. Check your tabs.', unknown: true }; }
     redraw();
@@ -764,7 +765,11 @@ export const DiscoverSection = (initialVnode) => {
   const openCommons = async () => {
     if (!commonsId || commonsBusy) return;
     commonsBusy = true; alertLine = null;
-    try { if (!(await attrs.send({ type: 'apps/open', appId: commonsId }))?.ok) alertLine = { key: 'commons', text: 'Could not open Commons.' }; }
+    try {
+      const result = await attrs.send({ type: 'apps/open', appId: commonsId });
+      if (result?.outcomeKnown === false) throw new Error('app-open-outcome-unknown');
+      if (!result?.ok) alertLine = { key: 'commons', text: 'Could not open Commons.' };
+    }
     catch { alertLine = { key: 'commons', text: 'Could not confirm whether Commons opened. Check your tabs.', unknown: true }; }
     finally { commonsBusy = false; redraw(); }
   };
