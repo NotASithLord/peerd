@@ -1,18 +1,4 @@
 import { expect, test } from 'bun:test';
-import { StarterSection } from '../../extension/home/starter-section.js';
-
-test('starter cards form a keyed fragment alongside ordinary section content', () => {
-  for (const enabled of [false, true]) {
-    const section = StarterSection().view({ attrs: { enabled, send: async () => ({ ok: true }) } });
-    expect(section.tag).toBe('section');
-    const children = section.children as any[];
-    const fragment = children.find(child => child?.tag === '[');
-    expect(fragment.children.map((card: any) => card.key)).toEqual(['csv-lab', 'wasm-image']);
-    expect(children.filter(child => child?.tag === 'article')).toHaveLength(1);
-    expect(children.filter(Boolean).every(child => child.key == null)).toBe(true);
-  }
-});
-
 import { makeOptionsApp } from '../../extension/options/components/options-app-core.js';
 import m from '../../extension/vendor/mithril/mithril.js';
 
