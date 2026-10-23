@@ -15,6 +15,29 @@ const settle = async () => {
 };
 
 describe('provider settings request ordering', () => {
+  it('keeps a cold actor neutral but retains the hint for actual and unknown failures', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const state = {
+      providers: { current: 'anthropic', hasKey: true, model: 'claude' },
+      settings: { providerName: 'anthropic', providerModel: 'claude' },
+      capabilities: { actorExecution: { status: 'not-started' }, localWebGpuHost: { status: 'unsupported' } },
+    };
+    const send = async (/** @type {any} */ message) => message.type === 'provider/status'
+      ? { ok: true, providers: [{ name: 'anthropic', label: 'Anthropic', defaultModel: 'claude', hasKey: true }] }
+      : { ok: true, options: [] };
+    m.mount(root, { view: () => m(ProvidersSection, { state, send }) });
+    try {
+      await settle();
+      for (const status of ['not-started', 'available', 'temporarily_unavailable', 'unsupported', 'unknown']) {
+        state.capabilities.actorExecution.status = status;
+        m.redraw.sync();
+        const hint = root.querySelector('#runner-model-status');
+        expect(!!hint).toBe(!['not-started', 'available'].includes(status));
+        if (status === 'temporarily_unavailable') expect(hint?.textContent).toContain('Actor work is paused.');
+      }
+    } finally { m.mount(root, null); root.remove(); }
+  });
   it('shows Retry when the initial provider status request fails', async () => {
     const root = document.createElement('div');
     document.body.appendChild(root);

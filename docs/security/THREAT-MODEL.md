@@ -287,7 +287,7 @@ delimiter the content cannot forge (`neutralizeFence`).
 Code: `peerd-runtime/actor/actor-worker-core.js`,
 `background/offscreen-actor-client.js`, `background/offscreen-actor-channel-client.js`,
 `background/direct-actor-host.js`, `offscreen/actor-channel-host.js`,
-`offscreen/actor-runner.js`, `offscreen/actor-worker-protocol.js`, and
+`offscreen/actor-runner.js`, `shared/actor-worker-protocol.js`, and
 `tools/prompt-wrap.js`. The browser custody test proves an actor cannot enter the
 privileged turn driver. The installed-XPI Firefox smoke proves the packaged extension
 starts a dedicated Worker, verifies its realm, attaches credentials only in the host,
@@ -864,7 +864,7 @@ evaluating peerd should know. Each cites where it lives in the code.
   Worker also retains standard web APIs such as `fetch`; it is a memory boundary,
   not a sealed code sandbox. Model output is not evaluated as code in that realm,
   and model or tool requests use the privileged relay paths.
-  (`offscreen/actor-runner.js`, `offscreen/actor-worker-protocol.js`,
+  (`offscreen/actor-runner.js`, `shared/actor-worker-protocol.js`,
   `background/direct-actor-host.js`, `peerd-runtime/actor/isolation.js`.)
 - R2 (narrowed). Memory poisoning. The auto-memory digest excludes tool results and
   synthetic messages, but still includes raw assistant text, which can echo

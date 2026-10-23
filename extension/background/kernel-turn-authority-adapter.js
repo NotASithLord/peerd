@@ -162,7 +162,7 @@ import {
 } from './app-actor-policy.js';
 
 import { sha256Hex } from '/shared/util.js';
-import { ACTOR_WORKER_PROTOCOL } from '/offscreen/actor-worker-protocol.js';
+import { ACTOR_WORKER_PROTOCOL } from '/shared/actor-worker-protocol.js';
 import {
   WEB_ACTOR_SOURCE_PROJECTION_KEY,
   webActorSourceProjectionRow,
@@ -2412,12 +2412,12 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     directActorHost?.bindRelayRoutes(actorClient?.routes ?? {});
     live.actorIsolationReady = actorIsolationAvailable(baseActorIsolation) && isolationState
       ? isolationState.load(baseActorIsolation).then((stored) => {
-        live.actorIsolation = stored ?? baseActorIsolation;
-        return live.actorIsolation;
+        live.actorIsolation = stored ?? baseActorIsolation; return live.actorIsolation;
       }).catch((cause) => {
-        live.actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, cause);
-        return live.actorIsolation;
+        live.actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, cause); return live.actorIsolation;
       }) : Promise.resolve(baseActorIsolation);
+    // why: health can settle after publication. Do not block controller startup.
+    void live.actorIsolationReady.then(() => deps.pushState()).catch(() => {});
     live.actorIsolationState = isolationState;
     live.runActorIsolated = async (/** @type {any} */ job, /** @type {any} */ options = {}) => {
       await live.actorIsolationReady;

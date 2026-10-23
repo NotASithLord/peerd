@@ -6,7 +6,7 @@ import {
 import {
   ACTOR_REALM_FACT_KEYS,
   ACTOR_WORKER_PROTOCOL,
-} from '../../extension/offscreen/actor-worker-protocol.js';
+} from '../../extension/shared/actor-worker-protocol.js';
 import { EXECUTION_PROTOCOL } from '../../extension/shared/execution-protocol.js';
 import { projectContributorSettlement } from '../../extension/peerd-runtime/controller-contributor.js';
 

@@ -1931,15 +1931,18 @@ describe('kernel turn authority adapter', () => {
     expect(h.storageState).toEqual({});
   });
 
-  test('restores actor isolation before the state broadcast reacquires controller ownership', async () => {
-    let pushStarted = false;
+  test('publishes settled actor health without blocking readiness or broadcasting inside retry', async () => {
+    let pushes = 0;
     const h = await harness(async (job) => job.probeOnly
       ? { ok: true, started: false, code: 'actor_worker_ready' }
       : { ok: false }, {
       pushState: async () => {
-        pushStarted = true;
+        pushes += 1;
+        return new Promise(() => {});
       },
     });
+    await h.factories.makeDriverDeps(h.shared).waitForActorIsolation();
+    expect(pushes).toBe(1);
     const routeDeps = h.factories.makeRouteDeps(h.shared);
 
     const result = await Promise.race([
@@ -1948,7 +1951,7 @@ describe('kernel turn authority adapter', () => {
     ]);
 
     expect(result).toMatchObject({ ok: true, capability: { status: 'available' } });
-    expect(pushStarted).toBe(false);
+    expect(pushes).toBe(1);
   });
 
   test.serial.each(['revoked', 'unchanged'])('a site-client write validates %s permission during its final landing proof', async (change) => {

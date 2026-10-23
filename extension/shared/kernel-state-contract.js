@@ -37,11 +37,11 @@ export const validKernelVault = (value) => {
 export const validKernelActorIsolation = (value) => {
   if (!record(value)) return false;
   const c = value;
-  if (!['available', 'unsupported', 'temporarily_unavailable'].includes(c.status)
+  if (!['not-started', 'available', 'unsupported', 'temporarily_unavailable'].includes(c.status)
       || ![null, 'offscreen-document-worker', 'background-page-worker'].includes(c.host)
       || (c.reason !== null && typeof c.reason !== 'string')
       || typeof c.retryable !== 'boolean') return false;
-  if (c.status === 'available') return c.host !== null && c.reason === null && c.retryable === false;
+  if (['not-started', 'available'].includes(c.status)) return c.host !== null && c.reason === null && c.retryable === false;
   if (c.status === 'unsupported') return c.host === null && c.retryable === false;
   return c.retryable === true;
 };
