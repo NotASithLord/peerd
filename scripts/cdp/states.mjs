@@ -21,7 +21,7 @@
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSocket } from 'node:dgram';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
