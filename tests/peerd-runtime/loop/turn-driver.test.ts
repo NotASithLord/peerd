@@ -14,6 +14,7 @@ import {
   safeForegroundTabContext,
 } from '/peerd-runtime/loop/turn-authority-driver.js';
 import { projectControllerToolSurface } from '/peerd-runtime/controller-tool-projection.js';
+import { makeTurnSlots } from '/peerd-runtime/loop/turn-slots.js';
 import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '/peerd-runtime/errors.js';
 
 /** Minimal deps maybeAutoResume touches; the rest stay undefined (never invoked). */
@@ -144,6 +145,8 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   controllerFailureCode = '',
   waitForProjectionAbort = false,
   uiVisible = false,
+  slots = null as any,
+  runTurn = null as any,
 } = {}) => {
   const turnAbortController = new AbortController();
   const session: any = {
@@ -255,7 +258,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
       },
       setCost: async () => {},
     },
-    turnSlots: {
+    turnSlots: slots ?? {
       claim: () => ({ controller: turnAbortController, release: () => { releases++; } }),
       isBusy: () => false,
     },
@@ -299,7 +302,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     auditLog: { append: async (entry: any) => { audits.push(entry); } },
     postChatNote: (note: string) => { chatNotes.push(note); },
     recordModelCall: (call: any) => recordedModelCalls.push(call),
-    runUserTurn: dynamicIsolation
+    runUserTurn: runTurn ?? (dynamicIsolation
       ? async function* (ctx: any) {
         // Mirror the sealed turn controller's exact authority protocol. The
         // old fixture ran the raw loop in the SW shell, bypassing the
@@ -353,7 +356,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
         signal: ctx.signal,
       })) { /* drain */ }
       yield { type: 'stop', sessionId: 's1', stopReason: 'end_turn' };
-    },
+    }),
     trimEnricher: { queue: () => {}, drain: async () => {} },
     contextWindowFor: () => null,
     liveContextWindow: () => null,
@@ -599,5 +602,44 @@ describe('runAgentTurn credential custody', () => {
 
     expect(fixture.modelCalls).toEqual([]);
     expect(fixture.recordedModelCalls).toEqual([]);
+  });
+});
+
+
+describe('streaming slot ownership', () => {
+  test.each(['steer', 'queued wake'])('an old %s cannot hide the new turn Stop', async (mode) => {
+    const slots = makeTurnSlots();
+    const entries: any[] = [], releases: Array<() => void> = [];
+    let entered = () => {};
+    let progress = new Promise<void>((resolve) => { entered = resolve; });
+    const runTurn = async function* (context: any) {
+      entries.push(context);
+      const held = new Promise<void>((resolve) => { releases.push(resolve); });
+      entered();
+      await held;
+      yield { type: 'stop', sessionId: 's1', stopReason: 'end_turn' };
+    };
+    const fixture = turnDeps('chat', { slots, runTurn, uiVisible: true });
+    const first = fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'first' });
+    await progress;
+    progress = new Promise<void>((resolve) => { entered = resolve; });
+    let second: Promise<any> | undefined;
+    if (mode === 'steer') {
+      second = fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'second' });
+      await progress;
+      expect(entries[0].signal.aborted).toBe(true);
+    } else {
+      slots.runWhenIdleClaimed('s1', (turnLease) => {
+        second = fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'second', turnLease });
+      });
+    }
+    releases[0]!();
+    await first;
+    await progress;
+    expect(entries[1].signal.aborted).toBe(false);
+    expect(fixture.broadcasts.filter((event) => event.type === 'turn/streaming' && !event.streaming)).toEqual([]);
+    releases[1]!();
+    await second;
+    expect(fixture.broadcasts.filter((event) => event.type === 'turn/streaming' && !event.streaming)).toHaveLength(1);
   });
 });

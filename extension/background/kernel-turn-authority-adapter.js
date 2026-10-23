@@ -2599,15 +2599,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     };
     const asyncActors = makeAsyncActors({
       spawnActor,
-      turnSlots: {
-        runWhenIdle: (/** @type {string} */ sessionId, /** @type {any} */ operation) =>
-          shared.turnSlots.runWhenIdle(sessionId, operation),
-        runWhenIdleClaimed: (/** @type {string} */ sessionId,
-          /** @type {any} */ operation) => shared.turnSlots.runWhenIdleClaimed(sessionId, operation),
-        generation: (/** @type {string} */ sessionId) => shared.turnSlots.generation(sessionId),
-        isBusy: (/** @type {string} */ sessionId) => shared.turnSlots.isBusy(sessionId),
-        stop: (/** @type {string} */ sessionId) => shared.turnSlots.stop(sessionId),
-      },
+      turnSlots: shared.turnSlots,
       stopSubtree: (/** @type {string} */ sessionId) => spawnActorCore.stopSubtree(sessionId),
       reenter: (/** @type {any} */ request) => live.runAgentTurn(request),
       getActiveSessionId: () => deps.sessionCache.sessionGet('currentSessionId'),
