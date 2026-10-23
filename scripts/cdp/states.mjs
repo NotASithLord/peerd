@@ -38,6 +38,7 @@ import {
 import { startWebFixtureServer } from './fixtures/web-suite.mjs';
 import { recordNetworkFloorVector, recordPrivateChildFloor, ordinaryProbeReached } from './network-floor-oracle.mjs';
 import { NOTEBOOK_FETCH_STATE } from './notebook-fetch-state.mjs';
+import { WEBVM_TERMINAL_STATE } from './webvm-terminal-state.mjs';
 import { WASMER_STATE } from './wasmer-state.mjs';
 import { STARTER_VISUAL_STATES } from './starter-visuals.mjs';
 import { APP_RUNTIME_STATES } from './app-runtime-state.mjs';
@@ -5964,6 +5965,7 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
+  WEBVM_TERMINAL_STATE,
   NOTEBOOK_FETCH_STATE,
   {
     name: 'notebook-remote-restricted', kind: 'functional', phase: 'post-unlock',

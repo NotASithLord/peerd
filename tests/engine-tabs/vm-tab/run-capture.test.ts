@@ -149,3 +149,26 @@ describe('scanForMarker', () => {
     expect(scanForMarker(buf, MARKER)?.exitCode).toBe(0);
   });
 });
+
+describe('parseRunCapture terminal controls', () => {
+  test('removes captured CSI and OSC from both streams without changing text', () => {
+    // why: these color and title fragments occur in the verified Debian capture.
+    const color = '\x1b[01;34m/home\x1b[0m';
+    const title = '\x1b]0;user@: ~\x07';
+    const plain = '/home\t[ordinary] café 日本 ✓ 🚀\n';
+    const result = parseRunCapture(stream('ls -d /home', {
+      output: `${title}${color}\t[ordinary] café 日本 ✓ 🚀\n`,
+      stderr: `\x1b]0;user@: ~\x1b\\${color}\t[ordinary] café 日本 ✓ 🚀\n`,
+      crlf: true,
+    }), MARKER);
+    expect(result).toEqual({ exitCode: 0, stdout: plain, stderr: plain });
+  });
+
+  test('still waits for a full marker after a split control sequence', () => {
+    const full = stream('ls', { output: '\x1b[01;34m/home\x1b[0m\n' });
+    for (const end of [full.indexOf('\x1b[01;34m') + 3, full.lastIndexOf(`${MARKER}-end`) + MARKER.length]) {
+      expect(parseRunCapture(full.slice(0, end), MARKER)).toBeNull();
+    }
+    expect(parseRunCapture(full, MARKER)?.stdout).toBe('/home\n');
+  });
+});
