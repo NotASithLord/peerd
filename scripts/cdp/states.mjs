@@ -4548,19 +4548,52 @@ export const STATES = [
         await reloadReadyPanel(child, { expectedSessionId: goalId });
         const reopened = await readReason();
         if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') rec.check('a new panel document replays the same reason once', reopened?.note?.id === returned?.note?.id && reopened?.notices.length === 1);
+        const [otherSession, goalSession] = await Promise.all([otherId, goalId].map((sessionId) =>
+          rpc(child.page, { type: 'session/get', sessionId })));
+        if (otherSession?.session?.sessionId !== otherId || goalSession?.session?.sessionId !== goalId
+            || otherSession.session.provider !== goalSession.session.provider
+            || otherSession.session.model !== goalSession.session.model) throw new Error('cold chats have different provider inputs');
+        if (!(await rpc(child.page, { type: 'session/switch', sessionId: otherId }))?.ok) throw new Error('cold fixture chat switch refused');
         const oldWorker = await child.stopServiceWorker();
         const newWorker = await child.restartServiceWorker(oldWorker);
         const posture = await rpc(child.page, { type: 'state/get' });
         if (!posture?.ok) throw new Error('cold state read refused');
         if (posture.state.vault.locked && !(await rpc(child.page, { type: 'vault/unlock', passphrase: PASSPHRASE }))?.ok) throw new Error('cold Goal vault unlock refused');
         if (!await waitFor(() => evalIn(child.page, `!!document.querySelector('form.input-bar')`))) throw new Error('cold Goal panel did not mount');
+        // Finish provider work in the other chat before the first cold Goal projection.
+        await evalIn(child.page, `import('/vendor/mithril/mithril.js').then(({ default: m }) => m.mount(document.querySelector('#app'), null))`, true);
+        if (!(await rpc(child.page, { type: 'session/switch', sessionId: otherId }))?.ok) throw new Error('cold route preparation failed');
+        if (!(await rpc(child.page, { type: 'models/options', sessionId: otherId }))?.ok) throw new Error('cold model options failed');
+        const warm = await waitFor(async () => {
+          const value = await rpc(child.page, { type: 'state/get' });
+          return value?.ok && value.state.session.sessionId === otherId
+            && value.state.composer?.canSend === true ? value.state : null;
+        });
+        if (!warm) throw new Error('cold provider preparation failed');
+        const before = await rpc(child.page, { type: 'bootstrap/ready' });
+        const leases = before?.featureLeases;
+        const baseline = leases?.leases?.controller;
+        if (!before?.ok || leases?.schema !== 1 || typeof leases.kernelEpoch !== 'string'
+            || !leases.kernelEpoch || !Number.isSafeInteger(baseline?.generation)
+            || baseline.status !== 'revoked') throw new Error('cold provider preparation did not release its controller');
+        if (!(await rpc(child.page, { type: 'session/switch', sessionId: goalId }))?.ok) throw new Error('cold Goal chat switch refused');
+        const isolated = await rpc(child.page, { type: 'state/get' });
+        const after = await rpc(child.page, { type: 'bootstrap/ready' });
+        const controller = after?.featureLeases?.leases?.controller;
+        rec.check('cold Goal-note hydration does not acquire a controller', isolated?.ok === true
+          && isolated.state.session.sessionId === goalId
+          && isolated.state.composer.provider === warm.composer.provider
+          && isolated.state.composer.model === warm.composer.model
+          && isolated.state.composer.canSend === true
+          && (process.env.PEERD_VISUAL_BASE_RENDER === '1' || isolated.state.session.goalStopNote?.id === returned?.note?.id)
+          && after?.ok === true && after.featureLeases?.schema === 1
+          && after.featureLeases.kernelEpoch === leases.kernelEpoch
+          && controller?.generation === baseline.generation && controller?.status === baseline.status,
+        JSON.stringify({ before: before?.featureLeases, after: after?.featureLeases }));
+        await reloadReadyPanel(child, { expectedSessionId: goalId });
         const restarted = process.env.PEERD_VISUAL_BASE_RENDER === '1' ? await readReason()
           : await waitFor(async () => { const value = await readReason(); return value?.notices.length === 1 ? value : null; });
-        const bootstrap = await rpc(child.page, { type: 'bootstrap/ready' });
-        if (!bootstrap?.ok || !bootstrap.featureLeases || bootstrap.featureLeases.schema !== 1
-            || !bootstrap.featureLeases.leases || typeof bootstrap.featureLeases.leases !== 'object') throw new Error('cold controller lease evidence is missing');
         rec.check('worker restart preserves chat ownership without another model call', newWorker.targetId !== oldWorker.targetId && child.modelCallCount() === limit);
-        rec.check('cold reason hydration does not start the controller', !['starting', 'active', 'unknown'].includes(bootstrap.featureLeases.leases.controller?.status), JSON.stringify(bootstrap.featureLeases));
         if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Goal end after worker restart', restarted);
         else rec.check('worker restart replays the durable reason once', restarted?.note?.id === returned?.note?.id && restarted?.notices.length === 1);
         await rec.visualPage('goal-ended-recovery', child.page);
