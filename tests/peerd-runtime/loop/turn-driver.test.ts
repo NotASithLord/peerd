@@ -34,6 +34,72 @@ test('makeTurnAuthorityDriver returns the two entry points', () => {
   expect(typeof d.maybeAutoResume).toBe('function');
 });
 
+describe('first-turn permission binding', () => {
+  test.each([
+    { label: 'Plan', mode: 'plan', confirm: false, expected: { permissionMode: 'plan', confirmActions: false } },
+    { label: 'Act with confirmation', mode: 'act', confirm: true, expected: { permissionMode: 'act', confirmActions: true } },
+    { label: 'unset defaults', mode: undefined, confirm: undefined, expected: { permissionMode: 'act', confirmActions: false } },
+    { label: 'invalid null values', mode: null, confirm: null, expected: { permissionMode: 'plan', confirmActions: true } },
+    { label: 'invalid values', mode: 'invalid', confirm: 'off', expected: { permissionMode: 'plan', confirmActions: true } },
+  ])('persists $label before claiming the turn', async ({ mode, confirm, expected }) => {
+    const cache = new Map<string, unknown>([
+      ['currentPermissionMode', mode], ['currentConfirmActions', confirm],
+    ]);
+    let created: any;
+    const claimed = new Error('creation boundary reached');
+    const driver = makeTurnAuthorityDriver({
+      vault: { isLocked: () => false },
+      sessionCache: {
+        sessionGet: async (key: string) => cache.get(key),
+        sessionSet: async (key: string, value: unknown) => { cache.set(key, value); },
+      },
+      ensureActiveProvider: async () => ({ name: 'ollama', model: 'qwen3:8b' }),
+      sessions: { create: async (fields: any) => {
+        expect(cache.has('currentSessionId')).toBe(false);
+        created = { ...fields, sessionId: 'fresh' };
+        return created;
+      } },
+      // why: this test ends after the real creation and binding, before model IO.
+      turnSlots: { claim: () => { throw claimed; } },
+    });
+    await expect(driver.runAgentTurn({ userText: 'Keep this permission.' })).rejects.toBe(claimed);
+    expect(created).toEqual({ ...expected, sessionId: 'fresh', provider: 'ollama', model: 'qwen3:8b' });
+    expect(Object.fromEntries(cache)).toEqual({
+      currentSessionId: 'fresh', currentPermissionMode: expected.permissionMode,
+      currentConfirmActions: expected.confirmActions,
+    });
+  });
+
+  test('reads a choice made while provider selection waits', async () => {
+    const entered = Promise.withResolvers<void>();
+    const provider = Promise.withResolvers<{ name: string; model: string }>();
+    const cache = new Map<string, unknown>([
+      ['currentPermissionMode', 'act'], ['currentConfirmActions', false],
+    ]);
+    let created: any;
+    const claimed = new Error('creation boundary reached');
+    const driver = makeTurnAuthorityDriver({
+      vault: { isLocked: () => false },
+      sessionCache: {
+        sessionGet: async (key: string) => cache.get(key),
+        sessionSet: async (key: string, value: unknown) => { cache.set(key, value); },
+      },
+      ensureActiveProvider: async () => { entered.resolve(); return provider.promise; },
+      sessions: { create: async (fields: any) => (created = { ...fields, sessionId: 'fresh' }) },
+      turnSlots: { claim: () => { throw claimed; } },
+    });
+    const turn = driver.runAgentTurn({ userText: 'Keep the later choice.' });
+    await entered.promise;
+    cache.set('currentPermissionMode', 'plan');
+    cache.set('currentConfirmActions', true);
+    provider.resolve({ name: 'ollama', model: 'qwen3:8b' });
+    await expect(turn).rejects.toBe(claimed);
+    expect(created).toMatchObject({ permissionMode: 'plan', confirmActions: true });
+    expect(cache.get('currentPermissionMode')).toBe('plan');
+    expect(cache.get('currentConfirmActions')).toBe(true);
+  });
+});
+
 describe('foreground tab prompt context', () => {
   test('uses only the public origin and drops hostile title/path bytes', () => {
     expect(safeForegroundTabContext({

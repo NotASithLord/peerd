@@ -41,6 +41,22 @@ export const bindCurrentChat = async (sessionCache, session) => {
   } finally { finish(); }
 };
 
+/** @param {any} sessions @param {any} cache @param {Record<string,unknown>} [fields] */
+export const createCurrentChat = async (sessions, cache, fields = {}) => {
+  // why: each lazy owner must keep the pending choice before durable binding.
+  const [mode = DEFAULT_CHAT_PERMISSION.mode, confirm = DEFAULT_CHAT_PERMISSION.confirmActions] = await Promise.all([
+    cache.sessionGet('currentPermissionMode'),
+    cache.sessionGet('currentConfirmActions'),
+  ]);
+  const created = await sessions.create({
+    ...fields,
+    permissionMode: mode === 'act' ? 'act' : 'plan',
+    confirmActions: confirm !== false,
+  });
+  await bindCurrentChat(cache, created);
+  return created;
+};
+
 /**
  * Resolve a durable owner without provider IO. Concurrent first launches share
  * creation; invalid existing claims never mint replacement authority.
@@ -55,12 +71,7 @@ export const createAppLaunchOwner = (sessions, cache) => {
       pending ??= (async () => {
         const current = await cache.sessionGet('currentSessionId');
         if (current) return current;
-        const session = await sessions.create({
-          permissionMode: DEFAULT_CHAT_PERMISSION.mode,
-          confirmActions: DEFAULT_CHAT_PERMISSION.confirmActions,
-        });
-        await bindCurrentChat(cache, session);
-        return session.sessionId;
+        return (await createCurrentChat(sessions, cache)).sessionId;
       })().finally(() => { pending = null; });
       claim = await pending;
     }
