@@ -2057,6 +2057,120 @@ export const STATES = [
     async run(ctx, rec) { await rec.visual('idle-unlocked'); },
   },
 
+  // --- visual: local send follows while another reader keeps its place -------
+  {
+    name: 'own-send-scroll', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText(Array.from({ length: 10 }, (_, index) =>
+      `History paragraph ${index + 1}. Keep this earlier context available while reading.`).join('\n\n')) }),
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const ownText = 'Send from this reading surface.';
+      const delayedReply = 'The delayed reply arrived. Keep the earlier reading position.';
+      let other, waiting = false, complete = false, releaseReply = () => {};
+      const view = (page) => evalIn(page, `(async () => {
+        'use strict';
+        (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
+        const list = document.querySelector('.message-list');
+        if (!list) return null;
+        const bubble = [...list.querySelectorAll('.message-user .bubble')].at(-1);
+        const bounds = list.getBoundingClientRect(), message = bubble?.getBoundingClientRect();
+        return { user: bubble?.textContent, top: list.scrollTop,
+          bottom: list.scrollHeight - list.scrollTop - list.clientHeight,
+          overflow: list.scrollHeight - list.clientHeight,
+          visible: !!message && message.top >= bounds.top - 1 && message.bottom <= bounds.bottom + 1,
+          reply: [...list.querySelectorAll('.message-assistant .bubble')].at(-1)?.textContent,
+          busy: !!list.querySelector('.message-assistant.streaming') || !!document.querySelector('form.input-bar button.stop'),
+        };
+      })()`, true);
+      const submit = async (page, text) => {
+        await page.send('Page.bringToFront');
+        await evalIn(page, `(() => {
+          'use strict';
+          const input = document.querySelector('form.input-bar textarea');
+          if (!input || input.disabled) throw new Error('composer is unavailable');
+          input.focus(); input.select();
+        })()`);
+        await page.send('Input.insertText', { text });
+        const enabled = await waitFor(() => evalIn(page,
+          `!!document.querySelector('form.input-bar button.send-btn:not(:disabled)')`), { budgetMs: 5_000 });
+        if (!enabled || !await clickAndSyncRedraw(page, 'form.input-bar button.send-btn')) throw new Error('composer send is unavailable');
+      };
+      const settled = async (page, text, reply) => {
+        const ready = await waitFor(async () => {
+          const state = await view(page);
+          return state?.user === text && state.reply?.includes(reply) && !state.busy;
+        }, { budgetMs: 20_000, pollMs: 50 });
+        if (!ready) throw new Error(`scroll turn did not settle: ${text}`);
+      };
+      const readFromTop = async (page) => {
+        await page.send('Page.bringToFront');
+        await evalIn(page, `new Promise((resolve, reject) => {
+          'use strict';
+          const list = document.querySelector('.message-list');
+          if (!list || list.scrollHeight - list.clientHeight <= 300) throw new Error('history does not overflow');
+          let timer;
+          const moved = () => {
+            if (list.scrollTop !== 0) { list.scrollTop = 0; return; }
+            clearTimeout(timer); list.removeEventListener('scroll', moved); resolve(true);
+          };
+          timer = setTimeout(() => { list.removeEventListener('scroll', moved); reject(new Error('native reader scroll did not arrive')); }, 3_000);
+          list.addEventListener('scroll', moved);
+          list.scrollTop = list.scrollTop === 0 ? list.scrollHeight : 0;
+        })`, true);
+      };
+      try {
+        for (const index of [1, 2]) {
+          const text = `Keep earlier turn ${index} in this chat.`;
+          await submit(ctx.page, text);
+          await settled(ctx.page, text, 'History paragraph 10.');
+        }
+        rec.check('reading history comes from two real composer turns', ctx.modelCallCount() === 2);
+        other = await openWidePage(ctx, 'sidepanel/sidepanel.html', { metrics: PANEL_METRICS, ready: '.message-list' });
+        await settled(other, 'Keep earlier turn 2 in this chat.', 'History paragraph 10.');
+        const { targetInfo } = await other.send('Target.getTargetInfo');
+        rec.observe('second real side-panel document', { targetId: targetInfo.targetId, url: await evalIn(other, 'location.href') });
+        await readFromTop(ctx.page);
+        await readFromTop(other);
+        ctx.setModelResponder(async () => {
+          await new Promise((resolve) => { releaseReply = resolve; waiting = true; });
+          waiting = false;
+          return { sse: sseText(delayedReply) };
+        });
+        await submit(ctx.page, ownText);
+        const started = await waitFor(async () => {
+          const [own, foreign] = await Promise.all([view(ctx.page), view(other)]);
+          return waiting && ctx.modelCallCount() === 1 && own?.user === ownText
+            && foreign?.user === ownText && own.busy && foreign.busy;
+        }, { budgetMs: 20_000, pollMs: 50 });
+        if (!started) throw new Error('delayed model request did not reach both real surfaces');
+        await rec.visualPage('own-send-scroll', ctx.page, { beforeShot: async (_page, theme) => {
+          const [own, foreign] = await Promise.all([view(ctx.page), view(other)]);
+          rec.check(`foreign send keeps the reader in place (${theme})`, foreign?.top === 0, JSON.stringify(foreign));
+          if (baseRender) rec.observe(`merge-base own-send position (${theme})`, own);
+          else rec.check(`own send keeps its bubble visible (${theme})`, own?.bottom < 2 && own.visible, JSON.stringify(own));
+        } });
+        await readFromTop(ctx.page);
+        const [reading, otherReading] = await Promise.all([view(ctx.page), view(other)]);
+        rec.check('a reader can leave the live edge during a real delayed model call',
+          waiting && reading?.busy && otherReading?.busy && reading.top === 0 && otherReading.top === 0);
+        releaseReply();
+        await settled(ctx.page, ownText, delayedReply);
+        await settled(other, ownText, delayedReply);
+        complete = true;
+        await rec.visualPage('own-send-scroll-reader', ctx.page, { beforeShot: async (_page, theme) => {
+          const [own, foreign] = await Promise.all([view(ctx.page), view(other)]);
+          rec.check(`reply and settlement keep both readers in place (${theme})`,
+            own?.top === 0 && foreign?.top === 0 && !own.busy && !foreign.busy, JSON.stringify({ own, foreign }));
+        } });
+      } finally {
+        releaseReply();
+        if (!complete) await rpc(ctx.page, { type: 'agent/stop' });
+        if (other) await other.close();
+        await setEmulatedTheme(ctx.page, 'light');
+      }
+    },
+  },
+
   // --- functional: the goal-mode autonomous loop -----------------------------
   // Also covers the plan-of-record (todo_init/todo_check → the visible
   // TodoCard) and the sticky Goal toggle (lit "running" while the run drives,
