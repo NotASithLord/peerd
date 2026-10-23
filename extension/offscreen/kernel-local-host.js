@@ -218,7 +218,9 @@ const testProvider = async (/** @type {any} */ message, /** @type {any} */ conte
   }
   const nativeBody = {
     model: policy.defaultModel,
-    max_tokens: 1,
+    // why: OpenAI refuses `max_tokens` on its gpt-5.x default model, so its
+    // key Test names the output cap the way the chat adapter does.
+    ...(policy.name === 'openai' ? { max_completion_tokens: 1 } : { max_tokens: 1 }),
     messages: [{ role: 'user', content: 'hi' }],
     stream: true,
     ...(policy.name === 'anthropic' ? { system: '' } : {}),

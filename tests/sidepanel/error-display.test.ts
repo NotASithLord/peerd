@@ -27,6 +27,15 @@ describe('mapError', () => {
     expect(mapError('authentication_error: invalid x-api-key')).toMatch(/key rejected/i);
     expect(mapError('Your credit balance is too low')).toMatch(/account limit/i);
   });
+
+  test('a throttle that mentions billing or quota reads as a rate limit, not an account limit', () => {
+    expect(mapError("Provider 'openai' HTTP 429: You can increase your rate limit by adding a payment method at https://platform.openai.com/account/billing."))
+      .toMatch(/Rate limited/i);
+    expect(mapError("Provider 'openrouter' HTTP 429: Resource has been exhausted (e.g. check quota)."))
+      .toMatch(/Rate limited/i);
+    expect(mapError("Provider 'openai' HTTP 429: insufficient_quota")).toMatch(/account limit/i);
+    expect(mapError("Provider 'openai' HTTP 429: billing_not_active")).toMatch(/account limit/i);
+  });
 });
 
 describe('errorSettingsTarget — only when Settings can fix it', () => {

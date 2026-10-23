@@ -42,7 +42,9 @@ export const mapError = (e) => {
   }
   // Account/credit/quota limits often arrive as 400/403 with a message,
   // not 429 — catch them by content before the generic HTTP fallback.
-  if (has('credit balance', 'billing', 'quota', 'insufficient_quota', 'usage limit', 'plan limit')) {
+  // why no bare 'billing' / 'quota': transient throttles carry them too; this
+  // list follows HARD_LIMIT_NEEDLES in peerd-provider/error-classify.js.
+  if (has('credit balance', 'billing_not_active', 'billing hard limit', 'insufficient_quota', 'usage limit', 'plan limit')) {
     return "Provider account limit — out of credit or over a usage cap. Check your provider's billing, then retry.";
   }
   if (e.startsWith('provider-http-429') || has('http 429', 'rate_limit', 'rate limit')) {
