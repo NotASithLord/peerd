@@ -44,6 +44,7 @@ describe('classifyFailure — the strings the codebase actually produces', () =>
     ['fetch returned HTTP 403', 'environment'],
     ["Provider 'openrouter' HTTP 429: rate limited", 'limits'],
     ['spend limit reached for this session', 'limits'],
+    ['not_run: The output limit cut this call before its arguments ended. Split the work into smaller calls.', 'limits'],
     ["Provider 'ollama' HTTP 400: {\"error\":{\"message\":\"bad request\"}}", 'provider'],
     ['provider stream ended early (likely rate limit or network drop)', 'provider'],
     ["actors.call: timed out after 5000ms awaiting 'vm-9'", 'timeout'],

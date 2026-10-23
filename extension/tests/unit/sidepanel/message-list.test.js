@@ -154,6 +154,71 @@ describe('sidepanel.message-list updates and aborted cards', () => {
       expect(card.querySelector('.tool-pending')).toBeTruthy();
     } finally { unmount(); }
   });
+
+  it('a finished model step whose tools are still dispatching keeps "running…"', async () => {
+    // the loop saves streaming:false + stopReason 'tool_use' BEFORE it dispatches
+    const { root, unmount } = mount([{
+      role: 'assistant', id: 'a1', content: '', streaming: false, stopReason: 'tool_use',
+      toolUses: [{ id: 't1', name: 'script', input: { code: 'return 42' } }],
+    }]);
+    try {
+      await flush();
+      const card = /** @type {Element} */ (root.querySelector('.tool-call'));
+      expect(card.classList.contains('tool-pending')).toBe(true);
+      expect(card.classList.contains('tool-cancelled')).toBe(false);
+      expect(card.querySelector('.tool-pending')?.textContent).toBe('running…');
+    } finally { unmount(); }
+  });
+
+  it('a Stop that could not prove the running tool stopped says outcome unknown', async () => {
+    const { root, unmount } = mount([{
+      role: 'assistant', id: 'a1', content: '', streaming: false, stopReason: 'tool_use',
+      error: 'Turn outcome unknown. Check the session before retrying.', outcomeKnown: false,
+      toolUses: [{ id: 't1', name: 'script', input: { code: 'await new Promise(() => {})' } }],
+    }]);
+    try {
+      await flush();
+      const card = /** @type {Element} */ (root.querySelector('.tool-call'));
+      expect(card.querySelector('.tool-pending')).toBeFalsy();
+      expect(card.querySelector('.tool-cancelled')?.textContent).toBe('outcome unknown');
+      const toggle = /** @type {HTMLButtonElement} */ (card.querySelector('button.tool-call-header'));
+      toggle.click();
+      await flush();
+      expect(root.textContent).toContain('Outcome unknown. The turn was stopped while this tool ran.');
+      expect(root.textContent?.includes('cancelled')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('a tool call cut by the output limit says not run, not running', async () => {
+    const { root, unmount } = mount([{
+      role: 'assistant', id: 'a1', content: '', streaming: false, stopReason: 'max_tokens',
+      toolUses: [{ id: 't1', name: 'sandbox_create', input: {} }],
+    }]);
+    try {
+      await flush();
+      const card = /** @type {Element} */ (root.querySelector('.tool-call'));
+      expect(card.querySelector('.tool-pending')).toBeFalsy();
+      expect(card.querySelector('.tool-cancelled')?.textContent).toBe('not run');
+      expect(root.querySelector('.stop-chip')?.textContent).toContain('output limit reached');
+      const toggle = /** @type {HTMLButtonElement} */ (card.querySelector('button.tool-call-header'));
+      toggle.click();
+      await flush();
+      expect(root.textContent).toContain('Not run. The turn ended before this tool ran.');
+    } finally { unmount(); }
+  });
+
+  it('a turn that ended without running its tool call says not run', async () => {
+    const { root, unmount } = mount([{
+      role: 'assistant', id: 'a1', content: '', streaming: false, stopReason: 'end_turn',
+      toolUses: [{ id: 't1', name: 'now', input: {} }],
+    }]);
+    try {
+      await flush();
+      const card = /** @type {Element} */ (root.querySelector('.tool-call'));
+      expect(card.querySelector('.tool-pending')).toBeFalsy();
+      expect(card.querySelector('.tool-cancelled')?.textContent).toBe('not run');
+    } finally { unmount(); }
+  });
 });
 
 describe('sidepanel.message-list peerd tab notice', () => {

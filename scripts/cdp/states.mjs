@@ -3228,6 +3228,115 @@ export const STATES = [
   },
 
 
+  // --- functional: Stop while a tool is running -------------------------------
+  // why: the loop saves the assistant message as streaming:false + 'tool_use'
+  // before it dispatches, and Stop cannot prove that the running tool also
+  // stopped. The card must still settle (outcome unknown), live and after a
+  // reload, instead of saying "running…" forever.
+  {
+    name: 'stop-during-tool', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex) => callIndex === 0
+      ? { sse: sseToolCall('script', { code: 'await new Promise((resolve) => setTimeout(resolve, 12000)); return 42;' }) }
+      : { sse: sseText('this-should-never-render') },
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const cardProbe = `(() => ({
+        busy: !!document.querySelector('form.input-bar button.stop'),
+        running: document.querySelector('.tool-call .tool-pending')?.textContent ?? null,
+        settled: document.querySelector('.tool-call .tool-cancelled')?.textContent ?? null,
+      }))()`;
+      await rpc(ctx.page, { type: 'agent/send', text: 'run a slow script' });
+      const running = await waitFor(async () => {
+        const view = await evalIn(ctx.page, cardProbe);
+        return view.busy && view.running ? view : null;
+      }, { budgetMs: 15_000, pollMs: 100 });
+      rec.check('the tool card says running while the script runs',
+        running?.running === 'running…', JSON.stringify(running));
+      const stopped = await rpc(ctx.page, { type: 'agent/stop' });
+      rec.check('agent/stop accepted', !!stopped?.ok);
+      let out = null;
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, cardProbe);
+        return !out.busy && (baseRender || !out.running) ? out : null;
+      }, { budgetMs: 15_000, pollMs: 100 });
+      if (baseRender) rec.observe('merge-base stopped tool card', out);
+      else rec.check('Stop settles the tool card as outcome unknown',
+        out?.busy === false && out?.running === null && out?.settled === 'outcome unknown',
+        JSON.stringify(out));
+      rec.check('Stop makes exactly one model call', ctx.modelCallCount() === 1, String(ctx.modelCallCount()));
+      const sessionId = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId ?? null;
+      await reloadReadyPanel(ctx, { expectedSessionId: sessionId });
+      const persisted = await waitFor(async () => {
+        const view = await evalIn(ctx.page, cardProbe);
+        return (baseRender ? !view.busy : view.settled) ? view : null;
+      }, { budgetMs: 15_000, pollMs: 100 });
+      if (baseRender) rec.observe('merge-base reloaded tool card', persisted);
+      else rec.check('the settled card survives a panel reload',
+        persisted?.running === null && persisted?.settled === 'outcome unknown',
+        JSON.stringify(persisted));
+      await clickAndSyncRedraw(ctx.page, '.tool-call .tool-call-header');
+      if (!baseRender) rec.check('the expanded card tells the user to check before retrying',
+        await evalIn(ctx.page, `document.querySelector('.tool-call .tool-result')?.textContent
+          .includes('Check the session before retrying.')`));
+      await rec.shot('settled-tool-card');
+    },
+  },
+
+  // why: the visual lane runs only visual states. Reuse the live Stop flow.
+  {
+    name: 'stopped-tool-card', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      const state = STATES.find(state => state.name === 'stop-during-tool');
+      ctx.setModelResponder(state.responder);
+      await state.run(ctx, rec);
+      await rec.visual('stopped-tool-card');
+    },
+  },
+  {
+    name: 'tool-call-output-limit', kind: 'visual', phase: 'post-unlock',
+    responder: call => ({ sse: call > 0 ? sseText('I will split the work into smaller calls.') : [
+      `data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: '', tool_calls: [{
+        index: 0, id: 'call_e2e_cut', type: 'function',
+        'function': { name: 'sandbox_create', 'arguments': '{"kind":"app","name":"Budget tracker","html":"<!doctype html>' },
+      }] } }] })}`,
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}`,
+      'data: [DONE]', '',
+    ].join('\n\n') + '\n\n' }),
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Build a budget tracker App.' });
+      rec.check('the App request is accepted', sent?.ok === true);
+      const settled = await waitFor(async () => {
+        const state = await rpc(ctx.page, { type: 'state/get' });
+        const messages = state?.state?.session?.messages ?? [];
+        const final = messages.at(-1);
+        const idle = await evalIn(ctx.page, `!document.querySelector('form.input-bar button.stop')
+          && !document.querySelector('.message-assistant.streaming')`);
+        return idle && (baseRender ? final?.stopReason === 'max_tokens'
+          : final?.content === 'I will split the work into smaller calls.')
+          ? { sessionId: state.state.session.sessionId, messages } : null;
+      }, { budgetMs: 20_000, pollMs: 100 });
+      if (!settled) throw new Error('The cut tool call did not settle');
+      const cut = settled.messages.find(message => message.stopReason === 'max_tokens');
+      const result = settled.messages.flatMap(message => message.toolResults ?? [])
+        .find(result => result.tool_use_id === cut?.toolUses?.[0]?.id);
+      if (baseRender) rec.observe('merge-base cut call', { calls: ctx.modelCallCount(), result });
+      else {
+        rec.check('the cut call gets a known not-run result and a smaller-call hint',
+          result?.is_error && result?.outcomeKnown === true && result?.content?.startsWith('not_run:')
+            && result.content.includes('Split the work into smaller calls'), JSON.stringify(result));
+        rec.check('the model continues once without dispatching the cut call', ctx.modelCallCount() === 2);
+        rec.check('the finished cut call has no running label',
+          await evalIn(ctx.page, `!document.querySelector('.tool-call .tool-pending')`));
+      }
+      const entries = await auditEntries(ctx);
+      rec.check('the incomplete App call never executes', !entries.some(entry => entry.sessionId === settled.sessionId
+        && entry.type === 'tool_executed' && entry.details?.tool === 'sandbox_create'));
+      await clickAndSyncRedraw(ctx.page, '.tool-call .tool-call-header');
+      await rec.visual('tool-call-output-limit');
+    },
+  },
+
   // --- functional: a provider error surfaces + idles --------------------------
   {
     name: 'error', kind: 'functional', phase: 'post-unlock',
