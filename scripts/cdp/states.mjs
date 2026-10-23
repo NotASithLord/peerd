@@ -74,6 +74,59 @@ const clickAndSyncRedraw = (page, selector) => evalIn(page, `(async () => {
   return true;
 })()`, true);
 
+// Real key presses over CDP, the way a keyboard user drives a page. why
+// rawKeyDown for keys without text: a keyDown without `text` floods a second
+// keydown on macOS; Enter carries '\r' so native buttons activate.
+const KEY_CODES = {
+  Enter: { code: 'Enter', vk: 13, text: '\r' },
+  Escape: { code: 'Escape', vk: 27 },
+  Tab: { code: 'Tab', vk: 9 },
+};
+const pressKey = async (page, key) => {
+  const spec = KEY_CODES[key];
+  await page.send('Input.dispatchKeyEvent', {
+    type: spec.text ? 'keyDown' : 'rawKeyDown', key, code: spec.code, windowsVirtualKeyCode: spec.vk,
+    ...(spec.text ? { text: spec.text, unmodifiedText: spec.text } : {}),
+  });
+  await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: spec.code, windowsVirtualKeyCode: spec.vk });
+};
+// A real mouse click over CDP: the user gesture Chrome requires before a page
+// may open the side panel, which a scripted element.click() does not carry.
+const realClick = async (page, selector) => {
+  const point = await evalIn(page, `(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) return null;
+    el.scrollIntoView({ block: 'center' });
+    const r = el.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  })()`);
+  if (!point) throw new Error(`realClick: ${selector} not found`);
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
+  await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
+};
+
+// why: Home owns Chat only while no side-panel port is connected (single-homed
+// chat). Retire the panel document to release its port before a Home scenario,
+// then put the live panel back for the states that follow.
+const releasePanelDocument = async (ctx) => {
+  await ctx.page.send('Page.navigate', { url: 'about:blank' });
+  const released = await waitFor(() => evalIn(ctx.page, `location.href === 'about:blank'`).catch(() => false),
+    { budgetMs: 5_000, pollMs: 50 });
+  if (!released) throw new Error('the side-panel document did not release its port');
+};
+const awaitLivePanel = async (ctx) => {
+  const restored = await waitFor(() => evalIn(ctx.page,
+    `document.documentElement.dataset.peerdBootStage === 'app-ready' && !!document.querySelector('.input-bar textarea')`).catch(() => false),
+  { budgetMs: 20_000, pollMs: 80 });
+  if (!restored) throw new Error('the live side panel did not restore');
+};
+const restorePanelDocument = async (ctx, panelUrl) => {
+  await ctx.page.send('Page.navigate', { url: panelUrl });
+  await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
+  await awaitLivePanel(ctx);
+};
+
 // why: these scenarios model a user who already made a network choice. Keep
 // the choice local to their fixtures; fresh-profile consent oracles stay untouched.
 const chooseFixtureNetwork = async (ctx, enabled) => {
@@ -383,7 +436,7 @@ let lockDelegated = false;
 let lockReportBody = '';
 let lockFixtureUrl = '';
 
-const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPanel = false }) => {
+const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPanel = false, rename = false }) => {
   await chooseFixtureNetwork(ctx, false);
   const options = await openExtPage(ctx, 'options/options.html');
   let imported;
@@ -417,6 +470,34 @@ const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPane
     { budgetMs: 20_000, pollMs: 80 });
     rec.check('visual fixture App appears in the Library', !!appReady);
     await evalIn(page, `document.querySelector(${JSON.stringify(cardSelector)})?.querySelector('.library-kebab')?.click()`);
+    if (rename) {
+      await waitFor(() => evalIn(page, `!!document.querySelector(${JSON.stringify(`${cardSelector} .library-menu-item`)})`),
+        { budgetMs: 5_000, pollMs: 50 });
+      await evalIn(page, `[...document.querySelector(${JSON.stringify(cardSelector)}).querySelectorAll('.library-menu-item')]
+        .find((button) => button.textContent === 'Rename')?.click()`);
+      const field = await waitFor(() => evalIn(page, `(() => {
+        const input = document.querySelector(${JSON.stringify(`${cardSelector} input`)});
+        return input ? { label: input.getAttribute('aria-label'), selected: input.selectionEnd - input.selectionStart,
+          value: input.value, focused: document.activeElement === input } : null;
+      })()`), { budgetMs: 5_000, pollMs: 50 });
+      rec.check('Library opens the real rename field', field?.focused === true && field.value === 'Versioned App');
+      if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') {
+        rec.check('the rename field has a name and selects the current App name',
+          field?.label === 'Rename Versioned App' && field.selected === field.value.length, JSON.stringify(field));
+      }
+      await rec.visualPage(visualName, page, { beforeShot: () => evalIn(page, `(() => {
+        const meta = document.querySelector(${JSON.stringify(`${cardSelector} .library-meta`)})?.firstChild;
+        if (meta?.nodeType === 3) meta.nodeValue = 'just now';
+      })()`) });
+      await pressKey(page, 'Escape');
+      if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') {
+        const restored = await waitFor(() => evalIn(page,
+          `document.activeElement === document.querySelector(${JSON.stringify(`${cardSelector} .library-kebab`)})`),
+        { budgetMs: 3_000, pollMs: 50 });
+        rec.check('Escape returns focus to the App actions button', !!restored);
+      }
+      return;
+    }
     const historyActionReady = await waitFor(() => evalIn(page, `!![...document.querySelector(${JSON.stringify(cardSelector)})?.querySelectorAll('.library-menu-item') ?? []].find((button) => button.textContent === 'History & Git')`),
       { budgetMs: 5_000, pollMs: 50 });
     rec.check('visual fixture exposes the History and Git action', !!historyActionReady);
@@ -2110,6 +2191,16 @@ export const STATES = [
       // The finished checklist stays as the run's receipt (does not vanish on end).
       const todoAfter = await evalIn(ctx.page, `!!document.querySelector('.todo-card')`);
       rec.check('TodoCard persists after the run as its receipt', !!todoAfter);
+      // The receipt must also survive a full 'state' push, which replaces the
+      // whole session: a Plan toggle is one such push.
+      await rpc(ctx.page, { type: 'permission/set', mode: 'plan' });
+      const planOn = await waitFor(() => evalIn(ctx.page,
+        `document.querySelector('.planact-mode[aria-pressed="true"]')?.textContent.trim() === 'Plan'`), { budgetMs: 8_000, pollMs: 50 });
+      const todoAfterPush = await evalIn(ctx.page, `!!document.querySelector('.todo-card')`);
+      rec.check('TodoCard survives the state push of a Plan toggle', !!planOn && todoAfterPush === true);
+      await rpc(ctx.page, { type: 'permission/set', mode: 'act' });
+      await waitFor(() => evalIn(ctx.page,
+        `document.querySelector('.planact-mode[aria-pressed="true"]')?.textContent.trim() === 'Act'`), { budgetMs: 8_000, pollMs: 50 });
       rec.check('submitted goal text round-trips as the first user message', !!out.userText && out.userText.includes('tidy the repo'), JSON.stringify(out.userText));
     },
   },
@@ -4768,6 +4859,282 @@ export const STATES = [
     },
   },
 
+  // --- functional: Home > Chats by keyboard, and the live chat header -------
+  // Chats is Home's default view when no panel is open. A row must open with
+  // Enter (a real <button>), its delete control must be a named sibling that
+  // shows on keyboard focus, and the header must carry the session title (the
+  // state snapshot used to drop it, so the header always read "New chat").
+  {
+    name: 'home-chat-list-keyboard', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
+      const panelUrl = await evalIn(ctx.page, 'location.href');
+      const sendChat = async (text) => {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text });
+        if (!sent?.ok) throw new Error(`agent/send failed: ${JSON.stringify(sent)}`);
+        await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
+      };
+      await sendChat('alpha chat about tides');
+      await rpc(ctx.page, { type: 'session/reset' });
+      await waitFor(async () => !(await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId, { budgetMs: 10_000, pollMs: 80 });
+      await sendChat('beta chat about bread');
+      let page = null;
+      try {
+        await releasePanelDocument(ctx);
+        page = await openWidePage(ctx, 'home/home.html#chat', { ready: '.home-shell' });
+        const listed = await waitFor(() => evalIn(page, `document.querySelectorAll('.chat-list-item').length >= 2`), { budgetMs: 15_000, pollMs: 80 });
+        rec.check('Home lists both chats', !!listed);
+        const header = () => evalIn(page, `document.querySelector('.home-chat-title')?.textContent ?? null`);
+        const activeTitle = () => evalIn(page, `document.querySelector('.chat-list-item.is-active .chat-list-item-title')?.textContent ?? null`);
+        const titles = { header: await header(), active: await activeTitle() };
+        rec.check('the chat header carries the live session title',
+          titles.header === 'beta chat about bread' && titles.active === 'beta chat about bread', JSON.stringify(titles));
+        // Real Tabs from "+ New chat": the first row, its delete control, the second row.
+        await evalIn(page, `document.querySelector('button.chat-list-new').focus()`);
+        for (let i = 0; i < 3; i++) await pressKey(page, 'Tab');
+        const focused = await evalIn(page, `(() => {
+          const a = document.activeElement;
+          const row = a?.closest('.chat-list-item');
+          const del = row?.querySelector('.chat-item-del');
+          return { tag: a?.tagName ?? null, inRow: !!row, active: !!row?.classList.contains('is-active'),
+            nested: !!a?.querySelector?.('.chat-item-del'), delOpacity: del ? getComputedStyle(del).opacity : null,
+            delLabel: del?.getAttribute('aria-label') ?? null, title: row?.querySelector('.chat-list-item-title')?.textContent ?? null };
+        })()`);
+        rec.check('Tab reaches the older chat as a real button that does not swallow its delete control',
+          focused.tag === 'BUTTON' && focused.inRow && !focused.active && !focused.nested && focused.title === 'alpha chat about tides',
+          JSON.stringify(focused));
+        rec.check('keyboard focus reveals the delete control, named per chat',
+          focused.delOpacity === '1' && /^Delete chat “.+”$/.test(focused.delLabel ?? ''), JSON.stringify(focused));
+        const beforeId = (await rpc(page, { type: 'state/get' }))?.state?.session?.sessionId ?? null;
+        await pressKey(page, 'Enter');
+        const switched = await waitFor(async () => {
+          const id = (await rpc(page, { type: 'state/get' }))?.state?.session?.sessionId ?? null;
+          return id && id !== beforeId ? id : null;
+        }, { budgetMs: 8_000, pollMs: 80 });
+        rec.check('Enter on a chat row switches the live session', !!switched, JSON.stringify({ beforeId, switched }));
+        const headerFollows = await waitFor(async () => (await header()) === 'alpha chat about tides', { budgetMs: 8_000, pollMs: 80 });
+        rec.check('the header follows the switched chat', !!headerFollows, JSON.stringify(await header()));
+        await rec.shotPage('home-chat-list-keyboard', page);
+      } finally {
+        if (page) await retirePrivateTransferPage(page);
+        await restorePanelDocument(ctx, panelUrl);
+      }
+    },
+  },
+
+  // --- functional: Home keeps the view you chose around the side panel -------
+  // A panel the user opened must survive a return to Home (only a card-opened
+  // panel auto-closes), and closing the panel after navigating must not yank
+  // Home back to Chats.
+  {
+    name: 'home-panel-navigation', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
+      const panelUrl = await evalIn(ctx.page, 'location.href');
+      const view = (page) => evalIn(page, `document.querySelector('main.home-content')?.className.replace('home-content home-content--', '') ?? null`);
+      const panelBar = (page) => evalIn(page, `!!document.querySelector('.home-panel-bar')`);
+      let page = null;
+      let blank = null;
+      try {
+        await releasePanelDocument(ctx);
+        page = await openWidePage(ctx, 'home/home.html#chat', { ready: '.home-shell' });
+        rec.check('Home owns Chat while no panel is connected', (await view(page)) === 'chat' && !(await panelBar(page)));
+        // The panel comes back (its port connects): Home hands Chat over.
+        await restorePanelDocument(ctx, panelUrl);
+        const handed = await waitFor(async () => (await panelBar(page)) && (await view(page)) !== 'chat', { budgetMs: 8_000, pollMs: 80 });
+        rec.check('an open panel takes Chat and Home drops to a tool view', !!handed, JSON.stringify({ view: await view(page) }));
+        await clickAndSyncRedraw(page, '[data-home-view="library"]');
+        rec.check('Library opens beside the panel', (await view(page)) === 'library');
+        // Leave for another tab and come back: a panel the user opened stays.
+        blank = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json();
+        const blankPage = await attach(blank.webSocketDebuggerUrl);
+        await blankPage.send('Page.enable');
+        await blankPage.send('Page.bringToFront');
+        const hidden = await waitFor(() => evalIn(page, `document.visibilityState === 'hidden'`), { budgetMs: 5_000, pollMs: 50 });
+        await page.send('Page.bringToFront');
+        const visible = await waitFor(() => evalIn(page, `document.visibilityState === 'visible'`), { budgetMs: 5_000, pollMs: 50 });
+        blankPage.close();
+        rec.check('Home went hidden and came back', !!hidden && !!visible);
+        await sleep(1_000);
+        const surfaces = await rpc(page, { type: 'surfaces/get' }).catch(() => null);
+        const returned = { surfaces, view: await view(page), panelBar: await panelBar(page) };
+        rec.check('a panel the user opened stays open when Home returns',
+          surfaces?.sidePanelOpen === true && returned.panelBar && returned.view === 'library', JSON.stringify(returned));
+        // Closing the panel now keeps Library instead of yanking Home to Chats.
+        await releasePanelDocument(ctx);
+        const closed = await waitFor(async () => !(await panelBar(page)), { budgetMs: 8_000, pollMs: 80 });
+        await sleep(300);
+        rec.check('closing the panel keeps the view the user navigated to', !!closed && (await view(page)) === 'library', JSON.stringify({ view: await view(page) }));
+        await rec.shotPage('home-panel-navigation', page);
+      } finally {
+        if (blank) await fetch(`http://127.0.0.1:${ctx.port}/json/close/${blank.id}`).catch(() => {});
+        if (page) await retirePrivateTransferPage(page);
+        await restorePanelDocument(ctx, panelUrl);
+      }
+    },
+  },
+
+  // --- functional: a card-opened side panel closes when you return to Home ---
+  // "Go ↗" on a "peerd opened a tab" card opens the side panel to follow the
+  // agent's tab. Coming back to Home must close that panel and hand Chat back,
+  // while a panel the user opened stays (home-panel-navigation). The close is
+  // the real one, which destroys the browser-owned panel document, so the
+  // harness reopens the panel for the states that follow.
+  {
+    name: 'home-card-panel-return', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex) => (callIndex === 0
+      ? { sse: sseToolCall('open_tab', {}) }
+      : { sse: sseText('The tab is open.') }),
+    async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
+      // why the sync redraw: a hidden tab gets no animation frame, so commit
+      // Mithril's scheduled redraw before reading Home's DOM.
+      const snap = async (page) => ({
+        sidePanelOpen: (await rpc(page, { type: 'surfaces/get' }).catch(() => null))?.sidePanelOpen ?? null,
+        ...(await evalIn(page, `import('/vendor/mithril/mithril.js').then(({ default: m }) => {
+          m.redraw.sync();
+          return {
+            view: document.querySelector('main.home-content')?.className.replace('home-content home-content--', '') ?? null,
+            panelBar: !!document.querySelector('.home-panel-bar'),
+            visibility: document.visibilityState,
+          };
+        })`, true)),
+      });
+      const homeOwnsChat = async (page) => {
+        const s = await snap(page);
+        return s.sidePanelOpen === false && s.view === 'chat' && !s.panelBar;
+      };
+      let page = null;
+      let tabsBefore = null;
+      try {
+        page = await openWidePage(ctx, 'home/home.html#chat', { ready: '.home-shell' });
+        tabsBefore = await evalIn(page, `chrome.tabs.query({}).then((tabs) => tabs.map((tab) => tab.id))`, true);
+        // Bring the chat home first: the live panel closes for real.
+        await rpc(page, { type: 'sidepanel/close' });
+        const owned = await waitFor(() => homeOwnsChat(page), { budgetMs: 8_000, pollMs: 80 });
+        rec.check('closing the panel hands Chat to Home', !!owned, JSON.stringify(await snap(page)));
+        const sent = await rpc(page, { type: 'agent/send', text: 'Open a blank tab for me.' });
+        rec.check('agent/send accepted from Home', !!sent?.ok, JSON.stringify(sent));
+        const card = await waitFor(() => evalIn(page, `!!document.querySelector('.agent-tab-notice-go')`), { budgetMs: 20_000, pollMs: 80 });
+        const settled = await waitFor(() => evalIn(page,
+          `!document.querySelector('.message-assistant.streaming') && !document.querySelector('form.input-bar button.stop')`),
+        { budgetMs: 20_000, pollMs: 80 });
+        rec.check('the opened-tab card renders on Home', !!card && !!settled);
+        await page.send('Page.bringToFront');
+        await waitFor(() => evalIn(page, `document.visibilityState === 'visible'`), { budgetMs: 5_000, pollMs: 50 });
+        // Go: a real click, since the gesture is what lets Home open the panel.
+        await realClick(page, '.agent-tab-notice-go');
+        const followed = await waitFor(async () => {
+          const s = await snap(page);
+          return s.visibility === 'hidden' && s.sidePanelOpen === true && s.panelBar;
+        }, { budgetMs: 15_000, pollMs: 80 });
+        rec.check('Go opens the side panel and leaves Home for the agent tab', !!followed, JSON.stringify(await snap(page)));
+        const returnedAt = Date.now();
+        await page.send('Page.bringToFront');
+        const closed = await waitFor(() => homeOwnsChat(page), { budgetMs: 3_000, pollMs: 50 });
+        rec.check('returning to Home closes the card-opened panel and Chat is back',
+          !!closed, JSON.stringify({ ...(await snap(page)), afterMs: Date.now() - returnedAt }));
+        await rec.shotPage('home-card-panel-return', page);
+      } finally {
+        if (page) {
+          if (tabsBefore) {
+            await evalIn(page, `(async () => {
+              const before = new Set(${JSON.stringify(tabsBefore)});
+              const tabs = await chrome.tabs.query({});
+              await Promise.all(tabs.filter((tab) => Number.isInteger(tab.id) && !before.has(tab.id))
+                .map((tab) => chrome.tabs.remove(tab.id).catch(() => {})));
+            })()`, true).catch(() => {});
+          }
+          await retirePrivateTransferPage(page);
+        }
+        const panelAlive = await evalIn(ctx.page, 'true').then(() => true, () => false);
+        if (!panelAlive) {
+          await ctx.reopenNativePanel();
+          await awaitLivePanel(ctx);
+        }
+      }
+    },
+  },
+
+  // --- functional: the Home notifications bell (preview, network on) --------
+  // The bell's menu is a disclosure: Escape closes it and returns focus to the
+  // bell, focus leaving the bell area closes it, and at narrow widths (the rail
+  // is a top bar) it opens below the bell inside the viewport, not above the window.
+  {
+    name: 'home-notifications-menu', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, true);
+      let page = null;
+      try {
+        page = await openWidePage(ctx, 'home/home.html#library', { ready: '.home-shell' });
+        const bellShown = await waitFor(() => evalIn(page, `!!document.querySelector('.notif-bell')`), { budgetMs: 15_000, pollMs: 80 });
+        rec.check('the notifications bell renders with the network on', !!bellShown);
+        // Three feed entries, broadcast the way the dweb base host emits them.
+        for (let i = 0; i < 3; i++) {
+          await evalIn(ctx.page, `chrome.runtime.sendMessage({ type: 'dweb/notify', notification: {
+            id: 'e2e-notif-${i}', ts: Date.now(), kind: 'peer', title: 'New peer connected', body: 'peer e2e-${i}', link: 'network',
+          } }).catch(() => null)`, true);
+        }
+        const fed = await waitFor(() => evalIn(page,
+          `import('/shared/peer-notifications.js').then(({ peerNotifications }) => peerNotifications.list().length >= 3)`, true),
+        { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the feed holds the three entries', !!fed);
+        const snap = () => evalIn(page, `({
+          open: !!document.querySelector('.notif-menu'), items: document.querySelectorAll('.notif-item').length,
+          expanded: document.querySelector('.notif-bell')?.getAttribute('aria-expanded') ?? null,
+          onBell: document.activeElement === document.querySelector('.notif-bell'),
+          active: document.activeElement?.className ?? null,
+        })`);
+        await evalIn(page, `document.querySelector('.notif-bell').focus()`);
+        await pressKey(page, 'Enter');
+        const opened = await waitFor(async () => (await snap()).open, { budgetMs: 3_000, pollMs: 50 });
+        rec.check('Enter on the bell opens the menu', !!opened, JSON.stringify(await snap()));
+        await pressKey(page, 'Escape');
+        await waitFor(async () => !(await snap()).open, { budgetMs: 3_000, pollMs: 50 });
+        const afterEscape = await snap();
+        rec.check('Escape closes the menu and returns focus to the bell',
+          !afterEscape.open && afterEscape.onBell && afterEscape.expanded === 'false', JSON.stringify(afterEscape));
+        if (!(await snap()).open) await clickAndSyncRedraw(page, '.notif-bell');
+        await evalIn(page, `document.querySelector('.notif-bell').focus()`);
+        await waitFor(async () => (await snap()).open, { budgetMs: 3_000, pollMs: 50 });
+        await evalIn(page, `document.querySelector('.home-rail-lock').focus()`);
+        await waitFor(async () => !(await snap()).open, { budgetMs: 3_000, pollMs: 50 });
+        const afterFocusOut = await snap();
+        rec.check('focus leaving the bell area closes the menu', !afterFocusOut.open, JSON.stringify(afterFocusOut));
+        // Narrow window: the rail is a top bar and the menu must open inside the viewport.
+        if ((await snap()).open) await clickAndSyncRedraw(page, '.notif-bell');
+        await page.send('Emulation.setDeviceMetricsOverride', { width: 600, height: 800, deviceScaleFactor: 1, mobile: false });
+        const narrow = await waitFor(() => evalIn(page, `matchMedia('(max-width: 620px)').matches`), { budgetMs: 3_000, pollMs: 50 });
+        await clickAndSyncRedraw(page, '.notif-bell');
+        const menuBox = await waitFor(() => evalIn(page, `(() => {
+          const menu = document.querySelector('.notif-menu');
+          if (!menu) return null;
+          const r = menu.getBoundingClientRect();
+          const items = [...menu.querySelectorAll('.notif-item')];
+          const usable = items.filter((it) => {
+            const b = it.getBoundingClientRect(); const x = b.left + b.width / 2; const y = b.top + b.height / 2;
+            return x >= 0 && y >= 0 && x < innerWidth && y < innerHeight && it.contains(document.elementFromPoint(x, y));
+          }).length;
+          return { top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right),
+            items: items.length, usable, vw: innerWidth, vh: innerHeight };
+        })()`), { budgetMs: 3_000, pollMs: 50 });
+        rec.check('at 600px the menu opens inside the viewport with every item usable',
+          !!narrow && !!menuBox && menuBox.top >= 0 && menuBox.bottom <= menuBox.vh && menuBox.left >= 0 && menuBox.right <= menuBox.vw
+            && menuBox.items >= 3 && menuBox.usable === menuBox.items, JSON.stringify(menuBox));
+        await rec.shotPage('home-notifications-menu-narrow', page);
+      } finally {
+        if (page) {
+          await evalIn(page, `import('/shared/peer-notifications.js').then(({ peerNotifications }) => peerNotifications.clear())`, true).catch(() => {});
+          await retirePrivateTransferPage(page);
+        }
+        await chooseFixtureNetwork(ctx, false);
+      }
+    },
+  },
+
   // --- visual (WIDE): the full-tab home SPA — the large in-browser view -------
   // Opened as its own browser tab (1280 wide), not the 400px side panel. The
   // vault is already unlocked in the SW, so home boots to its SPA.
@@ -4873,6 +5240,49 @@ export const STATES = [
     },
   },
 
+  // Rename fields render on both revisions. The head checks the new focus rules.
+  {
+    name: 'home-contacts-rename', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, true);
+      // The RFC 8032 public key keeps this saved contact and its avatar stable.
+      const did = 'did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw';
+      const page = await openWidePage(ctx, 'home/home.html#contacts', { ready: '.home-shell' });
+      try {
+        const saved = await rpc(page, { type: 'contacts/set', did, name: 'Rename review' });
+        rec.check('the contact is saved through the real route', saved?.ok === true, JSON.stringify(saved));
+        const ready = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.contact-row')]
+          .some((row) => row.querySelector('.peerd-disc-name')?.textContent === 'Rename review')`),
+        { budgetMs: 15_000, pollMs: 80 });
+        if (!ready) throw new Error('the saved contact did not render');
+        await evalIn(page, `[...document.querySelectorAll('.contact-row')]
+          .find((row) => row.querySelector('.peerd-disc-name')?.textContent === 'Rename review')
+          .querySelector('[title="Edit name"]').click()`);
+        const editing = await waitFor(() => evalIn(page,
+          `document.querySelector('.contact-name-input')?.value === 'Rename review'
+            && document.activeElement === document.querySelector('.contact-name-input')`),
+        { budgetMs: 5_000, pollMs: 50 });
+        rec.check('Contacts opens its focused name field', !!editing);
+        await rec.visualPage('home-contacts-rename', page, { beforeShot: () => evalIn(page,
+          `import('/shared/peer-notifications.js').then(({ peerNotifications }) => peerNotifications.clear())`, true) });
+        await pressKey(page, 'Escape');
+        rec.check('Escape leaves the saved contact name unchanged',
+          (await rpc(page, { type: 'contacts/list' }))?.contacts?.find((contact) => contact.did === did)?.name === 'Rename review');
+      } finally {
+        await rpc(page, { type: 'contacts/forget', did }).catch(() => {});
+        await retirePrivateTransferPage(page);
+        await chooseFixtureNetwork(ctx, false);
+      }
+    },
+  },
+  {
+    name: 'home-library-rename', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      await captureHomeLibraryGit(ctx, rec, { visualName: 'home-library-rename', rename: true });
+    },
+  },
   // --- visual (WIDE): browser-native Git history on an App -------------------
   // Creates through the real import→App→Git path, then opens the Library's
   // developer panel. Import avoids opening a second tab during the visual state,

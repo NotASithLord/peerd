@@ -1027,9 +1027,14 @@ export const reduceChat = (state, msg) => {
       // state.session — but this LIVE push carries only sessionId+messages, so
       // without it the card wouldn't tick until the next full 'state' snapshot.
       // undefined on non-goal turns (the card self-hides), so it's harmless.
+      // why title too: the first user message titles the session inside the
+      // turn and no full 'state' push follows it, so this live fold is how the
+      // home header learns a new chat's title. A later push that omits the
+      // title keeps the known one.
       return { ...state, actors: reconcileActorTerminals(state.actors, msg.session.messages),
         session: { ...state.session,
         sessionId: msg.session.sessionId, messages: msg.session.messages,
+        title: msg.session.title ?? state.session.title,
         todos: msg.session.todos }, lastError: null };
     case 'turn/cost':
       if (state.session.sessionId && msg.sessionId && state.session.sessionId !== msg.sessionId) return state;

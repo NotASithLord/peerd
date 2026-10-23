@@ -137,6 +137,44 @@ describe('home.contacts', () => {
     } finally { unmount(); }
   });
 
+  it('skips the live refresh while a name is being typed (a re-sort would blur and save a partial name)', async () => {
+    // A second linked peer whose recency flips on the second live read: the row
+    // being named would move above the first one, and the keyed move blurs its input.
+    const DID_LIVE_B = 'did:key:z6MkBBBBBBBBBBBBBBBBBBBB';
+    let liveReads = 0;
+    const send = makeSend({
+      'dweb/distributed/info': () => {
+        liveReads += 1;
+        const peerB = { did: DID_LIVE_B, name: null, linked: true, path: 'direct-ipv6', lastSeen: liveReads === 1 ? 500 : 1500 };
+        return { ok: true, peers: [...structuredClone(LIVE_PEERS), peerB] };
+      },
+    });
+    // Capture the 5 s poll so the test can fire it on demand.
+    let tick = /** @type {(() => void) | null} */ (null);
+    const realSetInterval = window.setInterval;
+    window.setInterval = /** @type {typeof window.setInterval} */ ((/** @type {TimerHandler} */ handler, /** @type {number | undefined} */ timeout) => {
+      tick = /** @type {() => void} */ (handler);
+      return realSetInterval(() => {}, timeout);
+    });
+    let mounted;
+    try { mounted = await mountView(send); } finally { window.setInterval = realSetInterval; }
+    const { root, unmount } = mounted;
+    try {
+      clickText(rowWith(root, 'BBBBBBBB'), 'button', 'Name');
+      await flush();
+      const input = need(root, '.contact-name-input', HTMLInputElement);
+      input.value = 'Bo';
+      input.dispatchEvent(new Event('input'));
+      tick?.();
+      await flush();
+      await flush();
+      expect(liveReads).toBe(1);
+      expect(send.calls.some((c) => c.type === 'contacts/set')).toBe(false);
+      expect(root.querySelector('.contact-name-input')).toBe(input);
+      expect(document.activeElement).toBe(input);
+    } finally { unmount(); }
+  });
+
   it('empty state when there are no known peers', async () => {
     const send = makeSend({
       'contacts/list': () => ({ ok: true, contacts: [] }),

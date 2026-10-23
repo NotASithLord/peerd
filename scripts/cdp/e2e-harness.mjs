@@ -796,36 +796,42 @@ export async function launchPeerd({
   const nativePanel = String(manifest.side_panel?.default_path ?? '').replace(/^\//, '')
     === String(panelPath).replace(/^\//, '');
   let page;
+  let reopenNativePanel = async () => { throw new Error('the side panel is not browser-owned'); };
   if (nativePanel) {
     if (!browserConn) throw new Error('browser CDP connection unavailable');
-    const { targetInfos: actionTargets = [] } = await browserConn.send('Target.getTargets', {
-      filter: [{ type: 'tab', exclude: false }, { exclude: false }],
-    });
-    const actionTabs = actionTargets.filter(
-      (entry) => entry.type === 'tab' && entry.url === 'about:blank',
-    );
-    if (actionTabs.length === 0) {
-      throw new Error(`Chrome did not expose an action tab target: ${JSON.stringify(actionTargets)}`);
-    }
-    /** @type {any} */ let target = null;
-    for (const actionTarget of actionTabs) {
-      await browserConn.send('Extensions.triggerAction', {
-        id: sw.id, targetId: actionTarget.targetId,
+    const findNativePanelTarget = async () => {
+      const { targetInfos = [] } = await browserConn.send('Target.getTargets');
+      return targetInfos.find(
+        (entry) => entry.targetId !== created.id && entry.url === panelUrl,
+      ) ?? null;
+    };
+    const openNativePanelTarget = async (budgetMs) => {
+      const { targetInfos: actionTargets = [] } = await browserConn.send('Target.getTargets', {
+        filter: [{ type: 'tab', exclude: false }, { exclude: false }],
       });
-      target = await waitFor(async () => {
-        const { targetInfos = [] } = await browserConn.send('Target.getTargets');
-        return targetInfos.find(
-          (entry) => entry.targetId !== created.id && entry.url === panelUrl,
-        ) ?? null;
-      }, { budgetMs: Math.min(10_000, READY_BUDGET_MS), pollMs: 25 });
-      if (target) break;
-    }
+      const actionTabs = actionTargets.filter(
+        (entry) => entry.type === 'tab' && entry.url === 'about:blank',
+      );
+      if (actionTabs.length === 0) {
+        throw new Error(`Chrome did not expose an action tab target: ${JSON.stringify(actionTargets)}`);
+      }
+      for (const actionTarget of actionTabs) {
+        await browserConn.send('Target.activateTarget', { targetId: actionTarget.targetId }).catch(() => {});
+        await browserConn.send('Extensions.triggerAction', {
+          id: sw.id, targetId: actionTarget.targetId,
+        });
+        const target = await waitFor(findNativePanelTarget, { budgetMs, pollMs: 25 });
+        if (target) return target;
+      }
+      return null;
+    };
+    const target = await openNativePanelTarget(Math.min(10_000, READY_BUDGET_MS));
     if (!target) {
       activationPage.close();
       cleanup();
       throw new Error('browser-owned side panel target never appeared');
     }
-    const { sessionId } = await browserConn.send('Target.attachToTarget', {
+    let { sessionId } = await browserConn.send('Target.attachToTarget', {
       targetId: target.targetId,
       flatten: true,
     });
@@ -864,6 +870,34 @@ export async function launchPeerd({
       events,
       on: (listener) => listeners.add(listener),
       off: (listener) => listeners.delete(listener),
+    };
+    // why: the kernel's sidepanel/close disables the browser-owned panel, which
+    // destroys this document target and strands the handle above. A state that
+    // closes the panel for real calls this afterwards: it binds the handle to
+    // the panel's next document (opened through the action when no product
+    // gesture already did) and boots that document under the same emulation.
+    reopenNativePanel = async () => {
+      const previousSessionId = sessionId;
+      let next = await findNativePanelTarget();
+      // The kernel re-enables the panel 250 ms after closing it, and an action
+      // click inside that window opens nothing.
+      for (let attempt = 0; !next && attempt < 3; attempt += 1) next = await openNativePanelTarget(4_000);
+      if (!next) throw new Error('browser-owned side panel target did not reappear');
+      ({ sessionId } = await browserConn.send('Target.attachToTarget', { targetId: next.targetId, flatten: true }));
+      browserConn.send('Target.detachFromTarget', { sessionId: previousSessionId }).catch(() => {});
+      await page.send('Runtime.enable');
+      await page.send('Page.enable');
+      await page.send('Network.enable');
+      await armDeterministicCapture(page);
+      await page.send('Page.bringToFront');
+      const priorTimeOrigin = await evalIn(page, 'performance.timeOrigin').catch(() => null);
+      await page.send('Page.reload');
+      const remounted = await waitFor(() => evalIn(page, `performance.timeOrigin !== ${priorTimeOrigin}
+        && document.readyState === 'complete'
+        && document.documentElement?.dataset.peerdBootModule === 'evaluated'
+        && !!document.documentElement?.dataset.peerdBootStage`).catch(() => false),
+      { budgetMs: READY_BUDGET_MS, pollMs: 25 });
+      if (!remounted) throw new Error('side panel did not remount after reopen');
     };
   } else {
     page = activationPage;
@@ -993,6 +1027,9 @@ export async function launchPeerd({
     // Swap the model behaviour + reset the per-state call counter — lets one
     // Chrome run many states back-to-back (the single-Chrome verify path).
     setModelResponder: (fn) => { currentResponder = fn || (() => ({ sse: sseText('e2e-smoke-ok') })); modelCalls = 0; },
+    // Rebind `page` to the browser-owned side panel after a state closed it for
+    // real (see the definition above); it throws outside the native-panel launch.
+    reopenNativePanel: () => reopenNativePanel(),
     // Authoritative MV3 retirement. Target.closeTarget is not sufficient
     // evidence: it can close a debugger target without proving Chrome stopped
     // the registered worker version. This uses the ServiceWorker domain,

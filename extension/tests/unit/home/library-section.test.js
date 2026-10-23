@@ -632,6 +632,10 @@ describe('home.library', () => {
       clickText(root, '.library-menu-item', 'Rename');
       await flush();
       const input = need(root, '.library-card input', HTMLInputElement);
+      // The field is named for assistive tech and opens with the whole name
+      // selected, so a new name typed at once replaces it.
+      expect(input.getAttribute('aria-label')).toBe('Rename Snake Game');
+      expect([input.selectionStart, input.selectionEnd]).toEqual([0, 'Snake Game'.length]);
       input.value = 'Renamed';
       input.dispatchEvent(new Event('input'));
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
@@ -639,6 +643,10 @@ describe('home.library', () => {
       expect(send.calls.find((c) => c.type === 'apps/rename'))
         .toEqual({ type: 'apps/rename', appId: 'app-2', name: 'Renamed' });
       expect(names(root)).toContain('Renamed');
+      // Enter hands focus back to the card's More actions button, as every
+      // other Library action does, instead of dropping it on the page body.
+      await focusSettles(focusedAction('more'));
+      expect(focusedAction('more')()).toBe(true);
     } finally { unmount(); }
   });
 
@@ -657,6 +665,8 @@ describe('home.library', () => {
       await flush();
       expect(send.calls.some((c) => c.type === 'apps/rename')).toBe(false);
       expect(names(root)).toContain('Snake Game');
+      await focusSettles(focusedAction('more'));
+      expect(focusedAction('more')()).toBe(true);
     } finally { unmount(); }
   });
 
