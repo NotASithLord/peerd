@@ -578,6 +578,17 @@ const recoveryCustody = createKernelRecoveryCustody({
   },
 });
 
+
+// why: a worker wake must resume interrupted work without loading every chat.
+void kernelReady.then(async () => {
+  if (vault.isLocked() || !settingsStore.get().autoResumeInterruptedTurns) return;
+  const sessionId = await sessionCache.sessionGet('currentSessionId');
+  const last = typeof sessionId === 'string' ? (await kernelSessions.get(sessionId))?.messages?.at(-1) : null;
+  if (last?.role === 'assistant' && (last.streaming === true
+      || last.stopReason === 'incomplete' || last.stopReason === 'tool_use' && last.toolUses?.length)
+      || last?.role === 'user' && last.toolResults?.length) await recoveryCustody.resume(sessionId);
+}).catch((error) => console.warn('[kernel] interrupted turn recovery failed', error));
+
 const vaultRoutes = makeVaultKernelRoutes({
   ready: kernelReady,
   deps: {
@@ -595,10 +606,7 @@ const vaultRoutes = makeVaultKernelRoutes({
         throw new Error('kernel-keyed-origin-hydration-failed');
       }
       await featureHost.vaultUnlocked();
-      const currentSessionId = await sessionCache.sessionGet('currentSessionId');
-      await recoveryCustody.resume(
-        typeof currentSessionId === 'string' ? currentSessionId : null,
-      );
+      await recoveryCustody.resume(await sessionCache.sessionGet('currentSessionId'));
     },
     onLocked: lockFeatureHost,
     beforeUnlock: () => lockLifecycle.state()
