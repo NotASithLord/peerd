@@ -4481,6 +4481,112 @@ export const STATES = [
     },
   },
 
+  {
+    name: 'starter-unknown-warning', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const base = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const warning = 'peerd could not confirm whether the starter was added. Check your Library before reviewing another copy.';
+      const title = 'Confirm actions: ON - asks when required. Reads and quick compute can run without asking.';
+      const modelCallsBefore = ctx.modelCallCount();
+      await chooseFixtureNetwork(ctx, false);
+      const before = await rpc(ctx.page, { type: 'state/get' });
+      const permission = before?.state?.session?.permission;
+      if (before?.ok !== true || before.state.session?.sessionId !== null
+          || !['plan', 'act'].includes(permission?.mode) || typeof permission?.confirmActions !== 'boolean') {
+        throw new Error('The original permission state is missing');
+      }
+      const appsBefore = await rpc(ctx.page, { type: 'apps/list' });
+      if (appsBefore?.ok !== true || !Array.isArray(appsBefore.apps)) throw new Error('The Library did not load');
+      const page = await openWidePage(ctx, 'tests/fixtures/starters.html?starter=csv-lab');
+      try {
+        const ready = await waitFor(() => evalIn(page, `(() => {
+          'use strict';
+          const apply = document.querySelector('.starter-review > button:first-of-type');
+          return apply?.textContent === 'Apply: add local copy' && !apply.disabled
+            && JSON.stringify(window.__starterFixtureCalls) === '["import/inspect"]';
+        })()`), { budgetMs: 8_000, pollMs: 80 });
+        if (!ready) throw new Error('The packaged starter inspection did not settle');
+        if (!await clickAndSyncRedraw(page, '.starter-review > button:first-of-type')) {
+          throw new Error('The starter Apply control is missing');
+        }
+        const unknown = await waitFor(() => evalIn(page, `(() => {
+          'use strict';
+          const alert = document.querySelector('.starter-review [role="alert"]');
+          if (!alert) return null;
+          return { text: alert.textContent, calls: window.__starterFixtureCalls,
+            apply: [...document.querySelectorAll('.starter-review button')]
+              .some(button => button.textContent === 'Apply: add local copy') };
+        })()`), { budgetMs: 8_000, pollMs: 80 });
+        rec.observe('actual starter warning', unknown);
+        rec.check('one real inspection and one refused Apply leave no Apply control',
+          unknown?.apply === false
+            && JSON.stringify(unknown.calls) === '["import/inspect","import/apply"]', JSON.stringify(unknown));
+        rec.check('the starter outcome remains unconfirmed',
+          unknown?.text?.includes('could not confirm') === true
+            && !unknown.text.includes('starter was not added'), JSON.stringify(unknown));
+        if (!base) rec.check('the starter warning gives no Refresh or replay assurance', unknown?.text === warning);
+        // why: this existing fixture inspects real packaged bytes but has no mutation authority.
+        await rec.visualPage('starter-unknown-warning', page);
+      } finally { await page.close(); }
+      await ctx.page.send('Page.bringToFront');
+      try {
+        if (permission.mode !== 'act') await clickAndSyncRedraw(ctx.page, '.planact-mode:last-child');
+        const actReady = await waitFor(async () => {
+          const current = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.permission;
+          return current?.mode === 'act' && current.confirmActions === permission.confirmActions
+            && await evalIn(ctx.page, `document.querySelector('.planact-confirm')?.disabled === false`);
+        }, { budgetMs: 8_000, pollMs: 80 });
+        if (!actReady) throw new Error('The actual Act control did not settle');
+        if (!permission.confirmActions) await clickAndSyncRedraw(ctx.page, '.planact-confirm');
+        const confirmed = await waitFor(async () => {
+          const current = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.permission;
+          return current?.mode === 'act' && current.confirmActions === true
+            && await evalIn(ctx.page, `document.querySelector('.planact-confirm')?.getAttribute('aria-pressed') === 'true'
+              && document.querySelector('.planact-confirm')?.disabled === false`);
+        }, { budgetMs: 8_000, pollMs: 80 });
+        if (!confirmed) throw new Error('The actual Confirm control did not settle');
+        const control = await evalIn(ctx.page, `(() => {
+          'use strict';
+          const button = document.querySelector('.planact-confirm');
+          return { text: button?.textContent, title: button?.title,
+            pressed: button?.getAttribute('aria-pressed'), disabled: button?.disabled };
+        })()`);
+        rec.observe('actual Confirm DOM title, not tooltip pixels', control);
+        rec.check('the real Confirm control is on and enabled',
+          control?.text === 'Confirm: on' && control.pressed === 'true' && control.disabled === false);
+        if (!base) rec.check('the Confirm title names the compute exception', control?.title === title);
+        await rec.visual('confirm-script-exception');
+      } finally {
+        const current = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.permission;
+        if (current?.mode !== 'act') throw new Error('Permission restoration has no known Act state');
+        if (current.confirmActions !== permission.confirmActions) {
+          await clickAndSyncRedraw(ctx.page, '.planact-confirm');
+          const restored = await waitFor(async () =>
+            (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.permission?.confirmActions === permission.confirmActions,
+          { budgetMs: 8_000, pollMs: 80 });
+          if (!restored) throw new Error('The original Confirm choice did not return');
+        }
+        if (permission.mode !== 'act') await clickAndSyncRedraw(ctx.page, '.planact-mode:first-child');
+        const restored = await waitFor(async () => {
+          const state = (await rpc(ctx.page, { type: 'state/get' }))?.state;
+          return state?.session?.permission?.mode === permission.mode
+            && state.session.permission.confirmActions === permission.confirmActions;
+        }, { budgetMs: 8_000, pollMs: 80 });
+        if (!restored) throw new Error('The original permission mode did not return');
+      }
+      const after = await rpc(ctx.page, { type: 'state/get' });
+      const appsAfter = await rpc(ctx.page, { type: 'apps/list' });
+      rec.check('the copy review creates no App, session or model request',
+        appsAfter?.ok === true && Array.isArray(appsAfter.apps)
+          && JSON.stringify(appsAfter.apps.map(app => app.id).sort()) === JSON.stringify(appsBefore.apps.map(app => app.id).sort())
+          && after?.state?.session?.sessionId === before.state.session.sessionId && ctx.modelCallCount() === modelCallsBefore);
+      rec.check('the real controls restore the original permission choice',
+        after?.state?.session?.permission?.mode === permission.mode
+          && after.state.session.permission.confirmActions === permission.confirmActions);
+    },
+  },
+
   // --- visual: a goal run mid-flight (goal bar + plan todo card) --------------
   {
     name: 'goal-running', kind: 'visual', phase: 'post-unlock',
@@ -8133,7 +8239,7 @@ Promise.resolve().then(async () => {
         await evalIn(appPage, `document.getElementById('mode-toggle')?.click()`);
         const editorState = await waitFor(() => evalIn(appPage, `(() => {
           const rows = [...document.querySelectorAll('.pe-node.is-readonly')];
-          if (rows.length < 3) return null;
+          if (rows.length < 3 || document.getElementById('editor-panel')?.hidden !== false) return null;
           rows[0].click();
           return {
             labels: rows.map((row) => row.getAttribute('aria-label')),
