@@ -237,6 +237,7 @@ export const createKernelDemandPlane = (deps) => {
       denylist: deps.denylist,
       repositories: support.repositories,
       originPacing: support.originPacing,
+      learnedOrigins: support.learnedOrigins,
       reloadApp,
       appCatalog: support.appCatalog,
       bindAppRegistry: support.appCatalog.bindLiveRegistry,

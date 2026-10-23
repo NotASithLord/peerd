@@ -12,6 +12,24 @@ const settle = async (pred: () => boolean, tries = 500) => {
 type TurnArgs = { sessionId: string; userText: string; synthetic: boolean; trusted?: boolean };
 
 describe('makeGoalRunner — the goal loop', () => {
+  it('keeps the run lease until its terminal reason is durable', async () => {
+    let release!: () => void;
+    let entered = false, leased = false;
+    const stored = new Promise<void>((resolve) => { release = resolve; });
+    const runner = makeGoalRunner({
+      runTurn: async () => ({ ok: true }), maxIterations: 1,
+      onRunEnd: async () => { entered = true; await stored; },
+      withRun: async (operation) => { leased = true; try { await operation(); } finally { leased = false; } },
+    });
+    await runner.start({ sessionId: 'goal-chat', goal: 'finish the task' });
+    await settle(() => entered);
+    expect(entered).toBe(true);
+    expect(leased).toBe(true);
+    release();
+    await settle(() => !leased);
+    expect(leased).toBe(false);
+  });
+
   it('stop() reports a failed durable removal', async () => {
     const kv = makeKv();
     kv.store.set(GOAL_RUNS_KEY, { s: { goal: 'keep going', iteration: 1, startedAt: 1 } });

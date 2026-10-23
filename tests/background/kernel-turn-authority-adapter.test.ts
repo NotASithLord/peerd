@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, test } from 'bun:test';
 import { createKernelTurnAuthorityAdapter } from '../../extension/background/kernel-turn-authority-adapter.js';
+import { makeLearnedOrigins } from '../../extension/peerd-runtime/actor/learned-origins.js';
 import { createOriginPacingStore } from '../../extension/peerd-runtime/pacing/origin-pacing-store.js';
 import { createAuthorityEffectScheduler } from '../../extension/background/authority-effect-scheduler.js';
 import { createPageToolAuthority } from '../../extension/background/page-tool-authority.js';
@@ -21,6 +22,9 @@ import { planToolsCommand } from '../../extension/peerd-runtime/tools/manifest-c
 import { canonicalActorOwnerPosture } from '../../extension/background/app-actor-policy.js';
 import { sha256Hex } from '../../extension/shared/util.js';
 import { makeSessionRoutes } from '../../extension/background/routes/sessions.js';
+import { createKernelSessionReader } from '../../extension/background/vault-kernel-core.js';
+import { makeKernelLearnedOriginRoutes } from '../../extension/background/settings-store.js';
+import { makeGoalRunner } from '../../extension/peerd-runtime/loop/goal-runner.js';
 import { composeTurn } from '../../extension/offscreen/controller-compose-runtime.js';
 import { browserProbeResult, TEST_DOCUMENT_ID } from '../helpers/browser-scripting.ts';
 import { ABORT_STOP } from '../../extension/peerd-runtime/loop/turn-slots.js';
@@ -449,6 +453,10 @@ const harness = async (
     },
   };
   dependencies.originPacing = options.originPacing ?? createOriginPacingStore({ kv: dependencies.kv });
+  dependencies.learnedOrigins = makeLearnedOrigins({
+    load: () => dependencies.kv.get('learnedOrigins.v1'),
+    save: (all) => dependencies.kv.set('learnedOrigins.v1', all),
+  });
   const factories = createKernelTurnAuthorityAdapter(dependencies);
   const shared: any = {
     sessions,
@@ -464,7 +472,7 @@ const harness = async (
   };
   const runtime = await factories.makeActorRuntime(shared);
   return {
-    factories, runtime, shared, root, durableApiActor, sessions, engine, browser, tabs,
+    factories, runtime, shared, root, durableApiActor, sessions, engine, browser, tabs, idb,
     broadcasts, storageState, kvState, cache, settings, notifications, panelBehavior,
     siteCaptureEvents, providerRevision: () => providerRevision,
     sourceProjections,
@@ -474,6 +482,7 @@ const harness = async (
     appNetworkAdmissions,
     destroyedRepositories,
     actorConfig: () => actorConfig,
+    learnedOrigins: dependencies.learnedOrigins,
   };
 };
 
@@ -841,6 +850,69 @@ describe('kernel turn authority adapter', () => {
       'buildToolContext', 'composeAuthority', 'goalMaxIterations', 'makeActorRuntime', 'makeDriver',
       'makeDriverDeps', 'makeGoals', 'makeRouteDeps',
     ]);
+  });
+
+  test('terminal Goal reasons stay in their own durable session and clear before new work', async () => {
+    const h = await harness();
+    const other = await h.sessions.create({ provider: 'anthropic', model: h.root.model });
+    h.cache.set('currentSessionId', other.sessionId);
+    await h.runtime.relays.onGoalRunEnd(h.root.sessionId, { phase: 'capped', reason: null });
+    const cold = createKernelSessionReader(h.idb);
+    const note = (await cold.get(h.root.sessionId))?.goalStopNote;
+    expect(note?.text).toMatch(/^Goal run stopped after reaching the \d+-turn limit\.$/);
+    expect(note?.id).toBeString();
+    expect((await cold.get(other.sessionId))?.goalStopNote).toBeUndefined();
+    const routeDeps = h.factories.makeRouteDeps(h.shared);
+    await routeDeps.turn.clearGoalStopNote(h.root.sessionId);
+    expect((await cold.get(h.root.sessionId))?.goalStopNote).toBeNull();
+    await h.runtime.relays.onGoalRunEnd(h.root.sessionId, {
+      phase: 'halted', reason: 'an earlier action needs verification before autonomous work can continue',
+    });
+    expect((await cold.get(h.root.sessionId))?.goalStopNote?.text).toContain('needs verification');
+    h.runtime.relays.bindGoalRunner({ stop: async () => {}, isActive: () => false });
+    await h.runtime.relays.beforeGoalStart({ sessionId: h.root.sessionId });
+    expect((await cold.get(h.root.sessionId))?.goalStopNote).toBeNull();
+    await h.runtime.relays.onGoalRunEnd(h.root.sessionId, { phase: 'done', reason: null });
+    await h.runtime.relays.onGoalRunEnd(h.root.sessionId, { phase: 'halted', reason: null });
+    expect((await cold.get(h.root.sessionId))?.goalStopNote).toBeNull();
+  });
+
+  test('Settings removal changes the real classifier before and after later learning', async () => {
+    const h = await harness();
+    h.settings.devMode = true;
+    const routes = makeKernelLearnedOriginRoutes({ learnedOrigins: h.learnedOrigins });
+    const inspect = (origin: string, seedReason?: string) => h.runtime.relays.debugOriginLock({ origin, seedReason });
+    expect((await inspect('https://bank.example.com', 'password-field')).learned).toBe(true);
+    expect((await routes['learned/forget']({ host: 'bank.example.com' })).ok).toBe(true);
+    expect((await inspect('https://bank.example.com')).learned).toBe(false);
+    await inspect('https://mail.example.org', 'confirmed-write');
+    expect((await routes['learned/list']()).origins).toEqual([{ host: 'mail.example.org', reason: 'confirmed-write' }]);
+    await routes['learned/clear']();
+    expect((await inspect('https://mail.example.org')).learned).toBe(false);
+    await inspect('https://shop.example.net', 'password-field');
+    expect(h.kvState.get('learnedOrigins.v1')).toEqual({ 'shop.example.net': 'password-field' });
+  });
+
+  test.each(['throw', 'failed-result'])('a stopped old Goal cannot restore its reason after a user send: %s', async (mode) => {
+    const h = await harness();
+    let finish!: () => void;
+    let entered = false, ended = false;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const runner = makeGoalRunner({
+      runTurn: async () => { entered = true; await gate;
+        if (mode === 'throw') throw new Error('old turn failed after Stop');
+        return { ok: false };
+      },
+      onRunEnd: async (sessionId, info) => { await h.runtime.relays.onGoalRunEnd(sessionId, info); ended = true; },
+    });
+    await runner.start({ sessionId: h.root.sessionId, goal: 'old request' });
+    expect(entered).toBe(true);
+    await runner.stop(h.root.sessionId);
+    await h.factories.makeRouteDeps(h.shared).turn.clearGoalStopNote(h.root.sessionId);
+    finish();
+    for (let attempt = 0; !ended && attempt < 30; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ended).toBe(true);
+    expect((await h.sessions.get(h.root.sessionId))?.goalStopNote).toBeUndefined();
   });
 
   test('real system and tools handlers mutate only their exact bound session', async () => {
