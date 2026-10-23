@@ -342,47 +342,71 @@ export async function capturePage(page, { bringToFront = true } = {}) {
  * it (both themes) and closes it. Used for the full-tab / large-view baselines.
  * @param {object} ctx  from launchPeerd
  * @param {string} path  extension-relative, e.g. 'home/home.html'
- * @param {{ metrics?: object }} [opts]
+ * @param {{ metrics?: object, newWindow?: boolean }} [opts]
  */
-export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready } = {}) {
+export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, newWindow = false } = {}) {
   const url = `chrome-extension://${ctx.sw.id}/${String(path).replace(/^\//, '')}`;
-  const created = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json();
-  const page = await attach(created.webSocketDebuggerUrl);
-  const disconnect = page.close;
-  page.close = () => {
-    disconnect();
-    return fetch(`http://127.0.0.1:${ctx.port}/json/close/${created.id}`).catch(() => {});
-  };
-  await page.send('Runtime.enable');
-  await page.send('Page.enable');
-  await page.send('Emulation.setDeviceMetricsOverride', metrics);
-  await setEmulatedTheme(page, 'light');
-  await page.send('Page.addScriptToEvaluateOnNewDocument', { source: stableStyleSource });
-  await page.send('Page.bringToFront');
-  await page.send('Page.navigate', { url });
-  // why `ready` is overridable: the default probe waits for a Mithril mount at
-  // `#app`, which is right for the SPA pages and WRONG for every standalone tab
-  // page — the engine tabs render into their own ids (and their hard-fail cards
-  // replace <body> outright), so they would time out here forever despite having
-  // painted. Those pages are exactly the ones with no visual coverage, so the
-  // probe has to be the caller's to choose.
-  const probe = ready
-    ? `document.readyState !== 'loading' && !!document.querySelector(${JSON.stringify(ready)})`
-    : `document.readyState === 'complete' && !!document.querySelector('#app > *')`;
-  const mounted = await waitFor(() => evalIn(page, probe), { budgetMs: READY_BUDGET_MS });
-  if (!mounted) {
-    const state = await evalIn(page, `({
-      href: location.href,
-      readyState: document.readyState,
-      visibilityState: document.visibilityState,
-      title: document.title,
-      body: document.body?.innerText?.slice(0, 500) ?? null,
-      app: document.querySelector('#app')?.innerHTML?.slice(0, 500) ?? null,
-    })`).catch((error) => ({ error: String(error) }));
-    try { page.close(); } catch { /* */ }
-    throw new Error(`wide page never mounted: ${path} ${JSON.stringify({ state, events: page.events })}`);
+  let created;
+  if (newWindow) {
+    // why: separate Home windows keep the native panel's window unchanged.
+    const version = await (await fetch(`http://127.0.0.1:${ctx.port}/json/version`)).json();
+    const browser = await attach(version.webSocketDebuggerUrl);
+    let targetId;
+    try {
+      ({ targetId } = await browser.send('Target.createTarget', { url: 'about:blank', newWindow: true }));
+      created = await waitFor(async () => (await cdpList(ctx.port)).find((target) => target.id === targetId),
+        { budgetMs: READY_BUDGET_MS, pollMs: 25 });
+      if (!created) throw new Error('The owned window target did not appear');
+    } catch (error) {
+      if (targetId) await fetch(`http://127.0.0.1:${ctx.port}/json/close/${targetId}`).catch(() => {});
+      throw error;
+    } finally { browser.close(); }
+  } else {
+    created = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json();
   }
-  return page;
+  let page;
+  let disconnect;
+  try {
+    page = await attach(created.webSocketDebuggerUrl);
+    disconnect = page.close;
+    page.close = () => {
+      disconnect();
+      return fetch(`http://127.0.0.1:${ctx.port}/json/close/${created.id}`).catch(() => {});
+    };
+    await page.send('Runtime.enable');
+    await page.send('Page.enable');
+    await page.send('Emulation.setDeviceMetricsOverride', metrics);
+    await setEmulatedTheme(page, 'light');
+    await page.send('Page.addScriptToEvaluateOnNewDocument', { source: stableStyleSource });
+    await page.send('Page.bringToFront');
+    await page.send('Page.navigate', { url });
+    // why `ready` is overridable: the default probe waits for a Mithril mount at
+    // `#app`, which is right for the SPA pages and WRONG for every standalone tab
+    // page - the engine tabs render into their own ids (and their hard-fail cards
+    // replace <body> outright), so they would time out here forever despite having
+    // painted. Those pages are exactly the ones with no visual coverage, so the
+    // probe has to be the caller's to choose.
+    const probe = ready
+      ? `document.readyState !== 'loading' && !!document.querySelector(${JSON.stringify(ready)})`
+      : `document.readyState === 'complete' && !!document.querySelector('#app > *')`;
+    const mounted = await waitFor(() => evalIn(page, probe), { budgetMs: READY_BUDGET_MS });
+    if (!mounted) {
+      const state = await evalIn(page, `({
+        href: location.href,
+        readyState: document.readyState,
+        visibilityState: document.visibilityState,
+        title: document.title,
+        body: document.body?.innerText?.slice(0, 500) ?? null,
+        app: document.querySelector('#app')?.innerHTML?.slice(0, 500) ?? null,
+      })`).catch((error) => ({ error: String(error) }));
+      throw new Error(`wide page never mounted: ${path} ${JSON.stringify({ state, events: page.events })}`);
+    }
+    return page;
+  } catch (error) {
+    try { disconnect?.(); } catch { /* */ }
+    await fetch(`http://127.0.0.1:${ctx.port}/json/close/${created.id}`).catch(() => {});
+    throw error;
+  }
 }
 
 // ---- raw CDP attach over Chrome's WebSocket (no npm client) -----------------

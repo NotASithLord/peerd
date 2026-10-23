@@ -154,6 +154,7 @@ export const createKernelDwebRouteOwner = (deps) => {
         transfer.onSettingsChanging(patch);
         await deps.settingsStore.update(patch);
         await transfer.onSettingsChanged(patch);
+        await deps.pushState();
         return { ok: true, running: false };
       },
       withDwebPublication: engine.withDwebPublication,
