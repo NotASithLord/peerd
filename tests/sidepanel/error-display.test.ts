@@ -1,5 +1,9 @@
 import { describe, test, expect } from 'bun:test';
 import { mapError, errorSettingsTarget } from '../../extension/sidepanel/error-display.js';
+import {
+  listProviderModels, listProviders, providerFailureCode, UnknownProviderError,
+} from '../../extension/peerd-provider/controller.js';
+import { makeModelEgress } from '../peerd-provider/model-egress-fixture';
 
 // The error banner reads BOTH the SW's typed codes ("provider-http-429") and
 // the loop's raw throw text ("Provider 'anthropic' HTTP 429: {…}"). mapError
@@ -19,6 +23,20 @@ describe('mapError', () => {
     expect(mapError('provider-usage-limit')).toMatch(/Usage\/credit limit/i);
     expect(mapError('provider-usage-limit:over cap')).toMatch(/\(over cap\)/);
     expect(mapError('actor-recovery-pending')).toMatch(/Wait a moment, then send again/i);
+  });
+
+  test('one missing provider does not mean the registry is empty', async () => {
+    const providers = listProviders();
+    expect(providers.length).toBeGreaterThan(0);
+    const missing = await listProviderModels('not-registered', {
+      modelEgress: makeModelEgress(),
+    }).catch((cause) => cause);
+    expect(missing).toBeInstanceOf(UnknownProviderError);
+    expect(listProviders()).toEqual(providers);
+    const code = providerFailureCode(missing);
+    expect(code).toBe('unknown-provider');
+    expect(mapError(code)).toBe('The selected provider is unavailable. Choose another provider in Settings.');
+    expect(errorSettingsTarget(code)).toEqual({ section: 'providers' });
   });
 
   test('raw provider throw text is matched, not dumped', () => {

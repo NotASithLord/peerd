@@ -49,6 +49,7 @@ const saveJsonFile = (payload, filename) => {
  * @property {boolean} hasObservedSession    whether initial session hydration has completed
  * @property {Map<string|undefined, Set<string>>} seenRecoveryIdsBySession recovery announcements already heard per chat
  * @property {boolean} [debugMenuOpen]       the debug-export flyout's open state
+ * @property {HTMLElement | null} [debugTrigger] the persistent debug button
  * @property {boolean} [inspectorOpen]       the context-inspector modal's open state
  * @property {Array<Record<string, any>>|null} [snapshots]  the inspector's fetched snapshots (null = loading)
  * @property {string|null} [snapshotsError]  why the fetch failed (locked vault, etc.), for an honest modal
@@ -282,7 +283,7 @@ export const ChatView = {
         state.session?.sessionId ? m('.debug-export', [
           m('button.debug-export-btn', {
             title: 'Debug: export this chat\'s debug bundle (a local file — nothing is sent anywhere)',
-            onclick: () => { ui.debugMenuOpen = !ui.debugMenuOpen; },
+            onclick: (/** @type {Event} */ event) => { ui.debugTrigger = /** @type {HTMLElement} */ (event.currentTarget); ui.debugMenuOpen = !ui.debugMenuOpen; },
           }, 'debug'),
           ui.debugMenuOpen ? m('.debug-menu-backdrop', {
             onclick: () => { ui.debugMenuOpen = false; },
@@ -340,7 +341,7 @@ export const ChatView = {
       ui.inspectorOpen ? m(ContextInspector, {
         snapshots: ui.snapshots ?? null,
         error: ui.snapshotsError ?? null,
-        onClose: () => { ui.inspectorOpen = false; },
+        onClose: () => { ui.inspectorOpen = false; ui.debugTrigger?.focus(); },
       }) : null,
     ]);
   },

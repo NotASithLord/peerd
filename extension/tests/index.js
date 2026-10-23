@@ -129,6 +129,8 @@ import './unit/sidepanel/confirm-note.test.js';
 import './unit/sidepanel/chat-reducer-confirm.test.js';
 import './unit/sidepanel/onboarding-provider-step.test.js';
 import './unit/sidepanel/site-client-confirm.test.js';
+import './unit/sidepanel/context-inspector.test.js';
+import './unit/sidepanel/sessions-view.test.js';
 import './unit/sidepanel/learned-origins-view.test.js';
 import './unit/sidepanel/paced-origins-view.test.js';
 import './unit/sidepanel/pacing-bar.test.js';

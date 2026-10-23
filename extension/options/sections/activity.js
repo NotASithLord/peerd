@@ -253,7 +253,7 @@ export const ActivityView = {
       m('p.muted', { style: 'margin:0; font-size:12px;' },
         ui.total ? `${ui.total} recorded event${ui.total === 1 ? '' : 's'}` : ''),
       m('.spacer', { style: 'flex:1;' }),
-      m('button.icon', { title: 'Refresh', onclick: () => ActivityView.refresh(vnode) }, '↻'),
+      m('button.icon', { title: 'Refresh', 'aria-label': 'Refresh', onclick: () => ActivityView.refresh(vnode) }, '↻'),
     ]);
 
     if (ui.error) return m('div', [header, m('p.error', ui.error)]);

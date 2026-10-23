@@ -94,9 +94,12 @@ describe('options.activity: host-derived semantic verdicts', () => {
     expect(semanticOnly?.type).toBe('semantic_report');
     expect(semanticOnly?.details.outcome).toBe('semantic-success');
 
-    const { root, unmount } = mount(async (msg) => (msg.type === 'audit/list'
-      ? { ok: true, entries, total: entries.length }
-      : { ok: true }));
+    /** @type {any[]} */
+    const calls = [];
+    const { root, unmount } = mount(async (msg) => {
+      calls.push(msg);
+      return msg.type === 'audit/list' ? { ok: true, entries, total: entries.length } : { ok: true };
+    });
     try {
       await settle();
       const text = root.textContent ?? '';
@@ -109,6 +112,12 @@ describe('options.activity: host-derived semantic verdicts', () => {
       expect(root.querySelectorAll('.log-info').length >= 2).toBe(true);
       expect(root.querySelectorAll('.log-warn').length >= 2).toBe(true);
       expect(root.querySelectorAll('.log-ok').length).toBe(1);
+      expect(root.querySelectorAll('.log-danger').length).toBe(1);
+      const refresh = /** @type {HTMLButtonElement} */ (root.querySelector('button[title="Refresh"]'));
+      expect(refresh.getAttribute('aria-label')).toBe('Refresh');
+      refresh.click();
+      await settle();
+      expect(calls.filter((message) => message.type === 'audit/list').length).toBe(2);
       expect(root.querySelectorAll('.log-danger').length).toBe(1);
     } finally { unmount(); }
   });
