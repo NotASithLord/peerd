@@ -11,6 +11,7 @@
 
 /**
  * @typedef {'egress_denied'
+ *         | 'web_fetch'
  *         | 'denylist_hit'
  *         | 'denylist_added'
  *         | 'denylist_removed'
