@@ -109,3 +109,34 @@ describe('parseSkillMd — Claude Code / Codex compatibility', () => {
     expect(r.description).toBe('hello world');
   });
 });
+
+
+describe('multi-line skill descriptions', () => {
+  test.each(['>', '>-', '>+', '>2', '>2-', '>+2', '|', '|-', '|+', '|2', '|2-', '|+2'])('reads %s block text', (indicator) => {
+    const description = indicator.startsWith('>') ? 'Write release notes. Use when shipping.' : 'Write release notes.\nUse when shipping.';
+    const text = `---\nname: release-notes\ndescription: ${indicator}\n  Write release notes.\n  Use when shipping.\nversion: 1.2\n---\nKeep the body.`;
+    expect(parseSkillMd(text)).toMatchObject({ name: 'release-notes', description, version: '1.2', body: 'Keep the body.' });
+  });
+
+  test.each([
+    'description: Use version 3.\n  Keep the next line.',
+    'description: "Use version 3.\n  Keep the next line."',
+    "description: 'Use version 3.\n  Keep the next line.'",
+    'description:\n  "Use version 3.\n  Keep the next line."',
+    'description:\n  Use version 3.\n  Keep the next line.',
+  ])('reads a continued scalar', (description) => {
+    expect(parseSkillMd(`---\nname: continued\n${description}\n---\nBody`).description)
+      .toBe('Use version 3. Keep the next line.');
+  });
+
+  test('keeps folded paragraphs, deeper indentation and nested metadata', () => {
+    const text = '---\nname: paragraphs\ndescription: >\n  First.\n\n  Second.\n    Keep indentation.\n\n    Keep this paragraph.\n  Last.\n\n  Next.\n\n  Final.\nmetadata:\n  author: local\nallowed-tools:\n  -\n  - Read\n---\nBody';
+    expect(parseSkillMd(text)).toMatchObject({ description: 'First.\nSecond.\n  Keep indentation.\n\n  Keep this paragraph.\nLast.\nNext.\nFinal.',
+      extra: { metadata: { author: 'local' } }, allowedTools: ['', 'Read'] });
+  });
+
+  test('rejects an empty block and strips a hyphen at the name limit', () => {
+    expect(() => parseSkillMd('---\nname: empty\ndescription: >-\n---\nBody')).toThrow(SkillParseError);
+    expect(normalizeName(`${'a'.repeat(63)}-longer`)).toBe('a'.repeat(63));
+  });
+});

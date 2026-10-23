@@ -20,7 +20,7 @@ export const normalizeName = (raw) => raw
   .toLowerCase()
   .replace(/[^a-z0-9]+/g, '-')
   .replace(/^-+|-+$/g, '')
-  .slice(0, 64);
+  .slice(0, 64).replace(/-+$/, '');
 
 const unquote = (/** @type {string} */ value) => value.length >= 2
   && ((value[0] === '"' && value.at(-1) === '"')
@@ -51,47 +51,43 @@ const scalar = (/** @type {string} */ value) => {
 };
 
 const parseFrontmatter = (/** @type {string} */ block) => {
-  /** @type {Record<string, unknown>} */
-  const output = {};
+  /** @type {Record<string, unknown>} */ const output = {};
   const lines = block.split(/\r?\n/);
   let index = 0;
   while (index < lines.length) {
     const line = lines[index];
-    if (!line.trim() || /^\s*#/.test(line)) { index += 1; continue; }
-    if (/^\s/.test(line)) { index += 1; continue; }
+    if (!line.trim() || /^\s/.test(line) || /^#/.test(line)) { index += 1; continue; }
     const colon = line.indexOf(':');
-    if (colon === -1) {
-      const display = line.length > 60 ? `${line.slice(0, 60)}…` : line;
-      throw new SkillParseError(`malformed frontmatter line: ${display}`);
-    }
+    if (colon === -1) throw new SkillParseError(
+      `malformed frontmatter line: ${line.length > 60 ? `${line.slice(0, 60)}…` : line}`);
     const key = line.slice(0, colon).trim();
     const rest = stripComment(line.slice(colon + 1).trim());
-    if (rest !== '') {
-      output[key] = scalar(rest);
-      index += 1;
+    let next = index + 1;
+    while (next < lines.length && (/^\s+/.test(lines[next]) || !lines[next].trim())) next += 1;
+    const continuation = lines.slice(index + 1, next);
+    index = next;
+    const blockScalar = /^[>|](?:[1-9][+-]?|[+-][1-9]?)?$/.test(rest);
+    const first = continuation.find((part) => part.trim()) ?? '';
+    if (rest || (first && !/^\s*-(\s|$)/.test(first)
+        && (/^\s*['"]/.test(first) || !first.includes(':')))) {
+      const indent = (blockScalar && Number(rest.match(/[1-9]/)?.[0])) || first.length - first.trimStart().length;
+      const parts = continuation.map((part) => part.trim() ? part.slice(indent).trimEnd() : '');
+      // why: keep literal paragraphs and deeper indentation inside block text.
+      let value = blockScalar ? parts.join('\n') : [rest, ...parts].join(' ').trim();
+      if (blockScalar && rest[0] === '>') value = value.replace(
+        /^([^\s].*)\n(\n*)(?=[^\s])/gm, (_match, text, breaks) => text + (breaks || ' '));
+      if (blockScalar) value = rest.includes('+') ? `${value}\n` : value.replace(/\n+$/, '') + (rest.includes('-') ? '' : '\n');
+      output[key] = blockScalar ? value : scalar(value);
       continue;
     }
-    /** @type {string[]} */
-    const items = [];
-    /** @type {Record<string, string>} */
-    const nested = {};
-    let next = index + 1;
-    while (next < lines.length && (/^\s+/.test(lines[next]) || !lines[next].trim())) {
-      const nestedLine = lines[next].trim();
-      if (nestedLine.startsWith('- ')) {
-        items.push(unquote(stripComment(nestedLine.slice(2).trim())));
-      } else if (nestedLine) {
-        const nestedColon = nestedLine.indexOf(':');
-        if (nestedColon !== -1) {
-          nested[nestedLine.slice(0, nestedColon).trim()] = unquote(
-            stripComment(nestedLine.slice(nestedColon + 1).trim()),
-          );
-        }
-      }
-      next += 1;
-    }
-    output[key] = items.length ? items : nested;
-    index = next;
+    const children = continuation.map((part) => part.trim());
+    const items = children.filter((part) => /^-(\s|$)/.test(part))
+      .map((part) => unquote(stripComment(part.slice(2).trim())));
+    output[key] = items.length ? items : Object.fromEntries(children.flatMap((part) => {
+      const nestedColon = part.indexOf(':');
+      return nestedColon < 0 ? [] : [[part.slice(0, nestedColon).trim(),
+        unquote(stripComment(part.slice(nestedColon + 1).trim()))]];
+    }));
   }
   return output;
 };
