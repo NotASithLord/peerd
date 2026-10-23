@@ -161,7 +161,7 @@ export const PERF_CHAT_NOTEBOOK_STATES = [
         if (!ready) throw new Error('The real Notebook did not become ready');
         const settled = await waitFor(() => evalIn(ctx.page, `document.body.textContent.includes('NOTEBOOK-PERF-READY') && !document.querySelector('button.stop')`), { budgetMs: 30_000 });
         if (!settled) throw new Error('The real Notebook creation receipt did not settle');
-        tabId = await evalIn(ctx.swConn, `chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === ${JSON.stringify(target.url)})?.id)`, true);
+        tabId = (await evalIn(ctx.swConn, 'chrome.tabs.query({})', true)).find((tab) => tab.url === target.url)?.id;
         if (!Number.isInteger(tabId)) throw new Error('The exact Notebook tab id is absent');
         const run = async (lines) => {
           await page.send('Performance.enable');
