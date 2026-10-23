@@ -1027,10 +1027,13 @@ export const reduceChat = (state, msg) => {
       // state.session — but this LIVE push carries only sessionId+messages, so
       // without it the card wouldn't tick until the next full 'state' snapshot.
       // undefined on non-goal turns (the card self-hides), so it's harmless.
+      // why lastError stays: the loop yields its final 'state' snapshot right
+      // after 'error', so clearing here wiped the banner before it painted.
+      // The next send (turn/streaming) or a chat switch (state) clears it.
       return { ...state, actors: reconcileActorTerminals(state.actors, msg.session.messages),
         session: { ...state.session,
         sessionId: msg.session.sessionId, messages: msg.session.messages,
-        todos: msg.session.todos }, lastError: null };
+        todos: msg.session.todos } };
     case 'turn/cost':
       if (state.session.sessionId && msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
       return { ...state, cost: { ...state.cost, turn: msg.turn, session: msg.session,
@@ -1067,6 +1070,7 @@ export const reduceChat = (state, msg) => {
       // viewed chat's composer/spinner.
       if (state.session.sessionId && msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
       return { ...state, streaming: !!msg.streaming, rateLimit: null, pacing: null,
+        lastError: msg.streaming ? null : state.lastError,
         cost: msg.streaming ? { ...state.cost, turn: null, limitReached: false } : state.cost };
     case 'turn/tool-use':
     case 'turn/tool-result':

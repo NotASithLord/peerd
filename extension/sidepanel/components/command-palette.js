@@ -58,6 +58,19 @@ import { filterCandidates } from '/peerd-runtime/ui.js';
 /** @param {number} i */
 export const PALETTE_OPTION_ID = (i) => `palette-opt-${i}`;
 
+// Commands the worker runs itself (routes/sessions.js agent/send checks them
+// before composer expansion, so a same-named user command or skill never
+// runs). They lead the list and hide same-named rows for the same reason:
+// the palette shows what runs. why here, not commands/list: the worker's
+// cold graph is a no-growth byte fence (scripts/bench/cold-start-budgets.js)
+// and these three never change at runtime.
+const BUILTIN_COMMANDS = [
+  { name: 'init', description: 'draft project memory; you confirm before it saves' },
+  { name: 'system', description: 'show or set this chat’s instructions' },
+  { name: 'tools', description: 'show or narrow this chat’s toolset' },
+];
+const BUILTIN_NAMES = new Set(BUILTIN_COMMANDS.map((c) => c.name));
+
 // Map a trigger + raw source list into display candidates. Commands and
 // refs share the {id,label,detail} candidate shape so the filter is
 // uniform; only the label/detail text differs.
@@ -69,7 +82,8 @@ export const PALETTE_OPTION_ID = (i) => `palette-opt-${i}`;
 export const candidatesFor = (trigger, items) => {
   if (!trigger) return [];
   if (trigger.type === 'command') {
-    return (items.commands ?? []).map((c) => ({
+    const listed = (items.commands ?? []).filter((c) => !BUILTIN_NAMES.has(c.name));
+    return [...BUILTIN_COMMANDS, ...listed].map((c) => ({
       id: c.name,
       label: c.name,
       detail: c.description || '',

@@ -26,6 +26,12 @@ describe('mapError', () => {
     expect(mapError('Provider HTTP 529: overloaded')).toMatch(/overloaded/i);
     expect(mapError('authentication_error: invalid x-api-key')).toMatch(/key rejected/i);
     expect(mapError('Your credit balance is too low')).toMatch(/account limit/i);
+    // an unmatched 4xx/5xx names the status and a next step, never the body
+    const body = '{"type":"error","error":{"type":"invalid_request_error","message":"x"}}';
+    expect(mapError(`Provider 'anthropic' HTTP 400: ${body}`))
+      .toBe('The provider rejected the request (HTTP 400). Try again, or pick another model.');
+    expect(mapError(`Provider 'anthropic' HTTP 500: ${body}`))
+      .toBe('The provider had an error (HTTP 500). Try again in a moment.');
   });
 });
 

@@ -127,10 +127,11 @@ export const ChatView = {
       }).engine !== null;
 
     return m('.chat-view', [
-      // Inline banner on the latest error from the SW. Sticks until a
-      // new message succeeds (which sets lastError back to null via the
-      // state push).
-      state.lastError ? m('.error-banner', [
+      // Inline banner on the latest error from the SW. Sticks until the next
+      // send (turn/streaming) or a chat switch (state push) clears lastError.
+      // role=alert: a screen reader hears the mapped copy when it lands, so
+      // the transcript's settle announcer only says that the turn failed.
+      state.lastError ? m('.error-banner', { role: 'alert' }, [
         m('span', mapError(state.lastError)),
         // why conditional: only offer "Open settings" when Settings can
         // actually fix it (key/auth → providers, spend limit → costs). A
@@ -148,7 +149,7 @@ export const ChatView = {
       // Rate-limit retry indicator. Without this the retry is a blank
       // spinner — the user thinks it's broken and keeps re-sending (which
       // aborts the retry), so the error never surfaces. Make it loud.
-      state.rateLimit ? m('.rate-limit-banner', [
+      state.rateLimit ? m('.rate-limit-banner', { role: 'status' }, [
         m('span.rl-spinner', { 'aria-hidden': 'true' }, '⏳'),
         m('span',
           `Rate limited — retrying${state.rateLimit.attempt ? ` (attempt ${state.rateLimit.attempt})` : ''}. `
@@ -218,6 +219,9 @@ export const ChatView = {
             confirmEvents: (state.confirmEvents ?? []).filter((e) => e.sessionId === state.session?.sessionId),
             uiActions,
             send,
+            // The viewed chat's turn lifecycle: the settle announcer speaks
+            // once when this flips from true to false.
+            streaming: !!state.streaming,
             // A model turn may be idle after acknowledging asynchronous actor
             // work. That is not yet the human task's final answer; mirror the
             // route's in-flight guard so the UI never offers a no-op verdict.

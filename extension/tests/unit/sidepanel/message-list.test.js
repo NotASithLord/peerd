@@ -123,6 +123,27 @@ describe('sidepanel.message-list updates and aborted cards', () => {
     } finally { unmount(); }
   });
 
+  it('the reasoning disclosure is a focusable native button with expansion state', async () => {
+    const { root, unmount } = mount([
+      { role: 'assistant', id: 'a1', content: 'answer', thinking: 'the plan' },
+    ]);
+    try {
+      await flush();
+      const toggle = /** @type {HTMLButtonElement} */ (root.querySelector('button.reasoning-header'));
+      expect(toggle).toBeTruthy();
+      expect(toggle.type).toBe('button');
+      expect(toggle.tabIndex).toBe(0);
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      expect(root.querySelector('.reasoning-body')).toBeFalsy();
+      toggle.focus();
+      expect(document.activeElement).toBe(toggle);
+      toggle.click();
+      await flush();
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+      expect(root.querySelector('.reasoning-body')?.textContent).toBe('the plan');
+    } finally { unmount(); }
+  });
+
   it('a stopped script delegation says cancelled, not failed', async () => {
     const { root, unmount } = mount([{
       role: 'assistant', id: 'a1', content: '', stopReason: 'aborted',
@@ -320,6 +341,99 @@ describe('sidepanel.message-list peerd tab notice', () => {
       expect(status?.getAttribute('aria-live')).toBe('polite');
       expect(status?.textContent).toContain('left a blank tab');
       expect(status?.textContent).toContain('browser control was not confirmed');
+    } finally { unmount(); }
+  });
+});
+
+// One polite line when the viewed chat's turn settles (the turn-level
+// streaming flag goes from true to false): the reply's opening text, or that
+// it failed. Never per token, never on a chat switch, never for a stopped turn.
+describe('sidepanel.message-list turn announcements', () => {
+  const streamingTurn = () => /** @type {any[]} */ ([
+    { role: 'user', id: 'u1', content: 'hi' },
+    { role: 'assistant', id: 'a1', content: '', streaming: true },
+  ]);
+  /** @param {HTMLElement} root */
+  const announced = (root) => root.querySelector('.message-list-turn-announcement')?.textContent;
+
+  it('announces the reply once, politely, when the turn settles', async () => {
+    const messages = streamingTurn();
+    const attrs = { sessionId: 's1', streaming: true };
+    const { root, unmount } = mount(messages, attrs);
+    try {
+      await flush();
+      const live = root.querySelector('.message-list-turn-announcement');
+      expect(live?.getAttribute('aria-live')).toBe('polite');
+      expect(live?.getAttribute('role')).toBe(null);
+      expect(announced(root)).toBe('');
+      messages[1] = { ...messages[1], content: 'Hello **there**.\n\nSecond line.', streaming: false };
+      m.redraw.sync();
+      expect(announced(root)).toBe('');
+      attrs.streaming = false;
+      m.redraw.sync();
+      expect(announced(root)).toBe('peerd replied: Hello there. Second line.');
+      m.redraw.sync();
+      expect(announced(root)).toBe('peerd replied: Hello there. Second line.');
+      expect(root.querySelectorAll('[role="status"]').length).toBe(0);
+    } finally { unmount(); }
+  });
+
+  it('clears between identical replies that finish before the announcement timeout', async () => {
+    const messages = streamingTurn();
+    const attrs = { sessionId: 'repeated-reply', streaming: true };
+    const { root, unmount } = mount(messages, attrs);
+    try {
+      await flush();
+      messages[1] = { ...messages[1], content: 'Done.', streaming: false };
+      attrs.streaming = false;
+      m.redraw.sync();
+      expect(announced(root)).toBe('peerd replied: Done.');
+      messages.push({ role: 'user', id: 'u2', content: 'again' },
+        { role: 'assistant', id: 'a2', content: '', streaming: true });
+      attrs.streaming = true;
+      m.redraw.sync();
+      expect(announced(root)).toBe('');
+      messages[3] = { ...messages[3], content: 'Done.', streaming: false };
+      attrs.streaming = false;
+      m.redraw.sync();
+      expect(announced(root)).toBe('peerd replied: Done.');
+    } finally { unmount(); }
+  });
+
+  it('says the turn failed without the raw provider text; a stopped turn stays quiet', async () => {
+    const failed = streamingTurn();
+    const failedAttrs = { sessionId: 's1', streaming: true };
+    const first = mount(failed, failedAttrs);
+    const stopped = streamingTurn();
+    const stoppedAttrs = { sessionId: 's2', streaming: true };
+    const second = mount(stopped, stoppedAttrs);
+    try {
+      await flush();
+      failed[1] = { ...failed[1], streaming: false, error: "Provider 'ollama' HTTP 401: {\"error\":\"x\"}" };
+      failedAttrs.streaming = false;
+      stopped[1] = { ...stopped[1], content: 'half an answer', streaming: false, stopReason: 'aborted' };
+      stoppedAttrs.streaming = false;
+      m.redraw.sync();
+      expect(announced(first.root)).toBe('peerd could not reply.');
+      expect(announced(second.root)).toBe('');
+    } finally { first.unmount(); second.unmount(); }
+  });
+
+  it('a chat switch onto an idle transcript announces nothing', async () => {
+    const messages = streamingTurn();
+    const attrs = { sessionId: 's1', streaming: true };
+    const { root, unmount } = mount(messages, attrs);
+    try {
+      await flush();
+      messages[1] = { ...messages[1], content: 'A new reply.', streaming: false };
+      attrs.streaming = false;
+      m.redraw.sync();
+      expect(announced(root)).toBe('peerd replied: A new reply.');
+      messages.splice(0, messages.length, { role: 'assistant', id: 'b1', content: 'An older reply.' });
+      attrs.sessionId = 's2';
+      attrs.streaming = false;
+      m.redraw.sync();
+      expect(announced(root)).toBe('');
     } finally { unmount(); }
   });
 });
