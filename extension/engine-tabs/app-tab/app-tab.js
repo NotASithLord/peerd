@@ -20,6 +20,7 @@ import { createAppDataClient } from './app-data-client.js';
 import { mithrilClassicSource } from './mithril-classic-source.js';
 import { createDwebBridgeLifecycle } from './dweb-bridge-lifecycle.js';
 import { makeAppActorAttachRecovery } from './actor-attach-recovery.js';
+import { mapError } from '/sidepanel/error-display.js';
 
 const uiRuntime = makeUiRuntimeClient({ browser });
 
@@ -121,8 +122,6 @@ const showNotice = (text, { persistent = false } = {}) => {
   if (!persistent) scheduleDismiss();
 };
 
-let actorChatBusy = false;
-let actorChatUnconfirmed = false;
 /** @param {boolean} open */
 const setActorChatOpen = (open) => {
   actorChatDrawer.hidden = !open;
@@ -143,8 +142,7 @@ const appendActorChatMessage = (role, text) => {
 
 const sendActorChatMessage = async () => {
   const prompt = actorChatInput.value.trim();
-  if (!prompt || actorChatBusy || actorChatUnconfirmed) return;
-  actorChatBusy = true;
+  if (!prompt || actorChatInput.disabled) return;
   actorChatSend.disabled = true;
   actorChatInput.disabled = true;
   actorChatStatus.textContent = 'Actor is working…';
@@ -154,27 +152,28 @@ const sendActorChatMessage = async () => {
     const reply = /** @type {any} */ (await uiRuntime.send({
       type: 'app/actor-chat', appId, message: prompt,
     }));
-    if (reply?.ok === true && typeof reply.content === 'string') {
-      appendActorChatMessage('actor', reply.content);
-    } else if (reply?.outcomeKnown === false) {
-      actorChatUnconfirmed = true;
-      appendActorChatMessage('status', 'Peerd could not confirm whether the App actor received that message. Inspect its transcript in peerd before sending another.');
-    } else {
-      appendActorChatMessage('status', 'The App actor did not reply. Try again.');
-    }
+    if (reply?.ok !== true || typeof reply.content !== 'string') throw reply;
+    appendActorChatMessage('actor', reply.content);
+    actorChatInput.disabled = false;
   } catch (cause) {
-    actorChatUnconfirmed = /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown === false;
-    appendActorChatMessage('status', actorChatUnconfirmed
+    const failure = /** @type {{outcomeKnown?:boolean,error?:string}} */ (cause);
+    actorChatInput.disabled = failure?.outcomeKnown === false;
+    if (!actorChatInput.disabled) actorChatInput.value = prompt;
+    const mapped = mapError(failure?.error);
+    // why: some mappings append provider text. Only fixed lines can cross here.
+    const fixed = ['provider-key-missing', 'unknown-provider', 'actor-recovery-pending', 'provider-usage-limit', 'provider-http-401', 'provider-http-429', 'provider-http-529', 'insufficient_quota'].some((code) => mapError(code) === mapped);
+    appendActorChatMessage('status', actorChatInput.disabled
       ? 'Peerd could not confirm whether the App actor received that message. Inspect its transcript in peerd before sending another.'
-      : 'The App actor connection was interrupted. Try again.');
+      : failure?.error === 'vault-locked'
+        ? 'Vault is locked. Unlock it in the peerd panel, then send again.'
+        : fixed ? mapped.replace(/\p{Dash_Punctuation}/gu, '-') : cause instanceof Error
+          ? 'The App actor connection was interrupted. Try again.' : 'The App actor did not reply. Try again.');
   } finally {
-    actorChatBusy = false;
-    actorChatSend.disabled = actorChatUnconfirmed;
-    actorChatInput.disabled = actorChatUnconfirmed;
-    actorChatStatus.textContent = actorChatUnconfirmed
+    actorChatSend.disabled = actorChatInput.disabled;
+    actorChatStatus.textContent = actorChatInput.disabled
       ? 'Delivery unconfirmed · inspect the actor in peerd'
       : 'Enter to send · Shift+Enter for a new line';
-    if (!actorChatUnconfirmed) actorChatInput.focus({ preventScroll: true });
+    if (!actorChatInput.disabled) actorChatInput.focus({ preventScroll: true });
   }
 };
 
@@ -256,10 +255,15 @@ const showSaveFailure = (path, error, action = 'save') => {
   if (saveStatus.hidden && document.activeElement instanceof HTMLElement) {
     saveReturnFocus = document.activeElement;
   }
-  saveOutcomeUnknown ||= /** @type {{outcomeKnown?:boolean}} */ (error)?.outcomeKnown === false;
+  const refusal = /** @type {{outcomeKnown?:boolean,error?:string,code?:string}} */ (error);
+  saveOutcomeUnknown ||= refusal?.outcomeKnown === false;
   const pastAction = action === 'delete' ? 'deleted' : action === 'create' ? 'created' : 'saved';
   saveMessage.textContent = saveOutcomeUnknown
     ? `Peerd could not confirm whether ${path} was ${pastAction}. Your edits are still open. Download a copy before reopening the App to check the saved file.`
+    : refusal?.error === 'vault-locked'
+      ? `Could not ${action} ${path}: the vault is locked. Your edits are still open. Unlock it in the peerd panel, then retry.`
+    : refusal?.code === 'app-file-invalid-json'
+      ? `${path} is not valid JSON, so it is not saved yet. Fix the JSON to save it.`
     : `Could not ${action} ${path}. Your edits are still open. Reduce the file or free browser storage, then retry.`;
   saveStatus.hidden = false;
   saveRetry.disabled = false;
@@ -791,7 +795,7 @@ const showConfirmation = ({ appName, detail, kind, approveLabel }) => new Promis
   const text = document.createElement('span');
   text.id = `app-confirm-${Date.now()}`;
   bar.setAttribute('aria-labelledby', text.id);
-  text.textContent = `“${appName}” wants to ${detail}.`;
+  text.textContent = `“${appName}” wants to ${detail}${/[.?!]$/.test(detail) ? '' : '.'}`;
   /** @param {string} label @param {boolean} val @param {boolean} solid */
   const mkBtn = (label, val, solid) => {
     const b = document.createElement('button');
