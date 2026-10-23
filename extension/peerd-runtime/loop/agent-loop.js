@@ -622,6 +622,10 @@ export async function* runUserTurn(ctx) {
             });
           } catch { /* enrichment is advisory */ }
         }
+      } else if (!trimPlan.didTrim && session.trimSummary && (ctx.contextWindow ?? 0) > 0) {
+        // why: a larger window must not revive the old cut at the target band.
+        try { await sessions.setTrimSummary?.(sessionId, null); session = { ...session, trimSummary: undefined }; }
+        catch { /* retry the reconstructible trim update next turn */ }
       }
       for await (const ev of callModel({
         provider: session.provider,
@@ -805,10 +809,16 @@ export async function* runUserTurn(ctx) {
     // empty buffer means the model passed `{}` implicitly.
     /** @type {ToolUseBlock[]} */
     const toolUses = [];
+    const invalidArguments = new Map();
     for (const tu of pendingToolUses.values()) {
       let input;
-      try { input = tu.inputBuf ? JSON.parse(tu.inputBuf) : {}; }
-      catch { input = {}; }
+      try {
+        input = tu.inputBuf ? JSON.parse(tu.inputBuf) : {};
+        if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('arguments must be an object');
+      } catch {
+        input = {};
+        invalidArguments.set(tu.id, `invalid_arguments: The arguments were not a valid JSON object (${tu.inputBuf.length} characters received). Nothing ran. Resend the call with complete JSON.`);
+      }
       toolUses.push({ id: tu.id, name: tu.name, input });
     }
 
@@ -930,14 +940,14 @@ export async function* runUserTurn(ctx) {
             if (signal) { try { signal.removeEventListener('abort', onAbort); } catch { /* stub signal in tests */ } }
             resolveDispatch(v);
           };
-          /** @param {unknown} cause @param {'aborted'|'timeout'} [kind] */
+          /** @param {unknown} cause @param {'aborted'|'timeout'|'invalid_arguments'} [kind] */
           const failWith = (cause, kind) => {
-            // why: deadline/abort failures are synthesized HERE, bypassing the
+            // why: local refusals and deadline/abort failures bypass the
             // dispatcher audit — emit tool_failed so the log matches is_error.
             // A timeout waited the full deadline before we gave up (a real,
             // known wall-clock); an abort can fire at any moment, so 0.
             const detail = /** @type {{message?:string,code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
-            const outcomeUnknown = detail?.outcomeKnown === false || kind !== undefined;
+            const outcomeUnknown = detail?.outcomeKnown === false || kind === 'aborted' || kind === 'timeout';
             if (kind) appendAudit({
               type: 'tool_failed', sessionId,
               details: {
@@ -967,6 +977,10 @@ export async function* runUserTurn(ctx) {
             () => failWith(new Error(`tool call did not settle within ${Math.round(DISPATCH_DEADLINE_MS / 60_000)} minutes; treating it as hung and moving on`), 'timeout'),
             DISPATCH_DEADLINE_MS,
           );
+          if (invalidArguments.has(tu.id)) {
+            failWith(new Error(invalidArguments.get(tu.id)), 'invalid_arguments');
+            return;
+          }
           toolDispatch({ id: tu.id, name: tu.name, args: tu.input }).then(
             (/** @type {ToolResult} */ r) => finish(r),
             (/** @type {unknown} */ e) => failWith(e),

@@ -53,6 +53,11 @@ const sourceFiles = (dir: string): string[] => readdirSync(dir, { withFileTypes:
     : entry.name.endsWith('.js') ? [join(dir, entry.name)] : []);
 
 describe('tool metadata authority', () => {
+  test.each(['load_skill', 'read_memory'])('%s advertises its bounded continuation', (name) => {
+    const descriptor = getToolMetadata(name);
+    expect((descriptor.schema as any).properties.offset.type).toBe('integer');
+    expect(descriptor.description).toContain('paging note');
+  });
   test('web capability copy names every supported fetch method and the site-capture sibling correctly', () => {
     const fetchDescription = getToolMetadata('fetch_url').description;
     for (const method of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) {

@@ -1654,7 +1654,7 @@ export const TOOL_METADATA_RECORDS = {
   "read_memory": {
     "name": "read_memory",
     "primitive": "memory",
-    "description": "Read persistent memory not already in your always-loaded context. Use when descending into a specific area of a workspace, or to see the full body of a scope. With scope \"subtree\" + a subpath, returns every subtree note covering that path (most specific first). With \"project\"/\"user\", returns that scope's full doc.",
+    "description": "Read persistent memory not already in your always-loaded context. With scope \"subtree\" + a subpath, read notes covering that path (most specific first). With \"project\"/\"user\", read that scope's doc. Results use bounded pages. Follow the paging note with the next offset to read the rest before a write.",
     "schema": {
       "type": "object",
       "properties": {
@@ -1674,6 +1674,10 @@ export const TOOL_METADATA_RECORDS = {
         "subpath": {
           "type": "string",
           "description": "Path within the workspace for subtree reads, e.g. \"src/api\"."
+        },
+        "offset": {
+          "type": "integer",
+          "description": "Start character offset. Follow the paging note to read the rest."
         }
       },
       "required": [
@@ -2100,13 +2104,17 @@ export const TOOL_METADATA_RECORDS = {
   "load_skill": {
     "name": "load_skill",
     "primitive": "inspect",
-    "description": "Load the full instructions for an installed skill by name. The system prompt lists available skills as name + one-line description only; call this to read a skill's complete SKILL.md body before following it. Returns the markdown body. Skill instructions are a playbook, not a privilege grant: any tool calls they lead to still pass the normal gates.",
+    "description": "Read an installed skill before following it. The system prompt lists only names and descriptions. Results use bounded pages. Follow each paging note with the next offset to read the complete SKILL.md body. A playbook grants no privileges: its tool calls still pass the normal gates.",
     "schema": {
       "type": "object",
       "properties": {
         "name": {
           "type": "string",
           "description": "The skill name (as shown in the skills list)."
+        },
+        "offset": {
+          "type": "integer",
+          "description": "Start character offset. Follow the paging note to read the rest."
         }
       },
       "required": [

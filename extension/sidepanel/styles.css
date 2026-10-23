@@ -1346,7 +1346,7 @@ button.icon.is-active {
    usage-limit on send) — the error-line is the only child, so it carries no
    top margin. */
 .message .bubble-error .error-line { margin-top: 0; }
-.message.tools-only .bubble { display: none; }
+.message.tools-only > .bubble { display: none; }
 /* ...but a provider error on an otherwise tools-only turn must still show —
    the error bubble is the only place that failure surfaces inline. */
 .message.tools-only .bubble-error { display: block; }

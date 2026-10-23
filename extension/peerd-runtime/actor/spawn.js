@@ -25,6 +25,7 @@
 // live behind the sealed controller's exact spawn projection.
 import { confirmActionsFromRecord } from '../permissions/policy.js';
 import { STARTUP_UNAVAILABLE_USER_FAILURE } from '../../shared/bounded-module-load.js';
+import { uuidv7 } from '../../shared/cold-util.js';
 
 /** @typedef {import('../sessions/types.js').Session} Session */
 
@@ -567,9 +568,9 @@ export const makeSpawnActor = (deps) => {
             for (const m of newMessages) await persistMessage(m);
           } else {
             const stamp = new Date(now()).toISOString();
-            await persistMessage({ id: `off-u-${now()}`, when: stamp, role: 'user', content: task });
+            await persistMessage({ id: uuidv7(now), when: stamp, role: 'user', content: task });
             await persistMessage({
-              id: `off-a-${now()}`, when: stamp, role: 'assistant',
+              id: uuidv7(now), when: stamp, role: 'assistant',
               content: r.ok || r.aborted ? (r.finalText ?? r.error ?? '') : '',
               ...(!r.ok && !r.aborted ? {
                 error: r.outcomeKnown === true
@@ -587,7 +588,7 @@ export const makeSpawnActor = (deps) => {
             if (!outcomeKnown && newMessages.length > 0
                 && !newMessages.some((message) => message?.role === 'assistant' && typeof message?.error === 'string')) {
               await persistMessage({
-                id: `off-error-${now()}`, when: new Date(now()).toISOString(), role: 'assistant', content: '',
+                id: uuidv7(now), when: new Date(now()).toISOString(), role: 'assistant', content: '',
                 error: `The actor worker stopped after execution began. Its outcome is unknown and must not be retried automatically. ${r.error ?? 'No failure detail was returned.'}`,
               });
             }
@@ -622,8 +623,8 @@ export const makeSpawnActor = (deps) => {
             ? STARTUP_UNAVAILABLE_USER_FAILURE
             : r?.error ?? 'actor isolation unavailable';
           const stamp = new Date(now()).toISOString();
-          await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `iso-u-${now()}`, when: stamp, role: 'user', content: task })).catch(() => {});
-          await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `iso-a-${now()}`, when: stamp, role: 'assistant', content: error })).catch(() => {});
+          await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: uuidv7(now), when: stamp, role: 'user', content: task })).catch(() => {});
+          await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: uuidv7(now), when: stamp, role: 'assistant', content: error })).catch(() => {});
           taggedAudit({
             type: 'actor_isolation_failure',
             details: { error, code: r?.code ?? 'unknown', performed: false },
@@ -633,8 +634,8 @@ export const makeSpawnActor = (deps) => {
         isolationRefused = true;
         const error = 'actor isolation unavailable: no dedicated worker host is wired';
         const stamp = new Date(now()).toISOString();
-        await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `iso-u-${now()}`, when: stamp, role: 'user', content: task })).catch(() => {});
-        await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: `iso-a-${now()}`, when: stamp, role: 'assistant', content: error })).catch(() => {});
+        await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: uuidv7(now), when: stamp, role: 'user', content: task })).catch(() => {});
+        await sessions.appendMessage(child.sessionId, /** @type {any} */ ({ id: uuidv7(now), when: stamp, role: 'assistant', content: error })).catch(() => {});
         taggedAudit({ type: 'actor_isolation_failure', details: { error, performed: false } }).catch(() => {});
       }
     } finally {
