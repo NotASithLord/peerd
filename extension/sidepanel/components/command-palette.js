@@ -104,7 +104,7 @@ export const candidatesFor = (trigger, items) => {
     id: `file:${path}`,
     label: path,
     detail: '',
-    insert: `@file:${path} `,
+    insert: `@file:${/[\s"]/.test(path) ? JSON.stringify(path) : path} `,
     kind: 'file',
   }));
 };

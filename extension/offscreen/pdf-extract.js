@@ -281,6 +281,7 @@ const extractTextLayer = async (bytes, signal) => {
     if (signal?.aborted || (/** @type {{name?:string}} */ (e))?.name === 'AbortError') {
       throw abortError(signal, 'PDF extraction stopped.');
     }
+    if ((/** @type {{name?:string}} */ (e))?.name === 'PasswordException') throw e;
     throw new PdfParseError(
       `pdf.js could not parse the document (pdf.js ${pdfjsLib.version}, `
       + `worker=${pdfjsLib.GlobalWorkerOptions.workerSrc || '(unset)'}): ${(/** @type {{ name?: string, message?: string }} */ (e))?.name ?? 'Error'}: ${(/** @type {{ message?: string }} */ (e))?.message ?? e}`,
@@ -396,6 +397,6 @@ export const extractPdfBytes = async (bytes, opts = {}) => {
     console.error(`[offscreen/pdf-extract] FAILED at stage=${stage} for ${where}:`, e);
     // Parser prose can contain producer-controlled PDF strings. Keep detail in
     // DevTools and cross the authority boundary with a stable code only.
-    return { ok: false, error: 'pdf_extract_failed', stage };
+    return { ok: false, error: (/** @type {{name?:string}} */ (e))?.name === 'PasswordException' ? 'pdf_password_required' : 'pdf_extract_failed', stage };
   }
 };

@@ -81,6 +81,8 @@ const DOCUMENT_FAILURE_GUIDANCE = Object.freeze({
   is_web_content: 'The URL served a web page or plain text, not a document file. Use fetch_url or open it in a tab.',
   ocr_not_installed: 'OCR is unavailable in this build. Retry with the automatic or pdf.js engine, or use page images.',
   pdf_extract_failed: 'The PDF could not be parsed. Try another copy or a fresh PDF export.',
+  document_too_large: 'The document is larger than read_doc can open (75 MiB for PDF, 40 MiB for Office or OpenDocument files). Ask for a smaller export or an HTML version.',
+  pdf_password_required: 'The PDF is password-protected. Ask the owner for an unprotected copy.',
   doc_extract_aborted: 'Document extraction stopped.',
   doc_extract_failed: 'Document extraction failed before any readable content was returned.',
 });
