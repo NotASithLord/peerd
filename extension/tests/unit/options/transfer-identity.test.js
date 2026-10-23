@@ -499,3 +499,37 @@ describe('options.transfer — portable identity restore', () => {
     } finally { unmount(); }
   });
 });
+
+for (const [code, guidance] of [
+  ['identity-export-network-off', 'Turn it on in Settings > Decentralized web, then try again.'],
+  ['identity-export-failed', 'retry after reopening peerd.'],
+]) {
+  describe(`options backup failure: ${code}`, () => {
+    it('keeps the passphrase and uses the correct existing error surface', async () => {
+      /** @type {any[]} */ const calls = [];
+      const { root, unmount } = await mountWhole(async (message) => {
+        calls.push(message);
+        return message.type === 'transfer/export' ? { ok: false, error: code } : { ok: true, sessions: [] };
+      });
+      try {
+        for (const id of ['exppass', 'exppass2']) {
+          const input = /** @type {HTMLInputElement} */ (root.querySelector(`#${id}`));
+          input.value = 'long-enough-for-backup'; input.dispatchEvent(new Event('input'));
+        }
+        await flush();
+        const download = /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')]
+          .find((button) => button.textContent === 'Download backup'));
+        download.click();
+        await flushUntil(() => root.textContent?.includes(guidance) === true, 'backup failure guidance');
+        expect(root.textContent?.includes(code)).toBe(false);
+        expect(root.textContent).toContain('Nothing was downloaded');
+        expect(/** @type {HTMLInputElement} */ (root.querySelector('#exppass')).value).toBe('long-enough-for-backup');
+        expect(/** @type {HTMLInputElement} */ (root.querySelector('#exppass2')).value).toBe('long-enough-for-backup');
+        expect(download.disabled).toBe(false);
+        expect(calls.filter((message) => message.type !== 'session/list')).toEqual([
+          { type: 'transfer/export', passphrase: 'long-enough-for-backup' },
+        ]);
+      } finally { unmount(); }
+    });
+  });
+}
