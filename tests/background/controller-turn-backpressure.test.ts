@@ -6,6 +6,13 @@ import { CONTROLLER_BUILD_DIGEST } from '../../extension/shared/structured-clone
 import { getToolAuthority } from '../../extension/peerd-runtime/tools/metadata/authority.js';
 import { projectToolAuthority, toToolDescriptor } from '../../extension/peerd-runtime/tools/metadata/descriptor.js';
 import { makeScriptedProviderAuthority } from '../peerd-provider/model-egress-fixture';
+import { makeTurnAuthorityDriver } from '../../extension/peerd-runtime/loop/turn-authority-driver.js';
+import { makeTurnSlots } from '../../extension/peerd-runtime/loop/turn-slots.js';
+import { createSessionStore } from '../../extension/peerd-runtime/sessions/store.js';
+import { makeMockIdb } from '../../extension/tests/mocks/idb.js';
+import { makeAsyncActors } from '../../extension/peerd-runtime/actor/async-actors.js';
+import { normalizeTally } from '../../extension/peerd-runtime/cost/accumulator.js';
+import { wrapUntrusted } from '../../extension/peerd-runtime/tools/prompt-wrap.js';
 
 const clone = <T>(value: T): T => structuredClone(value);
 const turnRuntime = createControllerTurnRuntime();
@@ -319,10 +326,172 @@ describe('production direct-controller tool backpressure', () => {
         error: expect.stringContaining('outcome unknown'),
       });
       expect(assistant.stopReason).not.toBe('aborted');
+      expect(assistant.toolUses[0]).toMatchObject({ id: 'read-0', input: { key: 'read-0' } });
       expect(JSON.stringify(sessions.snapshot())).not.toContain('RAW LATE EFFECT');
     } finally {
       release();
       harness.close();
     }
+  });
+});
+
+
+const connectSpendDriver = async (sessions: ReturnType<typeof createSessionStore>, initialLimit = 1, beforeProjection = async () => {}) => {
+  const harness = await connectHarness();
+  const turnSlots = makeTurnSlots();
+  const broadcasts: any[] = [], audits: any[] = [], signals: AbortSignal[] = [];
+  let modelCalls = 0, toolCalls = 0;
+  const settings = { spendLimitUsd: initialLimit, pricingOverrides: { 'claude-sonnet-4-6': {
+    input: 3, output: 0, cacheRead: 0, cacheWrite: 0,
+  } } };
+  const driver = makeTurnAuthorityDriver({
+    sessions, turnSlots, settingsStore: { get: () => settings },
+    vault: { isLocked: () => false },
+    sessionCache: { sessionGet: async () => null, sessionSet: async () => {} },
+    resolvePermission: async () => ({ mode: 'act', confirmActions: false }),
+    memory: { loadAlwaysLoaded: async () => ({ text: '' }) },
+    browser: { tabs: { query: async () => [] } },
+    skillRegistry: { describeForPrompt: async () => '' },
+    renderSystemPrompt: () => 'PINNED-SYSTEM',
+    projectToolDescriptors: async () => {
+      await beforeProjection();
+      return { tools: [descriptor], operations: ['turn.resource.read-result'] };
+    },
+    dwebEngagedSessions: new Set(), DWEB_ENABLED: false,
+    uiConnected: () => true, uiPorts: { broadcast: (event: any) => broadcasts.push(event) },
+    auditLog: { append: async (event: any) => { audits.push(event); } },
+    trimEnricher: { queue: () => {}, drain: async () => {} },
+    runUserTurn: (context: any) => {
+      signals.push(context.signal);
+      return harness.runUserTurn({
+        ...makeContext({ signal: context.signal, toolCount: 1, toolDispatch: async () => { toolCalls++; } }),
+        ...context,
+        callModel: async function* () {
+          modelCalls++;
+          yield { type: 'text-delta', text: 'Partial paid response' };
+          yield { type: 'tool-use-start', id: 'pending-read', name: descriptor.name };
+          yield { type: 'tool-use-delta', id: 'pending-read', partialJson: '{"key":"pending-read"}' };
+          yield { type: 'tool-use-stop', id: 'pending-read' };
+          yield { type: 'usage', usage: { inputTokens: 1_000_000, outputTokens: 0 } };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+      });
+    },
+  });
+  return { ...harness, driver, turnSlots, broadcasts, audits, signals, settings,
+    modelCalls: () => modelCalls, toolCalls: () => toolCalls };
+};
+
+const spendSession = async (cost = 0, onMessageAppended: (sessionId: string, message: any) => void = () => {}) => {
+  const sessions = createSessionStore({ idb: makeMockIdb(), makeId: () => 'session-backpressure', onMessageAppended });
+  await sessions.create();
+  await sessions.setCost('session-backpressure', normalizeTally({ cost }));
+  return sessions;
+};
+
+const spendInput = { sessionId: 'session-backpressure', userText: 'Continue the existing task', oneShot: true };
+
+describe('spend admission through the real controller', () => {
+  test('over-cap send saves a known refusal without inference and leaves a queued claim live', async () => {
+    const sessions = await spendSession(3);
+    const fixture = await connectSpendDriver(sessions);
+    let queued: Promise<any> | undefined, refusedSnapshot: any;
+    try {
+      const outcome = await fixture.driver.runAgentTurn({ ...spendInput, onBeforeRelease: async () => {
+        refusedSnapshot = { calls: fixture.modelCalls(), cost: (await sessions.get(spendInput.sessionId))!.cost!.cost };
+        fixture.turnSlots.runWhenIdle(spendInput.sessionId, () => {
+          fixture.settings.spendLimitUsd = 0;
+          queued = fixture.driver.runAgentTurn(spendInput);
+        });
+      } });
+      expect(refusedSnapshot).toEqual({ calls: 0, cost: 3 });
+      expect(fixture.broadcasts.filter((event) => event.type === 'turn/spend-limit-reached')).toHaveLength(1);
+      expect(outcome).toMatchObject({ ok: true, stopReason: 'aborted' });
+      await queued;
+      expect(fixture.modelCalls()).toBe(1);
+      expect(fixture.signals[0]!.aborted).toBe(true);
+      expect(fixture.signals[1]!.aborted).toBe(false);
+      const messages = (await sessions.get(spendInput.sessionId))!.messages;
+      expect(messages.slice(0, 2)).toMatchObject([
+        { role: 'user', content: spendInput.userText },
+        { role: 'assistant', streaming: false, content: expect.stringContaining('This message was not sent to the model.') },
+      ]);
+      expect(messages[1]).not.toHaveProperty('outcomeKnown', false);
+      expect(fixture.audits.filter((row) => row.type === 'spend_limit_reached')).toEqual([
+        expect.objectContaining({ details: { spent: 3, limitUsd: 1, performed: false } }),
+      ]);
+      const halt = fixture.broadcasts.findIndex((event) => event.type === 'turn/spend-limit-reached');
+      expect(halt).toBeGreaterThan(fixture.broadcasts.findIndex((event) => event.type === 'turn/stop'));
+      expect(fixture.broadcasts.filter((event) => event.type === 'turn/error')).toEqual([]);
+    } finally { fixture.close(); }
+  });
+
+  test('over-cap actor wake is durably acknowledged once and retains unknown parent correlation', async () => {
+    let actors: ReturnType<typeof makeAsyncActors>;
+    const sessions = await spendSession(3, (sessionId, message) => {
+      actors?.acknowledgeDelivery(sessionId, message.actorReply?.actorDeliveryId);
+    });
+    const fixture = await connectSpendDriver(sessions);
+    const attempts: any[] = [], scheduled: any[] = [];
+    actors = makeAsyncActors({
+      spawnActor: async () => ({ result: 'Check the saved child result before retry.', sessionId: 'child', executionFailed: true, outcomeKnown: false }),
+      turnSlots: fixture.turnSlots, wrapUntrusted,
+      reenter: async (request) => { attempts.push(request); return fixture.driver.runAgentTurn(request); },
+      getActiveSessionId: async () => spendInput.sessionId, isVaultLocked: () => false,
+      forwardEvent: () => {}, notify: () => {}, schedule: (fn) => scheduled.push(fn),
+    });
+    try {
+      await actors.spawnActorAsync({ parentSessionId: spendInput.sessionId, parentToolUseId: 'parent-create-1', task: 'Inspect the saved result' });
+      await waitFor(() => attempts.length === 1 && !fixture.turnSlots.isBusy(spendInput.sessionId));
+      expect(fixture.modelCalls()).toBe(0);
+      expect(attempts).toHaveLength(1);
+      expect(scheduled).toEqual([]);
+      expect(actors.actorTasks(spendInput.sessionId)[0]!.status).toBe('delivered');
+      const messages = (await sessions.get(spendInput.sessionId))!.messages;
+      expect(messages).toHaveLength(2);
+      expect(messages[0]).toMatchObject({ id: attempts[0].actorReply.actorDeliveryId, actorReply: {
+        failed: true, outcomeKnown: false, parentToolUseId: 'parent-create-1', parentToolUseIds: ['parent-create-1'],
+      } });
+      expect(messages[1]).not.toHaveProperty('outcomeKnown', false);
+      expect((await sessions.get(spendInput.sessionId))!.cost!.cost).toBe(3);
+      expect(fixture.audits.filter((row) => row.type === 'spend_limit_reached')).toHaveLength(1);
+    } finally { fixture.close(); }
+  });
+
+  test('final usage crossing settles known before pending tool dispatch', async () => {
+    const sessions = await spendSession();
+    const fixture = await connectSpendDriver(sessions);
+    try {
+      const outcome = await fixture.driver.runAgentTurn(spendInput);
+      expect(fixture.broadcasts.filter((event) => event.type === 'turn/error')).toEqual([]);
+      expect(outcome).toMatchObject({ ok: true, stopReason: 'aborted' });
+      expect(fixture.modelCalls()).toBe(1);
+      expect(fixture.toolCalls()).toBe(0);
+      expect((await sessions.get(spendInput.sessionId))!.cost!.cost).toBe(3);
+      const assistant = (await sessions.get(spendInput.sessionId))!.messages.at(-1)!;
+      expect(assistant).toMatchObject({ role: 'assistant', content: 'Partial paid response', streaming: false, stopReason: 'aborted' });
+      expect(assistant).not.toHaveProperty('outcomeKnown', false);
+      expect(fixture.audits.filter((row) => row.type === 'spend_limit_reached')).toHaveLength(1);
+    } finally { fixture.close(); }
+  });
+
+  test('a cost contribution during setup blocks admission', async () => {
+    const sessions = await spendSession();
+    const fixture = await connectSpendDriver(sessions, 1, async () => {
+      await sessions.setCost(spendInput.sessionId, normalizeTally({ cost: 3 }));
+    });
+    try {
+      expect(await fixture.driver.runAgentTurn(spendInput)).toMatchObject({ ok: true, stopReason: 'aborted' });
+      expect(fixture.modelCalls()).toBe(0);
+    } finally { fixture.close(); }
+  });
+
+  test.each([[1, 1], [3, 0], [3, -1], [3, Number.NaN]])('cost %s with limit %s still admits inference', async (cost, limit) => {
+    const sessions = await spendSession(cost);
+    const fixture = await connectSpendDriver(sessions, limit);
+    try {
+      await fixture.driver.runAgentTurn(spendInput);
+      expect(fixture.modelCalls()).toBe(1);
+    } finally { fixture.close(); }
   });
 });
