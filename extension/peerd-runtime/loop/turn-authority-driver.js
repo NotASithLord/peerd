@@ -164,7 +164,7 @@ const runAgentTurn = async (/** @type {any} */ input) => {
     if (turnSettled) return;
     turnSettled = true;
     releaseTurnSlot();
-    if (uiConnected()) {
+    if (uiConnected() && !turnSlots.isBusy(sessionId)) {
       uiPorts.broadcast({ type: 'turn/streaming', sessionId, streaming: false });
     }
   };

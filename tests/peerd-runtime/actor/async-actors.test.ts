@@ -32,6 +32,117 @@ const makeCommittedActors = (over: any = {}) => {
 };
 
 describe('makeAsyncActors', () => {
+  test('a final delivery does not queue an empty turn claim', async () => {
+    const slots = makeTurnSlots();
+    const claims: string[] = [];
+    const held: Array<() => void> = [];
+    let actors: ReturnType<typeof makeAsyncActors>;
+    actors = makeAsyncActors(baseDeps({
+      turnSlots: { ...slots, runWhenIdleClaimed: (id: string, run: any) => {
+        claims.push(id); slots.runWhenIdleClaimed(id, run);
+      } },
+      reenter: async (request: any) => {
+        actors.acknowledgeDelivery(request.sessionId, request.actorReply.actorDeliveryId);
+        await new Promise<void>((resolve) => { held.push(resolve); });
+        request.turnLease.release();
+        expect(slots.isBusy('parent')).toBe(false);
+      },
+    }));
+    await actors.spawnActorAsync({ task: 'one', parentSessionId: 'parent' });
+    await flush();
+    expect(claims).toEqual(['parent']);
+    expect(slots.isBusy('parent')).toBe(true);
+    held[0]!();
+    await flush();
+    expect(slots.isBusy('parent')).toBe(false);
+    expect(claims).toEqual(['parent']);
+  });
+
+  test.each(['coalesced', 'unlock-busy', 'later-child'])(
+    '%s queues claim only real model turns', async (mode) => {
+      const slots = makeTurnSlots(), parent = slots.claim('parent');
+      const claims: any[] = [], requests: any[] = [], finishes: Array<() => void> = [];
+      let models = 0;
+      let actors: ReturnType<typeof makeAsyncActors>;
+      const sessions = createSessionStore({
+        idb: makeMockIdb(), makeId: () => 'parent',
+        onMessageAppended: (sessionId, message: any) => {
+          if (!message.actorReply) return;
+          if (mode === 'unlock-busy') actors.onVaultUnlock();
+          actors.acknowledgeDelivery(sessionId, message.actorReply.actorDeliveryId);
+        },
+      });
+      await sessions.create();
+      actors = makeAsyncActors(baseDeps({
+        turnSlots: { ...slots, runWhenIdleClaimed: (id: string, start: any) => {
+          claims.push(id); slots.runWhenIdleClaimed(id, start);
+        } },
+        reenter: async (request: any) => {
+          requests.push(request);
+          try {
+            for await (const _ of runUserTurn({
+              ...request, sessions, signal: request.turnLease.controller.signal,
+              getSecret: async () => '', safeFetch: async () => new Response(),
+              getSystemPrompt: async () => '', appendAudit: async () => {}, tools: [],
+              callModel: async function* () {
+                models += 1;
+                await new Promise<void>((resolve) => { finishes.push(resolve); });
+                yield { type: 'text-delta', text: 'The child result is saved.' };
+                yield { type: 'message-stop', stopReason: 'end_turn' };
+              },
+            })) { /* consume the real loop */ }
+          } finally { request.turnLease.release(); }
+        },
+      }));
+      await actors.spawnActorAsync({ task: 'A', parentSessionId: 'parent' });
+      await actors.spawnActorAsync({ task: 'B', parentSessionId: 'parent' });
+      await flush(); parent.release(); await flush();
+      expect(models).toBe(1);
+      expect(requests[0].userText).toContain('R:A');
+      expect(requests[0].userText).toContain('R:B');
+      if (mode === 'later-child') {
+        await actors.spawnActorAsync({ task: 'C', parentSessionId: 'parent' });
+        await flush();
+      }
+      finishes.shift()!(); await flush();
+      if (mode === 'later-child') {
+        expect(models).toBe(2);
+        expect(requests[1].userText).toContain('R:C');
+        expect(requests[1].userText).not.toContain('R:A');
+        finishes.shift()!(); await flush();
+      }
+      expect(claims).toHaveLength(models);
+      expect(requests).toHaveLength(models);
+      expect(slots.isBusy('parent')).toBe(false);
+      expect(actors.actorTasks('parent').every((child) => child.status === 'delivered')).toBe(true);
+    },
+  );
+
+  test.each(['locked', 'stale'])(
+    '%s queued work keeps cleanup and the idle queue without an empty claim', async (mode) => {
+      const slots = makeTurnSlots(), parent = slots.claim('parent');
+      let claims = 0, turns = 0, notices = 0, advanced = 0;
+      const actors = makeAsyncActors(baseDeps({
+        turnSlots: { ...slots, runWhenIdleClaimed: (id: string, start: any) => {
+          claims += 1; slots.runWhenIdleClaimed(id, start);
+        } },
+        isVaultLocked: () => mode === 'locked',
+        notify: () => { notices += 1; }, reenter: async () => { turns += 1; },
+      }));
+      await actors.spawnActorAsync({ task: 'A', parentSessionId: 'parent' });
+      await flush();
+      if (mode === 'stale') slots.stop('parent');
+      slots.runWhenIdle('parent', () => { advanced += 1; });
+      parent.release(); await flush();
+      expect(claims).toBe(0);
+      expect(turns).toBe(0);
+      expect(advanced).toBe(1);
+      expect(slots.isBusy('parent')).toBe(false);
+      expect(actors.actorTasks('parent')[0].status).toBe(mode === 'stale' ? 'cancelled' : 'done');
+      expect(notices > 0).toBe(mode === 'locked');
+    },
+  );
+
   test('a failed uncommitted wake retries the same batch before a later child', async () => {
     const reenters: any[] = [];
     const scheduled: Array<() => void> = [];

@@ -102,6 +102,7 @@ import { validateKernelStateProjection } from '/shared/kernel-state-contract.js'
  * @property {{ turn: any, session: any, limitUsd: number, limitReached: boolean }} cost
  * @property {string|null|undefined} lastError
  * @property {boolean} streaming
+ * @property {{authorityEpoch:string,generation:number}|null} [projection]
  * @property {{ attempt: number|null, retryAfterMs: number|null }|null} rateLimit
  * @property {{ origin: string, untilMs: number, reason: string|null }|null} pacing
  *   a live per-origin pacing wait (#234). Cleared by every lifecycle message
@@ -143,6 +144,7 @@ import { validateKernelStateProjection } from '/shared/kernel-state-contract.js'
  *   attempt?: number,
  *   retryAfterMs?: number,
  *   streaming?: boolean,
+ *   projection?: {authorityEpoch:string,generation:number},
  *   parentToolUseId?: string,
  *   depth?: number,
  *   task?: string,
@@ -176,10 +178,8 @@ export const INITIAL_STATE = Object.freeze({
   // total; `cost.limitReached` flips true when the hard spend cap halts
   // the agent (cleared on the next user send). The meter reads these.
   cost: { turn: null, session: null, limitUsd: 0, limitReached: false },
-  // Inline turn-status. `streaming` is whether the CURRENTLY VIEWED
-  // chat's turn is in flight — live-toggled by turn/streaming pulses
-  // (session-guarded) and re-armed by every state push, which carries
-  // the per-session truth (turns keep running in background chats).
+  // why: streaming belongs to the viewed chat. State hydration replays
+  // its live pulse after the snapshot establishes that chat.
   // Live delegation feed for in-flight `script` runs, keyed by the script
   // call's toolUseId: [{ seq, method, to, goalPreview, phase, ms }]. Ephemeral
   // UI sugar — the durable record is the [DELEGATIONS] trace in the tool
@@ -919,17 +919,10 @@ export const reduceChat = (state, msg) => {
               ? msg.authorityReplacement !== true
               : incomingProjection.generation < priorProjection.generation)) return state;
       }
-      // Full snapshot. Replace, seeding the cost meter from the persisted
-      // session tally + the configured limit. (Voice-restore is the surface's
-      // job — see the module header.) why preserve pendingConfirm: confirm
-      // state is owned by the confirm/request|resolved channel, NOT the
-      // snapshot (it carries null) — folding ...msg.state must never wipe a
-      // live prompt a 'state' push races with (DESIGN-12). why rateLimit:null:
-      // the snapshot carries no rateLimit field, so without an explicit reset
-      // the previous chat's retry banner survives the fold and paints on the
-      // switched-to (idle) chat — a stale "⏳ Rate limited" control in the wrong
-      // conversation. A switched-to chat is never mid-retry from the previous
-      // one; an active retry in THIS chat re-asserts via the next pause/delta.
+      // why: snapshots restore cost but omit live confirmation and streaming.
+      // Preserve this chat's prompt and reset activity on a chat switch.
+      // A later pulse restores the selected turn. A new pause or delta
+      // restores an ephemeral retry notice.
       // why limitReached + the spend-limit lastError are SESSION-scoped (not
       // per-push): they are a halt state ("raise your limit to continue") that
       // must persist until the user acts. A 'state' push fires on a Plan/Act
@@ -1011,6 +1004,7 @@ export const reduceChat = (state, msg) => {
       return { ...state, ...msg.state, hydrated: true, ...pruneProjections, notices,
         actorProjectionEpoch,
         actorProjectionRevision,
+        streaming: sessionChanged ? false : state.streaming,
         pendingConfirm: sessionChanged ? (msg.state?.pendingConfirm ?? null) : state.pendingConfirm,
         confirmEvents,
         lastError: keepSpendError ? 'spend-limit-reached' : null, rateLimit: null, pacing: null, cost: { ...state.cost,
@@ -1063,11 +1057,14 @@ export const reduceChat = (state, msg) => {
         reason: typeof msg.reason === 'string' ? msg.reason : null,
       } };
     case 'turn/streaming':
+      if (msg.replay === true && (!state.projection || !msg.projection
+          || msg.projection.generation !== state.projection?.generation
+          || msg.projection.authorityEpoch !== state.projection?.authorityEpoch)) return state;
       // Per-session lifecycle pulse — a background turn must not flip the
       // viewed chat's composer/spinner.
       if (state.session.sessionId && msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
       return { ...state, streaming: !!msg.streaming, rateLimit: null, pacing: null,
-        cost: msg.streaming ? { ...state.cost, turn: null, limitReached: false } : state.cost };
+        cost: msg.streaming && msg.replay !== true ? { ...state.cost, turn: null, limitReached: false } : state.cost };
     case 'turn/tool-use':
     case 'turn/tool-result':
       // Real-time complements; the session message array (turn/state) is the

@@ -35,15 +35,8 @@ export const DEFAULT_MAX_DEPTH = 5;
 export const DEFAULT_MAX_STEPS = 20;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
 
-// Wall-clock ceiling for a child's WHOLE run (spawned-as-async-actors,
-// PR #134 phase 2). Before this, an actor had only step/depth caps — a
-// single hung tool call or provider stall could park it forever, with no
-// abort path (no signal was threaded) and nothing to wake the parent. The
-// timer aborts the child's turn-slot controller, so the loop unwinds
-// through its normal abort branch (persists the partial, stopReason
-// 'aborted') and the parent is woken with a timeout-flagged result.
-// Callers may pass timeoutMs lower or higher, clamped to MAX — the same
-// "can't be raised past the backstop" posture as maxSteps.
+// why: only an aborted loop reports a timeout. A late timer can follow a
+// clean result. Timeouts still wake the parent with a partial report.
 export const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 export const MAX_TIMEOUT_MS = 30 * 60_000;
 
@@ -261,7 +254,7 @@ export const makeSpawnActor = (deps) => {
    *   run (default DEFAULT_TIMEOUT_MS, clamped to MAX_TIMEOUT_MS)
    * @param {(ev: object) => void} [req.onEvent]   live forwarder for the side panel
    * @param {string} [req.parentToolUseId]         links the parent's card → child session
-   * @returns {Promise<{ result: string, sessionId: string | null, toolCalls: number, durationMs: number, depth: number, usage?: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, price?:{cost:number,estimated:boolean}, exceeded?: true, refused?: true, timedOut?: true, stopped?: true, executionFailed?: true, outcomeKnown?: boolean }>}
+   * @returns {Promise<{ result: string, sessionId: string | null, toolCalls: number, durationMs: number, depth: number, usage?: { inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number }, price?:{cost:number,estimated:boolean}, exceeded?: true, refused?: true, timedOut?: true, stopped?: true, incomplete?: true, executionFailed?: true, outcomeKnown?: boolean }>}
    */
   const spawnActor = async (req) => {
     const {
@@ -611,7 +604,7 @@ export const makeSpawnActor = (deps) => {
               details: {
                 error: r.error ?? 'unknown', aborted: r.aborted === true,
                 ...(!r.aborted ? {
-                  performed: !outcomeKnown,
+                  ...(!outcomeKnown ? { performed: true } : {}),
                   outcomeKnown,
                 } : {}),
               },
@@ -652,27 +645,25 @@ export const makeSpawnActor = (deps) => {
     const durationMs = now() - start;
     const final = await sessions.get(child.sessionId);
     const completion = finalActorTurnReply(final);
-    const result = completion.result;
-    // Guardrail 5 (step cap): a max_steps stop means the actor ran out
-    // of room before finishing. Surface it so the caller (and the model)
-    // knows the result may be partial.
+    // why: only a real abort suppresses a later parent reply. Empty replies,
+    // limits and provider errors must return a bounded terminal report.
     const exceeded = lastStopReason === 'max_steps';
-    // Phase 2: distinguish WHY an abort unwound the loop — but ONLY when the
-    // loop actually aborted. timerFired alone doesn't imply a timeout: the timer
-    // can fire in the race window between a clean 'end_turn' finish and this
-    // finally's clearTimer, which must NOT relabel a complete result as partial.
-    // Gate both flags on lastStopReason==='aborted' (a real abort unwind), then
-    // split by cause: timer → timedOut, anything else (Stop cascade, cancel) →
-    // stopped. Persisted provider errors are also stopped so partial text never
-    // presents a failed turn as success.
     const aborted = lastStopReason === 'aborted';
     const timedOut = aborted && timerFired;
-    const stopped = (aborted && !timerFired) || completion.stopped === true;
+    const stopped = (aborted && !timerFired) || (executionFailed && completion.stopped === true);
+    const incomplete = !aborted && outcomeKnown
+      && (executionFailed || completion.stopped === true || exceeded || lastStopReason === 'max_tokens');
+    const failedReply = final?.messages.some((message) => message.role === 'assistant' && typeof message.error === 'string' && message.error.length > 0);
+    const result = !incomplete ? completion.result
+      : exceeded ? 'The actor reached its step limit without a final reply. Check its saved transcript before retrying.'
+      : lastStopReason === 'max_tokens' ? 'The actor reached its output limit without a final reply. Check its saved transcript before retrying.'
+      : executionFailed || failedReply ? 'The actor did not complete. Check its saved transcript before retrying.'
+      : 'The actor ended without a final reply. Check its saved transcript before retrying.';
 
     taggedAudit({
       type: 'actor_completed',
       details: {
-        toolCalls, durationMs, exceeded, timedOut, stopped, resultChars: result.length,
+        toolCalls, durationMs, exceeded, timedOut, stopped, incomplete, resultChars: result.length,
         ...(executionFailed ? { executionFailed: true, outcomeKnown } : {}),
       },
     }).catch(() => {});
@@ -688,6 +679,7 @@ export const makeSpawnActor = (deps) => {
       ...(exceeded ? { exceeded: true } : {}),
       ...(timedOut ? { timedOut: true } : {}),
       ...(stopped ? { stopped: true } : {}),
+      ...(incomplete ? { incomplete: true } : {}),
       ...(isolationRefused ? { refused: true } : {}),
       ...(executionFailed ? { executionFailed: true, outcomeKnown } : {}),
     };

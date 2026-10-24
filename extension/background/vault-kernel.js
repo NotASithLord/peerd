@@ -524,6 +524,9 @@ const pushState = async (authority) => {
   const pendingConfirm = confirmation.coordinator.getPendingForOwner(ownerSessionId);
   uiPorts.broadcast(generation.bind({ type: 'state', state }));
   if (pendingConfirm) uiPorts.broadcast({ type: 'confirm/request', prompt: pendingConfirm });
+  if (ownerSessionId) uiPorts.broadcast({ type: 'turn/streaming', sessionId: ownerSessionId,
+    streaming: controllerRelays()?.turnSlots?.isBusy(ownerSessionId) === true,
+    replay: true, projection: state.projection });
   return state;
 };
 
