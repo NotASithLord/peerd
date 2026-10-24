@@ -97,6 +97,7 @@ const actorOutcomeUnknownFailure = (_text) =>
  * @property {string} [sessionId]
  * @property {((msg: Record<string, any>) => Promise<any>)} [send]
  * @property {boolean} [busy]
+ * @property {boolean} [streaming]
  * @property {boolean} [announceOnMount]
  * @property {Map<string|undefined, Set<string>>} [seenRecoveryIdsBySession]
  */
@@ -259,6 +260,50 @@ const scheduleRecoveryAnnouncementClear = (state) => {
   }, 1_000);
 };
 
+// What a screen reader hears when the viewed chat's turn settles: one polite
+// line per turn, never per token. The reply's opening text, or that it
+// failed (the error banner's alert carries the mapped copy, so it is not
+// repeated here). A stopped turn stays quiet.
+const TURN_PREVIEW_CHARS = 150;
+const BLOCK_TAGS = new Set(['P', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'PRE', 'BLOCKQUOTE', 'TR', 'BR']);
+
+/** @param {string} markdown */
+const replyPreview = (markdown) => {
+  const doc = new DOMParser().parseFromString(renderMarkdown(markdown), 'text/html');
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+  /** @type {string[]} */
+  const parts = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    parts.push(node.nodeType === Node.TEXT_NODE ? (node.nodeValue ?? '')
+      : BLOCK_TAGS.has(node.nodeName) ? ' ' : '');
+  }
+  const text = parts.join('').replace(/\s+/g, ' ').trim();
+  return text.length > TURN_PREVIEW_CHARS ? `${text.slice(0, TURN_PREVIEW_CHARS).trimEnd()}…` : text;
+};
+
+/** @param {ChatMessage[]|undefined} messages @param {string|undefined} peerName */
+const settledTurnAnnouncement = (messages, peerName) => {
+  const last = [...(messages ?? [])].reverse().find((message) => message.role === 'assistant');
+  if (!last || last.stopReason === 'aborted') return '';
+  const who = peerName || 'peerd';
+  if (last.error) return `${who} could not reply.`;
+  const preview = typeof last.content === 'string' ? replyPreview(last.content) : '';
+  return preview ? `${who} replied: ${preview}` : '';
+};
+
+/** @param {any} state @param {string} announcement */
+const replaceTurnAnnouncement = (state, announcement) => {
+  clearTimeout(state.turnAnnouncementTimer);
+  state.turnAnnouncement = announcement;
+  // why clear: a live region speaks only on change, so an identical next
+  // announcement would stay silent unless the text is emptied in between.
+  state.turnAnnouncementTimer = announcement ? setTimeout(() => {
+    state.turnAnnouncement = '';
+    state.turnAnnouncementTimer = null;
+    m.redraw();
+  }, 3_000) : null;
+};
+
 export const MessageList = {
   /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
   oninit(vnode) {
@@ -284,9 +329,17 @@ export const MessageList = {
       .map((event) => [event.key, event.protected !== false]));
     vnode.state.recoveryAnnouncement = fresh.map((receipt) => receipt.announcement).join(' ');
     vnode.state.recoveryAnnouncementTimer = null;
+    vnode.state.wasStreaming = !!vnode.attrs.streaming;
+    vnode.state.turnAnnouncement = '';
+    vnode.state.turnAnnouncementTimer = null;
   },
   /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
   onbeforeupdate(vnode) {
+    // why clear on start: a second identical reply can finish before the
+    // timeout. A chat switch must also drop the prior chat's announcement.
+    if (vnode.state.sessionId !== vnode.attrs.sessionId || (!vnode.state.wasStreaming && vnode.attrs.streaming)) {
+      replaceTurnAnnouncement(vnode.state, '');
+    }
     if (vnode.state.sessionId !== vnode.attrs.sessionId) {
       vnode.state.sessionId = vnode.attrs.sessionId;
       vnode.state.followBottom = true;
@@ -304,6 +357,8 @@ export const MessageList = {
       replaceRecoveryAnnouncement(vnode.state, fresh
         .map((receipt) => receipt.announcement)
         .join(' '));
+      // A switched-to chat's idle state is history, not a settle.
+      vnode.state.wasStreaming = !!vnode.attrs.streaming;
       return true;
     }
     const seen = vnode.state.seenRecoveryIdsBySession.get(vnode.attrs.sessionId) ?? new Set();
@@ -318,6 +373,11 @@ export const MessageList = {
         ...tabAnnouncements,
       ].join(' '));
     }
+    if (vnode.state.wasStreaming && !vnode.attrs.streaming) {
+      const settled = settledTurnAnnouncement(vnode.attrs.messages, vnode.attrs.peerName);
+      if (settled) replaceTurnAnnouncement(vnode.state, settled);
+    }
+    vnode.state.wasStreaming = !!vnode.attrs.streaming;
     return true;
   },
   // Initial mount: jump to the bottom so existing-session render starts
@@ -335,6 +395,7 @@ export const MessageList = {
   /** @param {{ state: any }} vnode */
   onremove(vnode) {
     if (vnode.state.recoveryAnnouncementTimer) clearTimeout(vnode.state.recoveryAnnouncementTimer);
+    clearTimeout(vnode.state.turnAnnouncementTimer);
   },
 
   /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
@@ -354,6 +415,12 @@ export const MessageList = {
             role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true',
           }, state.recoveryAnnouncement)
         : null,
+      // Always mounted and empty between turns: many screen readers skip a
+      // live region that is inserted with its text already in it. No role,
+      // so transcript history never reads as a status.
+      m('span.sr-only.message-list-turn-announcement', {
+        'aria-live': 'polite', 'aria-atomic': 'true',
+      }, state.turnAnnouncement),
     ]),
 };
 
@@ -744,11 +811,12 @@ const TaskFeedback = {
 // A single div — the gradient, mask, and spin are CSS-only and disabled under
 // prefers-reduced-motion.
 //
-// attrs.sm → a smaller variant for inline use (the Reasoning header).
+// attrs.sm → a smaller variant for inline use (the Reasoning header). A span
+// there, because the header is a button and allows only phrasing content.
 const ThinkingSpinner = {
   /** @param {{ attrs?: { sm?: boolean } }} vnode */
   view: ({ attrs }) =>
-    m(`.peerd-spinner${attrs && attrs.sm ? '.peerd-spinner--sm' : ''}`,
+    m(attrs && attrs.sm ? 'span.peerd-spinner.peerd-spinner--sm' : '.peerd-spinner',
       { role: 'status', 'aria-label': 'Working…' }),
 };
 
@@ -773,10 +841,14 @@ const Reasoning = {
     const thinkingNow = streaming && !hasText;
     const expanded = ui.userToggled ? ui.expanded : thinkingNow;
     return m(`.reasoning${thinkingNow ? '.reasoning-active' : ''}`, [
-      m('.reasoning-header', {
+      // A native button like the tool-call headers: Tab reaches it, Enter
+      // and Space toggle it, and aria-expanded carries its state.
+      m('button.reasoning-header', {
+        type: 'button',
+        'aria-expanded': String(expanded),
         onclick: () => { ui.userToggled = true; ui.expanded = !expanded; },
       }, [
-        m('span.disclosure', expanded ? '▼' : '▶'),
+        m('span.disclosure', { 'aria-hidden': 'true' }, expanded ? '▼' : '▶'),
         m('span.reasoning-label', 'Reasoning'),
         thinkingNow ? m(ThinkingSpinner, { sm: true }) : null,
       ]),

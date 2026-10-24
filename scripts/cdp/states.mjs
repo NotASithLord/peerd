@@ -4520,6 +4520,113 @@ export const STATES = [
     },
   },
 
+  {
+    name: 'composer-palette', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      try {
+        await evalIn(ctx.page, `(() => {
+          const input = document.querySelector('form.input-bar textarea');
+          input.focus(); input.value = '/'; input.setSelectionRange(1, 1);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        const listed = await waitFor(() => evalIn(ctx.page,
+          `!!document.querySelector('.command-palette')`), { budgetMs: 5_000, pollMs: 50 });
+        if (!listed) throw new Error('The slash palette did not render');
+        const builtins = await evalIn(ctx.page,
+          `JSON.stringify([...document.querySelectorAll('.palette-label')].slice(0, 3).map((el) => el.textContent))
+            === JSON.stringify(['/init', '/system', '/tools'])`);
+        if (baseRender) rec.observe('merge-base command list', { builtins });
+        else rec.check('the slash palette lists the three worker commands first', builtins);
+        await rec.visual('composer-palette-commands');
+        await evalIn(ctx.page, `(() => {
+          const input = document.querySelector('form.input-bar textarea');
+          input.value = '/zzzz'; input.setSelectionRange(5, 5);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        const empty = await waitFor(() => evalIn(ctx.page,
+          `document.querySelector('.palette-empty')?.textContent === 'No matching commands'`),
+        { budgetMs: 5_000, pollMs: 50 });
+        if (!empty) throw new Error('The no-match palette did not render');
+        const noMissingOption = await evalIn(ctx.page,
+          `!document.querySelector('form.input-bar textarea').hasAttribute('aria-activedescendant')`);
+        if (baseRender) rec.observe('merge-base empty option', { noMissingOption });
+        else rec.check('an empty palette names no missing active option', noMissingOption);
+        await rec.visual('composer-palette-no-match');
+        await ctx.page.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+        await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+        await evalIn(ctx.page, `import('/vendor/mithril/mithril.js').then(({ default: m }) => m.redraw.sync())`, true);
+        const escaped = await evalIn(ctx.page,
+          `!document.querySelector('.command-palette')
+            && document.querySelector('form.input-bar textarea').value === '/zzzz'`);
+        if (baseRender) rec.observe('merge-base Escape', { escaped });
+        else rec.check('Escape stays closed after keyup and keeps the draft', escaped);
+      } finally {
+        await evalIn(ctx.page, `(() => {
+          const input = document.querySelector('form.input-bar textarea');
+          input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+      }
+    },
+  },
+  {
+    name: 'reasoning-disclosure', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { MessageList } = await import('/sidepanel/components/message-list.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-reasoning';
+          // why fixed: the fixture must cover the live panel for the capture.
+          host.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);padding:14px;overflow:auto;';
+          document.body.appendChild(host);
+          m.mount(host, { view: () => m(MessageList, { messages: [{
+            id: 'reasoning-reply', role: 'assistant', content: 'The saved files are ready.',
+            thinking: 'I will check the saved files before I give the result.',
+          }] }) });
+          host.querySelector('.reasoning-header').focus();
+        })()`, true);
+        const nativeButton = await evalIn(ctx.page, `(() => {
+          const button = document.querySelector('#e2e-reasoning .reasoning-header');
+          return button.tagName === 'BUTTON' && button === document.activeElement
+            && button.getAttribute('aria-expanded') === 'false';
+        })()`);
+        if (baseRender) rec.observe('merge-base reasoning control', { nativeButton });
+        else rec.check('Reasoning is a focused native button with a collapsed state', nativeButton);
+        await rec.visual('reasoning-disclosure-focused');
+        // why click on the base: its disclosure is a div. Capture that same
+        // expanded content without requiring the branch's new keyboard path.
+        if (baseRender) await clickAndSyncRedraw(ctx.page, '#e2e-reasoning .reasoning-header');
+        else {
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' });
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+        }
+        const expanded = await waitFor(() => evalIn(ctx.page,
+          `!!document.querySelector('#e2e-reasoning .reasoning-body')`), { budgetMs: 3_000, pollMs: 50 });
+        if (baseRender) rec.check('the old disclosure opens for the expanded capture', !!expanded);
+        else rec.check('Enter opens Reasoning', !!expanded);
+        await rec.visual('reasoning-disclosure-expanded');
+        if (!baseRender) {
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, text: ' ' });
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+          const collapsed = await waitFor(() => evalIn(ctx.page,
+            `document.querySelector('#e2e-reasoning .reasoning-header')?.getAttribute('aria-expanded') === 'false'`),
+          { budgetMs: 3_000, pollMs: 50 });
+          rec.check('Space closes Reasoning', !!collapsed);
+        }
+      } finally {
+        await evalIn(ctx.page, `(async () => {
+          const host = document.getElementById('e2e-reasoning');
+          if (host) { (await import('/vendor/mithril/mithril.js')).default.mount(host, null); host.remove(); }
+        })()`, true);
+      }
+    },
+  },
+
   // --- visual: a multi-exchange transcript (bubbles carry across turns) -------
   {
     name: 'multi-turn-transcript', kind: 'visual', phase: 'post-unlock',

@@ -1414,6 +1414,17 @@ button.icon.is-active {
   color: var(--fg-muted);
 }
 .reasoning-header:hover { background: rgba(0, 183, 235, 0.08); }
+button.reasoning-header {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+button.reasoning-header:focus-visible {
+  outline: 2px solid var(--fg-muted);
+  outline-offset: -2px;
+}
 .reasoning-label {
   text-transform: uppercase;
   letter-spacing: 0.05em;
