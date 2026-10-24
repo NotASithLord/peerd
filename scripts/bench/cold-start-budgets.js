@@ -203,7 +203,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // authored graph in the disposable, module-preserving release staging tree.
     // Pin the measured pacing/consent/revocation closure with no reserve.
     serviceWorker: Object.freeze({
-      modules: 410, graphBytes: 2_095_772, entryBytes: 173,
+      modules: 410, graphBytes: 2_097_128, entryBytes: 173,
       inputSha256: 'e69cc813f7801a64f199549879049b6e0f226e61d1824b2ba4365281842131fe',
     }),
     // One shared read-only authority schema/provenance validator rejects
@@ -219,7 +219,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     offscreen: Object.freeze({ modules: 7, graphBytes: 22_022, entryBytes: 13_318 }),
   }),
   firefox: Object.freeze({
-    serviceWorker: Object.freeze({ modules: 90, graphBytes: 420_710, entryBytes: 210 }),
+    serviceWorker: Object.freeze({ modules: 90, graphBytes: 420_721, entryBytes: 210 }),
     sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
     home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
   }),
@@ -235,7 +235,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
   preview: Object.freeze({
     chrome: Object.freeze({
       serviceWorker: Object.freeze({
-        modules: 416, graphBytes: 2_215_379, entryBytes: 207,
+        modules: 416, graphBytes: 2_216_735, entryBytes: 207,
         inputSha256: '16c7ebee73d6029e090e7f9ddd919d7f43c1e607f64e649c9561e7470f674b96',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),
@@ -245,7 +245,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
     // Firefox has no dweb host yet, but Preview still carries its distinct
     // generated channel policy bytes.
     firefox: Object.freeze({
-      serviceWorker: Object.freeze({ modules: 92, graphBytes: 426_133, entryBytes: 81 }),
+      serviceWorker: Object.freeze({ modules: 92, graphBytes: 426_144, entryBytes: 81 }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
     }),
