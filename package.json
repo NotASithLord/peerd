@@ -111,13 +111,13 @@
     "eslint": "10.9.0",
     "fake-indexeddb": "^6.2.5",
     "globals": "^17.11.0",
-    "puppeteer-core": "^25.8.0",
+    "puppeteer-core": "25.13.0",
     "typescript": "^6.0.3",
     "web-ext": "10.6.0"
   },
   "overrides": {
     "adm-zip": "0.6.1",
-    "fast-uri": "3.1.8",
+    "fast-uri": "3.1.9",
     "image-size": "2.0.4",
     "js-yaml": "4.3.2",
     "shell-quote": "1.11.0"

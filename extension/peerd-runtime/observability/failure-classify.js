@@ -73,7 +73,9 @@ const RULES = [
   // "provider stream ended early (likely rate limit or network drop)" —
   // the guess in the parenthetical must not reclassify a dead stream.
   { kind: 'provider', test: /\bprovider stream ended early\b/i },
-  { kind: 'limits', test: /HTTP 402\b|HTTP 429\b|\busage limit\b|\bspend limit\b|\brate.?limit/i },
+  // The not_run alternative is a tool call cut by the output ceiling (the
+  // agent loop's result): the provider's limit spoke, not a bug.
+  { kind: 'limits', test: /HTTP 402\b|HTTP 429\b|\busage limit\b|\bspend limit\b|\brate.?limit|^not_run: .*output limit/i },
   // why agent sits ABOVE timeout: an actor-reported failure ("could not
   // complete your request: … timed out …") is the AGENT's account — the
   // delegated turn ran and failed in its own words; the timeout detail
