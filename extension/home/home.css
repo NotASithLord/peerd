@@ -728,13 +728,27 @@
 .chat-list-items { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
 .chat-list-item {
   position: relative;
-  display: flex; align-items: baseline; gap: 8px;
-  width: 100%; text-align: left;
-  padding: 9px 11px; border: none; border-radius: 7px;
-  background: none; color: var(--fg);
-  font-size: 13px; cursor: pointer;
+  display: flex;
+  border-radius: 7px;
+  color: var(--fg);
+  font-size: 13px;
   max-height: 52px;   /* so the delete animation can collapse it to 0 */
 }
+/* The row's main control is a real <button> (opens on Enter or Space, named by
+   its title and time); the delete control is its sibling, placed over the time.
+   The row keeps the hover / active / deleting styling. */
+.chat-list-item-main {
+  flex: 1; min-width: 0;
+  display: flex; align-items: baseline; gap: 8px;
+  text-align: left;
+  padding: 9px 11px; border: none; border-radius: inherit;
+  background: none; color: inherit;
+  font: inherit; cursor: pointer;
+}
+/* why a negative offset: .chat-list-items clips overflow, so a ring drawn
+   outside the row would lose its left and right edges. */
+.chat-list-item-main:focus-visible,
+.chat-item-del:focus-visible { outline: 2px solid var(--fg); outline-offset: -2px; }
 .chat-list-item:hover { background: var(--bg); }
 .chat-list-item.is-active { background: var(--bg); font-weight: 600; }
 .chat-list-item-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -750,8 +764,13 @@
   color: var(--fg-muted);
 }
 .chat-item-del::before { content: '⋯'; }
-.chat-list-item:hover .chat-item-del { opacity: 1; }
-.chat-list-item:hover .chat-list-item-meta { opacity: 0; }   /* make room for the trash */
+/* why :has(:focus-visible) and not :focus-within: a mouse click focuses the
+   button too, and the time must stay visible after that click exactly as
+   before; only keyboard focus needs the delete control revealed. */
+.chat-list-item:hover .chat-item-del,
+.chat-list-item:has(:focus-visible) .chat-item-del { opacity: 1; }
+.chat-list-item:hover .chat-list-item-meta,
+.chat-list-item:has(:focus-visible) .chat-list-item-meta { opacity: 0; }   /* make room for the trash */
 .chat-item-del:hover { color: var(--danger); background: var(--bg-elev); }
 .chat-item-del:hover::before { content: '🗑'; }
 
@@ -788,6 +807,15 @@
   background: var(--bg-elev); border: 1px solid var(--border);
   border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   display: flex; flex-direction: column; gap: 2px;
+}
+/* why here and not in the narrow-rail block above: same specificity, so the
+   later rule wins. In the narrow rail (a top bar) the bell sits in a 44px cell
+   at the top of the window, so a menu that opens upward lands above the
+   viewport. Open it downward, right-aligned to the bell, and cap the width to
+   the room left of the bell: 8px gutter + two 44px actions + gaps = 104px,
+   plus an 8px edge gutter. */
+@media (max-width: 620px) {
+  .notif-menu { top: 100%; bottom: auto; left: auto; right: 0; margin: 6px 0 0; width: min(320px, calc(100vw - 112px)); }
 }
 .notif-item {
   text-align: left; width: 100%;

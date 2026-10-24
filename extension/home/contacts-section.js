@@ -385,7 +385,10 @@ export const ContactsSection = () => {
     /** @param {{ attrs: { send: Send, requestTimeoutMs?: number } }} vnode */
     oncreate(vnode) {
       timer = setInterval(() => {
-        if (document.hidden) return;
+        // why skip while naming: the tick re-sorts live peers by lastSeen, and
+        // a keyed row move blurs the input, which commits a half-typed name.
+        // The Library poll pauses mid-rename for the same reason.
+        if (document.hidden || editingDid) return;
         if (!listFailure) refresh(vnode.attrs.send, vnode.attrs.requestTimeoutMs);
         refreshLive(vnode.attrs.send);
       }, 5000);

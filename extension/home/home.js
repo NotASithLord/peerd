@@ -160,7 +160,9 @@ const readView = () => {
 let activeView = readView();  // chat | actors | library | eval | discover | contacts | network
 clearHash();                  // deep-link consumed at boot — see viewFromHash
 /** @param {string} v */
-const setView = (v) => { activeView = v; try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ } };
+// why clear the stash: an explicit navigation is a choice, and the panel closing
+// later must not override it with the view we auto-left when the panel opened.
+const setView = (v) => { activeView = v; stashedChatView = null; try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ } };
 // SPA navigation keeps the rail mounted, so explicitly land keyboard and AT
 // users in the new content instead of leaving focus on a now-stale trigger.
 const focusActiveContent = () => requestAnimationFrame(() => {
@@ -181,11 +183,13 @@ const navigateHome = (view) => {
 let sidePanelOpen = false;
 /** @type {string | null} */
 let stashedChatView = null;  // the chat/chats view we auto-left when the panel opened — restored on close
-// "Pop to side" is STICKY: an explicit pop stays open until you un-pop (Bring it
-// here) or close the sidebar yourself — it does NOT auto-close on return to home.
-// (A panel opened by an "Open ↗" tab card is NOT sticky — it auto-closes when you
-// come back, so you can glance at the agent's tab then return.)
-let panelStickyByPop = false;
+// Only a panel opened by an "Open ↗" tab card auto-closes when you come back to
+// home (glance at the agent's tab, then return). A panel you opened yourself,
+// from the toolbar or with "Pop to side", STAYS until you bring the chat back or
+// close the sidebar. why a card flag and not a sticky-pop flag: every panel boot
+// flaps the surfaces broadcast open, closed, open within a few ms, so a flag
+// that resets on close is gone before you ever return.
+let panelOpenedByCard = false;
 // The recent-chats list column is collapsible (it gets noisy) — persisted.
 let chatListCollapsed = (() => { try { return localStorage.getItem('peerd.home.chatsCollapsed') === '1'; } catch { return false; } })();
 const toggleChatList = () => {
@@ -315,8 +319,8 @@ const requestDebugger = async (noticeId) => {
 // "Open ↗" on a "peerd opened a tab" card: focus the agent's background tab AND
 // open the side panel — BOTH inside this click gesture, the only moment Chrome
 // lets us open the panel (DESIGN-12). A card-opened panel follows you to that
-// tab and auto-closes when you come back to home (onVisibility) — UNLESS you'd
-// explicitly popped it (sticky). The card itself persists (tracks the live tab).
+// tab and auto-closes when you come back to home (onVisibility). The card itself
+// persists (tracks the live tab).
 /**
  * @param {number} tabId
  * @param {number} [windowId]
@@ -330,6 +334,7 @@ const openAgentTab = (tabId, windowId) => {
     const p = sidePanelApi()?.open?.(wid != null ? { windowId: wid } : { tabId });
     if (p?.catch) p.catch((/** @type {unknown} */ e) => console.warn('[home] open panel failed', e));
   } catch (e) { console.warn('[home] open panel threw', e); }
+  panelOpenedByCard = true;
   try { browser.tabs.update(tabId, { active: true }); } catch (e) { console.warn('[home] focus tab failed', e); }
   // why no dismiss: the agent-tab card PERSISTS after click — it tracks the live
   // agent tab so you can jump back any time; it clears itself when the tab closes.
@@ -361,14 +366,16 @@ catch { /* no tabs API in this context */ }
 const popToSide = () => {
   try {
     if (homeTab?.windowId == null) return; // id not resolved yet — no-op beats a reject
-    panelStickyByPop = true;               // explicit pop is STICKY — never auto-closes
     const p = sidePanelApi()?.open?.({ windowId: homeTab.windowId });
     if (p?.catch) p.catch((/** @type {unknown} */ e) => console.warn('[home] sidePanel.open failed', e));
   } catch (e) { console.warn('[home] sidePanel.open threw', e); }
 };
 // Bring the chat back from the panel into home (the inverse of pop-to-side / the
 // "go to tab" card). The panel's own close button does the same.
-const bringChatHome = () => settleUiEffect(send({ type: 'sidepanel/close' }));
+// why stash 'chat' here: the user asked for the chat, so the close must land on
+// Chat even after they navigated meanwhile (setView cleared the stash) or when
+// the panel opened while home was already on a tool view (nothing was stashed).
+const bringChatHome = () => { stashedChatView = 'chat'; settleUiEffect(send({ type: 'sidepanel/close' })); };
 
 // Actor Space spans every session, but its room action still lands on one
 // concrete chat. When home owns chat, navigate there; when the side panel owns
@@ -383,17 +390,19 @@ const openActorSession = (sessionId) => settleSessionEffect(
   },
 );
 
-// Auto-close the side panel when the user RETURNS to the home tab (a hidden →
-// visible transition) — UNLESS they explicitly popped it (sticky). So a card-
-// opened panel ("watch the agent on its tab") closes when you come back and chat
-// renders here again; a "Pop to side" panel STAYS until you bring it back or
-// close the sidebar yourself. (Auto-OPENING the panel when the agent creates a
-// tab is impossible — Chrome only opens the panel during a user gesture.)
+// Auto-close a CARD-opened side panel when the user RETURNS to the home tab (a
+// hidden to visible transition): "watch the agent on its tab" closes when you
+// come back and chat renders here again. A panel you opened yourself (toolbar,
+// "Pop to side") STAYS until you bring it back or close the sidebar. The card
+// flag is spent on that first return either way. (Auto-OPENING the panel when
+// the agent creates a tab is impossible: Chrome only opens the panel during a
+// user gesture.)
 let homeWasHidden = (typeof document !== 'undefined' && document.hidden);
 const onVisibility = () => {
   const hidden = document.hidden;
-  if (homeWasHidden && !hidden && sidePanelOpen && !panelStickyByPop) {
-    settleUiEffect(send({ type: 'sidepanel/close' }));
+  if (homeWasHidden && !hidden) {
+    if (sidePanelOpen && panelOpenedByCard) settleUiEffect(send({ type: 'sidepanel/close' }));
+    panelOpenedByCard = false;
   }
   homeWasHidden = hidden;
 };
@@ -410,10 +419,7 @@ function applySidePanelOpen(open) {
     // complementary two-level view: local work beside the page, global runtime
     // topology on home.
     if (activeView === 'chat') { stashedChatView = activeView; activeView = 'actors'; }
-  } else {
-    panelStickyByPop = false;   // panel closed → stickiness resets
-    if (stashedChatView) { activeView = stashedChatView; stashedChatView = null; }
-  }
+  } else if (stashedChatView) { activeView = stashedChatView; stashedChatView = null; }
   m.redraw();
 }
 
@@ -645,23 +651,33 @@ const ChatListPanel = () => {
           : sessions === null
             ? m('.chat-list-empty.muted', 'Loading…')
             : visible.length
-          ? visible.map((/** @type {any} */ s) => m('.chat-list-item', {
-              key: s.sessionId,
-              class: [s.sessionId === cur ? 'is-active' : '', deletingId === s.sessionId ? 'is-deleting' : ''].filter(Boolean).join(' '),
-              role: 'button', tabindex: '0',
-              onclick: () => {
-                if (deletingId || s.sessionId === cur) return;
-                settleSessionEffect({ type: 'session/switch', sessionId: s.sessionId }, load);
-              },
-            }, [
-              m('.chat-list-item-title', (s.title && s.title.trim()) || 'New chat'),
-              m('.chat-list-item-meta', fmtAgo(s.lastMessageAt ?? s.createdAt)),
-              // Hover affordance: a 3-dot that turns into a red trash; click deletes.
-              m('button.chat-item-del', {
-                title: 'Delete chat', 'aria-label': 'Delete chat',
-                onclick: (/** @type {Event} */ e) => { e.stopPropagation(); deleteChat(s.sessionId, s.sessionId === cur); },
-              }),
-            ]))
+          ? visible.map((/** @type {any} */ s) => {
+              const title = (s.title && s.title.trim()) || 'New chat';
+              // why two sibling buttons (the side panel's SessionRow shape): a
+              // role=button div never opened on Enter or Space, and a delete
+              // button nested inside it was an invisible Tab stop that folded
+              // "Delete chat" into the row's accessible name.
+              return m('.chat-list-item', {
+                key: s.sessionId,
+                class: [s.sessionId === cur ? 'is-active' : '', deletingId === s.sessionId ? 'is-deleting' : ''].filter(Boolean).join(' '),
+              }, [
+                m('button.chat-list-item-main', {
+                  'aria-current': s.sessionId === cur ? 'true' : undefined,
+                  onclick: () => {
+                    if (deletingId || s.sessionId === cur) return;
+                    settleSessionEffect({ type: 'session/switch', sessionId: s.sessionId }, load);
+                  },
+                }, [
+                  m('span.chat-list-item-title', title),
+                  m('span.chat-list-item-meta', fmtAgo(s.lastMessageAt ?? s.createdAt)),
+                ]),
+                // Hover affordance: a 3-dot that turns into a red trash; click deletes.
+                m('button.chat-item-del', {
+                  title: 'Delete chat', 'aria-label': `Delete chat “${title}”`,
+                  onclick: () => deleteChat(s.sessionId, s.sessionId === cur),
+                }),
+              ]);
+            })
             : m('.chat-list-empty.muted', 'No chats yet.')),
       ]);
     },
@@ -687,7 +703,21 @@ const NotificationsBell = () => {
     view() {
       const items = peerNotifications.list();
       const unseen = peerNotifications.unseen();
-      return m('.notif', [
+      return m('.notif', {
+        // why Escape + focusout: the menu is a disclosure, so it closes the way
+        // every other peerd popup does (Escape, focus leaving it), not only on
+        // an outside mousedown. A null relatedTarget is a click on the menu's
+        // own padding (or a window blur), which stays with that mousedown rule.
+        onkeydown: (/** @type {KeyboardEvent} */ e) => {
+          if (e.key !== 'Escape' || !open) return;
+          e.preventDefault();
+          open = false;
+          /** @type {HTMLElement | null} */ ((/** @type {Element} */ (e.currentTarget)).querySelector('.notif-bell'))?.focus();
+        },
+        onfocusout: (/** @type {FocusEvent} */ e) => {
+          if (open && e.relatedTarget instanceof Node && !(/** @type {Element} */ (e.currentTarget)).contains(e.relatedTarget)) open = false;
+        },
+      }, [
         m('button.home-nav-item.notif-bell', {
           'aria-expanded': String(open),
           onclick: () => { open = !open; if (open) peerNotifications.markAllSeen(); },

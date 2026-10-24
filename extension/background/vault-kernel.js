@@ -467,6 +467,7 @@ const stateSnapshot = async (authority = lockLifecycle.state() && vault.isLocked
     sessionId: null, messages: [], cost: null,
     permission: { mode: 'act', confirmActions: false },
     provider: null, customSystemPrompt: null, toolManifest: null,
+    title: null, todos: null,
   };
   let profile = null;
   let currentSession = null;
@@ -485,6 +486,12 @@ const stateSnapshot = async (authority = lockLifecycle.state() && vault.isLocked
       provider: currentSession?.provider ?? null,
       customSystemPrompt: currentSession?.customSystemPrompt ?? null,
       toolManifest: currentSession?.toolManifest ?? null,
+      // why title + todos: home's chat header reads session.title and the
+      // TodoCard reads session.todos off this snapshot, and the reducer
+      // replaces the whole session on every 'state' push, so a field missing
+      // here is a field lost on the next push.
+      title: currentSession?.title ?? null,
+      todos: currentSession?.todos ?? null,
     };
     const durableProfile = await kernelProfile.reconcile();
     profile = {

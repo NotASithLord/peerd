@@ -115,6 +115,15 @@ describe('reduceChat', () => {
     expect(reduceChat(streamingOn, { type: 'turn/streaming', sessionId: 'bg', streaming: false })).toBe(streamingOn);
   });
 
+  test('turn/state carries the session title and keeps it when a later push omits it', () => {
+    const titled = reduceChat(INITIAL_STATE, {
+      type: 'turn/state', session: { sessionId: 's1', messages: [{ id: 'm1' }], title: 'Plan a weekend trip' },
+    });
+    expect(titled.session.title).toBe('Plan a weekend trip');
+    const later = reduceChat(titled, { type: 'turn/state', session: { sessionId: 's1', messages: [{ id: 'm1' }, { id: 'm2' }] } });
+    expect(later.session.title).toBe('Plan a weekend trip');
+  });
+
   test('a scoped system note appears only in its owning session', () => {
     const viewed = withSession('viewed');
     const matching = reduceChat(viewed, {
