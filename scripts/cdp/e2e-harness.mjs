@@ -739,6 +739,7 @@ export async function launchPeerd({
     await connection.send('Runtime.enable').catch(() => {});
     await connection.send('Fetch.enable', { patterns: [
       { urlPattern: '*11434*' },
+      { urlPattern: 'https://api.openai.com/v1/chat/completions' },
       { urlPattern: 'https://remote-module.test/*' },
     ] });
     return connection;

@@ -176,6 +176,7 @@ export const planTrim = (messages, opts = {}) => {
   const countTriggerActive = contextWindow <= 0;
   const overCap = countTriggerActive && messages.length > softCap;
   let dropCount = overCap ? messages.length - keepRecent : 0;
+  let state = normalizeSummaryState(opts.summaryState);
 
   // Token trigger (only when the caller knows the model's window). When
   // the estimated prompt crosses triggerFraction, drop the oldest messages
@@ -184,21 +185,25 @@ export const planTrim = (messages, opts = {}) => {
   // trigger wants to drop more wins.
   if (contextWindow > 0) {
     const total = estimate(messages, system);
-    if (total > triggerFraction * contextWindow) {
-      const target = targetFraction * contextWindow;
-      let kept = total;
-      let tokenDrop = 0;
+    const target = targetFraction * contextWindow;
+    // why: the stored prefix stays large after trim or body compaction. Test
+    // the sent slice, and keep its anchor until the full history fits again.
+    if (total > target && state.covered > 0
+        && messages[state.covered - 1]?.id === state.coveredLastId) dropCount = state.covered;
+    let kept = dropCount > 0 ? estimate([
+      { role: 'user', content: wrapSummary(renderSummaryText(state)) }, ...messages.slice(dropCount),
+    ], system) : total;
+    if (kept > triggerFraction * contextWindow) {
       const maxDrop = messages.length - MIN_KEEP_RECENT;
       // why estimate([m], ''): decrement with the SAME (injected) estimator
       // that produced `total`, treated as additive — otherwise a custom
       // estimator (the docstring invites one) measures `total` on one scale
       // and the per-message decrement on another, mis-cutting the window.
       // For the default char/4 estimator this equals estimateMessageTokens(m).
-      while (tokenDrop < maxDrop && kept > target) {
-        kept -= estimate([messages[tokenDrop]], '');
-        tokenDrop++;
+      while (dropCount < maxDrop && kept > target) {
+        kept -= estimate([messages[dropCount]], '');
+        dropCount++;
       }
-      if (tokenDrop > dropCount) dropCount = tokenDrop;
     }
   }
 
@@ -219,7 +224,6 @@ export const planTrim = (messages, opts = {}) => {
   }
   if (dropCount <= 0) return noop();
 
-  let state = normalizeSummaryState(opts.summaryState);
   if (state.covered > 0) {
     const anchor = messages[state.covered - 1];
     // why reset on drift: the watermark assumes the message list is

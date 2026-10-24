@@ -2066,6 +2066,248 @@ export const STATES = [
 
   // --- visual: idle unlocked panel -------------------------------------------
   {
+    name: 'invalid-tool-arguments', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const requests = [];
+      const ids = ['runtime-broken-json', 'runtime-null-json', 'runtime-valid-object'];
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir, modelResponder: (index, request) => {
+        requests.push({ url: request.url, body: JSON.parse(request.postData) });
+        if (index > 0) return { sse: sseText('ARGUMENTS-CHECKED') };
+        const calls = ['{"url":"unterminated', 'null', '{}'].map((argumentsText, offset) => ({
+          index: offset, id: ids[offset], type: 'function', function: { name: 'open_tab', arguments: argumentsText },
+        }));
+        return { sse: [
+          `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: calls } }] })}`,
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] })}`,
+          'data: [DONE]', '',
+        ].join('\n\n') };
+      } });
+      try {
+        await unlockAndReady(child.page);
+        const key = await rpc(child.page, { type: 'provider/setKey', provider: 'openai', plaintext: 'sk-e2e-runtime-wire-only', activate: false });
+        const settings = await rpc(child.page, { type: 'settings/update', patch: { providerName: 'openai', providerModel: 'gpt-4.1-mini', autoMemoryEnabled: false } });
+        if (!key?.ok || !settings?.ok) throw new Error('OpenAI fixture selection refused');
+        const beforeTabs = await evalIn(child.page, `chrome.tabs.query({}).then((tabs) => tabs.map(({ id, url }) => ({ id, url })))`, true);
+        const beforeAudit = await rpc(child.page, { type: 'audit/list', limit: 800 });
+        if (!beforeAudit?.ok || !Array.isArray(beforeAudit.entries)) throw new Error('audit read refused');
+        const priorIds = new Set(beforeAudit.entries.map((entry) => entry.id));
+        if (!await waitFor(() => evalIn(child.page, `!!document.querySelector('.input-bar textarea')`))) throw new Error('composer did not mount');
+        await evalIn(child.page, `(() => { 'use strict';
+          const input = document.querySelector('.input-bar textarea'); input.value = 'Open the task tabs with the supplied arguments.';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        if (!await waitFor(() => evalIn(child.page, `document.querySelector('.send-btn')?.disabled === false`))) throw new Error('composer is not ready');
+        await clickAndSyncRedraw(child.page, '.send-btn');
+        const session = await waitFor(async () => {
+          const reply = await rpc(child.page, { type: 'state/get' });
+          return reply?.ok && reply.state?.session?.messages?.some((message) => message.role === 'assistant' && message.content === 'ARGUMENTS-CHECKED' && message.streaming === false) ? reply.state.session : null;
+        }, { budgetMs: 30_000, pollMs: 80 });
+        if (!session) throw new Error('OpenAI argument probe did not settle');
+        const afterTabs = await evalIn(child.page, `chrome.tabs.query({}).then((tabs) => tabs.map(({ id, url }) => ({ id, url })))`, true);
+        const added = afterTabs.filter((tab) => !beforeTabs.some((prior) => prior.id === tab.id));
+        const results = session.messages.flatMap((message) => message.toolResults ?? []);
+        const valid = results.find((result) => result.tool_use_id === ids[2]);
+        const receiptId = Number(valid?.content.match(/"tabId"\s*:\s*(\d+)/)?.[1]);
+        rec.check('the valid sibling opens its real task tab', valid?.is_error === false && added.some((tab) => tab.id === receiptId), JSON.stringify({ added, valid }));
+        rec.check('the existing tab URLs stay exact', beforeTabs.every((prior) => afterTabs.some((tab) => tab.id === prior.id && tab.url === prior.url)));
+        rec.check('the real OpenAI adapter receives two model responses', requests.length === 2
+          && requests.every((request) => request.url === 'https://api.openai.com/v1/chat/completions'));
+        const replay = requests[1]?.body.messages ?? [];
+        const uses = session.messages.flatMap((message) => message.toolUses ?? []);
+        const audit = await rpc(child.page, { type: 'audit/list', limit: 800 });
+        if (!audit?.ok || !Array.isArray(audit.entries)) throw new Error('settled audit read refused');
+        const entries = audit.entries.filter((entry) => !priorIds.has(entry.id));
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base invalid effects', { added, results, entries });
+        else {
+          rec.check('both invalid calls have known error results and no target effect', added.length === 1 && ids.slice(0, 2).every((id) => {
+            const result = results.find((candidate) => candidate.tool_use_id === id);
+            return result?.is_error === true && result.outcomeKnown !== false && result.content.startsWith('invalid_arguments:')
+              && replay.some((message) => message.role === 'tool' && message.tool_call_id === id && message.content === result.content)
+              && JSON.stringify(uses.find((use) => use.id === id)?.input) === '{}';
+          }), JSON.stringify(results));
+          const audited = entries.filter((entry) => ids.includes(entry.details?.callId));
+          rec.check('host audit records two known failures and only one execution', audited.length === 3
+            && ids.slice(0, 2).every((id) => audited.some((entry) => entry.type === 'tool_failed'
+              && entry.details.callId === id && entry.details.tool === 'open_tab'
+              && entry.details.outcome === 'semantic-failure' && entry.details.performed === false && entry.details.outcomeKnown === true))
+            && audited.some((entry) => entry.type === 'tool_executed' && entry.details.callId === ids[2]
+              && entry.details.tool === 'open_tab' && entry.details.operation === 'turn.page.open-tab'
+              && entry.details.performed === true && entry.details.outcomeKnown === true), JSON.stringify(audited));
+        }
+        if (!await waitFor(() => evalIn(child.page, `document.querySelectorAll('.tool-call').length === 3`))) throw new Error('tool cards did not render');
+        await rec.visualPage('invalid-tool-arguments', child.page);
+        await clickAndSyncRedraw(child.page, '.tool-call-header');
+        await rec.visualPage('invalid-arguments-detail', child.page);
+      } finally { await child.close(); }
+    },
+  },
+  {
+    name: 'instruction-paging', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const skillName = 'e2e-instruction-paging';
+      const skillBody = Array.from({ length: 120 }, (_, index) => `Step ${index + 1}: ${'Keep this instruction. '.repeat(20).trimEnd()}`).join('\n');
+      const memoryBody = Array.from({ length: 300 }, (_, index) => `Note ${index + 1}: ${'Keep this durable note. '.repeat(2).trimEnd()}`).join('\n');
+      const pages = { load_skill: [], read_memory: [] };
+      let stage = 'load_skill';
+      let modelCalls = 0;
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir, modelResponder: (_index, request) => {
+        if (++modelCalls > 10) return { sse: sseText('PAGING-PROBE-FAILED') };
+        const body = JSON.parse(request.postData);
+        const previous = body.messages.filter((message) => message.role === 'tool').at(-1);
+        if (previous) {
+          const call = body.messages.flatMap((message) => message.tool_calls ?? []).find((candidate) => candidate.id === previous.tool_call_id);
+          if (!call || !Object.hasOwn(pages, call.function.name)) throw new Error('unexpected paging result');
+          pages[call.function.name].push(previous.content);
+          const next = previous.content.match(/next: (.+)\.$/m);
+          if (next) return { sse: sseToolCall(call.function.name, JSON.parse(next[1])) };
+          stage = call.function.name === 'load_skill' ? 'read_memory' : 'done';
+        }
+        return { sse: stage === 'done' ? sseText('ALL-INSTRUCTIONS-READ')
+          : sseToolCall(stage, stage === 'load_skill' ? { name: skillName } : { scope: 'user' }) };
+      } });
+      let options;
+      try {
+        await unlockAndReady(child.page);
+        const key = await rpc(child.page, { type: 'provider/setKey', provider: 'openai', plaintext: 'sk-e2e-runtime-wire-only', activate: false });
+        const settings = await rpc(child.page, { type: 'settings/update', patch: { providerName: 'openai', providerModel: 'gpt-4.1-mini', autoMemoryEnabled: false } });
+        if (!key?.ok || !settings?.ok) throw new Error('paging provider selection refused');
+        options = await openWidePage(child, 'options/options.html#!/skills');
+        if (!await waitFor(() => evalIn(options, `!!document.querySelector('.skills-install textarea')`))) throw new Error('skill editor did not mount');
+        await evalIn(options, `(() => { 'use strict';
+          const input = document.querySelector('.skills-install textarea');
+          input.value = ${JSON.stringify(`---\nname: ${skillName}\ndescription: Check every instruction through bounded pages.\n---\n${skillBody}`)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        await clickAndSyncRedraw(options, '.skills-install button');
+        if (!await waitFor(async () => {
+          const result = await rpc(options, { type: 'skills/list' });
+          return result?.ok && result.skills?.some((skill) => skill.name === skillName);
+        })) throw new Error('long skill did not install');
+        await options.close();
+        options = await openWidePage(child, 'options/options.html#!/memory');
+        if (!await waitFor(() => evalIn(options, `!!document.querySelector('.memory-actions')`))) throw new Error('memory view did not mount');
+        await evalIn(options, `(() => { 'use strict';
+          [...document.querySelectorAll('.memory-actions button')].find((button) => button.textContent === 'New user note')?.click();
+        })()`);
+        if (!await waitFor(() => evalIn(options, `!![...document.querySelectorAll('.memory-card')].find((card) => card.querySelector('.memory-scope')?.textContent.startsWith('User'))`))) throw new Error('user memory editor did not mount');
+        await evalIn(options, `(() => { 'use strict';
+          const card = [...document.querySelectorAll('.memory-card')].find((element) => element.querySelector('.memory-scope')?.textContent.startsWith('User'));
+          const input = card.querySelector('textarea'); input.value = ${JSON.stringify(memoryBody)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        if (!await waitFor(() => evalIn(options, `[...document.querySelectorAll('.memory-card-actions button')].find((button) => button.textContent === 'Save')?.disabled === false`))) throw new Error('memory draft did not become ready');
+        await evalIn(options, `[...document.querySelectorAll('.memory-card-actions button')].find((button) => button.textContent === 'Save').click()`);
+        if (!await waitFor(async () => {
+          const result = await rpc(options, { type: 'memory/export' });
+          return result?.ok && result.payload?.docs?.some((doc) => doc.kind === 'user' && doc.body === memoryBody);
+        })) throw new Error('long memory did not save');
+        await child.page.send('Page.bringToFront');
+        await evalIn(child.page, `(() => { 'use strict';
+          const input = document.querySelector('.input-bar textarea'); input.value = 'Read the complete paging skill and user memory.';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        if (!await waitFor(() => evalIn(child.page, `document.querySelector('.send-btn')?.disabled === false`))) throw new Error('paging composer is not ready');
+        await clickAndSyncRedraw(child.page, '.send-btn');
+        const finished = await waitFor(async () => {
+          const reply = await rpc(child.page, { type: 'state/get' });
+          return reply?.ok && reply.state?.session?.messages?.some((message) => message.role === 'assistant' && message.content === 'ALL-INSTRUCTIONS-READ' && message.streaming === false);
+        }, { budgetMs: 45_000, pollMs: 80 });
+        if (!finished) throw new Error(`instruction paging did not settle: ${modelCalls} calls`);
+        rec.check('both reads return real nonempty model tool bytes', pages.load_skill.length > 0 && pages.read_memory.length > 0);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base instruction pages', pages);
+        else {
+          rec.check('every skill byte reaches the model through intact bounded pages', pages.load_skill.length > 1
+            && pages.load_skill.every((page) => page.length <= 18_000 && !page.includes(' chars elided '))
+            && pages.load_skill.map((page) => page.match(/\n\n([\s\S]*)\n<\/skill>/)?.[1]).join('') === skillBody);
+          rec.check('every memory byte reaches the model through intact bounded pages', pages.read_memory.length > 1
+            && pages.read_memory.every((page) => page.length <= 18_000 && !page.includes(' chars elided '))
+            && pages.read_memory.map((page) => page.replace(/\n\[paging\][^\n]*$/, '')).join('') === memoryBody);
+        }
+        for (const name of ['load_skill', 'read_memory']) for (const edge of ['first', 'last']) {
+          await evalIn(child.page, `(() => { 'use strict';
+            const cards = [...document.querySelectorAll('.tool-call')].filter((card) => card.querySelector('.tool-name')?.textContent === ${JSON.stringify(name)});
+            const card = cards[${edge === 'first' ? '0' : 'cards.length - 1'}];
+            if (!card) throw new Error('paging card is missing');
+            const header = card.querySelector('.tool-call-header'); if (header.getAttribute('aria-expanded') !== 'true') header.click();
+          })()`);
+          await rec.visualPage(name === 'load_skill' && edge === 'first' ? 'instruction-paging' : `instruction-${name}-${edge}`, child.page, { beforeShot: (page) => evalIn(page, `(() => { 'use strict';
+            const cards = [...document.querySelectorAll('.tool-call')].filter((card) => card.querySelector('.tool-name')?.textContent === ${JSON.stringify(name)});
+            const card = cards[${edge === 'first' ? '0' : 'cards.length - 1'}]; card.scrollIntoView({ block: 'start' });
+            const content = card.querySelector('.tool-result-content'); if (content) content.scrollTop = ${edge === 'first' ? '0' : 'content.scrollHeight'};
+          })()`) });
+        }
+      } finally { if (options) await options.close(); await child.close(); }
+    },
+  },
+  {
+    name: 'actor-stop-transcripts', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      let childCalls = 0;
+      let spawned = false;
+      let parentWaiting = false;
+      const tasks = [1, 2, 3].map((index) => `Stop transcript fixture ${index}: retain this task after reload.`);
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir, modelResponder: async (_index, request) => {
+        if (request.postData.includes('<actor_agent>')) { childCalls++; await gate; return { sse: sseText('LATE-CHILD-REPLY') }; }
+        if (!spawned) { spawned = true; return { sse: sseToolCalls(tasks.map((task) => ({ name: 'actor_create', args: { task, tools: [] } }))) }; }
+        parentWaiting = true; await gate; return { sse: sseText('LATE-PARENT-REPLY') };
+      } });
+      try {
+        await unlockAndReady(child.page);
+        if (!await waitFor(() => evalIn(child.page, `!!document.querySelector('.input-bar textarea')`))) throw new Error('actor composer did not mount');
+        await evalIn(child.page, `(() => { 'use strict';
+          const input = document.querySelector('.input-bar textarea'); input.value = 'Start three actors, then let me stop them.';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        if (!await waitFor(() => evalIn(child.page, `document.querySelector('.send-btn')?.disabled === false`))) throw new Error('actor composer is not ready');
+        await clickAndSyncRedraw(child.page, '.send-btn');
+        if (!await waitFor(() => childCalls === 3 && parentWaiting, { budgetMs: 30_000, pollMs: 50 })) throw new Error('three actors did not reach the model');
+        const state = await rpc(child.page, { type: 'state/get' });
+        const parentId = state?.state?.session?.sessionId;
+        if (!parentId) throw new Error('actor parent session is missing');
+        if (!await clickAndSyncRedraw(child.page, 'form.input-bar button.stop')) throw new Error('real Stop control is missing');
+        const evidence = await waitFor(async () => {
+          const audit = await rpc(child.page, { type: 'audit/list', limit: 800 });
+          if (!audit?.ok || !Array.isArray(audit.entries)) throw new Error('actor audit read refused');
+          const entries = audit.entries.filter((entry) => entry.details?.parentSessionId === parentId);
+          const ids = [...new Set(entries.filter((entry) => entry.type === 'actor_spawned').map((entry) => entry.details.actorSessionId))];
+          return ids.length === 3 && ids.every((id) => entries.some((entry) => entry.details?.actorSessionId === id
+            && ['actor_completed', 'actor_persistence_failed'].includes(entry.type))) ? { ids, entries } : null;
+        }, { budgetMs: 20_000, pollMs: 80 });
+        if (!evidence) throw new Error('stopped actors did not settle');
+        const sessions = await Promise.all(evidence.ids.map(async (sessionId) => {
+          const reply = await rpc(child.page, { type: 'session/get', sessionId });
+          if (!reply?.ok || !Array.isArray(reply.session?.messages) || reply.session.parentSessionId !== parentId) throw new Error('child transcript read refused');
+          return reply.session;
+        }));
+        const messageIds = sessions.flatMap((session) => session.messages.map((message) => message.id));
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base stopped transcripts', { sessions, entries: evidence.entries });
+        else rec.check('all three Stop fallbacks persist with six distinct IDs', sessions.every((session) => session.messages.length === 2
+          && session.messages[0].content === session.task) && new Set(messageIds).size === 6
+          && !evidence.entries.some((entry) => entry.type === 'actor_persistence_failed'), JSON.stringify({ sessions, entries: evidence.entries }));
+        release();
+        await reloadReadyPanel(child, { expectedSessionId: parentId });
+        if (!await waitFor(() => evalIn(child.page, `document.querySelectorAll('.tool-call.tool-actor').length === 3`))) throw new Error('reloaded actor cards are missing');
+        await evalIn(child.page, `document.querySelectorAll('.tool-call.tool-actor > .tool-call-header').forEach((button) => button.click())`);
+        const readable = sessions.filter((session) => session.messages.length > 0).length;
+        if (!await waitFor(() => evalIn(child.page, `document.querySelectorAll('.actor-transcript').length === ${readable}`))) throw new Error('actor transcript cards did not load');
+        if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') rec.check('all three saved tasks render after reload', await evalIn(child.page,
+          `${JSON.stringify(tasks)}.every((task) => [...document.querySelectorAll('.actor-transcript .bubble')].some((element) => element.textContent.trim() === task
+            && element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0 && getComputedStyle(element).visibility === 'visible'))`));
+        await rec.visualPage('actor-stop-transcripts', child.page);
+        await rec.visualPage('actor-stop-reopened-last', child.page, { beforeShot: (page) => evalIn(page,
+          `document.querySelectorAll('.tool-call.tool-actor')[2].scrollIntoView({ block: 'end' })`) });
+        // why: an async delivery can retry after the panel reload has finished.
+        await sleep(1_500);
+        rec.check('Stop prevents a later actor wake after the delivery retry interval', childCalls === 3 && child.modelCallCount() === 5);
+      } finally { release(); await child.close(); }
+    },
+  },
+  {
     name: 'idle-unlocked', kind: 'visual', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) { await rec.visual('idle-unlocked'); },
