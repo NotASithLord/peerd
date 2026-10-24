@@ -839,7 +839,6 @@ export const InputBar = {
             rows: 2,
             placeholder,
             value: ui.value,
-            role: 'textbox',
             'aria-autocomplete': 'list',
             'aria-expanded': paletteOpen ? 'true' : 'false',
             'aria-controls': paletteOpen ? 'composer-palette' : undefined,
@@ -849,9 +848,10 @@ export const InputBar = {
             oncreate: (/** @type {{ dom: HTMLTextAreaElement }} */ vnode) => {
               ui.el = vnode.dom;
               autosize(vnode.dom);
-              // why a window listener: resizing the panel re-wraps the draft,
-              // which changes its content height - and Mithril does not
-              // redraw on resize, so no onupdate would fire.
+              // why: restore typing after Unlock only if no control owns focus.
+              // A mounted modal keeps its selected control.
+              if (document.activeElement === document.body) vnode.dom.focus();
+              // why: resize changes wrapping without a Mithril redraw.
               ui.resizeListener = () => autosize(vnode.dom);
               window.addEventListener('resize', ui.resizeListener);
             },

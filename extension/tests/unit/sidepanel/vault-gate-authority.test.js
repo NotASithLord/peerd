@@ -65,6 +65,115 @@ describe('sidepanel.vault-gate cleanup posture', () => {
   });
 });
 
+describe('sidepanel.vault-gate passphrase errors', () => {
+  it('keeps focus through repeated wrong replies and permits one corrected retry', async () => {
+    const state = stateFor({ initialized: true, prfEnrolled: false });
+    state.vault.hasRecovery = true;
+    /** @type {Message[]} */ const sent = [];
+    /** @type {(reply: any) => void} */ let finish = () => {};
+    const { root, unmount } = mountGate(state, async message => {
+      sent.push(message);
+      return new Promise(resolve => { finish = resolve; });
+    });
+    try {
+      const field = /** @type {HTMLInputElement} */ (root.querySelector('#pass'));
+      const form = /** @type {HTMLFormElement} */ (root.querySelector('form'));
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        field.value = `wrong passphrase ${attempt}`;
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+        field.focus();
+        form.requestSubmit();
+        m.redraw.sync();
+        expect(field.disabled).toBe(false);
+        expect(field.readOnly).toBe(true);
+        expect(field.getAttribute('aria-busy')).toBe('true');
+        expect(document.activeElement).toBe(field);
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        expect(sent.length).toBe(attempt + 1);
+        finish({ ok: false, error: 'wrong-passphrase' });
+        await waitFor(() => !field.readOnly);
+        const error = root.querySelector('#vault-error');
+        expect(error?.textContent).toBe('That passphrase is wrong.');
+        expect(error?.getAttribute('role')).toBe('alert');
+        expect(field.getAttribute('aria-invalid')).toBe('true');
+        expect(field.getAttribute('aria-describedby')).toBe(error?.id);
+        expect(document.activeElement).toBe(field);
+        expect(root.querySelector('#pass')).toBe(field);
+      }
+      field.value = 'correct fixture passphrase';
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      form.requestSubmit();
+      m.redraw.sync();
+      expect(field.getAttribute('aria-invalid')).toBe(null);
+      expect(field.getAttribute('aria-describedby')).toBe(null);
+      expect(root.querySelector('#vault-error')).toBe(null);
+      finish({ ok: true });
+      await waitFor(() => !field.readOnly);
+      expect(field.value).toBe('');
+      expect(sent).toEqual([
+        { type: 'vault/unlock', passphrase: 'wrong passphrase 0' },
+        { type: 'vault/unlock', passphrase: 'wrong passphrase 1' },
+        { type: 'vault/unlock', passphrase: 'correct fixture passphrase' },
+      ]);
+    } finally { unmount(); }
+  });
+
+  it('does not take focus back after the user leaves a pending field', async () => {
+    const state = stateFor({ initialized: true, prfEnrolled: false });
+    state.vault.hasRecovery = true;
+    /** @type {(reply: any) => void} */ let finish = () => {};
+    const { root, unmount } = mountGate(state, async () => new Promise(resolve => { finish = resolve; }));
+    const other = document.createElement('button');
+    other.textContent = 'Other control';
+    document.body.append(other);
+    try {
+      const field = /** @type {HTMLInputElement} */ (root.querySelector('#pass'));
+      field.value = 'wrong passphrase';
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      field.focus();
+      root.querySelector('form')?.requestSubmit();
+      m.redraw.sync();
+      expect(field.readOnly).toBe(true);
+      other.focus();
+      finish({ ok: false, error: 'wrong-passphrase' });
+      await waitFor(() => !field.readOnly);
+      expect(document.activeElement).toBe(other);
+    } finally { other.remove(); unmount(); }
+  });
+
+  it('keeps the readiness fence and does not mark an authority failure as an invalid passphrase', async () => {
+    const state = stateFor({ initialized: true, prfEnrolled: false });
+    state.vault.hasRecovery = true;
+    state.hydrated = false;
+    /** @type {Message[]} */ const sent = [];
+    const { root, unmount } = mountGate(state, async message => {
+      sent.push(message);
+      return { ok: false, error: 'vault authority bootstrap timed out' };
+    });
+    try {
+      const field = /** @type {HTMLInputElement} */ (root.querySelector('#pass'));
+      const form = /** @type {HTMLFormElement} */ (root.querySelector('form'));
+      expect(field.disabled).toBe(true);
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      expect(sent.length).toBe(0);
+      state.hydrated = true;
+      m.redraw.sync();
+      expect(field.disabled).toBe(false);
+      field.value = 'fixture passphrase';
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      field.focus();
+      form.requestSubmit();
+      await waitFor(() => root.querySelector('#vault-error') !== null);
+      expect(root.querySelector('#vault-error')?.textContent).toBe('Vault unlock could not be completed.');
+      expect(field.getAttribute('aria-invalid')).toBe(null);
+      expect(field.getAttribute('aria-describedby')).toBe(null);
+      expect(field.classList.contains('is-error')).toBe(false);
+      expect(document.activeElement).toBe(field);
+      expect(sent.length).toBe(1);
+    } finally { unmount(); }
+  });
+});
+
 if (HAVE_VIRTUAL_AUTHENTICATOR) describe('sidepanel.vault-gate post-credential authority', () => {
   /** @type {Message | null} */
   let enrollment = null;

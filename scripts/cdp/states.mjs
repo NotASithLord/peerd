@@ -3651,6 +3651,104 @@ export const STATES = [
     },
   },
 
+  {
+    name: 'vault-passphrase-error', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const readGate = () => evalIn(ctx.page, `(() => {
+        'use strict';
+        const field = document.querySelector('#pass');
+        const error = document.querySelector('.gate-msg');
+        const live = error?.closest('[aria-live], [role="alert"], [role="status"]');
+        return {
+          composer: !!document.querySelector('form.input-bar'),
+          field: field ? { disabled: field.disabled, readOnly: field.readOnly,
+            invalid: field.getAttribute('aria-invalid'), describedBy: field.getAttribute('aria-describedby') } : null,
+          error: error ? { text: error.textContent, id: error.id, visible: error.checkVisibility(),
+            live: live?.getAttribute('role') === 'alert' || ['polite', 'assertive'].includes(live?.getAttribute('aria-live')),
+            linked: !!error.id && field?.getAttribute('aria-describedby')?.split(/\\s+/).includes(error.id)
+              && document.getElementById(error.id) === error } : null,
+          focused: document.activeElement === field,
+          activeTag: document.activeElement?.tagName,
+        };
+      })()`);
+      const requireLocked = async label => {
+        const authority = await waitFor(async () => {
+          const reply = await rpc(ctx.page, { type: 'state/get' }, { timeoutMs: 5000 });
+          rec.observe(`${label}: locked authority`, reply);
+          return reply?.ok === true && reply.state?.vault?.locked === true ? reply : null;
+        }, { budgetMs: 30_000, pollMs: 100 });
+        if (!authority) throw new Error(`PROBE-GAP: ${label} has no ready locked authority. No passphrase was submitted.`);
+        return authority;
+      };
+      const submit = async text => {
+        const editable = await evalIn(ctx.page, `(() => {
+          'use strict';
+          const field = document.querySelector('#pass');
+          if (!(field instanceof HTMLInputElement) || field.disabled || field.readOnly) return false;
+          field.focus();
+          field.select();
+          return true;
+        })()`);
+        if (!editable) throw new Error('PROBE-GAP: The real passphrase field is not editable.');
+        await ctx.page.send('Input.insertText', { text });
+        await ctx.page.send('Input.dispatchKeyEvent', {
+          type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r',
+        });
+        await ctx.page.send('Input.dispatchKeyEvent', {
+          type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+        });
+      };
+      if (!await clickAndSyncRedraw(ctx.page, 'button[aria-label="Lock the vault"]')) {
+        throw new Error('The real Lock control is unavailable.');
+      }
+      await requireLocked('wrong passphrase');
+      if (!await waitFor(async () => {
+        const gate = await readGate();
+        return gate.field && !gate.field.disabled && !gate.field.readOnly;
+      }, { budgetMs: 10_000 })) throw new Error('The locked passphrase field did not become ready.');
+      await submit(`${PASSPHRASE}-wrong`);
+      const wrong = await waitFor(async () => {
+        const gate = await readGate();
+        return gate.error?.text === 'That passphrase is wrong.' && !gate.field?.disabled && !gate.field?.readOnly
+          ? gate : null;
+      }, { budgetMs: 30_000, pollMs: 50 });
+      rec.check('the real wrong passphrase returns the expected visible refusal',
+        wrong?.error?.visible === true && !wrong.composer, JSON.stringify(wrong));
+      if (!wrong) throw new Error('The single wrong-passphrase attempt did not return its known refusal.');
+      if (baseRender) rec.observe('merge-base wrong-passphrase accessibility', wrong);
+      else {
+        rec.check('the visible wrong-passphrase error is a live alert', wrong.error.live, JSON.stringify(wrong.error));
+        rec.check('the invalid field describes its exact visible error',
+          wrong.field.invalid === 'true' && wrong.error.linked, JSON.stringify(wrong));
+        rec.check('wrong-passphrase refusal keeps focus on the recovery field', wrong.focused, JSON.stringify(wrong));
+      }
+      await rec.visual('vault-passphrase-error');
+      // why: Qualify the next single attempt without replaying any unlock.
+      await requireLocked('corrected passphrase');
+      await submit(PASSPHRASE);
+      const ready = await waitFor(() => evalIn(ctx.page, `(() => {
+        'use strict';
+        const field = document.querySelector('form.input-bar textarea');
+        if (!(field instanceof HTMLTextAreaElement)) return null;
+        return { focused: document.activeElement === field,
+          editable: !field.disabled && !field.readOnly,
+          activeTag: document.activeElement?.tagName,
+          visible: document.visibilityState, documentFocused: document.hasFocus() };
+      })()`), { budgetMs: 30_000 });
+      rec.observe('successful unlock immediate composer focus', ready);
+      const accepted = await rpc(ctx.page, { type: 'state/get' }, { timeoutMs: 5000 });
+      rec.check('one corrected keyboard attempt unlocks the real vault', !!ready
+        && accepted?.ok === true && accepted.state?.vault?.locked === false
+        && (baseRender || (ready.focused === true && ready.editable)), JSON.stringify({ ready, accepted }));
+      if (!ready || accepted?.ok !== true || accepted.state?.vault?.locked !== false) {
+        throw new Error('The single corrected-passphrase attempt did not prove an unlocked vault.');
+      }
+      await rec.shot('retry-ready');
+    },
+  },
+
   // --- functional: Contributor Metrics human consent lifecycle --------------
   {
     name: 'contributor-consent-lifecycle', kind: 'functional', phase: 'post-unlock',
