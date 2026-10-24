@@ -14,6 +14,7 @@ import {
 } from '../../extension/background/kernel-turn-authority-adapter.js';
 import { createSessionStore, makeTurnSlots } from '../../extension/peerd-runtime/kernel-custody.js';
 import { buildAppManifest } from '../../extension/peerd-engine/app-manifest.js';
+import { VMBootFailedError } from '../../extension/peerd-engine/background.js';
 import { createContextSnapshots } from '../../extension/shared/model-context-snapshot.js';
 import { createScriptRunRegistry } from '../../extension/background/script-runs.js';
 import { projectControllerToolSurface } from '../../extension/peerd-runtime/controller-tool-projection.js';
@@ -144,6 +145,7 @@ const harness = async (
     getSecret?: (name: string) => Promise<string>,
   } = {},
 ) => {
+  let providerSelections = 0;
   const toolProjections: any[] = [];
   const audits: any[] = [];
   const idb = memoryStore();
@@ -426,9 +428,10 @@ const harness = async (
     },
     providerProjection: { bumpRevision: () => { providerRevision += 1; } },
     providerEgress: {},
-    resolveProviderSelection: async () => ({
-      ok: true, selected: 'anthropic::claude-sonnet-4-6',
-    }),
+    resolveProviderSelection: async () => {
+      providerSelections += 1;
+      return { ok: true, selected: 'anthropic::claude-sonnet-4-6' };
+    },
     siteCapture: {
       has: (tabId: number) => tabId === 9,
       cancel: async (value: any) => { siteCaptureEvents.push(['cancel', value]); },
@@ -474,6 +477,7 @@ const harness = async (
     appNetworkAdmissions,
     destroyedRepositories,
     actorConfig: () => actorConfig,
+    providerSelections: () => providerSelections,
   };
 };
 
@@ -506,6 +510,43 @@ const dependencies = () => ({
 });
 
 describe('kernel turn authority adapter', () => {
+  test('a fresh composer binds the usable provider only when no explicit provider exists', async () => {
+    const h = await harness();
+    const before = h.providerSelections();
+    const chosen = await h.factories.buildToolContext({ sessionId: null });
+    expect(chosen.provider).toMatchObject({ name: 'anthropic', model: 'claude-sonnet-4-6' });
+    expect(h.providerSelections()).toBe(before);
+    h.settings.providerName = ''; h.settings.providerModel = '';
+    const fresh = await h.factories.buildToolContext({ sessionId: null });
+    expect(fresh.provider).toMatchObject({ name: 'anthropic', model: 'claude-sonnet-4-6' });
+    expect(h.settings.providerName).toBe('anthropic');
+    expect(h.providerSelections()).toBe(before + 1);
+  });
+
+  test('only the tracked VM tab can report a boot failure', async () => {
+    const h = await harness();
+    const tracker = h.engine.vmTabTracker;
+    const drop = tracker.onTabFailed;
+    const failures: unknown[] = [];
+    tracker.onTabFailed = (id: string, error?: unknown) => { failures.push(error); return drop(id); };
+    const route = h.runtime.relays.engineRoutes['vm/tab-failed'];
+    tracker.onTabReady('vm-1', 21);
+    for (const [message, sender] of [
+      [{ vmId: 'vm-1' }, { tab: { id: 22, url: 'vm://vm-1' } }],
+      [{ vmId: 'vm-1' }, { tab: { id: 21, url: 'vm://other' } }],
+      [{ vmId: 'missing' }, { tab: { id: 21, url: 'vm://missing' } }],
+      [{ vmId: 'vm-1' }, {}],
+    ]) {
+      expect(await route(message, sender)).toBe(false);
+      expect(tracker.getTabId('vm-1')).toBe(21);
+    }
+    expect(await route({ vmId: 'vm-1' }, { tab: { id: 21, url: 'vm://vm-1' } })).toBe(false);
+    expect(tracker.getTabId('vm-1')).toBeNull();
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toBeInstanceOf(VMBootFailedError);
+    expect(await h.engine.vmRegistry.get('vm-1')).not.toBeNull();
+  });
+
   const actorRoster = async (
     h: Awaited<ReturnType<typeof harness>>, sessionId: string, secretReadCount: () => number,
   ) => {

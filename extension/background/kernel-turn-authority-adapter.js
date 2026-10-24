@@ -3,6 +3,7 @@ import { makeSerialLane } from '/shared/cold-util.js';
 import { setUserPeerBlocked, refreshDiscoverySetting } from './dweb-peer-policy.js';
 
 import { effectReceiptFields } from './host-effect-verdict.js';
+import { VMBootFailedError } from '/peerd-engine/background.js';
 
 import { createAuthorityEffectScheduler } from './authority-effect-scheduler.js';
 import {
@@ -642,14 +643,6 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
   /** @type {any} */
   let goalRunner = null;
 
-  const resolveActiveProvider = () => {
-    const settings = deps.settingsStore.get();
-    const provider = providerEgressPolicy(settings.providerName);
-    if (!provider || (settings.providerName === 'local-webgpu' && deps.firefox)) {
-      throw new Error('no-provider');
-    }
-    return { name: settings.providerName, model: String(settings.providerModel ?? '') };
-  };
   const ensureActiveProvider = async () => {
     await deps.ready;
     const selection = await deps.resolveProviderSelection(null);
@@ -829,7 +822,12 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     const activeTab = tab && {
       id: tab.id, windowId: tab.windowId, url: tab.url ?? '', origin: originOf(tab.url ?? ''),
     };
-    const providerName = session?.provider ?? resolveActiveProvider().name;
+    // why: the first turn must bind the same usable provider as the composer.
+    const settings = deps.settingsStore.get();
+    const freshProvider = session?.provider && session?.model ? null
+      : providerEgressPolicy(settings.providerName) && !(settings.providerName === 'local-webgpu' && deps.firefox)
+        ? { name: settings.providerName, model: String(settings.providerModel ?? '') } : await ensureActiveProvider();
+    const providerName = session?.provider ?? freshProvider?.name ?? '';
     const actorType = options.actorType;
     const actorBacking = options.actorBacking;
     const requestedActorSurface = options.actorSurface
@@ -1065,7 +1063,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       allowlist: Object.freeze([...HARDCODED_ALLOWLIST, ...userEndpoints]),
       provider: {
         name: providerName,
-        model: session?.model ?? resolveActiveProvider().model,
+        model: session?.model ?? freshProvider?.model ?? '',
         hasKey: await providerCredentialReady(providerName),
       },
       vault: { isLocked: deps.vault.isLocked() },
@@ -2914,17 +2912,20 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     };
     const trustedEngineMessage = (/** @type {any} */ sender) =>
       deps.isTrustedSender(sender) && typeof sender?.tab?.id === 'number';
+    const vmTabState = async (/** @type {any} */ message, /** @type {any} */ sender, failed = false) => {
+      if (!trustedEngineMessage(sender) || typeof message?.vmId !== 'string'
+          || engine.vmTabTracker.parseVmIdFromUrl(sender.tab.url) !== message.vmId
+          || !await engine.vmRegistry.get(message.vmId)) return false;
+      const liveTabId = engine.vmTabTracker.getTabId(message.vmId);
+      if ((failed || liveTabId != null) && liveTabId !== sender.tab.id) return false;
+      if (failed) engine.vmTabTracker.onTabFailed(message.vmId, new VMBootFailedError('startup', 'Check the VM tab for details.'));
+      else engine.vmTabTracker.onTabReady(message.vmId, sender.tab.id);
+      await syncNetworkCustody();
+      return false;
+    };
     const engineRoutes = {
-      'vm/tab-ready': async (/** @type {any} */ message, /** @type {any} */ sender) => {
-        if (!trustedEngineMessage(sender) || typeof message?.vmId !== 'string'
-            || engine.vmTabTracker.parseVmIdFromUrl(sender.tab.url) !== message.vmId
-            || !await engine.vmRegistry.get(message.vmId)) return false;
-        const liveTabId = engine.vmTabTracker.getTabId(message.vmId);
-        if (liveTabId != null && liveTabId !== sender.tab.id) return false;
-        engine.vmTabTracker.onTabReady(message.vmId, sender.tab.id);
-        await syncNetworkCustody();
-        return false;
-      },
+      'vm/tab-ready': vmTabState,
+      'vm/tab-failed': (/** @type {any} */ message, /** @type {any} */ sender) => vmTabState(message, sender, true),
       'js/tab-ready': async (/** @type {any} */ message, /** @type {any} */ sender) => {
         if (!trustedEngineMessage(sender) || typeof message?.notebookId !== 'string'
             || engine.jsTabTracker.parseIdFromUrl(sender.tab.url) !== message.notebookId

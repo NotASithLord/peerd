@@ -1361,12 +1361,14 @@ const failBoot = (/** @type {string} */ stage, /** @type {any} */ err) => {
   setStage('Boot failed', `${stage}: ${err?.message ?? String(err)}`);
   DOM.bootCard.classList.add('is-failed');
   trace('error', `boot failed @ ${stage}: ${err?.message ?? String(err)}`);
+  void browser.runtime.sendMessage({ type: 'vm/tab-failed', vmId: vmId ?? location.hash.slice(1) }).catch(() => {});
 };
 
 // The Firefox WebVM-unavailable stop: not a "boot failed" error but a clear
 // "this browser can't host it yet" notice with the open bug + standards threads.
 // Idempotent — a re-run won't stack a second card.
 const failBootFirefoxWebVM = () => {
+  void browser.runtime.sendMessage({ type: 'vm/tab-failed', vmId: vmId ?? location.hash.slice(1) }).catch(() => {});
   setStatus('WebVM unavailable', 'failed');
   setStage('WebVM needs cross-origin isolation Firefox can’t grant yet');
   DOM.bootCard.classList.add('is-failed');

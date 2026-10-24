@@ -178,7 +178,7 @@ async function main() {
   const postUnlock = states.filter((s) => s.phase === 'post-unlock').sort((a, b) =>
     postUnlockPriority(a) - postUnlockPriority(b));
   const results = [];
-  const ctx = await launchPeerd({ extensionDir: EXTENSION_DIR });
+  const ctx = await launchPeerd({ extensionDir: EXTENSION_DIR, enforceWebSecurity: process.argv.includes('--enforce-web-security') });
   try {
     await freezeAnimations(ctx);
     for (const s of preUnlock) await runState(ctx, s, results);

@@ -692,7 +692,8 @@ export async function launchPeerd({
       if (url.includes('/v1/chat/completions')) {
         const spec = await currentResponder(modelCalls++, request);
         if (spec?.delayMs) await sleep(spec.delayMs);
-        if (spec?.sse != null) await fulfill('text/event-stream', spec.sse, spec.status ?? 200);
+        if (spec?.continueRequest === true) await connection.send('Fetch.continueRequest', { requestId });
+        else if (spec?.sse != null) await fulfill('text/event-stream', spec.sse, spec.status ?? 200);
         else if (spec?.status) await fulfill(spec.contentType ?? 'application/json', spec.body ?? '{}', spec.status);
         else await fulfill('text/event-stream', sseText('e2e-smoke-ok'));
       } else if (url.includes('/api/tags')) {
@@ -1018,24 +1019,31 @@ export async function launchPeerd({
       try { swConn?.close(); } catch { /* */ }
       swConn = null;
       context.swConn = null;
-      await page.send('ServiceWorker.stopWorker', { versionId: currentVersion.versionId });
-      const stoppedVersion = await waitFor(() => {
-        const row = serviceWorkerVersions.get(currentVersion.versionId);
-        return row?.runningStatus === 'stopped' ? row : null;
-      }, { budgetMs: 8_000, pollMs: 25 });
-      if (!stoppedVersion) {
-        throw new Error(`ServiceWorker version ${currentVersion.versionId} remained running`);
-      }
-      const gone = await waitFor(async () => {
-        const current = await findPeerdSw(port);
-        return !current || current.targetId !== old.targetId;
-      }, { budgetMs: 8_000, pollMs: 50 });
-      if (!gone) throw new Error('MV3 service-worker target did not terminate');
-      return {
-        ...old,
-        versionId: currentVersion.versionId,
-        stoppedRunningStatus: stoppedVersion.runningStatus,
+      // why: a new wake can replace the stopped row before the next poll.
+      let observedStop = null;
+      const onStopped = (method, { versions = [] } = {}) => {
+        if (method !== 'ServiceWorker.workerVersionUpdated') return;
+        observedStop ??= versions.find((row) => row.versionId === currentVersion.versionId
+          && String(row.scriptURL) === old.url && row.runningStatus === 'stopped') ?? null;
       };
+      page.on(onStopped);
+      try {
+        await page.send('ServiceWorker.stopWorker', { versionId: currentVersion.versionId });
+        const stoppedVersion = await waitFor(() => observedStop, { budgetMs: 8_000, pollMs: 25 });
+        if (!stoppedVersion) {
+          throw new Error(`ServiceWorker version ${currentVersion.versionId} remained running`);
+        }
+        const gone = await waitFor(async () => {
+          const current = await findPeerdSw(port);
+          return !current || current.targetId !== old.targetId;
+        }, { budgetMs: 8_000, pollMs: 50 });
+        if (!gone) throw new Error('MV3 service-worker target did not terminate');
+        return {
+          ...old,
+          versionId: currentVersion.versionId,
+          stoppedRunningStatus: stoppedVersion.runningStatus,
+        };
+      } finally { page.off(onStopped); }
     },
     // Backward-compatible name, now backed by authoritative stopWorker rather
     // than Target.closeTarget. New production acceptance should call the

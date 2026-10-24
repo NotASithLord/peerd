@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { createExecutionToolAuthority } from '../../extension/background/execution-tool-authority.js';
+import { createVmTabTracker } from '../../extension/background/tab-tracker.js';
+import { createVmRegistry, VMBootFailedError } from '../../extension/peerd-engine/background.js';
+import { createStorageStub } from '../setup.ts';
 import {
   snapshotControllerTurnAuthorityBinding, projectControllerTurnAuthorityClass,
   createReadOnlyOperationGrant,
@@ -10,6 +13,37 @@ const planFor = (kind: 'notebook'|'pod') => ({
 });
 
 describe('exact execution creation rollback', () => {
+  test('real WebVM tracker failure rolls back the new registry record and keeps its failed tab', async () => {
+    const registry = createVmRegistry({ storage: createStorageStub() });
+    const physical = new Map<number, any>();
+    let nextTab = 50;
+    let tracker: ReturnType<typeof createVmTabTracker>;
+    const failure = new VMBootFailedError('startup', 'Check the VM tab for details.');
+    const tabs = {
+      create: async (spec: any) => { const tab = { id: ++nextTab, ...spec }; physical.set(tab.id, tab); return tab; },
+      get: async (id: number) => physical.get(id),
+      remove: async (id: number) => { physical.delete(id); },
+    } as any;
+    tracker = createVmTabTracker({ tabs, announce: (_tab, _label, id) => { tracker.onTabFailed?.(id!, failure); } });
+    const prior = await registry.create({ name: 'Existing VM' });
+    tracker.onTabReady(prior.id, 49);
+    tracker.onTabFailed?.(prior.id, failure);
+    expect(tracker.getTabId(prior.id)).toBeNull();
+    expect(await registry.get(prior.id)).not.toBeNull();
+    const plan = { kind: 'webvm', name: 'Failed VM' };
+    const authority = createExecutionToolAuthority({
+      binding: { operation: 'turn.execution.create-webvm', args: { plan } },
+      ctx: { session: { sessionId: 'chat-1' }, vmRegistry: registry, vmTabTracker: tracker },
+    });
+    const result = await authority.createWebVm(plan);
+    expect(result).toMatchObject({ ok: false });
+    expect(result.error).toContain('Check the VM tab for details.');
+    expect((await registry.list()).map((record) => record.id)).toEqual([prior.id]);
+    expect([...physical.values()]).toHaveLength(1);
+    expect([...physical.values()][0].url).toContain('/engine-tabs/vm-tab/index.html#vm-');
+    expect(tracker.listLive()).toEqual([]);
+  });
+
   test.each(['notebook', 'pod', 'app'] as const)(
     '%s Git creation retains live Act authority through the exact projection',
     async (kind) => {

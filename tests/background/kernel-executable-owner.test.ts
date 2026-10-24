@@ -128,7 +128,7 @@ describe('kernel executable owner', () => {
       ['app/actor-chat', 'app'], ['actors/call', 'relay'],
       ['site-fetch/call', 'relay'], ['script/model-call', 'relay'],
       ['script-run/abort', 'relay'], ['a2a/call', 'relay'],
-      ['vm/tab-ready', 'engine'], ['js/tab-ready', 'engine'],
+      ['vm/tab-ready', 'engine'], ['vm/tab-failed', 'engine'], ['js/tab-ready', 'engine'],
       ['pod/tab-adopt', 'engine'], ['app/tab-ready', 'engine'],
       ['app/actor-retry', 'engine'],
     ]);
@@ -241,8 +241,13 @@ describe('kernel executable owner', () => {
         options: 'chrome-extension://runtime/options/options.html',
       },
     });
-    expect(await control.routes['vm/tab-ready']({ vmId: 'vm-1' }, sender('vm', 'vm-2')))
-      .toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
+    for (const route of ['vm/tab-ready', 'vm/tab-failed']) {
+      expect(control.routes[route]).toBeFunction();
+      expect(await control.routes[route]({ vmId: 'vm-1' }, sender('vm', 'vm-2')))
+        .toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
+      expect(await control.routes[route]({ vmId: 'vm-1' }, { ...sender('vm', 'vm-1'), id: 'other-runtime' }))
+        .toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
+    }
     expect(await control.routes['js/tab-ready'](
       { notebookId: 'notebook-1' }, sender('notebook', 'notebook-2'),
     )).toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
@@ -253,8 +258,10 @@ describe('kernel executable owner', () => {
       .toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
     expect(loads).toBe(0);
 
-    expect(await control.routes['vm/tab-ready']({ vmId: 'vm-1' }, sender('vm', 'vm-1')))
-      .toMatchObject({ ok: true, name: 'vm/tab-ready' });
+    for (const route of ['vm/tab-ready', 'vm/tab-failed']) {
+      expect(await control.routes[route]({ vmId: 'vm-1' }, sender('vm', 'vm-1')))
+        .toMatchObject({ ok: true, name: route });
+    }
     expect(await control.routes['js/tab-ready'](
       { notebookId: 'notebook-1' }, sender('notebook', 'notebook-1'),
     )).toMatchObject({ ok: true, name: 'js/tab-ready' });
