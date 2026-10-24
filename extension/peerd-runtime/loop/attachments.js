@@ -266,22 +266,17 @@ export const validateAttachments = (list) => {
   return arr.map(validateAttachment);
 };
 
+const DOCUMENT_ATTACHMENT_FAILURES = Object.freeze({
+  legacy_binary_format: 'It is an older or password-protected Office file. Save it as .docx, .xlsx or .pptx without a password, then attach it again.',
+  unsupported_format: 'This file format is not supported. Save it as PDF, .docx, .xlsx or .pptx, then attach it again.',
+  unreadable_container: 'The file is corrupt, password-protected, or uses unsupported compression. Save a new copy without a password, then attach it again.',
+  parse_failed: 'The file could not be read. Save a new copy, then attach it again.',
+});
+
 /**
- * Convert the 'doc' attachments in a validated batch into inlinable text.
- *
- * The ONE impure step in this file, and the IO is injected rather than
- * imported (the house rule) — the caller passes a converter, which in the
- * service worker is the offscreen document client. That keeps the parsers out
- * of this module entirely: the side panel imports classifyAttachment from
- * here, and must not drag seven format walkers along with it.
- *
- * Each converted record trades its base64 `data` for a `text` field. Nothing
- * downstream sees document bytes: the Markdown is what gets inlined, persisted
- * and re-sent, and the original file is dropped after this step.
- *
- * FAIL CLOSED, per attachment, with the converter's own message — "this is a
- * Word 97-2003 binary, ask for a .docx or convert it in a WebVM" is the whole
- * value of attempting a legacy file, and a generic error would throw it away.
+ * why: inject conversion so side-panel imports do not load document parsers.
+ * Replace bytes with Markdown before persistence. Refuse the whole send with
+ * user guidance from stable codes. Never show parser prose to the user.
  *
  * @param {Object} args
  * @param {Array<{ name: string, mediaType: string, kind: string, size: number, data?: string }>} args.attachments
@@ -304,7 +299,9 @@ export const convertDocAttachments = async ({ attachments, convert }) => {
     try {
       text = await convert({ name: att.name, mediaType: att.mediaType, data: att.data });
     } catch (e) {
-      throw new AttachmentConversionError(att.name, /** @type {{ message?: string }} */ (e)?.message ?? String(e));
+      const error = /** @type {{ code?: keyof typeof DOCUMENT_ATTACHMENT_FAILURES, message?: string }} */ (e);
+      throw new AttachmentConversionError(att.name, error?.code && Object.hasOwn(DOCUMENT_ATTACHMENT_FAILURES, error.code)
+        ? DOCUMENT_ATTACHMENT_FAILURES[error.code] : error?.message ?? String(e));
     }
     const { data: _drop, ...meta } = att;
     out.push({ ...meta, text: String(text ?? '') });
