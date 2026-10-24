@@ -169,7 +169,7 @@ export { openOverlay } from './overlay.js';
 export {
   createNotebookRegistry,
   NOTEBOOK_TAB_PATH,
-  NOTEBOOK_OPFS_ROOT,
+  NOTEBOOK_OPFS_ROOT, NOTEBOOK_CUSTODY_ROOT,
 } from './notebook-registry.js';
 
 // --- Pod (sealed shell/WASI jobs + OPFS workspace) ----------------------

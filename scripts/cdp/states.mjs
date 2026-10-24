@@ -6184,7 +6184,116 @@ export const STATES = [
             && failureView?.output?.includes('./lib/failure.js:1')
             && !/blob:|data:/.test(failureView?.output ?? ''),
           JSON.stringify({ importedFailure, failureView }));
-      } finally { try { page.close(); } catch { /* */ } }
+
+        const sendNotebook = (message) => evalIn(ctx.swConn, `(async () => {
+          const tabs = await chrome.tabs.query({});
+          const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+          if (!tab?.id) throw new Error('Notebook tab not found');
+          return chrome.tabs.sendMessage(tab.id, ${JSON.stringify({ notebookId, ...message })});
+        })()`, true);
+        const draft = 'return 21 * 2';
+        await evalIn(page, `document.querySelector('.cm-content').focus()`);
+        const selectAll = { key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: process.platform === 'darwin' ? 4 : 2 };
+        await page.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...selectAll });
+        await page.send('Input.dispatchKeyEvent', { type: 'keyUp', ...selectAll });
+        await page.send('Input.insertText', { text: draft });
+        if (!await waitFor(async () => (await sendNotebook({ type: 'js/read-file', path: 'notebook.js' }))?.content === draft,
+          { budgetMs: 10_000, pollMs: 100 })) throw new Error('Notebook draft did not save');
+        const backupDirectory = (create) => evalIn(page, `(async () => {
+          let dir = await navigator.storage.getDirectory();
+          dir = await dir.getDirectoryHandle('peerd-notebooks');
+          dir = await dir.getDirectoryHandle(${JSON.stringify(notebookId)});
+          await dir.removeEntry('notebook.before-agent.js', { recursive: true }).catch((error) => {
+            if (error.name !== 'NotFoundError') throw error;
+          });
+          if (${create}) await dir.getDirectoryHandle('notebook.before-agent.js', { create: true });
+        })()`, true);
+        await backupDirectory(true);
+        const backupFailure = await sendNotebook({ type: 'js/eval', code: 'return 43', timeoutMs: 10_000 });
+        const keptDraft = await sendNotebook({ type: 'js/read-file', path: 'notebook.js' });
+        rec.check('a native backup write failure leaves the saved Notebook draft intact',
+          backupFailure?.ok === false && keptDraft?.content === draft, JSON.stringify({ backupFailure, keptDraft }));
+        await backupDirectory(false);
+        const recovered = await sendNotebook({ type: 'js/eval', code: 'return 43', timeoutMs: 10_000 });
+        if (recovered?.ok !== true) throw new Error('Notebook backup retry failed');
+
+        const custodyPath = `peerd-notebook-custody/${notebookId}/mirror.json`;
+        const backupAliases = ['notebook.before-agent.js', '/notebook.before-agent.js', 'notebook.before-agent.js/', '///notebook.before-agent.js///'];
+        const backupBeforeWrites = await sendNotebook({ type: 'js/read-file', path: backupAliases[0] });
+        const boundaryPaths = ['mirror.json', `/${custodyPath}`, `../../${custodyPath}`, `..\\${custodyPath}`, 'bad\0path'];
+        const boundaryCode = `
+          const paths = ${JSON.stringify([...boundaryPaths, ...backupAliases])};
+          const writes = [], deletes = [];
+          for (const path of paths) {
+            try { await peerd.self.writeFile(path, '{"pending":true}'); writes.push(true); } catch { writes.push(false); }
+            try { await peerd.self.deleteFile(path); deletes.push(true); } catch { deletes.push(false); }
+          }
+          let rootBlocked = false;
+          try { await navigator.storage.getDirectory(); } catch { rootBlocked = true; }
+          return { writes, deletes, rootBlocked };
+        `;
+        const boundary = await sendNotebook({ type: 'js/eval', code: boundaryCode, timeoutMs: 10_000 });
+        const routeWrite = await sendNotebook({ type: 'js/write-file', path: `/${custodyPath}`, content: '{"pending":true}' });
+        const escapeWrite = await sendNotebook({ type: 'js/write-file', path: `../../${custodyPath}`, content: '{"pending":true}' });
+        const backupWrites = [];
+        for (const path of backupAliases) backupWrites.push(await sendNotebook({ type: 'js/write-file', path, content: 'return 0' }));
+        const backupAfterWrites = await sendNotebook({ type: 'js/read-file', path: backupAliases[0] });
+        const markerAfterWrites = await evalIn(page, `(async () => {
+          let dir = await navigator.storage.getDirectory();
+          for (const part of ['peerd-notebook-custody', ${JSON.stringify(notebookId)}]) dir = await dir.getDirectoryHandle(part);
+          return JSON.parse(await (await (await dir.getFileHandle('mirror.json')).getFile()).text());
+        })().catch(() => null)`, true);
+        rec.check('agent file writes and deletes cannot forge the host mirror marker',
+          boundary?.result?.value?.rootBlocked === true
+            && JSON.stringify(boundary?.result?.value?.writes) === '[true,true,false,false,false,false,false,false,false]'
+            && JSON.stringify(boundary?.result?.value?.deletes) === '[true,true,false,false,false,false,false,false,false]'
+            && routeWrite?.ok === true && escapeWrite?.ok === false && markerAfterWrites?.code === boundaryCode
+            && backupWrites.every((reply) => reply?.ok === false)
+            && backupBeforeWrites?.ok === true && backupAfterWrites?.content === backupBeforeWrites?.content,
+          JSON.stringify({ boundary, routeWrite, escapeWrite, markerAfterWrites, backupWrites, backupBeforeWrites, backupAfterWrites }));
+
+        const source = await readFile(new URL('../../extension/engine-tabs/notebook-tab/notebook-tab.js', import.meta.url), 'utf8');
+        const marker = 'await mirrorOpfs.write(LAST_AGENT_PATH, JSON.stringify({ code: msg.code }));';
+        const index = source.indexOf(marker);
+        if (index < 0 || source.indexOf(marker, index + 1) >= 0) throw new Error('Notebook marker location is not unique');
+        let paused = false;
+        page.on((method) => { if (method === 'Debugger.paused') paused = true; });
+        await page.send('Debugger.enable');
+        const point = await page.send('Debugger.setBreakpointByUrl', {
+          url: `chrome-extension://${ctx.sw.id}/engine-tabs/notebook-tab/notebook-tab.js`,
+          lineNumber: source.slice(0, index).split('\n').length - 1,
+          columnNumber: index - source.lastIndexOf('\n', index - 1) - 1,
+        });
+        if (!point.locations?.length) throw new Error('Notebook marker breakpoint did not bind');
+        const interrupted = sendNotebook({ type: 'js/eval', code: 'return 44', timeoutMs: 10_000 }).catch(() => null);
+        if (!await waitFor(() => paused, { budgetMs: 10_000, pollMs: 50 })) throw new Error('Notebook marker commit did not pause');
+        await page.send('Debugger.removeBreakpoint', { breakpointId: point.breakpointId });
+        await page.send('Page.reload');
+        await page.send('Debugger.disable');
+        if (!await waitFor(() => evalIn(page, `!document.getElementById('notebook-app').hidden && !!document.querySelector('.cm-content')`),
+          { budgetMs: 10_000, pollMs: 100 })) throw new Error('Notebook did not reload');
+        await interrupted;
+        const blocked = await sendNotebook({ type: 'js/eval', code: 'return 45', timeoutMs: 10_000 });
+        const backup = await sendNotebook({ type: 'js/read-file', path: 'notebook.before-agent.js' });
+        const notebook = await sendNotebook({ type: 'js/read-file', path: 'notebook.js' });
+        const visible = await evalIn(page, `!!document.querySelector('.pe-node[data-path="notebook.before-agent.js"]')`);
+        rec.check('reload preserves the visible backup and blocks an incomplete mirror marker',
+          blocked?.result?.stopped === true && backup?.content === draft && notebook?.content === 'return 44' && visible === true,
+          JSON.stringify({ blocked, backup, notebook, visible }));
+        const removed = await evalIn(page, `(async () => {
+          const { createRepositoryService } = await import('/peerd-engine/index.js');
+          await createRepositoryService().destroy({ kind: 'notebook', id: ${JSON.stringify(notebookId)} }, { worktree: true });
+          const root = await navigator.storage.getDirectory();
+          return Promise.all(['peerd-notebooks', 'peerd-notebook-custody'].map(async (name) => {
+            const parent = await root.getDirectoryHandle(name);
+            return parent.getDirectoryHandle(${JSON.stringify(notebookId)}).then(() => false, (error) => error.name === 'NotFoundError');
+          }));
+        })()`, true);
+        rec.check('Notebook destruction removes workspace files and host custody', removed?.every((value) => value === true), JSON.stringify(removed));
+      } finally {
+        await page.send('Debugger.disable').catch(() => {});
+        try { page.close(); } catch { /* */ }
+      }
     },
   },
   {

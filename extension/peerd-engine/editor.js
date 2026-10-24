@@ -727,14 +727,19 @@ export const createEditor = async (config) => {
    * backup-before-overwrite.
    *
    * @param {string} content
-   * @param {{ backupTo?: string }} [opts]
+   * @param {{ backupTo?: string, signal?: AbortSignal, beforeReplace?: () => void }} [opts]
    */
-  const replaceActiveWith = async (content, { backupTo } = {}) => {
+  const replaceActiveWith = async (content, { backupTo, signal, beforeReplace } = {}) => {
     const prev = getValue();
-    if (backupTo && prev.trim().length > 0 && prev !== content) {
-      try { await persistFile(backupTo, prev); }
-      catch (e) { console.warn('[peerd-editor] backup-before-replace failed', e); }
+    const path = currentFile;
+    const revision = editRevision;
+    if (backupTo && prev.trim().length > 0) {
+      await persistFile(backupTo, prev);
     }
+    if (signal?.aborted || currentFile !== path || editRevision !== revision) {
+      throw new DOMException('aborted', 'AbortError');
+    }
+    beforeReplace?.();
     setValue(content);
     setDirty(true);
     bumpEditRevision(currentFile);

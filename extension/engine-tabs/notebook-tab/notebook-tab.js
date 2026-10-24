@@ -12,7 +12,7 @@
 
 import browser from '/shared/browser-api.js';
 import {
-  createEditor, isRemoteSpecifier, makeFetchRemote,
+  createEditor, isRemoteSpecifier, makeFetchRemote, opfsHelpers, NOTEBOOK_CUSTODY_ROOT,
   moduleImportPolicyMessage, MODULE_SYNTAX_ERROR_CODE,
   REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
   remoteModuleCapabilityBlockedMessage,
@@ -38,7 +38,14 @@ if (!notebookId) {
 
 const NOTEBOOK_PATH = 'notebook.js';
 const BEFORE_AGENT_PATH = 'notebook.before-agent.js';
-const HIDDEN_FILES = new Set([BEFORE_AGENT_PATH]);
+const LAST_AGENT_PATH = 'mirror.json';
+
+/** @param {string} path */
+const assertAgentFileMutation = (path) => {
+  if (typeof path === 'string' && path.split('/').filter(Boolean).join('/') === BEFORE_AGENT_PATH) {
+    throw new DOMException('aborted', 'AbortError');
+  }
+};
 
 // A peerd-owned tab carries the trigger to pull the side panel in — so you can
 // keep chatting from this Notebook without a round-trip back to home. Mounted
@@ -97,6 +104,8 @@ const assertOpfsWritable = async () => {
   throw new Error(response?.error
     ?? 'Notebook files are read-only because their storage format cannot be updated safely. No data was changed.');
 };
+
+const mirrorOpfs = opfsHelpers([NOTEBOOK_CUSTODY_ROOT, notebookId], { beforeMutation: assertOpfsWritable });
 
 /** @param {string} text @param {boolean} busy */
 const setRunStatus = (text, busy) => {
@@ -608,6 +617,7 @@ const runEvalInternal = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PAT
             return;
           }
           try {
+            if (m.op === 'write' || m.op === 'delete') assertAgentFileMutation(m.args.path);
             let result;
             if (m.op === 'read') result = await editor.opfs.read(m.args.path);
             else if (m.op === 'write') { await editor.opfs.write(m.args.path, m.args.content); result = null; }
@@ -867,19 +877,42 @@ const onNotebookMessage = (msg, sender, sendResponse) => {
             sendResponse({ ok: true, result: busyResult() });
             return;
           }
-          // Mirror the agent's code into notebook.js with a one-shot
-          // backup of whatever the user had there.
+          // why: The saved marker protects the previous notebook.js across reloads.
           let result;
           const deadlineTimer = setTimeout(
             () => controller.abort('deadline'), msg.timeoutMs ?? 30000,
           );
           try {
-            throwIfAborted(controller.signal);
-            if (editor.getActiveFile() !== NOTEBOOK_PATH) {
-              await editor.switchToFile(NOTEBOOK_PATH);
-              throwIfAborted(controller.signal);
+            const previousMarker = await mirrorOpfs.read(LAST_AGENT_PATH).catch((error) => {
+              if (error?.name === 'NotFoundError') return null;
+              throw error;
+            });
+            const marker = previousMarker === null ? null : JSON.parse(previousMarker);
+            if (previousMarker !== null && (!marker || marker.pending || typeof marker.code !== 'string')) {
+              throw new DOMException('aborted', 'AbortError');
             }
-            await editor.replaceActiveWith(msg.code, { backupTo: BEFORE_AGENT_PATH });
+            let pending = false, replacementStarted = false;
+            try {
+              throwIfAborted(controller.signal);
+              await mirrorOpfs.write(LAST_AGENT_PATH, JSON.stringify({ pending: true }));
+              pending = true;
+              if (editor.getActiveFile() !== NOTEBOOK_PATH) await editor.switchToFile(NOTEBOOK_PATH);
+              throwIfAborted(controller.signal);
+              if (editor.getActiveFile() !== NOTEBOOK_PATH) throw new DOMException('aborted', 'AbortError');
+              await editor.replaceActiveWith(msg.code, {
+                backupTo: editor.getActiveContent() === marker?.code ? undefined : BEFORE_AGENT_PATH,
+                signal: controller.signal,
+                beforeReplace: () => { replacementStarted = true; },
+              });
+              await mirrorOpfs.write(LAST_AGENT_PATH, JSON.stringify({ code: msg.code }));
+              pending = false;
+            } finally {
+              // why: An incomplete mirror must not claim the next code as saved.
+              if (pending && !replacementStarted) {
+                if (previousMarker === null) await mirrorOpfs.delete(LAST_AGENT_PATH);
+                else await mirrorOpfs.write(LAST_AGENT_PATH, previousMarker);
+              }
+            }
             throwIfAborted(controller.signal);
             result = await runEvalInternal(
               msg.code, msg.timeoutMs ?? 30000, NOTEBOOK_PATH, controller.signal,
@@ -908,6 +941,7 @@ const onNotebookMessage = (msg, sender, sendResponse) => {
           } else sendResponse({ ok: true, stopped: false });
           return;
         case 'js/write-file':
+          assertAgentFileMutation(msg.path);
           await editor.opfs.write(msg.path, msg.content);
           await editor.refreshTree();
           sendResponse({ ok: true });
@@ -1007,7 +1041,6 @@ const setupResizer = () => {
     mountEl: byId('editor-mount'),
     opfsBase: ['peerd-notebooks', notebookId],
     pinnedFile: NOTEBOOK_PATH,
-    hiddenFiles: HIDDEN_FILES,
     beforeOpfsMutation: assertOpfsWritable,
     onRun: runFromEditor,
     onSaved: () => setSaveStatus('saved'),
