@@ -40,9 +40,6 @@ export const createKernelProductionRuntime = async (deps) => {
   const pendingLiveness = [];
   /** @type {any} */
   let pendingGoal = null;
-  const trackerNote = (/** @type {string} */ kind) => (
-    /** @type {number} */ tabId, /** @type {any} */ value,
-  ) => liveRelays.noteAgentTab(tabId, { kind, ...value });
   const onEngineAdopt = (/** @type {EngineKind} */ kind, /** @type {string} */ id,
     /** @type {number} */ tabId) => {
     // why: tracker bootstrap runs before the turn owner exists.
@@ -81,10 +78,8 @@ export const createKernelProductionRuntime = async (deps) => {
     fetchFn: globalThis.fetch.bind(globalThis),
     archiveOrphanedActor: (/** @type {string} */ sessionId) =>
       liveRelays.archiveOrphanedActor(sessionId),
-    noteVmTab: trackerNote('WebVM'),
-    noteJsTab: trackerNote('Notebook'),
-    notePodTab: trackerNote('Pod'),
-    noteAppTab: trackerNote('App'),
+    noteAgentTab: (/** @type {number} */ tabId, /** @type {any} */ value) =>
+      liveRelays.noteAgentTab(tabId, value),
     onVmTabAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) =>
       onEngineAdopt('vm', id, tabId),
     onJsTabAdopt: (/** @type {string} */ id, /** @type {number} */ tabId) =>

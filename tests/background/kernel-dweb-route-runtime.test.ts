@@ -66,7 +66,10 @@ describe('kernel dweb route runtime', () => {
 
   test('direct master OFF uses the canonical fenced settings transition', async () => {
     const events: string[] = [];
+    let release!: () => void;
+    const pushed = new Promise<void>((resolve) => { release = resolve; });
     const runtime = createKernelDwebRouteOwner(deps({
+      pushState: async () => { events.push('push'); await pushed; },
       settingsStore: {
         get: () => ({ dwebEnabled: true }), stored: () => ({}),
         update: async () => { events.push('write'); },
@@ -77,8 +80,14 @@ describe('kernel dweb route runtime', () => {
         onSettingsChanged: async () => { events.push('disable-host'); },
       },
     }));
-    expect(await runtime.routes['dweb/base/stop']()).toEqual({ ok: true, running: false });
-    expect(events).toEqual(['invalidate', 'write', 'disable-host']);
+    let completed = false;
+    const pending = runtime.routes['dweb/base/stop']().then((reply) => { completed = true; return reply; });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(events).toEqual(['invalidate', 'write', 'disable-host', 'push']);
+      expect(completed).toBe(false);
+    } finally { release(); }
+    expect(await pending).toEqual({ ok: true, running: false });
   });
 
   test('wires exact active host and mesh generation into production reseed messages', async () => {

@@ -53,21 +53,24 @@ export const createKernelEngineLive = async (deps) => {
   await Promise.all([
     vmRegistry.load(), jsRegistry.load(), podRegistry.load(), appRegistry.load(),
   ]);
+  /** why: read the saved name before the note. @type {(kind:string,registry:any)=>NonNullable<import('./tab-tracker.js').TabTrackerConfig['announce']>} */
+  const trackerNote = (kind, registry) => (tabId, _label, id) => registry.get(id).then(
+    (/** @type {any} */ record) => deps.noteAgentTab(tabId, { kind, name: record?.name ?? null })).catch(() => {});
   const vmTabTracker = createVmTabTracker({
     tabs: deps.browser.tabs,
-    announce: deps.noteVmTab,
+    announce: trackerNote('WebVM', vmRegistry),
     onAdopt: deps.onVmTabAdopt,
     onDrop: deps.onVmTabDrop,
   });
   const jsTabTracker = createJsTabTracker({
-    announce: deps.noteJsTab,
+    announce: trackerNote('Notebook', jsRegistry),
     onAdopt: deps.onJsTabAdopt,
     onDrop: deps.onJsTabDrop,
     sendTabMessage: deps.browser.tabs.sendMessage.bind(deps.browser.tabs),
   });
   const podTabTracker = createPodTabTracker({
     tabs: deps.browser.tabs,
-    announce: deps.notePodTab,
+    announce: trackerNote('Pod', podRegistry),
     onAdopt: deps.onPodTabAdopt,
     onDrop: deps.onPodTabDrop,
   });
@@ -75,7 +78,7 @@ export const createKernelEngineLive = async (deps) => {
     dwebAuthority: deps.appDwebAuthority,
     tabs: deps.browser.tabs,
     sendTabMessage: deps.browser.tabs.sendMessage.bind(deps.browser.tabs),
-    announce: deps.noteAppTab,
+    announce: trackerNote('App', appRegistry),
     onAdopt: deps.onAppTabAdopt,
     onDrop: deps.onAppTabDrop,
   });
