@@ -20,6 +20,7 @@ import {
 import { classifyBrowserAutomationTarget } from '../tools/browser-automation-policy.js';
 import { findDenylistMatch } from '../../peerd-egress/denylist/denylist.js';
 import { makeTurnCostTracker } from '../cost/turn-tracker.js';
+import { limitExceeded, normalizeTally } from '../cost/accumulator.js';
 import { detectInterruptedTurn } from './resume-detect.js';
 import {
   projectSemanticHookManifest,
@@ -389,18 +390,13 @@ const runAgentTurn = async (/** @type {any} */ input) => {
   // 'stop' case in the switch only runs when the UI is connected).
   let lastStopReason = null;
   let turnOk = true;
-  // Cost/usage accumulation for this turn (feature 06): the fold/persist/
-  // push/halt logic lives in makeTurnCostTracker (peerd-runtime/cost); the
-  // SW supplies the IO: persist via sessions.setCost, the live meter via
-  // the side-panel port, and the hard-limit halt via THIS turn's
-  // AbortController (same clean-abort path as Stop / steer-live, so the
-  // loop unwinds through its existing branch: persists partial, yields
-  // stopReason='aborted').
-  // why: reuse the record resolved at turn start instead of reading the
-  // session again at the accounting boundary.
-  const costSession = turnSession;
+  // why: keep the user/wake append even when spend blocks inference.
+  // The tracker persists usage and emits each halt once for this claim.
+  const costSession = await sessions.get(sessionId);
+  const spendLimitUsd = settingsStore.get().spendLimitUsd;
+  const overSpendLimit = limitExceeded(normalizeTally(costSession?.cost).cost, spendLimitUsd);
   const costTracker = makeTurnCostTracker({
-    limitUsd: settingsStore.get().spendLimitUsd,
+    limitUsd: spendLimitUsd,
     initialSessionCost: costSession?.cost,
     persistCost: (/** @type {any} */ tally) => sessions.setCost(/** @type {any} */ (sessionId), /** @type {any} */ (tally)),
     onCost: (/** @type {any} */ info) => {
@@ -418,7 +414,7 @@ const runAgentTurn = async (/** @type {any} */ input) => {
       auditLog.append({
         type: 'spend_limit_reached',
         sessionId: sid,
-        details: { spent, limitUsd },
+        details: { spent, limitUsd, ...(overSpendLimit ? { performed: false } : {}) },
       }).catch(() => {});
       abortController.abort();
     },
@@ -515,6 +511,7 @@ const runAgentTurn = async (/** @type {any} */ input) => {
       // clean tool round the loop synthesizes the reply from the result and stops,
       // skipping the redundant summarize inference. false for every normal turn.
       oneShot,
+      ...(overSpendLimit ? { preflightReply: 'Spend limit reached. Raise the limit in Settings to continue. This message was not sent to the model.' } : {}),
     })) {
       // Cost telemetry (feature 06): handled BEFORE the panel guard so
       // the persisted session total and the hard-limit halt stay correct
@@ -614,6 +611,7 @@ const runAgentTurn = async (/** @type {any} */ input) => {
           break;
       }
     }
+    if (overSpendLimit && costTracker.maybeHalt({ sessionId })) lastStopReason = 'aborted';
   } catch (e) {
     // Loop-level failure: typed errors get clean labels; anything else
     // surfaces as a generic provider error message.
