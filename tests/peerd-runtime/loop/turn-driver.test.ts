@@ -417,7 +417,7 @@ describe('runAgentTurn credential custody', () => {
   test('a mid-turn actor-host failure updates the next model prompt', async () => {
     const fixture = turnDeps('chat', { dynamicIsolation: true });
     expect(await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'delegate work' }))
-      .toEqual({ ok: true, stopReason: 'end_turn' });
+      .toEqual({ ok: true, stopReason: 'end_turn', toolCalls: 0 });
     const projectedCalls = fixture.modelCalls.filter((call) => Array.isArray(call.tools));
     expect(projectedCalls).toHaveLength(2);
     expect(projectedCalls[0].tools.map((tool: any) => tool.name))
@@ -477,7 +477,7 @@ describe('runAgentTurn credential custody', () => {
     const fixture = turnDeps('chat', { streamBoundaryFailure: true });
     expect(await fixture.driver.runAgentTurn({
       sessionId: 's1', userText: 'inspect the page',
-    })).toEqual({ ok: false, stopReason: undefined });
+    })).toEqual({ ok: false, stopReason: undefined, toolCalls: 0 });
 
     expect(fixture.broadcasts).toContainEqual(expect.objectContaining({
       type: 'turn/error', error: ACTOR_CREDENTIAL_BOUNDARY_FAILURE,
@@ -488,7 +488,7 @@ describe('runAgentTurn credential custody', () => {
   test('uses the controller-projected provider failure without provider classes', async () => {
     const fixture = turnDeps('chat', { controllerFailureCode: 'provider-http-401' });
     expect(await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'hello' }))
-      .toEqual({ ok: false, stopReason: null });
+      .toEqual({ ok: false, stopReason: null, toolCalls: 0 });
     expect(fixture.broadcasts).toContainEqual(expect.objectContaining({
       type: 'turn/error', sessionId: 's1', error: 'provider-http-401',
       code: 'provider-http-401',
@@ -500,7 +500,7 @@ describe('runAgentTurn credential custody', () => {
     const fixture = turnDeps('chat', { turnUnknown: true, boundaryFailure: true });
     expect(await fixture.driver.runAgentTurn({
       sessionId: 's1', userText: 'commit and continue',
-    })).toEqual({ ok: false, stopReason: null });
+    })).toEqual({ ok: false, stopReason: null, toolCalls: 0 });
     expect(fixture.broadcasts).toContainEqual(expect.objectContaining({
       type: 'turn/error',
       code: 'controller-call-timeout',
@@ -523,7 +523,7 @@ describe('runAgentTurn credential custody', () => {
     });
     expect(await fixture.driver.runAgentTurn({
       sessionId: 's1', userText: 'inspect the page',
-    })).toEqual({ ok: false, stopReason: undefined });
+    })).toEqual({ ok: false, stopReason: undefined, toolCalls: 0 });
     expect(fixture.broadcasts).toEqual([]);
   });
 

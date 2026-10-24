@@ -383,12 +383,9 @@ const runAgentTurn = async (/** @type {any} */ input) => {
   const toolDescriptors = initialToolSurface.tools;
   /** @type {{ messages: any[], usage: any } | null} */
   let turnSnapshot = null;
-  // Turn outcome, returned so an outer driver (goal mode: loop/goal-runner.js)
-  // can tell a clean turn from a failed/aborted one instead of blindly
-  // re-entering. lastStopReason is captured BEFORE the panel guard below (the
-  // 'stop' case in the switch only runs when the UI is connected).
-  let lastStopReason = null;
-  let turnOk = true;
+  // why: Goal runs need the outcome before the panel guard.
+  // Stop and errors must end a goal when no panel is connected.
+  const outcome = { ok: true, stopReason: /** @type {string|null|undefined} */ (null), toolCalls: 0 };
   // Cost/usage accumulation for this turn (feature 06): the fold/persist/
   // push/halt logic lives in makeTurnCostTracker (peerd-runtime/cost); the
   // SW supplies the IO: persist via sessions.setCost, the live meter via
@@ -529,11 +526,12 @@ const runAgentTurn = async (/** @type {any} */ input) => {
       // Capture the final stop reason for the return value BEFORE the panel
       // guard (the switch's 'stop' case is panel-only). 'aborted' here = Stop /
       // steer / a spend-limit halt: an outer goal loop must not re-drive it.
-      if (ev.type === 'stop') lastStopReason = ev.stopReason;
+      if (ev.type === 'stop') outcome.stopReason = ev.stopReason;
+      if (ev.type === 'tool-use') outcome.toolCalls += 1;
       // The production loop turns provider failures into stream events. Fold
       // their outcome before the UI guard so background and Goal turns fail
       // even when no panel is connected.
-      if (ev.type === 'error') turnOk = false;
+      if (ev.type === 'error') outcome.ok = false;
       if (!uiConnected()) continue;
       switch (ev.type) {
         case 'state':
@@ -625,7 +623,7 @@ const runAgentTurn = async (/** @type {any} */ input) => {
       : (/** @type {{ message?: string }} */ (e))?.message ?? 'unknown-error');
     const outcomeUnknown = detail?.outcomeKnown === false;
     const error = outcomeUnknown ? UNKNOWN_TURN_ERROR : technicalError;
-    turnOk = false;
+    outcome.ok = false;
     let messageId;
     if (outcomeUnknown) {
       try {
@@ -685,11 +683,7 @@ const runAgentTurn = async (/** @type {any} */ input) => {
   }
   // why: the outcome lets goal mode stop on a failed/aborted turn rather than
   // re-driving a broken condition up to the cap. Normal sends ignore it.
-  return {
-    ok: turnOk,
-    stopReason: lastStopReason,
-    ...(turnSnapshot ? { turnSnapshot } : {}),
-  };
+  return turnSnapshot ? { ...outcome, turnSnapshot } : outcome;
   } catch (error) {
     if (abortController.signal.aborted) {
       return { ok: false, stopReason: 'aborted' };

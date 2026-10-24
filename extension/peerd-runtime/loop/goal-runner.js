@@ -25,15 +25,12 @@ export const GOAL_RUNS_KEY = 'goal.runs.v1';
  * @param {string} [todoBlock]  formatTodoBlock(session.todos); '' when no list
  */
 export const goalContinuationPrompt = (goal, todoBlock = '') => [
-  'Continue working autonomously toward this goal:',
+  'Continue working autonomously:',
   '',
   goal,
-  ...(todoBlock ? ['', todoBlock, '', 'Work the next unchecked item; call todo_check the moment its validation passes.'] : []),
+  ...(todoBlock ? ['', todoBlock, '', 'Work the next unchecked item. Call todo_check when validated.'] : []),
   '',
-  'Take the next concrete step now. Do NOT stop to ask me for confirmation or',
-  'permission — keep going. When (and ONLY when) the goal is FULLY achieved,',
-  'call the complete_goal tool with a one-line summary. If you are genuinely',
-  'blocked and cannot make progress, call complete_goal and say why.',
+  'Act now. Do not ask permission. Call complete_goal only when achieved or blocked; summarize in one line.',
 ].join('\n');
 
 /**
@@ -41,6 +38,7 @@ export const goalContinuationPrompt = (goal, todoBlock = '') => [
  * @typedef {Object} GoalRun
  * @property {string} goal
  * @property {number} iteration     completed-turn counter
+ * @property {number} idle          consecutive continuations with no tool calls
  * @property {boolean} completed    complete_goal was called
  * @property {boolean} halted       Stop / steer-takeover / a failed turn
  * @property {boolean} [paused]     a hard throw (e.g. vault locked) — keep the
@@ -52,7 +50,7 @@ export const goalContinuationPrompt = (goal, todoBlock = '') => [
 
 /**
  * @param {Object} deps
- * @param {(args: { sessionId: string, userText: string, synthetic: boolean, trusted?: boolean }) => Promise<{ ok?: boolean, stopReason?: string } | void>} deps.runTurn
+ * @param {(args: { sessionId: string, userText: string, synthetic: boolean, trusted?: boolean }) => Promise<{ ok?: boolean, stopReason?: string, toolCalls?: number } | void>} deps.runTurn
  *   One full agent turn (runAgentTurn). Returns the turn outcome so the loop can
  *   stop on a failed/aborted turn instead of re-driving a broken condition.
  *   complete()/halt() may also fire DURING it (the complete_goal tool, or Stop).
@@ -113,16 +111,17 @@ export const makeGoalRunner = ({
     return running;
   };
 
-  // why: Live snapshots permit recovery. A failed snapshot does not stop work.
-  const persist = () => {
+  // why: A required snapshot must stop its owner if recovery state cannot save.
+  /** @param {GoalRun} [owner] */
+  const persist = (owner) => {
     if (!kv) return Promise.resolve();
-    /** @type {Record<string, { goal: string, iteration: number, startedAt: number }>} */
+    /** @type {Record<string, { goal: string, iteration: number, idle: number, startedAt: number }>} */
     const out = {};
     for (const [sid, r] of runs) {
       if (r.completed || r.halted) continue;
-      out[sid] = { goal: r.goal, iteration: r.iteration, startedAt: r.startedAt };
+      out[sid] = { goal: r.goal, iteration: r.iteration, idle: r.idle, startedAt: r.startedAt };
     }
-    return enqueuePersistence(() => kv.set(GOAL_RUNS_KEY, out)).catch(() => {});
+    return enqueuePersistence(() => kv.set(GOAL_RUNS_KEY, out)).catch(() => { if (owner) owner.halted = true; });
   };
 
   /** @param {string} sid @returns {GoalRun | null} */
@@ -256,7 +255,7 @@ export const makeGoalRunner = ({
         run.iteration += 1;
         persist();  // record the iteration about to run, so a crash resumes here
         emit(sid, 'running');
-        /** @type {{ ok?: boolean, stopReason?: string } | void} */
+        /** @type {{ ok?: boolean, stopReason?: string, toolCalls?: number } | void} */
         let outcome;
         // The live plan-of-record for this continuation — re-read per turn so
         // check-offs from the previous turn show. Best-effort: a read failure
@@ -287,14 +286,16 @@ export const makeGoalRunner = ({
           else { run.halted = true; run.lastError = /** @type {any} */ (e)?.message ?? String(e); }
           break;
         }
-        // A turn that ended in failure or was aborted (Stop / steer / spend
-        // limit) must NOT be blindly re-driven — that would burn the whole cap
-        // re-failing. Stop the run instead.
-        if (outcome && (outcome.ok === false || outcome.stopReason === 'aborted')) {
+        // why: Stop failed turns and repeated continuations with no tool calls.
+        // A first text reply can plan the goal.
+        // A missing count does not prove that no tool ran.
+        run.idle = !first && outcome?.toolCalls === 0 ? run.idle + 1 : 0;
+        if (outcome && (outcome.ok === false || outcome.stopReason === 'aborted' || run.idle === 2)) {
           run.halted = true;
-          run.lastError = outcome.stopReason === 'aborted' ? null : 'a turn failed';
+          run.lastError = run.idle === 2 || outcome.stopReason === 'aborted' ? null : 'a turn failed';
           break;
         }
+        if (alive()) await persist(run);
       }
     } finally {
       if (runs.get(sid) === run) {
@@ -353,7 +354,7 @@ export const makeGoalRunner = ({
     stopping.delete(sessionId);
     if (runs.has(sessionId)) halt(sessionId);  // supersede any prior run
     runs.set(sessionId, {
-      goal: goal.trim(), iteration: 0, completed: false, halted: false,
+      goal: goal.trim(), iteration: 0, idle: 0, completed: false, halted: false,
       summary: null, lastError: null, startedAt: now(),
     });
     persist();
@@ -382,7 +383,7 @@ export const makeGoalRunner = ({
     let resumed = 0;
     for (const [sid, raw] of Object.entries(stored)) {
       if (!sid || runs.has(sid) || cancelled.has(sid) || stopping.has(sid)) continue;
-      const rec = /** @type {{ goal?: unknown, iteration?: unknown, startedAt?: unknown }} */ (raw);
+      const rec = /** @type {{ goal?: unknown, iteration?: unknown, idle?: unknown, startedAt?: unknown }} */ (raw);
       if (!rec || typeof rec.goal !== 'string' || !rec.goal) continue;
       // why clamp at the cap: persist() records the iteration ABOUT to run, so a
       // crash resumes there. But if the SW died DURING the final allowed turn, the
@@ -395,7 +396,8 @@ export const makeGoalRunner = ({
       runs.set(sid, {
         goal: rec.goal,
         iteration,
-        completed: false, halted: false, summary: null, lastError: null,
+        idle: rec.idle === 1 ? 1 : 0,
+        completed: false, halted: Number(rec.idle) >= 2, summary: null, lastError: null,
         startedAt: Number(rec.startedAt) || now(),
       });
       emit(sid, 'running');

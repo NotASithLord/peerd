@@ -432,7 +432,11 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
     runner = makeGoalRunner({
       runTurn: async () => {
         seenWhileLive = kv.store.get(GOAL_RUNS_KEY);
-        if (failWrite) kv.set = async () => { throw new Error('write failed'); };
+        if (failWrite && seenWhileLive?.s1?.iteration === 1) return { toolCalls: 0 };
+        if (failWrite) {
+          kv.set = async () => { throw new Error('write failed'); };
+          return { toolCalls: 0 };
+        }
         runner.halt('s1');
       },
       kv, onRunEnd: (_sid, info) => ends.push(info),
@@ -448,23 +452,32 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
   });
 
-  it('resume() rehydrates a persisted run and continues it as a synthetic continuation', async () => {
+  it.each([0, 1, 2])('resume() preserves the hidden continuation and idle count: %s', async (idle) => {
     const kv = makeKv();
-    // Seed storage as if the SW died mid-run at iteration 2.
-    kv.store.set(GOAL_RUNS_KEY, { sBoot: { goal: 'keep building', iteration: 2, startedAt: 1 } });
+    // With one idle turn, worker loss interrupts the next continuation.
+    kv.store.set(GOAL_RUNS_KEY, { sBoot: { goal: 'keep building', iteration: idle === 1 ? 3 : 2, startedAt: 1, idle } });
     const calls: TurnArgs[] = [];
+    const ends: any[] = [];
     let runner: ReturnType<typeof makeGoalRunner>;
     runner = makeGoalRunner({
-      runTurn: async (a: TurnArgs) => { calls.push(a); runner.complete('sBoot', 'done'); },
-      kv,
+      runTurn: async (a: TurnArgs) => {
+        calls.push(a);
+        if (!idle) runner.complete('sBoot', 'done');
+        return { toolCalls: 0 };
+      },
+      kv, onRunEnd: (_sid, info) => ends.push(info),
     });
     const res = await runner.resume();
     expect(res.resumed).toBe(1);
     await settle(() => runner.get('sBoot') === null);
     // Continues from the persisted iteration → a HIDDEN continuation that still
     // carries the goal, NOT the goal replayed as a fresh visible message.
-    expect(calls[0].synthetic).toBe(true);
-    expect(calls[0].userText).toContain('keep building');
+    if (idle < 2) {
+      expect(calls[0].synthetic).toBe(true);
+      expect(calls[0].userText).toContain('keep building');
+    }
+    expect(calls).toHaveLength(idle < 2 ? 1 : 0);
+    expect(ends[0].phase).toBe(idle ? 'halted' : 'done');
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
   });
 
