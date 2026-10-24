@@ -1318,7 +1318,7 @@ const runDirectControllerStopGoalSmoke = async (driver, providerServer) => {
     assert(goalRecords.length === 3
       && goalRecords.every((entry) => !entry.body.includes('<actor_agent>'))
       && goalRecords[0].body.includes(ROOT_GOAL_PROMPT)
-      && goalRecords[1].body.includes('Continue working autonomously toward this goal:')
+      && goalRecords[1].body.includes('Continue working autonomously:')
       && goalRecords[2].body.includes(ROOT_GOAL_TOOL_ID),
     'the direct controller performs the deterministic three-request Goal protocol exactly once',
     JSON.stringify(goalRecords.map((entry) => ({
