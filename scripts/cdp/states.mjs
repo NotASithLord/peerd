@@ -30,7 +30,7 @@ import {
 } from '../acceptance/git-smart-http-fixture.mjs';
 import {
   rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage, attach,
-  reloadReadyPanel, resetSession,
+  reloadReadyPanel, resetSession, launchPeerd, unlockAndReady, freezeAnimations,
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
   NETWORK_GUARD_CONTROLLER_PORT, NETWORK_GUARD_OWNED_HOST,
   NETWORK_GUARD_UNRELATED_HOST, SITE_CLIENT_FIXTURE_TLS_PORT,
@@ -2217,6 +2217,148 @@ export const STATES = [
         }
         await rec.visual('actors-incomplete-reply');
       } finally { await rpc(ctx.page, { type: 'agent/stop' }); }
+    },
+  },
+  {
+    name: 'actor-cold-surfaces', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const observer = `(() => {
+        'use strict';
+        const evidence = globalThis.__actorColdEvidence = { states: [], requests: [] };
+        const runtime = chrome.runtime;
+        const connect = runtime.connect.bind(runtime), sendMessage = runtime.sendMessage.bind(runtime);
+        runtime.connect = (...args) => {
+          const port = connect(...args);
+          port.onMessage.addListener((message) => {
+            if (message?.type === 'state') evidence.states.push({
+              capability: message.state?.capabilities?.actorExecution,
+              projection: message.state?.projection,
+            });
+          });
+          return port;
+        };
+        runtime.sendMessage = (...args) => {
+          const message = args.find((value) => value && typeof value.type === 'string');
+          if (message) evidence.requests.push(message.type);
+          return sendMessage(...args);
+        };
+      })()`;
+      for (const surface of ['home', 'sidepanel']) {
+        let mainCalls = 0, childCalls = 0;
+        const fresh = await launchPeerd({ extensionDir: ctx.extensionDir,
+          panelPath: surface === 'home' ? 'home/home.html#chat' : 'sidepanel/sidepanel.html',
+          beforePanelNavigate: (page) => page.send('Page.addScriptToEvaluateOnNewDocument', { source: observer }),
+          modelResponder: (_index, request) => {
+            if (request.postData?.includes('<actor_agent>')) {
+              childCalls++; return { sse: sseText('The isolated cold-start computation is complete.') };
+            }
+            if (mainCalls++ === 0) return { sse: sseToolCall('actor_create', {
+              task: 'Compute six times seven without tools and report the result.', tools: [], sync: true,
+            }) };
+            return { sse: sseText('The first isolated actor is ready.') };
+          },
+        });
+        let options;
+        try {
+          const untouched = await rpc(fresh.page, { type: 'state/get' });
+          rec.check(`${surface} starts with a real fresh locked vault`, untouched?.ok
+            && untouched.state?.vault?.initialized === false && untouched.state.vault.locked === true);
+          const untouchedActor = untouched?.state?.capabilities?.actorExecution;
+          if (baseRender) rec.observe(`merge-base fresh locked ${surface} actor health`, untouchedActor);
+          else rec.check(`${surface} fresh locked state has exact neutral actor health`, untouchedActor?.status === 'not-started'
+            && untouchedActor.host === 'offscreen-document-worker' && untouchedActor.reason === null
+            && untouchedActor.retryable === false, JSON.stringify(untouchedActor));
+          const untouchedLease = await rpc(fresh.page, { type: 'bootstrap/ready' });
+          rec.check(`${surface} fresh locked state read keeps the controller revoked`, untouchedLease?.ok
+            && untouchedLease.featureLeases?.schema === 1
+            && untouchedLease.featureLeases.leases?.controller?.status === 'revoked', JSON.stringify(untouchedLease?.featureLeases));
+          await unlockAndReady(fresh.page);
+          if (surface === 'home') {
+            if (!await waitFor(() => evalIn(fresh.page, `!!document.querySelector('[data-network-choice="skip"]')`),
+              { budgetMs: 15_000, pollMs: 50 })) throw new Error('fresh Home did not offer its real network choice');
+            if (!await clickAndSyncRedraw(fresh.page, '[data-network-choice="skip"]')) throw new Error('Not now did not accept the real choice');
+            rec.check('fresh Home records the explicit network-off choice',
+              (await rpc(fresh.page, { type: 'state/get' }))?.state?.settings?.dwebEnabled === false);
+          }
+          await freezeAnimations(fresh);
+          await fresh.page.send('Emulation.setDeviceMetricsOverride', surface === 'home'
+            ? { width: 960, height: 900, deviceScaleFactor: 1, mobile: false } : PANEL_METRICS);
+          const ready = await waitFor(() => evalIn(fresh.page,
+            `document.querySelectorAll('.path-card[data-path]').length > 1`), { budgetMs: 20_000, pollMs: 50 });
+          if (!ready) throw new Error(`${surface} did not mount its real starter cards`);
+          const cold = (await rpc(fresh.page, { type: 'state/get' }))?.state?.capabilities?.actorExecution;
+          // why: provider projection can verify the host before the first unlocked state is published.
+          const safeHealth = ['not-started', 'available'].includes(cold?.status)
+            && cold.host === 'offscreen-document-worker' && cold.reason === null && cold.retryable === false;
+          const lease = await rpc(fresh.page, { type: 'bootstrap/ready' });
+          const controls = await evalIn(fresh.page, `(() => ({
+            banner: !!document.querySelector('.actor-isolation-banner'),
+            cards: [...document.querySelectorAll('.path-card[data-path]')].map((button) => ({
+              kind: button.dataset.path, disabled: button.disabled,
+            })),
+          }))()`);
+          if (baseRender) rec.observe(`merge-base cold ${surface}`, { cold, controls, leases: lease?.featureLeases });
+          else {
+            rec.check(`${surface} has exact safe actor health`, safeHealth, JSON.stringify(cold));
+            rec.check(`${surface} has enabled starters and no false pause`, !controls.banner
+              && controls.cards.length > 1 && controls.cards.every((card) => !card.disabled), JSON.stringify(controls));
+          }
+          const leases = lease?.featureLeases;
+          const validLeases = lease?.ok === true && leases?.schema === 1 && leases.leases !== null
+            && typeof leases.leases === 'object' && !Array.isArray(leases.leases)
+            && ['buildId', 'bootId', 'kernelEpoch'].every((key) => typeof leases[key] === 'string' && leases[key].length > 0);
+          const coldAudit = await rpc(fresh.page, { type: 'audit/list', limit: 100 });
+          rec.check(`${surface} cold setup starts no actor or model inference`, validLeases && (baseRender || safeHealth)
+            && fresh.modelCallCount() === 0 && coldAudit?.ok && Array.isArray(coldAudit.entries)
+            && !coldAudit.entries.some((entry) => ['actor_ran_isolated', 'actor_background_turn_refused', 'actor_completed'].includes(entry.type)),
+          JSON.stringify({ cold, lease, calls: fresh.modelCallCount(), audit: coldAudit }));
+          // why: unlocked provider projection uses the controller before actor work starts.
+          rec.observe(`${surface} provider readiness lease after unlock`, { before: untouchedLease?.featureLeases, after: leases });
+          await rec.visualPage(surface === 'home' ? 'actor-cold-surfaces' : `actor-cold-${surface}`, fresh.page);
+          if (surface === 'home') {
+            const before = await evalIn(fresh.page, 'globalThis.__actorColdEvidence.states.length');
+            options = await openWidePage(fresh, 'options/options.html#!/providers', { ready: '#runner-model' });
+            await evalIn(options, `document.querySelector('#runner-model').scrollIntoView({ block: 'center' })`);
+            const hint = await evalIn(options, `document.querySelector('#runner-model-status')?.textContent ?? null`);
+            if (baseRender) rec.observe('merge-base cold Providers hint', hint);
+            else rec.check('cold Providers has no false paused hint', hint === null, String(hint));
+            rec.check('real Providers inventory makes no model inference', fresh.modelCallCount() === 0);
+            await rec.visualPage('actor-cold-providers', options);
+            const published = await waitFor(() => evalIn(fresh.page,
+              `globalThis.__actorColdEvidence.states.slice(${before}).find((entry) => entry.capability?.status === 'available')`),
+            { budgetMs: 15_000, pollMs: 50 });
+            if (baseRender) rec.observe('merge-base inventory publication push', published ?? null);
+            else rec.check('live inventory publication pushes health to Home without a diagnostic state read',
+              published?.capability?.status === 'available' && published.capability.reason === null);
+          } else {
+            const before = await evalIn(fresh.page, `({ states: globalThis.__actorColdEvidence.states.length,
+              reads: globalThis.__actorColdEvidence.requests.filter((type) => type === 'state/get').length })`);
+            await evalIn(fresh.page, `(() => {
+              'use strict'; const input = document.querySelector('form.input-bar textarea'); input.focus(); input.select();
+            })()`);
+            await fresh.page.send('Input.insertText', { text: 'Start one isolated actor for this cold chat.' });
+            if (!await waitFor(() => evalIn(fresh.page, `!!document.querySelector('button.send-btn:not(:disabled)')`),
+              { budgetMs: 5_000 }) || !await clickAndSyncRedraw(fresh.page, 'button.send-btn')) throw new Error('the cold composer did not send');
+            const finished = await waitFor(() => evalIn(fresh.page,
+              `document.body.innerText.includes('The first isolated actor is ready.') && !document.querySelector('form.input-bar button.stop')`),
+            { budgetMs: 30_000, pollMs: 50 });
+            if (!finished) throw new Error('the first real actor did not settle');
+            const pushed = await evalIn(fresh.page, `({ states: globalThis.__actorColdEvidence.states.slice(${before.states}),
+              reads: globalThis.__actorColdEvidence.requests.filter((type) => type === 'state/get').length,
+              banner: !!document.querySelector('.actor-isolation-banner') })`);
+            const audit = await rpc(fresh.page, { type: 'audit/list', limit: 100 });
+            rec.check('the real first actor uses one verified dedicated worker', childCalls === 1 && fresh.modelCallCount() === 3
+              && audit?.ok && audit.entries?.some((entry) => entry.type === 'actor_ran_isolated'
+                && entry.details?.workerType === 'dedicated' && entry.details?.realmVerified === true));
+            rec.check('the first-use observation adds no state/get artifact', pushed.reads === before.reads, JSON.stringify(pushed));
+            if (baseRender) rec.observe('merge-base first-use publication', pushed);
+            else rec.check('live first-use publication clears the cold value and false pause',
+              pushed.states.some((entry) => entry.capability?.status === 'available') && !pushed.banner, JSON.stringify(pushed));
+            await rec.visualPage('actor-cold-first-use', fresh.page);
+          }
+        } finally { if (options) await options.close(); await fresh.close(); }
+      }
     },
   },
 

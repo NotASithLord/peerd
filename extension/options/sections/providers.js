@@ -196,7 +196,7 @@ export const ProvidersSection = {
     const provider = state.providers ?? { current: 'anthropic', hasKey: false };
     const providerModel = state.settings?.providerModel ?? '';
     const actorExecution = state.capabilities?.actorExecution;
-    const actorUnavailable = actorExecution && actorExecution.status !== 'available';
+    const actorUnavailable = actorExecution && !['available', 'not-started'].includes(actorExecution.status);
 
     /**
      * @param {{ type: string } & Record<string, any>} message

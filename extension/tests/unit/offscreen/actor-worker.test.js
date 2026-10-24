@@ -5,7 +5,7 @@ import { describe, it, expect } from '../../framework.js';
 import {
   ACTOR_REALM_FACT_KEYS,
   ACTOR_WORKER_PROTOCOL,
-} from '/offscreen/actor-worker-protocol.js';
+} from '/shared/actor-worker-protocol.js';
 
 const waitFor = (/** @type {Worker} */ worker, /** @type {string} */ type) =>
   new Promise((resolve, reject) => {

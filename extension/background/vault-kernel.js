@@ -41,6 +41,8 @@ import {
   WrongPassphraseError,
 } from '/peerd-egress/kernel-storage.js';
 import { makeUiPorts } from './ui-ports.js';
+import { makeActorIsolationStateStore, readColdActorIsolation } from './actor-isolation-state.js';
+import { ACTOR_WORKER_PROTOCOL } from '/shared/actor-worker-protocol.js';
 import { createKernelBrowserNetworkRuntime } from './kernel-browser-network-authority.js';
 import { createKernelControllerGateway } from './kernel-controller-gateway.js';
 import {
@@ -140,6 +142,8 @@ let kernelReadyAt = null;
 const runtimeId = browser.runtime.id;
 const kernelManifest = /** @type {any} */ (browser.runtime.getManifest());
 const kernelFirefox = BROWSER === 'firefox';
+const actorHost = kernelFirefox ? 'background-page-worker' : 'offscreen-document-worker';
+const actorIsolationState = makeActorIsolationStateStore({ storage: browser.storage.local, protocol: ACTOR_WORKER_PROTOCOL });
 const makeFirefoxGuard = /** @type {any} */ (
   globalThis)[Symbol.for('peerd.kernel.firefox-addon.v1')];
 if (kernelFirefox !== !!makeFirefoxGuard) {
@@ -501,18 +505,17 @@ const stateSnapshot = async (authority = lockLifecycle.state() && vault.isLocked
     ? LOCKED_PROVIDER_AUTHORITY_VIEW
     : await providerProjection.peek(currentSession, false)
       ?? pendingProviderView(settings, currentSession);
+  const coldActorIsolation = controllerRelays() ? null : await readColdActorIsolation(actorIsolationState, actorHost);
   return buildVaultKernelState({
     kernel: generation.identity, status: authority, ...authority, autoLockMs,
     generation: projectionGeneration,
-    actorHost: kernelFirefox ? 'background-page-worker' : 'offscreen-document-worker',
+    actorHost,
     runtimeCapabilities, lockCleanup: lockLifecycle.state(),
     settings: { ...settings, dwebChoiceMade: typeof settingsStore.stored().dwebEnabled === 'boolean' },
     session, ...providerView, profile,
     actorProjection,
-    // why: once the demand plane is live, its actor host is the authority for
-    // isolation health. Retaining the cold-shell placeholder would tell users
-    // actor work is paused even while dedicated workers are actively running.
-    actorIsolation: controllerRelays()?.getActorIsolation?.() ?? null,
+    // why: re-read the live owner after storage IO so its newer health wins.
+    actorIsolation: controllerRelays()?.getActorIsolation?.() ?? coldActorIsolation,
   });
 };
 
