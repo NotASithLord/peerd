@@ -202,8 +202,10 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // not a supported demand boundary. This is the exact achieved minified
     // authored graph in the disposable, module-preserving release staging tree.
     // Pin the measured pacing/consent/revocation closure with no reserve.
+    // The combined Home and Settings fixes grow the same shared kernel leaves
+    // as Preview; 2_095_810 is their remeasured closure, with no reserve.
     serviceWorker: Object.freeze({
-      modules: 410, graphBytes: 2_095_484, entryBytes: 173,
+      modules: 410, graphBytes: 2_095_810, entryBytes: 173,
       inputSha256: '12b82da78ea8c1390943b6e762cb08a0faacd3d4125683e213bdb03af055d2c5',
     }),
     // One shared read-only authority schema/provenance validator rejects
@@ -234,10 +236,12 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
   store: COLD_GRAPH_RATCHETS,
   preview: Object.freeze({
     chrome: Object.freeze({
-      // why 2_213_825: the kernel state snapshot now carries the session title
-      // and todos (home chat header, plan-card receipt), 47 minified bytes.
+      // why 2_215_417: the combined Home and Settings fixes grow existing
+      // kernel leaves only (state snapshot title and todos, backup network
+      // policy, skill and hook validation and chat titles, task-tab names and
+      // the Stop state push, exact App tab reuse). Remeasured, no reserve.
       serviceWorker: Object.freeze({
-        modules: 416, graphBytes: 2_215_010, entryBytes: 207,
+        modules: 416, graphBytes: 2_215_417, entryBytes: 207,
         inputSha256: '58d2f25738ab54bc3d031da25c83859d31d29c5759b2459aeb9739b2bca138fd',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),
