@@ -158,8 +158,8 @@ export const _computeBackoffMsForTests = computeBackoffMs;
 
 /**
  * Live model inventory from GET /api/v1/models — the whole gateway catalog,
- * id-sorted. Powers the Settings curation picker (and doubles as the key
- * verification probe: a 200 with models means the key authenticates). Throws
+ * id-sorted. Powers the Settings curation picker only: the catalog is public,
+ * so a 200 says nothing about the key (provider/test verifies it). Throws
  * the adapter's typed errors on failure so callers surface a legible message.
  *
  * Note this is NOT wired as the adapter's `listModels` descriptor hook: that

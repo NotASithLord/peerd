@@ -5314,6 +5314,60 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
+  // why: the idle Providers capture cannot show a refused test. Keep the real
+  // page and inventory, but fix this one reply so the image needs no API key.
+  {
+    name: 'options-provider-test-429', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html');
+      try {
+        await waitFor(() => evalIn(page, `document.querySelector('.provider-card') !== null`),
+          { budgetMs: 15_000, pollMs: 80 });
+        await evalIn(page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { OptionsApp } = await import('/options/components/options-app.js');
+          const { makeUiRuntimeClient } = await import('/shared/ui-runtime-client.js');
+          const browser = (await import('/shared/browser-api.js')).default;
+          const client = makeUiRuntimeClient({ browser });
+          const snapshot = await client.send({ type: 'state/get' });
+          const status = await client.send({ type: 'provider/status' });
+          if (!snapshot?.state || !Array.isArray(status?.providers)) throw new Error('provider fixture snapshot missing');
+          const state = snapshot.state;
+          state.providers = { ...state.providers, current: 'anthropic', hasKey: true };
+          state.settings = { ...state.settings, providerName: 'anthropic', providerModel: '' };
+          const providers = status.providers.map(provider => provider.name === 'anthropic'
+            ? { ...provider, hasKey: true } : provider);
+          const send = message => message.type === 'provider/status'
+            ? Promise.resolve({ ok: true, providers })
+            : message.type === 'provider/test' && message.provider === 'anthropic'
+              ? Promise.resolve({ ok: false, error: 'http-429' })
+              : client.send(message);
+          const root = document.getElementById('app');
+          m.mount(root, null);
+          m.mount(root, { view: () => m(OptionsApp, { state, send, section: 'providers' }) });
+        })()`, true);
+        const clicked = await waitFor(() => evalIn(page, `(() => {
+          const card = [...document.querySelectorAll('.provider-card')]
+            .find(node => node.querySelector('.provider-card-name')?.textContent === 'Anthropic');
+          const button = [...(card?.querySelectorAll('button') ?? [])]
+            .find(node => node.textContent === 'Test');
+          if (!button) return false;
+          button.click();
+          return true;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        const message = await waitFor(() => evalIn(page, `document.querySelector('.provider-card .key-msg')?.textContent`),
+          { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the provider test shows a settled result', clicked && !!message, message);
+        if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') {
+          rec.check('the refused test names its status and recovery step',
+            message?.includes('(429)') && message.includes('Check your plan, credit or rate limit')
+              && !message.includes('reach the provider'), message);
+        }
+        await rec.visualPage('options-provider-test-429', page);
+      } finally { try { page.close(); } catch {} }
+    },
+  },
   // --- the on-device model cards ------------------------------------------
   // options-fulltab captures the providers page from the top, which leaves the
   // Local (WebGPU) card below the fold - so the multi-model list it now renders
