@@ -113,7 +113,7 @@ const responseProjection = (response) => ({
 /**
  * @param {Object} deps
  * @param {(resource:string|URL|Request,init?:RequestInit)=>Promise<Response>} deps.safeFetch
- * @param {{getSecret:(name:string)=>Promise<string|null>}} deps.vault
+ * @param {{getSecret:(name:string)=>Promise<string|null>,touch?:()=>void}} deps.vault
  * @param {{get:()=>Record<string,any>}} deps.settingsStore
  * @param {{open:(request:any,owner:object,signal?:AbortSignal)=>Promise<string>,
  *   read:(streamId:string,owner:object)=>Promise<any>,
@@ -245,6 +245,7 @@ export const createProviderEgressAuthority = ({
       releaseOwnerOperation(operation);
       return knownFailure('model-egress-credential-missing');
     }
+    vault.touch?.();
     const { abort, unlink } = operation;
     let response;
     const connectTimer = setTimeout(() => abort.abort('model-egress-connect-timeout'), policy.connectMs);
@@ -371,6 +372,7 @@ export const createProviderEgressAuthority = ({
     if (retiredOwners.has(grant.owner) || grant.signal?.aborted) {
       return knownFailure('local-model-generation-aborted');
     }
+    vault.touch?.();
     try {
       const streamId = await localModelAuthority.open({
         messages: value.messages,

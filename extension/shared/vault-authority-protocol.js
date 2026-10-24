@@ -14,12 +14,8 @@ export const VAULT_AUTHORITY_STORAGE_RESULT = 'vault-authority/storage-result';
 export const VAULT_AUTHORITY_EVENT = 'vault-authority/event';
 
 export const VAULT_AUTHORITY_METHODS = Object.freeze([
-  'status',
-  'boot',
-  'attemptResume',
-  'setAutoLockMs',
-  'initialize',
-  'initializeWithPrfOnly',
+  'status', 'touch', 'boot', 'attemptResume', 'setAutoLockMs',
+  'initialize', 'initializeWithPrfOnly',
   'unlock',
   'setRecoveryPassphrase',
   'lock',
