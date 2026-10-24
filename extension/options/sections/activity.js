@@ -289,7 +289,7 @@ export const ActivityView = {
           : `${ui.total} recorded event${ui.total === 1 ? '' : 's'}`),
       m('.spacer', { style: 'flex:1;' }),
       m('button.icon', {
-        title: 'Refresh',
+        title: 'Refresh', 'aria-label': 'Refresh',
         onclick: () => ActivityView.refresh(vnode, hasFilter(ui) ? Number.MAX_SAFE_INTEGER : undefined),
       }, '↻'),
     ]);

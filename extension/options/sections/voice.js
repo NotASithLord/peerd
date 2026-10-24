@@ -19,6 +19,7 @@
 
 import m from '/vendor/mithril/mithril.js';
 import browser from '/shared/browser-api.js';
+import { confirmationDialogAttrs } from '/shared/ui-effects.js';
 import { createVoiceManager, detectVoiceCapability } from '/peerd-runtime/options.js';
 import { mutationFailureCopy } from '../mutation-custody.js';
 import { resetRow } from './reset-row.js';
@@ -77,6 +78,7 @@ export const VoiceSection = {
     // The on-device upgrade is offered whenever Moonshine is available and is
     // not already the live engine.
     const canUpgrade = capability.moonshine && activeEngine !== 'moonshine';
+    const closeConfirmation = () => { ui.voiceConfirmOpen = false; m.redraw(); };
 
     // Enable voice. With no `engine` arg it uses the stored preference (instant
     // Web Speech under 'auto'); with engine === 'moonshine' it persists the
@@ -269,9 +271,9 @@ export const VoiceSection = {
         // Reached from "Upgrade to on-device" (Chrome) or "Enable voice"
         // (Firefox, where it's required). Always about the on-device model.
         ui.voiceConfirmOpen ? m('.peerd-modal-backdrop', {
-          onclick: (/** @type {Event} */ e) => { if (e.target === e.currentTarget) ui.voiceConfirmOpen = false; },
-        }, m('.peerd-modal', [
-          m('h3', 'Download on-device voice model?'),
+          onclick: (/** @type {Event} */ e) => { if (e.target === e.currentTarget) closeConfirmation(); },
+        }, m('.peerd-modal', confirmationDialogAttrs('voice-confirm-title', closeConfirmation, ui), [
+          m('h3#voice-confirm-title', 'Download on-device voice model?'),
           m('p', [
             'peerd will use ',
             m('a', {
@@ -293,11 +295,7 @@ export const VoiceSection = {
                 'This browser has no built-in speech API, so the on-device model is required for voice.')
             : null,
           m('.peerd-modal-actions', [
-            m('button.secondary', {
-              type: 'button',
-              disabled: ui.voiceBusy,
-              onclick: () => { ui.voiceConfirmOpen = false; m.redraw(); },
-            }, 'Cancel'),
+            m('button.secondary', { type: 'button', 'data-confirm-reject': '', disabled: ui.voiceBusy, onclick: closeConfirmation }, 'Cancel'),
             m('button', {
               type: 'button',
               disabled: ui.voiceBusy || !capability.moonshine,

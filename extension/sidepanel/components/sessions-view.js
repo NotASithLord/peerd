@@ -196,7 +196,7 @@ const SessionRow = {
         ]),
       ]),
       m('button.session-archive', {
-        title: 'Archive', disabled,
+        title: 'Archive', 'aria-label': `Archive chat “${title}”`, disabled,
         onclick: (/** @type {Event} */ e) => { e.stopPropagation(); onArchive(); },
       }, '×'),
     ]);
