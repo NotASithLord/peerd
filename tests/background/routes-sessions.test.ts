@@ -138,6 +138,16 @@ describe('agent/send slash-command routing', () => {
     await makeSessionRoutes(deps)['agent/send']({ text: 'hello' });
     expect(calls.halted).toEqual(['a']);
   });
+  test('a user turn clears its old Goal reason after durable Stop and before model dispatch', async () => {
+    const order: string[] = [];
+    const { deps } = baseDeps({
+      haltGoalRun: async (sessionId: string) => { order.push(`stop:${sessionId}`); },
+      clearGoalStopNote: async (sessionId: string) => { order.push(`clear:${sessionId}`); },
+      runAgentTurn: async () => { order.push('model'); },
+    });
+    expect(await makeSessionRoutes(deps)['agent/send']({ text: 'continue' })).toEqual({ ok: true });
+    expect(order).toEqual(['stop:a', 'clear:a', 'model']);
+  });
   test('the steer-takeover AWAITS the durable goal Stop (#60)', async () => {
     // A late-resolving haltGoalRun: the handler must wait for the durable stop
     // to commit (so it can't resurrect on the next unlock) before returning.

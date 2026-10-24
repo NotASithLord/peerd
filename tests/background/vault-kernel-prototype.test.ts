@@ -99,6 +99,23 @@ describe('minimal vault authority-kernel prototype', () => {
     expect(JSON.stringify(state)).not.toMatch(/credentialId|prfSalt|wrappedDK|secret|apiKey/);
   });
 
+  test('cold Goal receipts carry bounded text only for an unlocked owning chat', () => {
+    const base = buildVaultKernelState({ kernel: KERNEL,
+      status: { initialized: true, prfEnrolled: false, hasRecovery: true },
+      locked: true, unlockedAt: 0, lockReason: null, autoLockMs: 1_000, ...lockedUi });
+    const note = { id: 'goal-end-receipt', text: 'Goal run stopped (needs verification).', at: 1 };
+    const state = { ...base, vault: { ...base.vault, locked: false },
+      profile: { id: 'default', peerName: 'peerd', onboardingComplete: true },
+      session: { ...base.session, sessionId: 'owning-chat', goalStopNote: note } };
+    expect(validateKernelStateProjection(state).ok).toBe(true);
+    for (const invalid of [
+      { ...note, id: '' }, { ...note, id: 'x'.repeat(129) },
+      { ...note, text: '' }, { ...note, text: 'x'.repeat(1_001) },
+      { ...note, at: NaN }, { ...note, at: -1 }, { ...note, action: { kind: 'open-tab' } },
+    ]) expect(validateKernelStateProjection({ ...state, session: { ...state.session, goalStopNote: invalid } }).ok).toBe(false);
+    expect(validateKernelStateProjection({ ...base, session: { ...base.session, goalStopNote: note } }).ok).toBe(false);
+  });
+
   test('locked cleanup projection excludes authority metadata and rejects invalid cleanup states', () => {
     const authority = {
       initialized: true, prfEnrolled: true, hasRecovery: false,

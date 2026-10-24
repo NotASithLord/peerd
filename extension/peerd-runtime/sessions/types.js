@@ -69,6 +69,7 @@
  * the ordinary state snapshots), and re-surfaced in every goal continuation
  * prompt. Absent until a run calls todo_init.
  * @property {import('../todo/core.js').TodoItem[]} [todos]
+ * @property {{id:string,text:string,at:number}|null} [goalStopNote] Last terminal Goal reason.
  *
  * Prewalk state (loop/prewalk.js) — present only while a prewalk-armed goal
  * run owns this session. phase 'planning' = frontier model, nudge injected;

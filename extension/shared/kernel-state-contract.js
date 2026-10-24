@@ -79,6 +79,9 @@ const validSession = (value) => {
       || s.messages.some((item) => !record(item))) return false;
   if (!record(s.permission) || !['plan', 'act'].includes(s.permission.mode)
       || typeof s.permission.confirmActions !== 'boolean') return false;
+  if (s.goalStopNote != null && (s.sessionId === null || !record(s.goalStopNote) || Object.keys(s.goalStopNote).length !== 3
+      || !boundedString(s.goalStopNote.id, 128, 1) || !boundedString(s.goalStopNote.text, 1_000, 1)
+      || !Number.isFinite(s.goalStopNote.at) || s.goalStopNote.at < 0)) return false;
   return s.provider == null || boundedString(s.provider, 64);
 };
 

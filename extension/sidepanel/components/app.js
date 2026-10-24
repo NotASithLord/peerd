@@ -261,7 +261,7 @@ const PlaceholderView = {
 // equality) — /init progress and the grant-debugger nudge must be visible
 // wherever the user is, not just the side panel.
 /**
- * @typedef {{ id: number, text?: string, action?: { kind?: string, label?: string, url?: string } | null }} Notice
+ * @typedef {{ id: number|string, text?: string, action?: { kind?: string, label?: string, url?: string } | null }} Notice
  */
 
 export const NoticeBar = {

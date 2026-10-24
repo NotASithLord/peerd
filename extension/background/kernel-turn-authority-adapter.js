@@ -44,7 +44,6 @@ import {
   groupResourceLossNotices,
   makeFixedSiteClientOriginGuard,
   makeJudgeLanding,
-  makeLearnedOrigins,
   makeLifecycleBoot,
   makeMeshDispatch,
   makeOriginStateStore,
@@ -566,22 +565,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       return true;
     } catch { return false; }
   };
-  const learnedOrigins = makeLearnedOrigins({
-    load: async () => deps.kv.get('learnedOrigins.v1'),
-    save: async (all) => deps.kv.set('learnedOrigins.v1', all),
-    onLearn: (host, reason) => {
-      deps.auditLog.append({
-        type: 'origin_learned_sensitive', details: { host, reason },
-      }).catch(() => {});
-    },
-    onForget: (hosts) => {
-      for (const host of hosts) {
-        deps.auditLog.append({
-          type: 'origin_unlearned_sensitive', details: { host },
-        }).catch(() => {});
-      }
-    },
-  });
+  const learnedOrigins = deps.learnedOrigins;
   const engineLiveness = makeEngineLiveness({ storage: deps.kv });
   const numericTabAuthorityFor = async (/** @type {unknown} */ liveUrl) => {
     await learnedOrigins.hydrate();
@@ -1111,6 +1095,16 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
   const uiConnected = () => live?.shared.uiPorts.size > 0;
   const post = (/** @type {any} */ message) => {
     if (uiConnected()) live.shared.uiPorts.broadcast(message);
+  };
+  // why: a new user turn must clear every older terminal save.
+  const goalNotes = makeSerialLane();
+  const clearGoalStopNote = async (/** @type {string} */ sessionId) => {
+    const cleared = await goalNotes(async () => {
+      if (!(await live.shared.sessions.getMetadata(sessionId))?.goalStopNote) return false;
+      await live.shared.sessions.update(sessionId, { goalStopNote: null });
+      return true;
+    });
+    if (cleared && uiConnected()) await deps.pushState();
   };
   const rootSessionIdFor = (/** @type {string} */ sessionId) =>
     rootChatSession(live.shared.sessions, sessionId).catch(() => null);
@@ -3484,8 +3478,11 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       noteAgentTab: (/** @type {number} */ tabId, /** @type {any} */ tab) =>
         live.tabAffordances.noteAgentTab(tabId, tab),
       bindGoalRunner: (/** @type {any} */ runner) => { goalRunner = runner; },
-      beforeGoalStart: (/** @type {{sessionId:string}} */ request) =>
-        prewalk.armForRun(request?.sessionId),
+      beforeGoalStart: async (/** @type {{sessionId:string}} */ request) => {
+        await goalRunner?.stop(request.sessionId);
+        await clearGoalStopNote(request.sessionId);
+        await prewalk.armForRun(request.sessionId);
+      },
       hasUnresolvedSideEffects: async (/** @type {string} */ sessionId) => {
         await lifecycleArmed;
         if (await lifecycleBoot.operationLog.unknownIntentOverflowed?.()) return true;
@@ -3494,21 +3491,16 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         }
         return false;
       },
-      onGoalRunEnd: (/** @type {string} */ sessionId, /** @type {any} */ info) => {
+      onGoalRunEnd: async (/** @type {string} */ sessionId, /** @type {any} */ info) => {
         prewalk.restoreForRun(sessionId).catch(() => {});
-        void deps.sessionCache.sessionGet('currentSessionId').then((/** @type {any} */ current) => {
-          if (current !== sessionId) return;
-          if (info?.phase === 'capped') {
-            deps.postChatNote(
-              `Goal run stopped after reaching the ${GOAL_MAX_ITERATIONS}-turn limit.`,
-              null,
-              sessionId,
-            );
-          } else if (info?.phase === 'halted') {
-            deps.postChatNote(info?.reason
-              ? `Goal run stopped (${info.reason}).` : 'Goal run stopped.', null, sessionId);
-          }
-        }).catch(() => {});
+        const text = info?.phase === 'capped'
+          ? `Goal run stopped after reaching the ${GOAL_MAX_ITERATIONS}-turn limit.`
+          : info?.phase === 'halted' && info.reason ? `Goal run stopped (${info.reason}).` : null;
+        if (!text) return;
+        await goalNotes(() => shared.sessions.update(sessionId, {
+          goalStopNote: { id: crypto.randomUUID(), text: text.slice(0, 1_000), at: Date.now() },
+        }));
+        if (uiConnected()) await deps.pushState();
       },
       broadcastAgentTab: () => live.tabAffordances.broadcastAgentTab(),
       onUiConnect: async (/** @type {any} */ port,
@@ -3704,7 +3696,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       runInit: (/** @type {any} */ message = {}, /** @type {any} */ options = undefined) =>
         deps.runMemoryInit(message, options),
       handleSystemCommand, handleToolsCommand,
-      postChatNote: deps.postChatNote, spawnActor: live.spawnActor,
+      postChatNote: deps.postChatNote, spawnActor: live.spawnActor, clearGoalStopNote,
       browser: deps.browser, ensureSession: ensureCurrentSession,
       actorRecoveryReady: () => live.actorRecoveryGate.ready(),
       actorMessaging: live.actorMessaging,

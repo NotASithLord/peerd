@@ -142,6 +142,20 @@ describe('reduceChat', () => {
     })).toBe(INITIAL_STATE);
   });
 
+  test('cold Goal reasons hydrate once, stay scoped and clear with their receipt', () => {
+    const note = { id: 'goal-end-1', text: 'Goal run stopped (needs verification).', at: 1 };
+    const snapshot = { type: 'state', state: { session: { sessionId: 'viewed', messages: [], goalStopNote: note } } };
+    const fresh = reduceChat(INITIAL_STATE, snapshot);
+    expect(fresh.notices).toEqual([{ id: note.id, text: note.text, sessionId: 'viewed', action: null }]);
+    const repeated = reduceChat(fresh, snapshot);
+    expect(repeated.notices).toHaveLength(1);
+    expect(reduceChat(repeated, { type: 'turn/system-note', ...note, sessionId: 'viewed' })).toBe(repeated);
+    const other = reduceChat(repeated, { type: 'state', state: { session: { sessionId: 'other', messages: [] } } });
+    expect(other.notices).toHaveLength(0);
+    expect(reduceChat(other, snapshot).notices).toHaveLength(1);
+    expect(reduceChat(fresh, { type: 'state', state: { session: { sessionId: 'viewed', messages: [], goalStopNote: null } } }).notices).toHaveLength(0);
+  });
+
   test('an unscoped system note remains visible for current-chat UI feedback', () => {
     const viewed = withSession('viewed');
     const next = reduceChat(viewed, { type: 'turn/system-note', text: 'Settings saved.' });

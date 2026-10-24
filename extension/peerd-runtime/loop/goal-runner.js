@@ -280,6 +280,7 @@ export const makeGoalRunner = ({
             trusted: true,
           });
         } catch (e) {
+          if (!alive()) break;
           // A hard throw. A locked vault is TRANSIENT — pause (keep the
           // persisted record) so resume() re-drives after unlock. Anything else
           // is a real stop.
@@ -290,6 +291,7 @@ export const makeGoalRunner = ({
         // A turn that ended in failure or was aborted (Stop / steer / spend
         // limit) must NOT be blindly re-driven — that would burn the whole cap
         // re-failing. Stop the run instead.
+        if (!alive()) break;
         if (outcome && (outcome.ok === false || outcome.stopReason === 'aborted')) {
           run.halted = true;
           run.lastError = outcome.stopReason === 'aborted' ? null : 'a turn failed';
@@ -312,7 +314,7 @@ export const makeGoalRunner = ({
           if (runs.get(sid) !== run) return;
           runs.delete(sid);
           emit(sid, phase, run);
-          try { onRunEnd(sid, { phase, summary: run.summary, reason: run.lastError ?? null }); }
+          try { await onRunEnd(sid, { phase, summary: run.summary, reason: run.lastError ?? null }); }
           catch (e) { console.error('[goal] onRunEnd threw', e); }
         }
       }
