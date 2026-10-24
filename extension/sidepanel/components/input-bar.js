@@ -277,7 +277,7 @@ export const sendAgentWithCustody = async ({ send, message, pending, currentSess
  *   state: InputBarState,
  *   attrs: {
  *     state: ChatState, send: Send, voiceManager?: any,
- *     goalArmed?: boolean, onGoalSent?: () => void,
+ *     goalArmed?: boolean, onGoalSent?: () => void, onSubmit?: () => void,
  *   },
  * }} InputBarVnode
  */
@@ -330,7 +330,7 @@ export const InputBar = {
   },
 
   /** @param {InputBarVnode} vnode */
-  view: ({ attrs: { state, send, voiceManager, goalArmed, onGoalSent }, state: ui }) => {
+  view: ({ attrs: { state, send, voiceManager, goalArmed, onGoalSent, onSubmit }, state: ui }) => {
     const streaming = !!state.streaming;
     const sid = state.session?.sessionId;
     // Switched chats → save the draft we were holding and load the new chat's.
@@ -434,7 +434,7 @@ export const InputBar = {
       e?.preventDefault?.();
       const text = ui.value.trim();
       if (!text || ui.busy || ui.unconfirmedSend || !canSend) return;
-      ui.sendError = null;
+      ui.sendError = null; onSubmit?.();
       const operationId = `send.${Date.now().toString(36)}.${crypto.randomUUID()}`;
 
       // Goal-armed (mode-row toggle): this send starts an autonomous goal run

@@ -98,12 +98,13 @@ const actorOutcomeUnknownFailure = (_text) =>
  * @property {((msg: Record<string, any>) => Promise<any>)} [send]
  * @property {boolean} [busy]
  * @property {boolean} [streaming]
+ * @property {number} [followSequence]
  * @property {boolean} [announceOnMount]
  * @property {Map<string|undefined, Set<string>>} [seenRecoveryIdsBySession]
  */
 
-// Keep following only while the user stays near the live edge. Record this on
-// scroll because a large redraw can move the edge before onupdate measures it.
+// why local intent: follow again on a local send. Keep other surfaces still.
+// Read the edge on scroll, before a redraw can change it.
 const NEAR_BOTTOM_PX = 150;
 /** @param {HTMLElement} el */
 const nearBottom = (el) => el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
@@ -333,8 +334,9 @@ export const MessageList = {
     vnode.state.turnAnnouncement = '';
     vnode.state.turnAnnouncementTimer = null;
   },
-  /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
-  onbeforeupdate(vnode) {
+  /** @param {{ attrs: TranscriptArgs, state: any }} vnode @param {{ attrs: TranscriptArgs }} old */
+  onbeforeupdate(vnode, old) {
+    if (vnode.attrs.followSequence !== old.attrs.followSequence || vnode.state.sessionId !== vnode.attrs.sessionId) vnode.state.followBottom = true;
     // why clear on start: a second identical reply can finish before the
     // timeout. A chat switch must also drop the prior chat's announcement.
     if (vnode.state.sessionId !== vnode.attrs.sessionId || (!vnode.state.wasStreaming && vnode.attrs.streaming)) {
@@ -342,7 +344,6 @@ export const MessageList = {
     }
     if (vnode.state.sessionId !== vnode.attrs.sessionId) {
       vnode.state.sessionId = vnode.attrs.sessionId;
-      vnode.state.followBottom = true;
       const receipts = recoveryReceipts(vnode.attrs.messages);
       const existing = vnode.state.seenRecoveryIdsBySession.get(vnode.attrs.sessionId);
       const fresh = existing

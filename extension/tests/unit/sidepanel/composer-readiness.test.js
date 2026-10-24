@@ -3,6 +3,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';
 import { InputBar } from '/sidepanel/components/input-bar.js';
+import { ChatView } from '/sidepanel/components/chat-view.js';
 
 const settle = async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -28,6 +29,130 @@ const mountInput = (state, options = {}) => {
     unmount: () => { m.mount(root, null); root.remove(); },
   };
 };
+
+describe('sidepanel own-send scroll', () => {
+  it('follows only the submitting surface and keeps a reader in place during streaming', async () => {
+    const sessionId = 'own-send-scroll-integrated';
+    const storageKeys = [`peerd.draft.${sessionId}`, `peerd.unconfirmed-send.${sessionId}`];
+    for (const key of storageKeys) localStorage.removeItem(key);
+    const state = /** @type {any} */ ({
+      session: {
+        sessionId, provider: 'ollama', model: 'qwen3:8b',
+        permission: { mode: 'act', confirmActions: false },
+        messages: Array.from({ length: 24 }, (_, index) => ({
+          role: 'user', id: `history-${index}`, content: `Earlier message ${index + 1}.`,
+        })),
+      },
+      providers: { current: 'ollama', hasKey: false, model: 'qwen3:8b' },
+      composer: { provider: 'ollama', model: 'qwen3:8b', canSend: true, reason: null },
+      settings: { voiceOnboardingDismissed: true, voiceEnabled: false },
+      capabilities: {}, goalRuns: {}, streaming: false,
+    });
+    /** @type {any[]} */ const sends = [];
+    /** @type {((reply: any) => void)[]} */ const finishReplies = [];
+    const send = async (/** @type {any} */ message) => {
+      if (message.type === 'models/options') return { ok: true, options: [] };
+      if (message.type !== 'agent/send') return { ok: true };
+      sends.push(message);
+      state.session.messages.push(
+        { role: 'user', id: `sent-${sends.length}`, content: message.text },
+        { role: 'assistant', id: `reply-${sends.length}`, content: '', streaming: true },
+      );
+      state.streaming = true;
+      return new Promise((resolve) => { finishReplies.push(resolve); });
+    };
+    const root = document.createElement('div');
+    root.style.width = '600px';
+    document.body.appendChild(root);
+    try {
+      m.mount(root, { view: () => m('div', ['first', 'second'].map((surface) =>
+        m(ChatView, { key: surface, state, send, voiceManager: null, uiActions: {}, surface }))) });
+      await settle();
+      const surfaces = [...root.querySelectorAll('.chat-view')];
+      expect(surfaces.length).toBe(2);
+      const lists = surfaces.map((surface) => /** @type {HTMLElement} */ (
+        surface.querySelector('.message-list')
+      ));
+      for (const list of lists) {
+        list.style.cssText = 'display:block;height:120px;overflow-y:auto;overflow-anchor:none';
+        expect(list.clientHeight).toBeGreaterThan(0);
+        expect(list.scrollHeight - list.clientHeight).toBeGreaterThan(300);
+        list.scrollTop = 0;
+        list.dispatchEvent(new Event('scroll'));
+      }
+      const [firstList, secondList] = lists;
+      const submit = async (/** @type {Element} */ surface, /** @type {string} */ text) => {
+        const textarea = surface.querySelector('textarea');
+        const form = surface.querySelector('form.input-bar');
+        if (!(textarea instanceof HTMLTextAreaElement) || !form) throw new Error('composer missing');
+        textarea.value = text;
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        m.redraw.sync();
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        await settle();
+      };
+      const visibleOwnBubble = (/** @type {HTMLElement} */ list, /** @type {string} */ text) => {
+        expect(list.scrollHeight - list.scrollTop - list.clientHeight).toBeLessThan(2);
+        const bubble = [...list.querySelectorAll('.message-user .bubble')]
+          .find((node) => node.textContent === text);
+        if (!bubble) throw new Error('submitted bubble missing');
+        const bounds = list.getBoundingClientRect(), message = bubble.getBoundingClientRect();
+        expect(message.top >= bounds.top - 1 && message.bottom <= bounds.bottom + 1).toBe(true);
+      };
+
+      await submit(surfaces[0], 'Send from the first surface');
+      expect(sends.map((message) => message.text)).toEqual(['Send from the first surface']);
+      visibleOwnBubble(firstList, 'Send from the first surface');
+      expect(secondList.scrollTop).toBe(0);
+
+      firstList.scrollTop = 0;
+      firstList.dispatchEvent(new Event('scroll'));
+      const firstReply = state.session.messages.at(-1);
+      for (const text of ['First streamed sentence. ', 'Second streamed sentence.']) {
+        firstReply.content += text;
+        await settle();
+        expect(state.streaming).toBe(true);
+        expect(firstList.scrollTop).toBe(0);
+        expect(secondList.scrollTop).toBe(0);
+      }
+      firstReply.streaming = false;
+      firstReply.stopReason = 'end_turn';
+      state.streaming = false;
+      finishReplies[0]({ ok: true });
+      await settle();
+      expect(firstList.scrollTop).toBe(0);
+      expect(secondList.scrollTop).toBe(0);
+
+      await submit(surfaces[1], 'Send from the second surface');
+      expect(sends.map((message) => message.text))
+        .toEqual(['Send from the first surface', 'Send from the second surface']);
+      visibleOwnBubble(secondList, 'Send from the second surface');
+      expect(firstList.scrollTop).toBe(0);
+      state.session.messages.at(-1).streaming = false;
+      state.streaming = false;
+      finishReplies[1]({ ok: true });
+      await settle();
+      secondList.scrollTop = 0;
+      secondList.dispatchEvent(new Event('scroll'));
+      state.composer = { ...state.composer, canSend: false, reason: 'controller-not-ready' };
+      await settle();
+      expect(localStorage.getItem(`peerd.unconfirmed-send.${sessionId}`)).toBe(null);
+      expect(/** @type {HTMLButtonElement} */ (surfaces[0].querySelector('button.send-btn')).disabled).toBe(true);
+      await submit(surfaces[0], 'Keep the blocked draft');
+      expect(sends.length).toBe(2);
+      expect(firstList.scrollTop).toBe(0);
+      expect(secondList.scrollTop).toBe(0);
+      expect(/** @type {HTMLTextAreaElement} */ (surfaces[0].querySelector('textarea')).value)
+        .toBe('Keep the blocked draft');
+    } finally {
+      for (const finish of finishReplies) finish({ ok: true });
+      await settle();
+      m.mount(root, null);
+      root.remove();
+      for (const key of storageKeys) localStorage.removeItem(key);
+    }
+  });
+});
 
 describe('session-aware composer readiness', () => {
   for (const throws of [false, true]) {

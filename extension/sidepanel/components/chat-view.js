@@ -44,6 +44,7 @@ const saveJsonFile = (payload, filename) => {
  * Component-local state for ChatView.
  * @typedef {Object} ChatViewState
  * @property {boolean} goalArmed             the Goal toggle's arm state (UI-only)
+ * @property {number} sendSequence                 local composer submissions
  * @property {string|null|undefined} _sid    which chat the arm state belongs to
  * @property {boolean} hadMessages           whether this chat already mounted a transcript
  * @property {boolean} hasObservedSession    whether initial session hydration has completed
@@ -64,11 +65,9 @@ const saveJsonFile = (payload, filename) => {
 export const ChatView = {
   /** @param {ChatViewVnode} vnode */
   oninit(vnode) {
-    // Goal arming is pure composer intent (it just flags the next send as
-    // goal:true), so it lives here as UI-only state — no SW round-trip. Reset
-    // when the chat changes (each chat owns its own run), mirroring the
-    // InputBar's per-session draft swap.
-    vnode.state.goalArmed = false;
+    // why local state: Goal arms this chat's next send without a worker request.
+    // Each surface owns its send sequence. Reset Goal on chat changes, like InputBar's draft.
+    vnode.state.goalArmed = false; vnode.state.sendSequence = 0;
     vnode.state._sid = vnode.attrs.state?.session?.sessionId;
     vnode.state.hadMessages = (vnode.attrs.state?.session?.messages?.length ?? 0) > 0;
     vnode.state.hasObservedSession = vnode.state._sid != null;
@@ -192,7 +191,7 @@ export const ChatView = {
         actorExecution: state.capabilities?.actorExecution,
       })
         : m(MessageList, {
-            sessionId: state.session?.sessionId,
+            sessionId: state.session?.sessionId, followSequence: ui.sendSequence,
             announceOnMount,
             seenRecoveryIdsBySession: ui.seenRecoveryIdsBySession,
             messages,
@@ -335,7 +334,7 @@ export const ChatView = {
       // (The per-chat usage chip lives inside the InputBar action row,
       // next to the mic/Send buttons — feature 06.)
       m(InputBar, {
-        state, send, voiceManager,
+        state, send, voiceManager, onSubmit: () => { ui.sendSequence += 1; },
         goalArmed: ui.goalArmed,
         onGoalSent: () => { ui.goalArmed = false; },
       }),
