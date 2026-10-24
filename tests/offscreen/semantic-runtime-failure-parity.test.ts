@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { makeControllerTurnBridge } from '../../extension/background/controller-turn-bridge.js';
+import { stampLifecycleToolResult } from '../../extension/background/host-effect-verdict.js';
 import { semanticCallAuditEntry } from '../../extension/background/semantic-call-audit.js';
 import { createControllerTurnRuntime } from '../../extension/offscreen/controller-turn-runtime.js';
 import { startActorWorker } from '../../extension/offscreen/actor-worker-runtime.js';
@@ -347,10 +348,42 @@ describe('main and actor semantic failure integration parity', () => {
       actorPerformed: true, actorAborted: false,
     });
     expect(done).toMatchObject({
-      type: 'error', outcomeKnown: false, retryable: false,
-      recovery, authorityReceipt,
+      type: 'done', runId: 'actor-lifecycle-run', result: {
+        error: 'outcome_unknown: Verify the target before retrying.',
+        stopReason: 'error', toolCalls: 1,
+      },
+    });
+    expect(done.result.ok).not.toBe(true);
+    const uses = done.result.newMessages.flatMap((message: any) => message.toolUses ?? []);
+    expect(uses).toEqual([{
+      id: 'actor-lifecycle-call', name: 'message_actor',
+      input: { to: 'web', message: 'inspect', await_reply: true },
+    }]);
+    const blocks = done.result.newMessages.flatMap((message: any) => message.toolResults ?? []);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({
+      tool_use_id: uses[0].id, is_error: true, outcomeKnown: false, retryable: false,
       actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
       actorDeliveryIds: ['delivery-one', 'delivery-two'],
+      actorTerminal: true, actorOutcomeKnown: false, actorPerformed: true,
     });
+    // why: transport completion retains the transcript. The host owns recovery truth.
+    const hostInput = {
+      receipts: [authorityReceipt], callId: uses[0].id,
+      rewrites: [{ callId: uses[0].id, rewrite: { error: result.error, recovery }, physical: result }],
+    };
+    for (const stored of [false, true]) {
+      const settled = stampLifecycleToolResult({ ...hostInput, stored,
+        value: stored ? blocks[0] : { ok: false, error: done.result.error },
+      });
+      expect(settled).toMatchObject({
+        ...(stored ? { is_error: true } : { ok: false }),
+        outcomeKnown: false, retryable: false, recovery,
+        authorityReceipts: [authorityReceipt],
+        actorDeliveryId: 'delivery-one', actorCorrelationId: 'correlation-one',
+        actorDeliveryIds: ['delivery-one', 'delivery-two'],
+        actorTerminal: true, actorOutcomeKnown: false, actorPerformed: true, actorAborted: false,
+      });
+    }
   });
 });

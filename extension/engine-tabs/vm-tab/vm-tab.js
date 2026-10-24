@@ -17,7 +17,7 @@
 
 import browser from '/shared/browser-api.js';
 import {
-  VMBootFailedError,
+  VMBootFailedError, VMNotReadyError,
   IMAGE_PIN_HEAD_BYTES,
   IMAGE_PIN_STORAGE_KEY,
   parseContentRangeTotal,
@@ -677,6 +677,7 @@ let cxRead = /** @type {(byte: number) => void} */ (/** @type {unknown} */ (null
 /** @type {any} */
 let term = null;
 /** @type {any} */ let fitAddon = null;
+let syncConsoleSize = () => {};
 
 let silentMode = false;
 let httpMarkerPending = '';
@@ -684,7 +685,7 @@ let httpMarkerPending = '';
 // newline) can't grow memory unbounded. Comfortably above a max-size body's
 // base64 (8MB body → ~11MB line); past this we flush it as literal output.
 const MAX_MARKER_PENDING = 24 * 1024 * 1024;
-/** @type {{ marker: string, buffer: string, startedAt: number, lastChunkAt: number, resolve: (r: {exitCode: number, stdout: string, stderr: string, timing: {totalMs: number, tailMs: number}}) => void } | null} */
+/** @type {{ marker: string, buffer: string, startedAt: number, lastChunkAt: number, reject: (error: Error) => void, resolve: (r: {exitCode: number, stdout: string, stderr: string, timing: {totalMs: number, tailMs: number}}) => void } | null} */
 let activeRunCapture = null;
 /** @type {string[] | null} */
 let preTerminalBuffer = [];
@@ -970,11 +971,11 @@ const runViaShell = async (/** @type {string} */ cmd, /** @type {any} */ opts = 
   // Per-call stderr capture file inside the VM (run-capture.js protocol); the
   // wrapper replays it between the -err/-end markers and removes it.
   const errFile = `${ERRFILE_PREFIX}${Math.random().toString(36).slice(2, 10)}`;
-  /** @type {{ marker: string, buffer: string, startedAt: number, lastChunkAt: number, resolve: ((r: any) => void) | null }} */
-  const capture = { marker, buffer: '', startedAt: Date.now(), lastChunkAt: 0, resolve: null };
+  /** @type {{ marker: string, buffer: string, startedAt: number, lastChunkAt: number, resolve: ((r: any) => void) | null, reject: ((error: Error) => void) | null }} */
+  const capture = { marker, buffer: '', startedAt: Date.now(), lastChunkAt: 0, resolve: null, reject: null };
   let abortListener;
   const completion = new Promise((resolve, reject) => {
-    capture.resolve = resolve;
+    capture.resolve = resolve; capture.reject = reject;
     if (opts.signal) {
       abortListener = () => {
         // Interrupt the still-running foreground command (Ctrl-C, then a newline)
@@ -990,10 +991,8 @@ const runViaShell = async (/** @type {string} */ cmd, /** @type {any} */ opts = 
   const effectiveSilent = !!opts.silent;
   if (effectiveSilent) silentMode = true;
   const wrappedCmd = `\x15${buildWrappedCommand(cmd, marker, errFile)}`;
-  for (let i = 0; i < wrappedCmd.length; i++) {
-    cxRead(wrappedCmd.charCodeAt(i));
-  }
   try {
+    for (const byte of new TextEncoder().encode(wrappedCmd)) cxRead(byte);
     // parseRunCapture already sliced the echo off and split stdout/stderr.
     return await completion;
   } finally {
@@ -1306,19 +1305,27 @@ const boot = async () => {
   // 7. PTY hookup
   setStage('Starting shell');
   const decoder = new TextDecoder();
-  cxRead = cx.setCustomConsole((/** @type {any} */ buf, /** @type {any} */ vt) => {
+  const shellOutput = (/** @type {any} */ buf, /** @type {any} */ vt) => {
     if (vt !== 1 && vt !== undefined) return;
     const bytes = (buf instanceof Uint8Array) ? buf
       : (typeof buf === 'number') ? new Uint8Array([buf])
       : new Uint8Array(buf);
     const text = decoder.decode(bytes, { stream: true });
     if (text) handleShellByte(text);
-  }, 80, 24);
-
-  cx.run('/bin/bash', ['--login', '-i']).then(
-    (/** @type {any} */ code) => { shellExit = code; trace('warn', `persistent shell exited (${code})`); },
-    (/** @type {any} */ err) => { shellExit = -1; trace('error', `persistent shell threw: ${err?.message ?? String(err)}`); },
-  );
+  };
+  cxRead = cx.setCustomConsole(shellOutput, 80, 24);
+  // why: an active command can change disk before exit. Reject without the safe retry flag.
+  const shellEnded = (/** @type {number} */ status) => {
+    shellExit = status;
+    const capture = activeRunCapture; activeRunCapture = null;
+    capture?.reject(new VMNotReadyError(`persistent shell exited (${status}); command outcome unknown`));
+    trace('warn', `persistent shell exited (${status})`);
+  };
+  cx.run('/bin/bash', ['--login', '-i'], {
+    env: ['LANG=C.UTF-8', 'TERM=xterm', 'HOME=/home/user', 'USER=user'], cwd: '/home/user',
+  }).then((/** @type {any} */ result) => shellEnded(result.status), () => shellEnded(-1));
+  // why: retain the decoder and callback across resize. The vendor API sends no SIGWINCH.
+  syncConsoleSize = () => { cxRead = cx.setCustomConsole(shellOutput, term.cols, term.rows); };
 
   // 8. Wait briefly for the prompt to settle
   await new Promise((r) => setTimeout(r, 600));
@@ -1427,7 +1434,9 @@ const mountTerminal = () => {
   DOM.bootCard.hidden = true;
   DOM.terminal.hidden = false;
   term.open(DOM.terminal);
+  term.onResize(syncConsoleSize);
   try { fitAddon?.fit(); } catch { /* no-op */ }
+  syncConsoleSize();
 
   // Opening banner — the live shell continues the boot console's look:
   // the wordmark letters in their module colors (24-bit ANSI; same five
@@ -1453,7 +1462,7 @@ const mountTerminal = () => {
   // User keystrokes → bash stdin.
   term.onData((/** @type {any} */ data) => {
     if (!cxRead) return;
-    for (let i = 0; i < data.length; i++) cxRead(data.charCodeAt(i));
+    for (const byte of new TextEncoder().encode(data)) cxRead(byte);
   });
 
   // Auto-resize.
@@ -1485,12 +1494,13 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
 
   (async () => {
     try {
+      // why: only this check proves no input or file staging occurred. Later failures stay unknown.
+      if (['vm/run', 'vm/write-file'].includes(msg.type) && (!term || shellExit !== null)) {
+        sendResponse({ ok: false, error: 'VMNotReadyError: shell not ready', shellExited: shellExit !== null });
+        return;
+      }
       switch (msg.type) {
         case 'vm/run': {
-          if (!cx) {
-            sendResponse({ ok: false, error: 'VMNotReadyError: VM not yet booted' });
-            return;
-          }
           const timeoutMs = msg.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
           const start = Date.now();
           const ctrl = new AbortController();
@@ -1522,7 +1532,6 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
         }
 
         case 'vm/write-file': {
-          if (!cx) { sendResponse({ ok: false, error: 'VMNotReadyError' }); return; }
           const bytes = base64ToBytes(msg.b64);
           const stagingName = `/peerd${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
           try {
@@ -1544,7 +1553,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
         }
 
         case 'vm/is-ready': {
-          sendResponse({ ok: true, ready: !!cx, vmId });
+          sendResponse({ ok: true, ready: !!term && shellExit === null, shellExited: shellExit !== null, vmId });
           return;
         }
 
