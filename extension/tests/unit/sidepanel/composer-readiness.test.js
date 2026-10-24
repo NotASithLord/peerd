@@ -186,4 +186,171 @@ describe('session-aware composer readiness', () => {
       localStorage.removeItem('peerd.draft.composer-controller-startup');
     }
   });
+
+  it('a confirmed composer send never comes back into the composer', async () => {
+    const id = 'sent-text-returns';
+    localStorage.removeItem(`peerd.draft.${id}`);
+    localStorage.removeItem(`peerd.unconfirmed-send.${id}`);
+    /** @type {(value?:any)=>void} */
+    let finish = () => {};
+    const reply = new Promise((resolve) => { finish = () => resolve({ ok: true }); });
+    const mounted = mountInput({
+      session: { sessionId: id, provider: 'ollama' },
+      providers: { current: 'ollama', hasKey: false, model: 'local' },
+      composer: { provider: 'ollama', model: 'local', canSend: true, reason: null },
+      capabilities: {},
+    }, { send: (/** @type {any} */ message) => message.type === 'agent/send' ? reply : { ok: true } });
+    try {
+      await settle();
+      const textarea = mounted.root.querySelector('textarea');
+      if (!(textarea instanceof HTMLTextAreaElement)) throw new Error('textarea missing');
+      textarea.value = 'send me once';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      m.redraw.sync?.();
+      mounted.root.querySelector('form')?.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await settle();
+      expect(textarea.value).toBe('');
+      finish();
+      await settle();
+      await settle();
+      expect(textarea.value).toBe('');
+      expect(localStorage.getItem(`peerd.draft.${id}`)).toBe(null);
+    } finally {
+      finish();
+      mounted.unmount();
+      localStorage.removeItem(`peerd.draft.${id}`);
+      localStorage.removeItem(`peerd.unconfirmed-send.${id}`);
+    }
+  });
+
+  it('a first send whose session id arrives before the reply never comes back', async () => {
+    const created = 'created-session';
+    const keys = ['new', created].flatMap((id) => [`peerd.draft.${id}`, `peerd.unconfirmed-send.${id}`]);
+    for (const key of keys) localStorage.removeItem(key);
+    /** @type {(value?:any)=>void} */
+    let finish = () => {};
+    const reply = new Promise((resolve) => { finish = () => resolve({ ok: true }); });
+    const state = {
+      session: /** @type {{ sessionId: string, provider: string } | null} */ (null),
+      providers: { current: 'ollama', hasKey: false, model: 'local' },
+      composer: { provider: 'ollama', model: 'local', canSend: true, reason: null },
+      capabilities: {},
+    };
+    const mounted = mountInput(state, { send: (/** @type {any} */ message) => message.type === 'agent/send' ? reply : { ok: true } });
+    try {
+      await settle();
+      const textarea = mounted.root.querySelector('textarea');
+      if (!(textarea instanceof HTMLTextAreaElement)) throw new Error('textarea missing');
+      textarea.value = 'first message once';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      m.redraw.sync?.();
+      mounted.root.querySelector('form')?.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await settle();
+      expect(textarea.value).toBe('');
+      state.session = { sessionId: created, provider: 'ollama' };
+      await settle();
+      expect(textarea.value).toBe('');
+      expect(mounted.root.textContent?.includes('Check delivery')).toBe(false);
+      finish();
+      await settle();
+      await settle();
+      expect(textarea.value).toBe('');
+      expect(localStorage.getItem(`peerd.draft.${created}`)).toBe(null);
+      expect(localStorage.getItem(`peerd.unconfirmed-send.${created}`)).toBe(null);
+    } finally {
+      finish();
+      mounted.unmount();
+      for (const key of keys) localStorage.removeItem(key);
+    }
+  });
+
+  /** @param {string} id */
+  const otherSurfaceSend = (id) => ({
+    operationId: `send.other-surface.${id}`, text: 'sent from another window', goal: false,
+    sessionId: id, hadAttachments: false, source: 'composer',
+  });
+  /** @param {string} id */
+  const readyState = (id) => ({
+    session: { sessionId: id, provider: 'ollama' },
+    providers: { current: 'ollama', hasKey: false, model: 'local' },
+    composer: { provider: 'ollama', model: 'local', canSend: true, reason: null },
+    capabilities: {},
+  });
+
+  // A fresh chat's send is persisted under `new` until its session id lands.
+  for (const from of ['this chat', 'a fresh chat']) {
+    it(`an unconfirmed send from another surface on ${from} never replaces this composer draft`, async () => {
+      const id = `other-surface-draft-${from.replace(/ /g, '-')}`;
+      const key = `peerd.unconfirmed-send.${id}`;
+      const seedKey = from === 'a fresh chat' ? 'peerd.unconfirmed-send.new' : key;
+      localStorage.removeItem(`peerd.draft.${id}`);
+      localStorage.removeItem(key);
+      localStorage.removeItem(seedKey);
+      const pending = { ...otherSurfaceSend(id), sessionId: seedKey === key ? id : null };
+      const mounted = mountInput(readyState(id));
+      try {
+        await settle();
+        const textarea = mounted.root.querySelector('textarea');
+        if (!(textarea instanceof HTMLTextAreaElement)) throw new Error('textarea missing');
+        textarea.value = 'Keep my own draft';
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        m.redraw.sync?.();
+        localStorage.setItem(seedKey, JSON.stringify(pending));
+        await settle();
+        expect(textarea.value).toBe('Keep my own draft');
+        expect(localStorage.getItem(`peerd.draft.${id}`)).toBe('Keep my own draft');
+        expect(mounted.root.textContent).toContain('Check delivery');
+        localStorage.removeItem(key);
+        await settle();
+        expect(textarea.value).toBe('Keep my own draft');
+        expect(localStorage.getItem(`peerd.draft.${id}`)).toBe('Keep my own draft');
+        expect(mounted.root.textContent?.includes('Check delivery')).toBe(false);
+        expect(/** @type {HTMLButtonElement|null} */ (mounted.root.querySelector('button.send-btn'))?.disabled).toBe(false);
+      } finally {
+        mounted.unmount();
+        localStorage.removeItem(`peerd.draft.${id}`);
+        localStorage.removeItem(key);
+        localStorage.removeItem(seedKey);
+      }
+    });
+  }
+
+  for (const adoptedOn of ['redraw', 'mount', 'fresh-chat redraw']) {
+    it(`a copy adopted on ${adoptedOn} clears when the other surface settles its send`, async () => {
+      const id = `other-surface-${adoptedOn.replace(/ /g, '-')}`;
+      const key = `peerd.unconfirmed-send.${id}`;
+      const seedKey = adoptedOn === 'fresh-chat redraw' ? 'peerd.unconfirmed-send.new' : key;
+      localStorage.removeItem(`peerd.draft.${id}`);
+      localStorage.removeItem(key);
+      localStorage.removeItem(seedKey);
+      const pending = { ...otherSurfaceSend(id), sessionId: seedKey === key ? id : null };
+      if (adoptedOn === 'mount') localStorage.setItem(key, JSON.stringify(pending));
+      const mounted = mountInput(readyState(id));
+      try {
+        await settle();
+        if (adoptedOn !== 'mount') {
+          localStorage.setItem(seedKey, JSON.stringify(pending));
+          await settle();
+        }
+        const textarea = mounted.root.querySelector('textarea');
+        if (!(textarea instanceof HTMLTextAreaElement)) throw new Error('textarea missing');
+        expect(textarea.value).toBe(pending.text);
+        expect(mounted.root.textContent).toContain('Check delivery');
+        localStorage.removeItem(key);
+        await settle();
+        expect(textarea.value).toBe('');
+        expect(localStorage.getItem(`peerd.draft.${id}`)).toBe(null);
+        expect(mounted.root.textContent?.includes('Check delivery')).toBe(false);
+      } finally {
+        mounted.unmount();
+        localStorage.removeItem(`peerd.draft.${id}`);
+        localStorage.removeItem(key);
+        localStorage.removeItem(seedKey);
+      }
+    });
+  }
 });

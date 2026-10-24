@@ -4699,6 +4699,15 @@ export const STATES = [
             && view.assistantText === 'HOME-COMPOSER-REPLY' && !view.busy && !view.errorText;
         }, { budgetMs: 20_000, pollMs: 80 });
         requireCheck('Home composer sends a real turn and renders its answer', answered === true);
+        const composerAfterSend = await evalIn(page, `(() => ({
+          value: document.querySelector('.home-chat form.input-bar textarea')?.value,
+          sendDisabled: document.querySelector('.home-chat form.input-bar .send-btn')?.disabled,
+          leakedDrafts: Object.keys(localStorage).filter((key) => key.startsWith('peerd.draft.')
+            && (localStorage.getItem(key) ?? '').includes('HOME-COMPOSER-MESSAGE')),
+        }))()`);
+        rec.check('a confirmed Home send leaves the composer and its saved draft empty',
+          composerAfterSend?.value === '' && composerAfterSend.sendDisabled === true
+            && composerAfterSend.leakedDrafts?.length === 0, JSON.stringify(composerAfterSend));
         const state = await rpc(page, { type: 'state/get' });
         const sessionId = state?.state?.session?.sessionId;
         requireCheck('Home observes the bound live session', typeof sessionId === 'string' && sessionId.length > 0);
