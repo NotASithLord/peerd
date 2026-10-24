@@ -2,6 +2,7 @@
 
 import { makeSerialLane } from '../shared/cold-util.js';
 import { parseHookDocument } from '../shared/hook-document.js';
+import { SkillParseError } from '../shared/skill-document.js';
 import {
   HookRecordsLimitError,
   projectSemanticHookManifest,
@@ -104,7 +105,8 @@ export const createKernelAdministrativeControl = (deps) => {
     const records = await readHooks();
     if (operation === 'administrative.hooks.save') {
       const record = hookRecord(payload.source);
-      if (!validAdministrativeHookRecord(record)) throw new TypeError('hook-source-invalid');
+      if (!validAdministrativeHookRecord(record)) return { ok: false,
+        error: 'Hook not saved: check its ID, event and rule. A rule accepts only matchArg, contains, onMatch and reason.' };
       const next = records.filter((candidate) => candidate?.id !== record.id);
       next.push(record);
       projectSemanticHookManifest(next);
@@ -218,9 +220,9 @@ export const createKernelAdministrativeControl = (deps) => {
         });
         return success({ ok: true, skill });
       } catch (cause) {
-        if (/** @type {{name?:unknown}} */ (cause)?.name === 'SkillExistsError') {
+        if (cause instanceof SkillParseError || /** @type {{name?:unknown}} */ (cause)?.name === 'SkillExistsError') {
           return success({
-            ok: false, error: 'already-installed',
+            ok: false, error: cause instanceof SkillParseError ? 'invalid-skill' : 'already-installed',
             detail: /** @type {{message?:string}} */ (cause)?.message ?? String(cause),
           });
         }

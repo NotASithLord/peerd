@@ -30,7 +30,7 @@ import {
 } from '../acceptance/git-smart-http-fixture.mjs';
 import {
   rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage, attach,
-  reloadReadyPanel, launchPeerd,
+  reloadReadyPanel, launchPeerd, unlockAndReady,
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
   NETWORK_GUARD_CONTROLLER_PORT, NETWORK_GUARD_OWNED_HOST,
   NETWORK_GUARD_UNRELATED_HOST, SITE_CLIENT_FIXTURE_TLS_PORT,
@@ -6569,6 +6569,246 @@ export const STATES = [
         if (skillAttempted) await rpc(ctx.page, { type: 'skills/remove', name: skillName }).catch(() => {});
         if (hookAttempted) await rpc(ctx.page, { type: 'hooks/remove', id: hookId }).catch(() => {});
         if (page) await retirePrivateTransferPage(page);
+      }
+    },
+  },
+  {
+    name: 'administrative-validation', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const base = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const modelCallsBefore = ctx.modelCallCount();
+      const skillName = 'e2e-folded-description';
+      const description = 'Read the full skill description. Use this fixture to check line folding.';
+      let page;
+      let skillAttempted = false;
+      try {
+        for (const kind of ['skills', 'hooks']) {
+          page = await openWidePage(ctx, `options/options.html#!/${kind}`);
+          const prior = await rpc(page, { type: `${kind}/list` });
+          if (!prior?.ok || !Array.isArray(prior[kind])) throw new Error(`${kind} read refused`);
+          if (kind === 'skills' && prior.skills.some((skill) => skill.name === skillName)) throw new Error('skill fixture already exists');
+          const selector = kind === 'skills' ? '.skills-install textarea' : '.hook-add-editor';
+          const submit = kind === 'skills' ? '.skills-install button' : '.hook-add button[type="submit"]';
+          if (kind === 'hooks') {
+            if (!await waitFor(() => evalIn(page, `!!document.querySelector('.hooks-actions button')`))) throw new Error('hook form did not mount');
+            await clickAndSyncRedraw(page, '.hooks-actions button');
+          }
+          if (!await waitFor(() => evalIn(page, `!!document.querySelector(${JSON.stringify(selector)})`))) throw new Error(`${kind} editor did not mount`);
+          const draft = kind === 'skills' ? '---\nname: 日本語スキル\ndescription: Check an invalid handle.\n---\nKeep this draft.'
+            : '---\nid: e2e-invalid-rule\nevent: pre-tool-use\nmatch: type\nrule:\n  matchArg: text\n  contains: e2e\n  onmatch: allow\n---\nKeep this draft.';
+          await evalIn(page, `(() => { 'use strict';
+            const editor = document.querySelector(${JSON.stringify(selector)});
+            editor.value = ${JSON.stringify(draft)};
+            editor.dispatchEvent(new Event('input', { bubbles: true }));
+          })()`);
+          if (!await waitFor(() => evalIn(page, `document.querySelector(${JSON.stringify(submit)})?.disabled === false`))) throw new Error(`${kind} Save did not enable`);
+          await clickAndSyncRedraw(page, submit);
+          const noticeSelector = kind === 'skills' ? '.skills-status' : '.hooks-pane .key-msg.err';
+          const notice = await waitFor(() => evalIn(page, `document.querySelector(${JSON.stringify(noticeSelector)})?.textContent`));
+          if (!notice) throw new Error(`${kind} refusal did not settle`);
+          rec.check(`${kind} refusal preserves the exact draft`, await evalIn(page,
+            `document.querySelector(${JSON.stringify(selector)})?.value === ${JSON.stringify(draft)}
+              && document.querySelector(${JSON.stringify(submit)})?.disabled === false`));
+          const after = await rpc(page, { type: `${kind}/list` });
+          rec.check(`${kind} refusal writes nothing`, after?.ok && JSON.stringify(after[kind]) === JSON.stringify(prior[kind]));
+          if (base) rec.observe(`${kind} base refusal`, notice);
+          else rec.check(`${kind} reports a known actionable refusal`, notice.startsWith(kind === 'skills' ? 'Skill not installed:' : 'Hook not saved:')
+            && !notice.includes('could not confirm'), notice);
+          await rec.visualPage(kind === 'skills' ? 'administrative-validation' : `${kind}-validation-refusal`, page);
+          if (kind === 'skills') {
+            skillAttempted = true;
+            const text = `---\nname: ${skillName}\ndescription: >-\n  Read the full skill description.\n  Use this fixture to check line folding.\n---\nOnly a parser test fixture.`;
+            await evalIn(page, `(() => { 'use strict';
+              const editor = document.querySelector('.skills-install textarea');
+              editor.value = ${JSON.stringify(text)}; editor.dispatchEvent(new Event('input', { bubbles: true }));
+            })()`);
+            await clickAndSyncRedraw(page, '.skills-install button');
+            const installed = await waitFor(async () => {
+              const listed = await rpc(page, { type: 'skills/list' });
+              return listed?.ok && listed.skills.find((skill) => skill.name === skillName);
+            });
+            if (!installed) throw new Error('folded skill did not install');
+            if (base) rec.observe('base folded description', installed.description);
+            else rec.check('the full folded description persists', installed.description === description, installed.description);
+            if (!await waitFor(() => evalIn(page, `document.querySelector('.skills-list')?.textContent.includes(${JSON.stringify(installed.description)})`))) throw new Error('installed skill did not render');
+            await rec.visualPage('skill-folded-description', page);
+            const removed = await rpc(page, { type: 'skills/remove', name: skillName });
+            if (!removed?.ok) throw new Error('skill fixture cleanup refused');
+            skillAttempted = false;
+          }
+          await page.close(); page = null;
+        }
+        rec.check('validation and install need no model call', ctx.modelCallCount() === modelCallsBefore);
+      } finally {
+        if (skillAttempted) await rpc(ctx.page, { type: 'skills/remove', name: skillName });
+        if (page) await page.close();
+      }
+    },
+  },
+  {
+    name: 'shared-chat-title', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const fileBytes = await readFile(new URL('../../extension/peerd-runtime/tools/prompt-wrap.js', import.meta.url));
+      const fileText = fileBytes.toString('utf8');
+      const priorSettings = await evalIn(ctx.page, `(async () => { 'use strict';
+        return (await (await import('/peerd-egress/kernel-storage.js')).kv.get('settings.v1')) ?? {};
+      })()`, true);
+      if (!priorSettings || typeof priorSettings !== 'object' || Array.isArray(priorSettings)) throw new Error('saved provider settings are unavailable');
+      const status = await rpc(ctx.page, { type: 'provider/status' });
+      if (status?.ok !== true || status.providers?.find((provider) => provider.name === 'anthropic')?.hasKey !== false) throw new Error('the ephemeral title fixture requires no prior Anthropic key');
+      const fixture = await startWebFixtureServer();
+      const requests = [];
+      let tab;
+      try {
+        const keyed = await rpc(ctx.page, { type: 'provider/setKey', provider: 'anthropic', plaintext: 'sk-e2e-shared-title-only', activate: false });
+        const selected = await rpc(ctx.page, { type: 'settings/update', patch: { providerName: 'anthropic', providerModel: '' } });
+        if (keyed?.ok !== true || selected?.ok !== true) throw new Error('the real Anthropic fixture setup refused');
+        if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.input-bar input[type="file"]') && !!document.querySelector('.input-bar textarea')`))) throw new Error('the Anthropic composer did not become ready');
+        tab = await evalIn(ctx.page, `(async () => { 'use strict';
+          return (await chrome.tabs.create({ url: ${JSON.stringify(`${fixture.url.replace('127.0.0.1', 'orders.peerd.test')}/products`)}, active: false })).id;
+        })()`, true);
+        if (!Number.isInteger(tab)) throw new Error('shared web tab did not open');
+        const loaded = await waitFor(() => evalIn(ctx.page, `chrome.tabs.get(${tab}).then((tab) => tab.status === 'complete')`, true));
+        if (!loaded) throw new Error('shared web fixture did not load');
+        ctx.setModelResponder((_index, request) => {
+          requests.push({ url: request.url, method: request.method,
+            body: request.postData ?? Buffer.concat((request.postDataEntries ?? [])
+              .map((entry) => Buffer.from(entry.bytes ?? '', 'base64'))).toString() });
+          return { sse: [
+            ['message_start', { type: 'message_start', message: { id: 'msg-e2e-shared-title', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } }],
+            ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
+            ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Shared content received.' } }],
+            ['content_block_stop', { type: 'content_block_stop', index: 0 }],
+            ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 2 } }],
+            ['message_stop', { type: 'message_stop' }],
+          ].map(([event, payload]) => `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`).join('') };
+        });
+        await evalIn(ctx.page, `(() => { 'use strict';
+          const files = new DataTransfer();
+          files.items.add(new File([Uint8Array.from(${JSON.stringify([...fileBytes])})], 'prompt-wrap.js', { type: 'text/javascript' }));
+          const input = document.querySelector('.input-bar input[type="file"]');
+          if (!input) throw new Error('real attachment input is missing');
+          input.files = files.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+        })()`);
+        if (!await waitFor(() => evalIn(ctx.page, `document.querySelector('.attach-chip-name')?.textContent === 'prompt-wrap.js'`))) throw new Error('file did not stage');
+        const question = 'Summarize the page and this file.';
+        await evalIn(ctx.page, `(() => { 'use strict';
+          const input = document.querySelector('.input-bar textarea');
+          input.value = ${JSON.stringify(`@tab:${tab} ${question}`)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.closest('form').requestSubmit();
+        })()`);
+        const session = await waitFor(async () => {
+          const state = await rpc(ctx.page, { type: 'state/get' });
+          return state?.ok && state.state?.session?.messages?.some((message) => message.role === 'assistant' && message.content === 'Shared content received.' && message.streaming !== true) ? state.state.session : null;
+        }, { budgetMs: 30_000, pollMs: 80 });
+        if (!session) throw new Error('shared composer send did not settle');
+        rec.check('one real Anthropic request is intercepted', ctx.modelCallCount() === 1 && requests.length === 1
+          && requests[0].url === 'https://api.anthropic.com/v1/messages' && requests[0].method === 'POST');
+        const content = session.messages.find((message) => message.role === 'user')?.content;
+        rec.check('the durable message keeps real page and file context', typeof content === 'string'
+          && content.includes('<untrusted_web_content ')
+          && content.includes('Coffee Mug') && content.endsWith(`\n\n<peerd_file name="prompt-wrap.js">\n${fileText}\n</peerd_file>`), content?.slice(0, 250));
+        const modelMessages = requests.length === 1 ? JSON.parse(requests[0].body).messages : [];
+        const modelText = modelMessages.flatMap((message) => typeof message.content === 'string'
+          ? [message.content] : (message.content ?? []).filter((block) => block.type === 'text').map((block) => block.text)).join('\n');
+        rec.check('the model gets the same fenced context', requests.length === 1
+          && modelText.includes('untrusted_web_content') && modelText.includes('Coffee Mug')
+          && modelText.includes(`<peerd_file name="prompt-wrap.js">\n${fileText}\n</peerd_file>`));
+        const listed = await rpc(ctx.page, { type: 'session/list' });
+        const title = listed?.ok === true && Array.isArray(listed.sessions)
+          ? listed.sessions.find((row) => row.sessionId === session.sessionId)?.title : null;
+        if (typeof title !== 'string' || !title.trim()) throw new Error(`real chat title metadata is missing: ${JSON.stringify({ sessionId: session.sessionId, listed })}`);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base shared title', title);
+        else rec.check('only the user question becomes the new title', title === question, title);
+        await clickAndSyncRedraw(ctx.page, '[aria-label="Chats"]');
+        if (!await waitFor(() => evalIn(ctx.page, `(() => { 'use strict';
+          const node = document.querySelector('.session-row.active .session-title');
+          return node instanceof HTMLElement && node.textContent === ${JSON.stringify(title)};
+        })()`))) throw new Error('real chat title did not render');
+        await rec.visual('shared-chat-title');
+        await clickAndSyncRedraw(ctx.page, '[aria-label="Chats"]');
+        if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.input-bar textarea')`))) throw new Error('chat did not reopen');
+      } finally {
+        try {
+          const keys = ['providerName', 'providerModel'];
+          const reset = keys.filter((key) => !Object.hasOwn(priorSettings, key));
+          const patch = Object.fromEntries(keys.filter((key) => Object.hasOwn(priorSettings, key)).map((key) => [key, priorSettings[key]]));
+          if (reset.length && (await rpc(ctx.page, { type: 'settings/reset', keys: reset }))?.ok !== true) throw new Error('unset provider settings did not restore');
+          if (Object.keys(patch).length && (await rpc(ctx.page, { type: 'settings/update', patch }))?.ok !== true) throw new Error('saved provider settings did not restore');
+          const restored = await evalIn(ctx.page, `(async () => { 'use strict';
+            return (await (await import('/peerd-egress/kernel-storage.js')).kv.get('settings.v1')) ?? {};
+          })()`, true);
+          rec.check('provider settings restore with exact saved field presence', keys.every((key) =>
+            Object.hasOwn(restored, key) === Object.hasOwn(priorSettings, key) && restored[key] === priorSettings[key]));
+        } finally {
+          if (tab) await evalIn(ctx.page, `chrome.tabs.remove(${tab})`, true);
+          await fixture.close();
+        }
+      }
+    },
+  },
+  {
+    name: 'pull-in-moved-tab', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      // why: a fresh Home host leaves the real native panel closed. The shared
+      // harness panel must stay alive for the next state.
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir, panelPath: 'home/home.html',
+        modelResponder: (index) => ({ sse: index === 0 ? sseToolCall('sandbox_create', { kind: 'notebook', name: 'Moved Notebook' }) : sseText('Notebook ready.') }) });
+      let browser;
+      let notebook;
+      let panel;
+      let panelSession;
+      try {
+        await unlockAndReady(child.page);
+        const sent = await rpc(child.page, { type: 'agent/send', text: 'Create a Notebook named Moved Notebook.' });
+        if (!sent?.ok) throw new Error('real Notebook creation refused');
+        if (!await waitFor(async () => {
+          const state = await rpc(child.page, { type: 'state/get' });
+          return state?.ok && state.state?.session?.messages?.some((message) => message.role === 'assistant' && message.content === 'Notebook ready.' && message.streaming !== true);
+        }, { budgetMs: 30_000 })) throw new Error('Notebook creation did not settle');
+        const surfaces = await rpc(child.page, { type: 'surfaces/get' });
+        if (surfaces?.ok !== true || surfaces.sidePanelOpen !== false) throw new Error('fresh native panel is not closed');
+        const target = await waitFor(async () => (await fetch(`http://127.0.0.1:${child.port}/json/list`).then((reply) => reply.json()))
+          .find((entry) => entry.url.includes('/engine-tabs/notebook-tab/index.html#')), { budgetMs: 30_000 });
+        if (!target) throw new Error('real Notebook target is missing');
+        notebook = await attach(target.webSocketDebuggerUrl);
+        await notebook.send('Page.enable');
+        if (!await waitFor(() => evalIn(notebook, `!!document.querySelector('.peerd-pull')`))) throw new Error('native pull-in chip did not mount');
+        const before = await evalIn(notebook, `chrome.tabs.getCurrent().then((tab) => ({ id: tab.id, windowId: tab.windowId, document: performance.timeOrigin }))`, true);
+        const movedWindow = await evalIn(notebook, `chrome.windows.create({ tabId: ${before.id}, focused: true }).then((window) => window.id)`, true);
+        const after = await evalIn(notebook, `chrome.tabs.getCurrent().then((tab) => ({ id: tab.id, windowId: tab.windowId, document: performance.timeOrigin }))`, true);
+        rec.check('the real Notebook tab moves without a new document', before.id === after.id && before.document === after.document
+          && before.windowId !== after.windowId && after.windowId === movedWindow, JSON.stringify({ before, after }));
+        await notebook.send('Page.bringToFront');
+        const button = await evalIn(notebook, `(() => { 'use strict'; const bounds = document.querySelector('.peerd-pull').getBoundingClientRect(); return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }; })()`);
+        await notebook.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...button });
+        await notebook.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...button });
+        const version = await fetch(`http://127.0.0.1:${child.port}/json/version`).then((reply) => reply.json());
+        browser = await attach(version.webSocketDebuggerUrl);
+        let lastNativeTargets = [];
+        const nativeTarget = await waitFor(async () => {
+          lastNativeTargets = (await browser.send('Target.getTargets')).targetInfos;
+          return lastNativeTargets.find((entry) => entry.url.split('#')[0] === `chrome-extension://${child.sw.id}/sidepanel/sidepanel.html`);
+        });
+        if (!nativeTarget) throw new Error(`native pull-in did not open a panel: ${JSON.stringify({
+          targets: lastNativeTargets.map(({ targetId, type, url }) => ({ targetId, type, url })), before, after,
+        })}`);
+        ({ sessionId: panelSession } = await browser.send('Target.attachToTarget', { targetId: nativeTarget.targetId, flatten: true }));
+        panel = { send: (method, parameters = {}) => browser.send(method, parameters, panelSession) };
+        const ownerWindow = await evalIn(panel, `chrome.windows.getCurrent().then((window) => window.id)`, true);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base native panel window', { ownerWindow, after });
+        else rec.check('native pull-in opens in the moved tab window', ownerWindow === after.windowId, JSON.stringify({ ownerWindow, after }));
+        if (!await waitFor(() => evalIn(panel, `!!document.querySelector('.input-bar textarea')`))) throw new Error('native panel did not become ready');
+        await panel.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
+        await rec.visualPage('pull-in-moved-tab', panel);
+      } finally {
+        if (panelSession) await browser.send('Target.detachFromTarget', { sessionId: panelSession });
+        notebook?.close(); browser?.close();
+        await child.close();
       }
     },
   },
