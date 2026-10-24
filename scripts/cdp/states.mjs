@@ -5806,6 +5806,98 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
+  {
+    name: 'options-voice-ready', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const page = await openWidePage(ctx, 'options/options.html#!/voice');
+      try {
+        const loaded = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.voice-section button')]
+          .some((button) => button.textContent === 'Enable voice')`), { budgetMs: 15_000, pollMs: 80 });
+        if (!loaded) throw new Error('The Voice settings did not load');
+        const state = await rpc(page, { type: 'state/get' });
+        if (!state?.ok || state.state.settings.voiceEngine === 'moonshine') {
+          throw new Error('The Voice capture requires the Web Speech preference');
+        }
+        // why Web Speech: enabling its idle manager does not record audio or
+        // download a model. The real ready state exposes the silence slider.
+        await evalIn(page, `[...document.querySelectorAll('.voice-section button')]
+          .find((button) => button.textContent === 'Enable voice').click()`);
+        const ready = await waitFor(() => evalIn(page,
+          `!!document.querySelector('.voice-section input[type="range"]')
+            && !!document.querySelector('.voice-status.is-ok')`), { budgetMs: 10_000, pollMs: 50 });
+        if (!ready) throw new Error('Voice settings did not reach the ready state');
+        const named = await evalIn(page, `(() => {
+          const slider = document.querySelector('.voice-section input[type="range"]');
+          return slider.id === 'voice-silence' && !!document.querySelector('label[for="voice-silence"]')
+            && slider.getAttribute('aria-valuetext') === (Number(slider.value) / 1000).toFixed(1) + 's';
+        })()`);
+        if (baseRender) rec.observe('merge-base silence slider name', { named });
+        else rec.check('the silence slider has a label and a value in seconds', named);
+        await rec.visualPage('options-voice-ready', page);
+      } finally {
+        await evalIn(page, `[...document.querySelectorAll('.voice-section button')]
+          .find((button) => button.textContent === 'Disable voice')?.click()`).catch(() => {});
+        const disabled = await waitFor(async () => {
+          const state = await rpc(ctx.page, { type: 'state/get' });
+          return state?.ok && state.state.settings.voiceEnabled !== true;
+        }, { budgetMs: 5_000, pollMs: 50 });
+        if (!disabled) throw new Error('Voice settings did not return to disabled');
+        await retirePrivateTransferPage(page);
+      }
+    },
+  },
+  {
+    name: 'options-key-forms', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      let page = await openWidePage(ctx, 'options/options.html#!/api-integrations');
+      try {
+        const loaded = await waitFor(() => evalIn(page,
+          `!!document.querySelector('form.provider-card-form input[type="password"]')`), { budgetMs: 15_000, pollMs: 80 });
+        if (!loaded) throw new Error('The API key form did not load');
+        const named = await evalIn(page, `(() => {
+          const form = document.querySelector('form.provider-card-form');
+          form.querySelector('input').focus();
+          return ['API host', 'API key', 'Authentication', 'Header name'].every((name) =>
+            form.querySelector('[aria-label="' + name + '"]'))
+            && form.nextElementSibling?.getAttribute('role') === 'status';
+        })()`);
+        if (baseRender) rec.observe('merge-base API form names', { named });
+        else rec.check('the API form names its fields and keeps a live result line', named);
+        await rec.visualPage('options-api-form', page);
+        await retirePrivateTransferPage(page);
+        page = null;
+        page = await openWidePage(ctx, 'options/options.html#!/vault');
+        const vaultReady = await waitFor(() => evalIn(page, `!!document.querySelector('#recpass2')`),
+          { budgetMs: 15_000, pollMs: 80 });
+        if (!vaultReady) throw new Error('The recovery passphrase form did not load');
+        // why: use the real vault passphrase and its 120 s Argon2 budget.
+        // The capture must keep the same unlock passphrase.
+        await evalIn(page, `(() => {
+          for (const id of ['recpass', 'recpass2']) {
+            const input = document.getElementById(id);
+            input.value = ${JSON.stringify(PASSPHRASE)};
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          document.getElementById('recpass').closest('form').requestSubmit();
+        })()`);
+        const saved = await waitFor(() => evalIn(page, `[...document.querySelectorAll('form p')]
+          .some((line) => /Recovery passphrase (updated|set)[.]/.test(line.textContent))`),
+        { budgetMs: 120_000, pollMs: 80 });
+        if (!saved) throw new Error('The recovery passphrase did not report success');
+        const ink = await evalIn(page, `[...document.querySelectorAll('form p')]
+          .find((line) => /Recovery passphrase (updated|set)[.]/.test(line.textContent))?.style.color === 'var(--ok-ink)'`);
+        if (baseRender) rec.observe('merge-base recovery result colour', { ink });
+        else rec.check('the recovery result uses the readable text colour', ink);
+        await rec.visualPage('options-vault-recovery', page, {
+          beforeShot: () => evalIn(page, `document.getElementById('recpass').closest('form').scrollIntoView({ block: 'center' })`),
+        });
+      } finally { if (page) await retirePrivateTransferPage(page); }
+    },
+  },
 
   // --- visual (WIDE): the two settings pages the redesign rebuilt -------------
   //
@@ -5824,11 +5916,26 @@ export const STATES = [
     name: 'options-behavior', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
       const page = await openWidePage(ctx, 'options/options.html#!/behavior');
       try {
         await waitFor(() => evalIn(page, `document.querySelectorAll('.set-row').length >= 11`),
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        await evalIn(page, `document.querySelector('.set-toggle')?.focus()`);
         await rec.visualPage('options-behavior', page);
+        await evalIn(page, `(() => {
+          const button = [...document.querySelectorAll('button')]
+            .find((el) => el.textContent === 'Reset section to defaults');
+          button.scrollIntoView({ block: 'center' }); button.click();
+        })()`);
+        await evalIn(page, `import('/vendor/mithril/mithril.js').then(({ default: m }) => m.redraw.sync())`, true);
+        const confirmed = await evalIn(page,
+          `document.body.textContent.includes('Reset the settings on this page to their defaults?')
+            && document.activeElement?.textContent === 'No'`);
+        if (baseRender) rec.observe('merge-base reset confirmation', { confirmed });
+        else rec.check('reset asks before it changes this page', confirmed);
+        await rec.visualPage('options-reset-confirm', page);
+        await evalIn(page, `[...document.querySelectorAll('button')].find((el) => el.textContent === 'No')?.click()`);
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -5897,6 +6004,131 @@ export const STATES = [
           JSON.stringify(row));
         await rec.visualPage('options-memory', page);
       } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+  {
+    name: 'options-memory-safety', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const scope = { kind: 'project', workspace: 'settings-safety' };
+      const body = '# Project memory\n\n- Keep the saved files.';
+      const draft = `${body}\n- Keep this unsaved edit too.`;
+      const page = await openWidePage(ctx, 'options/options.html#!/memory');
+      let prior;
+      let attempted = false;
+      try {
+        const exported = await rpc(page, { type: 'memory/export' });
+        if (!exported?.ok) throw new Error('Memory export failed');
+        prior = exported.payload.docs.find((doc) => doc.id === 'project:settings-safety');
+        attempted = true;
+        const written = await rpc(page, { type: 'memory/write', scope, body });
+        if (!written?.ok) throw new Error('Memory seed failed');
+        await page.send('Page.reload');
+        const ready = await waitFor(() => evalIn(page,
+          `[...document.querySelectorAll('.memory-card')].some((card) => card.querySelector('.memory-scope')?.textContent === 'Project · settings-safety')`),
+        { budgetMs: 15_000, pollMs: 80 });
+        if (!ready) throw new Error('The project memory editor did not open');
+        await evalIn(page, `[...document.querySelectorAll('.memory-actions button')].find((el) => el.textContent === 'Delete all').click()`);
+        await evalIn(page, `import('/vendor/mithril/mithril.js').then(({ default: m }) => m.redraw.sync())`, true);
+        const pending = await rpc(page, { type: 'memory/export' });
+        rec.check('one Delete all click leaves the saved memory intact',
+          pending?.payload?.docs.some((doc) => doc.id === 'project:settings-safety' && doc.body === body));
+        const confirmed = await evalIn(page, `!!document.querySelector('.memory-confirm') && document.activeElement?.textContent === 'No'`);
+        if (baseRender) rec.observe('merge-base memory confirmation', { confirmed });
+        else rec.check('Delete all asks with a separate confirmation', confirmed);
+        await rec.visualPage('options-memory-delete-confirm', page);
+        await evalIn(page, `[...document.querySelectorAll('.memory-confirm button')].find((el) => el.textContent === 'No')?.click()`);
+        await evalIn(page, `(() => {
+          const card = [...document.querySelectorAll('.memory-card')]
+            .find((el) => el.querySelector('.memory-scope')?.textContent === 'Project · settings-safety');
+          const input = card.querySelector('textarea');
+          input.value = ${JSON.stringify(draft)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          location.hash = '!/costs';
+        })()`);
+        const left = await waitFor(() => evalIn(page, `!document.querySelector('.memory-pane')`),
+          { budgetMs: 5_000, pollMs: 50 });
+        if (!left) throw new Error('Settings did not leave Memory');
+        await evalIn(page, `location.hash = '!/memory'`);
+        const restored = await waitFor(() => evalIn(page,
+          `[...document.querySelectorAll('.memory-card')].some((card) => card.querySelector('.memory-scope')?.textContent === 'Project · settings-safety')`),
+        { budgetMs: 5_000, pollMs: 50 });
+        const current = await rpc(page, { type: 'memory/export' });
+        rec.check('editing and navigation leave the saved memory unchanged', !!restored
+          && current?.payload?.docs.some((doc) => doc.id === 'project:settings-safety' && doc.body === body));
+        const retained = await evalIn(page, `[...document.querySelectorAll('.memory-card')]
+          .find((el) => el.querySelector('.memory-scope')?.textContent === 'Project · settings-safety')?.querySelector('textarea')?.value === ${JSON.stringify(draft)}`);
+        if (baseRender) rec.observe('merge-base memory draft', { retained });
+        else rec.check('a section switch preserves the unsaved draft', retained);
+        await rec.visualPage('options-memory-draft-restored', page);
+      } finally {
+        await evalIn(page, `[...document.querySelectorAll('.memory-card')]
+          .find((el) => el.querySelector('.memory-scope')?.textContent === 'Project · settings-safety')
+          ?.querySelectorAll('button').forEach((button) => { if (button.textContent === 'Revert') button.click(); })`).catch(() => {});
+        if (attempted) await rpc(page, prior ? { type: 'memory/write', scope, body: prior.body } : { type: 'memory/delete', scope }).catch(() => {});
+        await retirePrivateTransferPage(page);
+      }
+    },
+  },
+  {
+    name: 'options-activity-history', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const marker = 'settings-history-e2e.test';
+      const page = await openWidePage(ctx, 'options/options.html#!/activity');
+      let added = false;
+      try {
+        const prior = await rpc(page, { type: 'denylist/list' });
+        if (!prior?.ok || prior.patterns?.includes(marker)) throw new Error('Activity marker is not free');
+        added = true;
+        const result = await rpc(page, { type: 'denylist/add', pattern: marker });
+        if (!result?.ok) throw new Error('Activity marker could not be recorded');
+        const recorded = await waitFor(async () => (await rpc(page, { type: 'audit/list', limit: 20_000 }))
+          ?.entries?.some((entry) => entry.type === 'denylist_added' && entry.details?.pattern === marker),
+        { budgetMs: 5_000, pollMs: 50 });
+        if (!recorded) throw new Error('The activity marker was not recorded');
+        // why real requests: the old event must fall outside the route's actual
+        // fetch window. Keep the current mode while generating newer events.
+        await evalIn(page, `(async () => {
+          const browser = (await import('/shared/browser-api.js')).default;
+          const state = await browser.runtime.sendMessage({ type: 'state/get' });
+          const mode = state.state.session.permission.mode;
+          for (let index = 0; index < 501; index++) {
+            const reply = await browser.runtime.sendMessage({ type: 'permission/set', mode });
+            if (!reply?.ok) throw new Error('Activity event could not be recorded');
+          }
+        })()`, true);
+        const outside = await waitFor(async () => {
+          const log = await rpc(page, { type: 'audit/list' });
+          return log?.total > log?.entries?.length
+            && !log.entries.some((entry) => entry.details?.pattern === marker);
+        }, { budgetMs: 5_000, pollMs: 50 });
+        if (!outside) throw new Error('The old event did not leave the fetch window');
+        await page.send('Page.reload');
+        const loaded = await waitFor(() => evalIn(page, `!!document.querySelector('.log-filter-query')`),
+          { budgetMs: 15_000, pollMs: 80 });
+        if (!loaded) throw new Error('Activity filters did not load');
+        const windowNamed = await evalIn(page,
+          `/Newest 500 of [0-9]+ recorded events/.test(document.body.textContent)`);
+        if (baseRender) rec.observe('merge-base Activity window', { windowNamed });
+        else rec.check('Activity states that it loaded only the newest events', windowNamed);
+        await evalIn(page, `(() => {
+          const input = document.querySelector('.log-filter-query');
+          input.value = ${JSON.stringify(marker)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        const found = await waitFor(() => evalIn(page,
+          `document.querySelector('.log-row')?.textContent.includes(${JSON.stringify(marker)})`),
+        { budgetMs: 5_000, pollMs: 50 });
+        if (baseRender) rec.observe('merge-base older event search', { found: !!found });
+        else rec.check('a filter finds an event older than the default fetch window', !!found);
+        await rec.visualPage('options-activity-older-event', page);
+      } finally {
+        if (added) await rpc(page, { type: 'denylist/remove', pattern: marker }).catch(() => {});
+        await retirePrivateTransferPage(page);
+      }
     },
   },
   {

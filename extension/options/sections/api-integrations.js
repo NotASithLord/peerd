@@ -198,12 +198,14 @@ export const ApiIntegrationsSection = {
         m('.input-row', [
           m('input', {
             type: 'text', spellcheck: false, autocapitalize: 'none', autocomplete: 'off',
+            'aria-label': 'API host',
             placeholder: 'api.stripe.com', value: ui.originInput, disabled: ui.busy || ui.uncertain,
             oninput: (/** @type {any} */ e) => { ui.originInput = e.target.value; },
             style: 'flex:0 0 11rem;',
           }),
           m('input', {
             type: 'password', spellcheck: false, autocomplete: 'off',
+            'aria-label': 'API key',
             placeholder: 'paste key…', value: ui.keyInput, disabled: ui.busy || ui.uncertain,
             oninput: (/** @type {any} */ e) => { ui.keyInput = e.target.value; },
           }),
@@ -216,11 +218,13 @@ export const ApiIntegrationsSection = {
           // field was blank, which left the strongest option (DPoP) with no way to
           // reach it at all. Same 11rem lead column as the origin field above.
           m('select', {
+            'aria-label': 'Authentication',
             value: ui.schemeInput, disabled: ui.busy || ui.uncertain, style: 'flex:0 0 11rem;',
             onchange: (/** @type {any} */ e) => { ui.schemeInput = e.target.value; },
           }, SCHEMES.map((s) => m('option', { value: s.value }, s.label))),
           m('input', {
             type: 'text', spellcheck: false, autocapitalize: 'none', autocomplete: 'off',
+            'aria-label': 'Header name',
             placeholder: ui.schemeInput === 'raw' ? 'Header name (e.g. X-API-Key)' : 'Header name (Custom header only)',
             value: ui.headerInput, disabled: ui.busy || ui.uncertain || ui.schemeInput !== 'raw',
             oninput: (/** @type {any} */ e) => { ui.headerInput = e.target.value; },
@@ -230,7 +234,13 @@ export const ApiIntegrationsSection = {
             ui.busy ? '…' : 'Save'),
         ]),
       ]),
-      ui.msg ? m(`p.key-msg${ui.msg.ok ? '.ok' : '.err'}`, ui.msg.text) : null,
+      // why always mounted + role=status: a live region announces changes
+      // inside a region that already exists; a line inserted with its text
+      // is announced unreliably. Empty it costs no pixels (.key-msg:empty).
+      m('p.key-msg', {
+        role: 'status',
+        class: ui.msg ? (ui.msg.ok ? 'ok' : 'err') : '',
+      }, ui.msg ? ui.msg.text : null),
 
       m('p.muted.settings-footer', [
         'Stored as ', m('code', 'origin:<origin>'), ' in the vault (https only). The agent '
@@ -329,7 +339,7 @@ export const SiteClientsSection = {
         + 'no credentials (your session rides the browser), run pinned to their origin, and are ',
         m('strong', 'a cache, not a contract'), ' (the agent verifies them on use). Remove any here.',
       ]),
-      ui.loadError ? m('p.key-msg.err', [
+      ui.loadError ? m('p.key-msg.err', { role: 'alert' }, [
         ui.loadError, ' ',
         m('button.linkish', {
           type: 'button', disabled: ui.busy,
@@ -354,7 +364,10 @@ export const SiteClientsSection = {
                 `${c.summary ? `${c.summary} · ` : ''}auth: ${c.auth} · derived ${fmtAge(c.derivedAt)} · `
                 + `${c.lastVerifiedAt ? `verified ${fmtAge(c.lastVerifiedAt)}` : 'unverified'} · via ${c.deriver}`),
             ]))),
-      ui.msg ? m(`p.key-msg${ui.msg.ok ? '.ok' : '.err'}`, ui.msg.text) : null,
+      m('p.key-msg', {
+        role: 'status',
+        class: ui.msg ? (ui.msg.ok ? 'ok' : 'err') : '',
+      }, ui.msg ? ui.msg.text : null),
     ]);
   },
 };

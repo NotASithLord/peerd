@@ -229,12 +229,15 @@ export const VoiceSection = {
           activeEngine === 'moonshine'
             ? m('p.muted', { style: 'margin:0;' }, 'Moonshine base — ~250 MB, runs on-device (downloaded once, cached locally).')
             : null,
-          m('label', { style: 'font-size:13px; margin-top:8px;' },
+          m('label', { for: 'voice-silence', style: 'font-size:13px; margin-top:8px;' },
             `Stop on silence: ${(voiceSilenceMs / 1000).toFixed(1)}s`),
           m('input', {
+            id: 'voice-silence',
             type: 'range',
             min: 500, max: 5000, step: 100,
             value: voiceSilenceMs,
+            // why valuetext: the raw value is milliseconds; the label reads in seconds.
+            'aria-valuetext': `${(voiceSilenceMs / 1000).toFixed(1)}s`,
             disabled: ui.voiceBusy,
             onchange: async (/** @type {{ target: HTMLInputElement }} */ e) => {
               if (ui.voiceBusy) return;

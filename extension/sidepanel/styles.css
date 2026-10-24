@@ -2181,8 +2181,8 @@ button.tool-call-header:focus-visible {
   font-size: 13px;
   color: var(--fg-muted);
 }
-.voice-section .voice-status.is-ok { color: var(--ok); }
-.voice-section .voice-status.is-err { color: var(--danger); }
+.voice-section .voice-status.is-ok { color: var(--ok-ink); }
+.voice-section .voice-status.is-err { color: var(--danger-ink); }
 
 /* --- confirmation modal (voice enrollment) --- */
 .peerd-modal-backdrop {
@@ -3176,7 +3176,8 @@ button.tool-call-header:focus-visible {
   font-variant-numeric: tabular-nums;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.key-badge.key-set   { color: var(--ok); border-color: var(--ok); }
+/* why -ink for the text: the fill token reads 2.3:1 on the light theme. */
+.key-badge.key-set   { color: var(--ok-ink); border-color: var(--ok); }
 .key-badge.key-unset { color: var(--fg-muted); }
 /* Keyless local providers (Ollama, on-device WebGPU): neutral until proven
    ready/connected — green (.key-set) is reserved for that, never default. */
@@ -3224,8 +3225,8 @@ button.tool-call-header:focus-visible {
    (a live region must exist before its first announcement) - empty, it
    must cost zero pixels. */
 .key-msg:empty { margin: 0; }
-.key-msg.ok  { color: var(--ok); }
-.key-msg.err { color: var(--danger); }
+.key-msg.ok  { color: var(--ok-ink); }
+.key-msg.err { color: var(--danger-ink); }
 
 /* --- OpenRouter model curation (Settings → Providers) ----------------- */
 .or-models { margin-top: 4px; }
