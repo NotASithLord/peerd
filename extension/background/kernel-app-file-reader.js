@@ -77,6 +77,10 @@ export const makeKernelAppEditorRoutes = ({
     if (remove && path === checked.record.entryFile) {
       return { ok: false, error: `refusing to delete entry file: ${path}` };
     }
+    if (!remove && (path === 'peerd.json' || /^data\/[a-z0-9][a-z0-9._-]{0,63}\.json$/i.test(path))) {
+      try { JSON.parse(content); }
+      catch { return { ok: false, code: 'app-file-invalid-json', error: `${path} is not valid JSON` }; }
+    }
     try {
       await withAppDwebAuthority(checked.id, () => repositories.coordinate({ kind: 'app', id: checked.id }, async () => {
         let prior;

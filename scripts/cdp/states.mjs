@@ -6362,14 +6362,16 @@ export const STATES = [
       }) : sseText('EDITOR-RECOVERY-READY') }),
     async run(ctx, rec) {
       const directory = await mkdtemp(join(tmpdir(), 'peerd-editor-recovery-'));
+      const priorTargets = new Set((await fetch(`http://127.0.0.1:${ctx.port}/json/list`).then((reply) => reply.json())).map((target) => target.id));
       let page;
+      let vaultLocked = false;
       try {
         const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create an App named Editor recovery.' });
         rec.check('App creation accepted', sent?.ok === true, JSON.stringify(sent));
         const target = await waitFor(async () => {
           const targets = await fetch(`http://127.0.0.1:${ctx.port}/json/list`).then((reply) => reply.json());
           return targets.find((candidate) => candidate.type === 'page'
-            && candidate.title === 'peerd · Editor recovery') ?? null;
+            && candidate.title === 'peerd · Editor recovery' && !priorTargets.has(candidate.id)) ?? null;
         }, { budgetMs: 30_000, pollMs: 100 });
         if (!target) throw new Error('The created App did not render');
         page = await attach(target.webSocketDebuggerUrl);
@@ -6456,6 +6458,149 @@ export const STATES = [
         await waitFor(() => evalIn(page,
           `document.querySelector('.pe-node.is-active')?.dataset.path === 'notes.txt'`),
         { budgetMs: 10_000, pollMs: 100 });
+        const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+        const selectFile = async (path) => {
+          const opened = await evalIn(page, `(() => {
+            const directory = document.querySelector('.pe-node[data-kind="dir"][data-path="data"]');
+            if (directory?.getAttribute('aria-expanded') === 'false') directory.click();
+            const file = [...document.querySelectorAll('.pe-node[data-kind="file"]')].find((node) => node.dataset.path === ${JSON.stringify(path)});
+            file?.click();
+            return !!file;
+          })()`);
+          if (!opened || !await waitFor(() => evalIn(page,
+            `document.querySelector('.pe-node.is-active')?.dataset.path === ${JSON.stringify(path)}`),
+          { budgetMs: 10_000, pollMs: 100 })) throw new Error(`Editor file did not open: ${path}`);
+        };
+        const replaceDraft = async (content) => {
+          await evalIn(page, `(async () => {
+            const { EditorView } = await import('/vendor/codemirror/cm.js');
+            const view = EditorView.findFromDOM(document.querySelector('.cm-editor'));
+            view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+            view.focus();
+          })()`, true);
+          await page.send('Input.insertText', { text: content });
+        };
+        const savedText = (path) => evalIn(page, `(async () => {
+          const { opfsHelpers } = await import('/peerd-engine/opfs.js');
+          return opfsHelpers(['peerd-apps', ${JSON.stringify(appId)}]).read(${JSON.stringify(path)});
+        })()`, true);
+        // why: this records real replies. It never replaces a route result.
+        await evalIn(page, `(async () => {
+          const browser = (await import('/shared/browser-api.js')).default;
+          const original = browser.runtime.sendMessage.bind(browser.runtime);
+          globalThis.__engineReplies = [];
+          browser.runtime.sendMessage = async (message, ...args) => {
+            const reply = await original(message, ...args);
+            if (['app/editor-write', 'app/actor-chat'].includes(message?.type)) {
+              globalThis.__engineReplies.push({ type: message.type, path: message.path, reply });
+            }
+            return reply;
+          };
+        })()`, true);
+        const chat = async (text) => {
+          const before = await evalIn(page, `document.querySelectorAll('.actor-chat-message').length`);
+          await evalIn(page, `(() => {
+            if (document.getElementById('actor-chat-drawer').hidden) document.getElementById('actor-chat-toggle').click();
+            const input = document.getElementById('actor-chat-input');
+            input.focus(); input.select();
+          })()`);
+          await page.send('Input.insertText', { text });
+          await evalIn(page, `document.getElementById('actor-chat-send').click()`);
+          const settled = await waitFor(() => evalIn(page, `(() => {
+            const messages = [...document.querySelectorAll('.actor-chat-message')];
+            const last = messages.at(-1);
+            const input = document.getElementById('actor-chat-input');
+            if (messages.length < ${before + 2} || last?.dataset.role === 'user' || input.disabled) return null;
+            return { text: last.textContent, role: last.dataset.role, prompt: input.value,
+              reply: globalThis.__engineReplies.filter((entry) => entry.type === 'app/actor-chat').at(-1)?.reply };
+          })()`), { budgetMs: 60_000, pollMs: 100 });
+          if (!settled) throw new Error('The real App actor chat did not settle');
+          return settled;
+        };
+        ctx.setModelResponder(() => ({ sse: sseText('APP-DRAWER-READY') }));
+        const workingChat = await chat('Reply with APP-DRAWER-READY.');
+        rec.check('the real App actor drawer works before the error control',
+          workingChat.role === 'actor' && workingChat.text === 'APP-DRAWER-READY' && workingChat.reply?.ok === true,
+          JSON.stringify(workingChat));
+        ctx.setModelResponder(() => ({ status: 401, body: '{"error":{"message":"invalid api key SECRET-PROVIDER-TEXT"}}' }));
+        const authChat = await chat('Keep this prompt after a rejected key.');
+        rec.check('the actor receives a real model 401', authChat.reply?.ok === false
+          && /HTTP 401/.test(authChat.reply?.error ?? '') && ctx.modelCallCount() > 0, JSON.stringify(authChat));
+        if (baseRender) rec.observe('merge-base actor 401 guidance', authChat);
+        else rec.check('the drawer names a rejected key and keeps the known-refusal prompt',
+          authChat.text === 'API key rejected (401). Check or update it in Settings.'
+          && authChat.prompt === 'Keep this prompt after a rejected key.' && !authChat.text.includes('SECRET-PROVIDER-TEXT'),
+          JSON.stringify(authChat));
+        await rec.visualPage('app-actor-chat-auth-refusal', page);
+        await evalIn(page, `document.getElementById('actor-chat-close').click()`);
+        await selectFile('data/first.json');
+        const invalidJson = '{"saved":';
+        await replaceDraft(invalidJson);
+        const invalidSave = await waitFor(async () => {
+          const saved = await savedText('data/first.json');
+          const result = await evalIn(page, `({ text: document.getElementById('app-save-message').textContent,
+            visible: !document.getElementById('app-save-status').hidden,
+            reply: globalThis.__engineReplies.filter((entry) => entry.type === 'app/editor-write').at(-1)?.reply })`);
+          return result.visible || saved === invalidJson ? { ...result, saved } : null;
+        }, { budgetMs: 10_000, pollMs: 100 });
+        if (!invalidSave) throw new Error('The real invalid JSON save did not settle');
+        if (baseRender) rec.observe('merge-base invalid JSON write', invalidSave);
+        else rec.check('invalid JSON stays in the editor and cannot replace the durable file',
+          invalidSave.saved === firstData && invalidSave.reply?.code === 'app-file-invalid-json'
+          && invalidSave.text.includes('Fix the JSON to save it.'), JSON.stringify(invalidSave));
+        rec.check('the invalid JSON draft remains available to repair', await evalIn(page, `(async () => {
+          const { EditorView } = await import('/vendor/codemirror/cm.js');
+          return EditorView.findFromDOM(document.querySelector('.cm-editor')).state.doc.toString() === ${JSON.stringify(invalidJson)};
+        })()`, true));
+        await rec.visualPage('app-editor-invalid-json', page);
+        const repairedJson = '{"saved":true,"repaired":true}';
+        await replaceDraft(repairedJson);
+        const repaired = await waitFor(async () => await savedText('data/first.json') === repairedJson
+          && await evalIn(page, `document.getElementById('app-save-status').hidden`), { budgetMs: 10_000, pollMs: 100 });
+        rec.check('valid JSON saves through the same editor after repair', !!repaired);
+        if (!repaired) throw new Error('The JSON repair did not reach the durable file');
+        await selectFile('index.html');
+        const originalHtml = await savedText('index.html');
+        const lockedDraft = `${originalHtml}\n<!-- Keep this draft through a locked save. -->`;
+        const locked = await rpc(ctx.page, { type: 'vault/lock' });
+        if (locked?.ok !== true) throw new Error(`Vault lock failed: ${JSON.stringify(locked)}`);
+        vaultLocked = true;
+        await replaceDraft(lockedDraft);
+        const lockNotice = await waitFor(() => evalIn(page, `document.getElementById('app-save-status').hidden
+          ? null : document.getElementById('app-save-status').textContent`), { budgetMs: 10_000, pollMs: 100 });
+        const lockedReply = await evalIn(page, `globalThis.__engineReplies.filter((entry) => entry.type === 'app/editor-write').at(-1)?.reply`);
+        rec.check('the real locked save refuses before a disk change and keeps Retry',
+          lockedReply?.error === 'vault-locked' && await savedText('index.html') === originalHtml
+          && await evalIn(page, `document.getElementById('app-save-retry').textContent === 'Retry'`), JSON.stringify({ lockNotice, lockedReply }));
+        if (baseRender) rec.observe('merge-base locked save guidance', lockNotice);
+        else rec.check('the Save banner directs the user to unlock',
+          lockNotice?.includes('Unlock it in the peerd panel, then retry.') && !lockNotice.includes('free browser storage'), lockNotice);
+        await rec.visualPage('app-editor-locked-save', page);
+        const beforeLockedChat = ctx.modelCallCount();
+        const lockedChat = await chat('Keep this prompt while the vault is locked.');
+        rec.check('a locked drawer send makes no model call', ctx.modelCallCount() === beforeLockedChat, JSON.stringify(lockedChat));
+        if (baseRender) rec.observe('merge-base locked actor guidance', lockedChat);
+        else rec.check('the drawer names a real known locked refusal and keeps its prompt',
+          lockedChat.reply?.error === 'vault-locked' && lockedChat.reply?.outcomeKnown === true
+          && lockedChat.text === 'Vault is locked. Unlock it in the peerd panel, then send again.'
+          && lockedChat.prompt === 'Keep this prompt while the vault is locked.', JSON.stringify(lockedChat));
+        await rec.visualPage('app-actor-chat-locked-refusal', page);
+        const unlocked = await rpc(ctx.page, { type: 'vault/unlock', passphrase: PASSPHRASE }, { timeoutMs: 120_000 });
+        if (unlocked?.ok !== true) throw new Error(`Vault unlock failed: ${JSON.stringify(unlocked)}`);
+        vaultLocked = false;
+        await evalIn(page, `document.getElementById('app-save-retry').click()`);
+        const retried = await waitFor(async () => await savedText('index.html') === lockedDraft
+          && await evalIn(page, `document.getElementById('app-save-status').hidden`), { budgetMs: 10_000, pollMs: 100 });
+        rec.check('unlock and the existing Retry save the exact draft', !!retried);
+        if (!retried) throw new Error('The real save retry did not finish');
+        ctx.setModelResponder(() => ({ sse: sseText('APP-DRAWER-RECOVERED') }));
+        const recoveredChat = await chat('Reply with APP-DRAWER-RECOVERED.');
+        rec.check('the drawer works after unlock without a page reload',
+          recoveredChat.role === 'actor' && recoveredChat.text === 'APP-DRAWER-RECOVERED' && recoveredChat.reply?.ok === true,
+          JSON.stringify(recoveredChat));
+        await evalIn(page, `document.getElementById('actor-chat-close').click()`);
+        await selectFile('notes.txt');
+        ctx.setModelResponder(() => ({ sse: sseText('EDITOR-RECOVERY-READY') }));
         const draft = 'These edits exist only in the open draft.\nKeep every character: café ✓';
         await evalIn(page, `(async () => {
           const browser = (await import('/shared/browser-api.js')).default;
@@ -6523,8 +6668,10 @@ export const STATES = [
             && after.guard === true && after.url === target.url && after.noticeVisible === true,
           JSON.stringify(after));
         await page.send('Page.bringToFront');
+        await rec.visualPage('app-editor-recovery', page);
         await rec.shotPage('draft-preserved', page);
       } finally {
+        if (vaultLocked) await rpc(ctx.page, { type: 'vault/unlock', passphrase: PASSPHRASE }, { timeoutMs: 120_000 });
         try { await page?.send('Page.setDownloadBehavior', { behavior: 'default' }); } catch {}
         try { page?.close(); } catch {}
         await rm(directory, { recursive: true, force: true });
@@ -8666,3 +8813,8 @@ Promise.resolve().then(async () => {
     },
   },
 ];
+
+// why: keep the functional check and include the same real flow in CI images.
+const appEditorRecovery = STATES.find((state) => state.name === 'app-editor-save-recovery');
+if (!appEditorRecovery) throw new Error('App editor recovery state is missing');
+STATES.push({ ...appEditorRecovery, name: 'app-editor-recovery', kind: 'visual' });

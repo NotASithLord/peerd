@@ -43,7 +43,7 @@ export const showConsentBar = ({ appName, detail, kind, approveLabel }, { armDel
   const text = document.createElement('span');
   text.id = `app-confirm-${Date.now()}`;
   bar.setAttribute('aria-labelledby', text.id);
-  text.textContent = `“${appName}” wants to ${detail}.`;
+  text.textContent = `“${appName}” wants to ${detail}${/[.?!]$/.test(detail) ? '' : '.'}`;
   /** @param {string} label @param {boolean} val @param {boolean} solid */
   const mkBtn = (label, val, solid) => {
     const b = document.createElement('button');

@@ -160,6 +160,29 @@ describe('native kernel App file picker', () => {
     expect(calls).toContainEqual(['reload', 'app-1']);
   });
 
+  test('invalid App JSON stops before file writes and consent changes', async () => {
+    const calls: string[] = [];
+    const routes = makeKernelAppEditorRoutes({
+      vault: { isLocked: () => false },
+      catalog: { get: async () => ({ id: 'app-1', entryFile: 'index.html' }) },
+      files: { writeText: async () => { calls.push('write'); } },
+      repositories: { coordinate: async (_ref: any, operation: () => Promise<any>) => {
+        calls.push('coordinate'); return operation();
+      } },
+      withAppDwebAuthority: async (_id: string, operation: () => Promise<any>) => {
+        calls.push('consent'); return operation();
+      },
+      isAppSender: () => true,
+    });
+    for (const type of ['app/editor/write', 'app/editor-write'] as const) {
+      for (const path of ['peerd.json', 'data/document.json', 'DATA/State.JSON']) {
+        await expect(routes[type]({ appId: 'app-1', path, content: '{' }, 'exact-app'))
+          .resolves.toEqual({ ok: false, code: 'app-file-invalid-json', error: `${path} is not valid JSON` });
+      }
+    }
+    expect(calls).toEqual([]);
+  });
+
   test('editor routes fail locked before OPFS, catalog mutation, or repository startup', async () => {
     let calls = 0;
     const routes = makeKernelAppEditorRoutes({
