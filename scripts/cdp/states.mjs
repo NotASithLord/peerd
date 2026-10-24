@@ -5964,6 +5964,71 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
+  // why: hold the real disk lock in another document before this VM boots.
+  // No CheerpX device can open in either refusal case.
+  {
+    name: 'vm-disk-ownership', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      if (process.env.PEERD_VISUAL_BASE_RENDER === '1') {
+        const extension = process.argv.find(arg => arg.startsWith('--extension='))?.slice('--extension='.length);
+        if (!extension) throw new Error('base visual render requires an explicit extension tree');
+        if (!existsSync(join(extension, 'engine-tabs/vm-tab/disk-lock.js'))) {
+          rec.observe('merge-base surface', { present: false, reason: 'disk refusal introduced on this branch' });
+          return;
+        }
+      }
+      const holder = await openExtPage(ctx, 'options/options.html');
+      let page;
+      try {
+        const vm = await evalIn(holder, `(async () => {
+          const { buildManifest } = await import('/shared/bundle/manifest.js');
+          const { packBundle } = await import('/shared/bundle/bundle.js');
+          const { toBase64 } = await import('/shared/bundle/bytes.js');
+          const { manifest, chunks } = await buildManifest({ payload: packBundle({ files: {} }),
+            type: 'vm-recipe', mime: 'application/peerd-vm-recipe', meta: { kind: 'vm', name: 'Disk guard' } });
+          const imported = await chrome.runtime.sendMessage({ type: 'import/apply',
+            envelope: { format: 'peerd-bundle', version: 1, manifest, chunks: chunks.map(toBase64) } });
+          if (!imported?.ok) throw new Error(JSON.stringify(imported));
+          const reply = await chrome.runtime.sendMessage({ type: 'vm/get-meta', vmId: imported.id });
+          const { diskLockName } = await import('/engine-tabs/vm-tab/disk-lock.js');
+          await new Promise(resolve => {
+            navigator.locks.request(diskLockName(reply.record.diskOverlayKey), () => {
+              resolve(); return new Promise(() => {});
+            });
+          });
+          return reply.record;
+        })()`, true);
+        for (const failure of ['busy', 'unavailable']) {
+          page = await openWidePage(ctx, 'engine-tabs/vm-tab/index.html', { ready: '.boot-card.is-failed' });
+          if (failure === 'unavailable') {
+            await page.send('Page.addScriptToEvaluateOnNewDocument', { source:
+              `Object.defineProperty(navigator, 'locks', { value: { request() { throw new Error('lock service unavailable'); } } });` });
+          }
+          await page.send('Page.navigate', { url: `chrome-extension://${ctx.sw.id}/engine-tabs/vm-tab/index.html?lock-case=${failure}#${vm.id}` });
+          const refused = await waitFor(() => evalIn(page, `(() => {
+            if (!document.querySelector('.boot-card.is-failed') || location.hash) return null;
+            return { text: document.body.innerText, log: document.getElementById('boot-log')?.textContent,
+              cheerpxLoaded: performance.getEntriesByType('resource').some(entry => entry.name.includes('/cheerpx/')) };
+          })()`), { budgetMs: 10_000, pollMs: 50 });
+          rec.check(`${failure} disk ownership stops before the VM loads`,
+            !!refused && !refused.cheerpxLoaded && !refused.log?.includes('IDBDevice.create')
+              && refused.text.includes(failure === 'busy' ? 'already open in another tab' : 'Could not lock the VM disk'),
+            JSON.stringify(refused));
+          const pinClock = () => evalIn(page, `(() => {
+            for (const node of document.querySelectorAll('#boot-log, #boot-log *')) {
+              for (const text of node.childNodes) if (text.nodeType === 3) text.textContent = text.textContent.replace(/\\d{2}:\\d{2}:\\d{2}/g, '00:00:00').replaceAll(${JSON.stringify(vm.id)}, 'vm-disk-guard');
+            }
+            // why: match the existing VM capture guard for fixed blur layers.
+            const pullIn = document.querySelector('.peerd-pull');
+            if (pullIn) { pullIn.style.backdropFilter = 'none'; pullIn.style.webkitBackdropFilter = 'none'; pullIn.getBoundingClientRect(); }
+          })()`);
+          await rec.visualPage(`vm-disk-${failure}`, page, { beforeShot: pinClock });
+          await page.close();
+          page = null;
+        }
+      } finally { try { page?.close(); } catch {} try { await holder.closeTarget(); } catch {} }
+    },
+  },
   NOTEBOOK_FETCH_STATE,
   {
     name: 'notebook-remote-restricted', kind: 'functional', phase: 'post-unlock',
@@ -6209,6 +6274,82 @@ export const STATES = [
       finally { try { page.close(); } catch { /* */ } }
     },
   },
+  // why: use the real sandbox message and trusted parent, with a reserved URL.
+  {
+    name: 'app-consent-arming', kind: 'visual', phase: 'post-unlock',
+    responder: call => ({ sse: call === 0 ? sseToolCall('sandbox_create', {
+      kind: 'app', name: 'Consent guard', files: { 'index.html': `<!doctype html><title>Consent guard</title>
+<main><h1>External link</h1><p>The trusted bar must confirm this link.</p></main>
+<script>'use strict'; addEventListener('message', event => { if (event.data?.type === 'request-link') parent.postMessage({type:'app-link',href:'https://consent.peerd.test/approved'},'*'); });</script>` },
+    }) : sseText('CONSENT-READY') }),
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      let page, targetId;
+      const targets = () => fetch(`http://127.0.0.1:${ctx.port}/json/list`).then(reply => reply.json());
+      const opened = () => targets().then(all => all.filter(target => target.url.startsWith('https://consent.peerd.test/')));
+      try {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create the Consent guard App.' });
+        if (!sent?.ok) throw new Error('Consent App creation failed');
+        const target = await waitFor(async () => (await targets()).find(candidate => candidate.title === 'peerd · Consent guard'),
+          { budgetMs: 30_000, pollMs: 100 });
+        if (!target) throw new Error('Consent App did not open');
+        targetId = target.id;
+        page = await attach(target.webSocketDebuggerUrl);
+        await page.send('Runtime.enable');
+        await page.send('Page.enable');
+        await page.send('Page.bringToFront');
+        await page.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+        await waitFor(() => evalIn(page, `document.getElementById('boot')?.classList.contains('is-hidden')`),
+          { budgetMs: 10_000, pollMs: 50 });
+        const early = await evalIn(page, `(async () => {
+          const bar = await new Promise((resolve, reject) => {
+            const observer = new MutationObserver(() => {
+              const bar = document.querySelector('[role="alertdialog"]');
+              if (bar) { observer.disconnect(); clearTimeout(timer); resolve(bar); }
+            });
+            const timer = setTimeout(() => { observer.disconnect(); reject(new Error('consent bar missing')); }, 5000);
+            observer.observe(document.body, { childList: true });
+            document.getElementById('app-frame').contentWindow.postMessage({ type: 'request-link' }, '*');
+          });
+          const allow = [...bar.querySelectorAll('button')].find(button => button.textContent === 'Open link');
+          if (!${baseRender}) allow?.click();
+          return { disabled: allow?.disabled, open: !!document.querySelector('[role="alertdialog"]'),
+            inert: document.getElementById('app-frame').inert, focused: document.activeElement?.textContent };
+        })()`, true);
+        if (baseRender) {
+          await rec.visualPage('app-consent-armed', page);
+          await evalIn(page, `[...document.querySelectorAll('[role="alertdialog"] button')].find(button => button.textContent === 'Deny').click()`);
+          return;
+        }
+        rec.check('the new prompt blocks immediate approval and makes the App inert',
+          early?.disabled && early.open && early.inert && early.focused === 'Deny', JSON.stringify(early));
+        await waitFor(() => evalIn(page, `document.querySelector('[role="alertdialog"] button')?.disabled === false`),
+          { budgetMs: 5_000, pollMs: 50 });
+        const point = await evalIn(page, `(() => {
+          const button = [...document.querySelectorAll('[role="alertdialog"] button')].find(node => node.textContent === 'Open link');
+          const rect = button.getBoundingClientRect();
+          return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+        })()`);
+        for (const type of ['mousePressed', 'mouseReleased']) {
+          await page.send('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 2 });
+        }
+        rec.check('a multi-click after arming cannot approve or open a tab',
+          await evalIn(page, `!!document.querySelector('[role="alertdialog"]')`) && (await opened()).length === 0);
+        await rec.visualPage('app-consent-armed', page);
+        for (const type of ['mousePressed', 'mouseReleased']) {
+          await page.send('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 1 });
+        }
+        const approved = await waitFor(async () => (await opened())[0], { budgetMs: 5_000, pollMs: 50 });
+        rec.check('a deliberate single click opens exactly the confirmed link',
+          approved?.url === 'https://consent.peerd.test/approved'
+            && await evalIn(page, `!document.querySelector('[role="alertdialog"]') && !document.getElementById('app-frame').inert`));
+      } finally {
+        for (const target of await opened()) await fetch(`http://127.0.0.1:${ctx.port}/json/close/${target.id}`);
+        try { page?.close(); } catch {}
+        if (targetId) await fetch(`http://127.0.0.1:${ctx.port}/json/close/${targetId}`);
+      }
+    },
+  },
   {
     name: 'app-editor-save-recovery', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex) => ({ sse: callIndex === 0
@@ -6243,6 +6384,26 @@ export const STATES = [
         await evalIn(page, `document.getElementById('mode-toggle').click()`);
         await waitFor(() => evalIn(page, `!!document.querySelector('#editor-panel:not([hidden]) .cm-content')`),
           { budgetMs: 10_000, pollMs: 100 });
+        const loaded = await evalIn(page, `(async () => {
+          const { EditorView } = await import('/vendor/codemirror/cm.js');
+          const view = EditorView.findFromDOM(document.querySelector('.cm-editor'));
+          view.focus();
+          return view.state.doc.toString();
+        })()`, true);
+        for (const type of ['keyDown', 'keyUp']) {
+          await page.send('Input.dispatchKeyEvent', { type, key: 'z', code: 'KeyZ', windowsVirtualKeyCode: 90,
+            modifiers: type === 'keyDown' ? (process.platform === 'darwin' ? 4 : 2) : 0 });
+        }
+        await sleep(600);
+        const afterUndo = await evalIn(page, `(async () => {
+          const { EditorView } = await import('/vendor/codemirror/cm.js');
+          const { opfsHelpers } = await import('/peerd-engine/index.js');
+          return { buffer: EditorView.findFromDOM(document.querySelector('.cm-editor')).state.doc.toString(),
+            saved: await opfsHelpers(['peerd-apps', ${JSON.stringify(appId)}]).read('index.html') };
+        })()`, true);
+        rec.check('Undo after loading leaves the App source and saved file intact',
+          !!loaded && afterUndo?.buffer === loaded && afterUndo.saved === loaded, JSON.stringify(afterUndo));
+        await rec.shotPage('undo-after-load', page);
         await evalIn(page, `(() => {
           const original = window.prompt;
           window.prompt = () => 'notes.txt';

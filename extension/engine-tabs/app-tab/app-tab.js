@@ -19,6 +19,7 @@ import { isServiceWorkerSender } from '/shared/messaging.js';
 import { createAppDataClient } from './app-data-client.js';
 import { mithrilClassicSource } from './mithril-classic-source.js';
 import { createDwebBridgeLifecycle } from './dweb-bridge-lifecycle.js';
+import { showConsentBar } from './consent-bar.js';
 import { makeAppActorAttachRecovery } from './actor-attach-recovery.js';
 
 const uiRuntime = makeUiRuntimeClient({ browser });
@@ -772,47 +773,10 @@ frame.addEventListener('load', () => {
 
 const dwebBridgeLifecycle = createDwebBridgeLifecycle();
 
-// A minimal monochrome consent bar follows the project color rule.
 let confirmationTail = Promise.resolve();
 
-/** @param {{ appName: string, detail: string, kind?: string, approveLabel?: string }} arg @returns {Promise<boolean>} */
-const showConfirmation = ({ appName, detail, kind, approveLabel }) => new Promise((resolve) => {
-  const priorFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  const bar = document.createElement('div');
-  bar.setAttribute('role', 'alertdialog');
-  bar.setAttribute('aria-modal', 'true');
-  bar.style.cssText = [
-    'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:50',
-    'display:flex', 'gap:12px', 'align-items:center', 'justify-content:center',
-    'padding:10px 16px', 'background:#111', 'color:#eee',
-    'font:13px/1.4 -apple-system, system-ui, sans-serif',
-    'border-bottom:1px solid #333',
-  ].join(';');
-  const text = document.createElement('span');
-  text.id = `app-confirm-${Date.now()}`;
-  bar.setAttribute('aria-labelledby', text.id);
-  text.textContent = `“${appName}” wants to ${detail}.`;
-  /** @param {string} label @param {boolean} val @param {boolean} solid */
-  const mkBtn = (label, val, solid) => {
-    const b = document.createElement('button');
-    b.textContent = label;
-    b.style.cssText = `min-height:44px;padding:8px 16px;border:1px solid #555;border-radius:4px;cursor:pointer;background:${solid ? '#eee' : 'transparent'};color:${solid ? '#111' : '#eee'};font:inherit`;
-    b.addEventListener('click', () => { bar.remove(); priorFocus?.focus(); resolve(val); });
-    return b;
-  };
-  const actionLabel = approveLabel ?? (kind === 'join' ? 'Join room' : kind === 'install' ? 'Install app' : 'Allow');
-  const allow = mkBtn(actionLabel, true, true);
-  const deny = mkBtn('Deny', false, false);
-  bar.append(text, allow, deny);
-  document.body.appendChild(bar);
-  deny.focus();
-  bar.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') { event.preventDefault(); deny.click(); return; }
-    if (event.key !== 'Tab') return;
-    if (event.shiftKey && document.activeElement === allow) { event.preventDefault(); deny.focus(); }
-    else if (!event.shiftKey && document.activeElement === deny) { event.preventDefault(); allow.focus(); }
-  });
-});
+/** @param {{ appName: string, detail: string, kind?: string, approveLabel?: string }} args @returns {Promise<boolean>} */
+const showConfirmation = (args) => showConsentBar(args, { inert: frame });
 
 /** Serialize every trusted-parent consent surface so App prompts cannot overlap.
  * @param {{ appName: string, detail: string, kind?: string, approveLabel?: string }} args */

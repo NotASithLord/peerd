@@ -262,13 +262,19 @@ export const createEditor = async (config) => {
   };
 
   const initialPath = initialFile || pinnedFile;
-  const state = EditorState.create({
+  // why a fresh state per loaded file: a load dispatched as a document edit
+  // enters undo history, so one Cmd-Z reverts the load and autosave writes
+  // the previous buffer (or nothing) over the file on disk. setState does
+  // not fire the update listener, so a load never queues a save either.
+  /** @param {string} path @param {string} [doc] */
+  const createState = (path, doc = '') => EditorState.create({
+    doc,
     extensions: [
       lineNumbers(), highlightActiveLine(), drawSelection(),
       history(), bracketMatching(), closeBrackets(), indentOnInput(),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       autocompletion(),
-      langCompartment.of(langForPath(initialPath)),
+      langCompartment.of(langForPath(path)),
       oneDark, update,
       keymap.of([
         ...(onRun ? [{ key: 'Mod-Enter', preventDefault: true, run: () => { onRun(); return true; } }] : []),
@@ -281,7 +287,7 @@ export const createEditor = async (config) => {
       ]),
     ],
   });
-  const view = new EditorView({ state, parent: host });
+  const view = new EditorView({ state: createState(initialPath), parent: host });
   const getValue = () => view.state.doc.toString();
   /** @param {string} text */
   const setValue = (text) => {
@@ -637,11 +643,9 @@ export const createEditor = async (config) => {
     let content = '';
     try { content = await opfsRead(path); } catch {}
     currentFile = path;
-    setValue(content);
+    view.setState(createState(path, content));
     lastSavedContent = content;
     setDirty(false);
-    // Reconfigure the language for the new file's extension.
-    view.dispatch({ effects: langCompartment.reconfigure(langForPath(path)) });
     renderTree();
     const active = treeBody.querySelector('.pe-node.is-active');
     active?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -711,7 +715,7 @@ export const createEditor = async (config) => {
       currentFile = pinnedFile;
       let content = '';
       try { content = await opfsRead(pinnedFile); } catch {}
-      setValue(content);
+      view.setState(createState(pinnedFile, content));
       lastSavedContent = content;
       setDirty(false);
       deletingActiveFile = false;
@@ -786,7 +790,7 @@ export const createEditor = async (config) => {
   await refreshTree();
   try {
     const content = await opfsRead(currentFile);
-    setValue(content);
+    view.setState(createState(currentFile, content));
     lastSavedContent = content;
     setDirty(false);
   } catch { /* file doesn't exist yet -- leave editor empty */ }
