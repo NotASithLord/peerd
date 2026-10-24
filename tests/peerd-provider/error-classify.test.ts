@@ -21,9 +21,11 @@ describe('isUsageLimitResponse — hard limits', () => {
     'Your credit balance is too low to access the Anthropic API.',
     '{"error":{"type":"invalid_request_error","message":"credit balance is too low"}}',
     'This request would exceed your monthly spend limit',
-    '{"error":{"message":"You have exhausted your quota"}}',
+    '{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","param":null,"code":"insufficient_quota"}}',
     'insufficient_quota',
     'Billing hard limit has been reached',
+    '{"error":{"message":"Your account is not active, please check your billing details on our website.","type":"billing_not_active","param":null,"code":"billing_not_active"}}',
+    '{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}',
   ])('flags a billing/credit/quota body: %s', (body) => {
     expect(isUsageLimitResponse(429, body)).toBe(true);
   });
@@ -39,6 +41,13 @@ describe('isUsageLimitResponse — transient (must NOT be hard)', () => {
     '{"error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}',
     '{"error":{"type":"overloaded_error","message":"Overloaded"}}',
     '',
+    // throttles that mention billing or quota but clear by waiting: OpenAI's
+    // free-tier per-minute limits link the billing page, and Google-routed
+    // OpenRouter requests name a per-minute quota
+    "{\"error\": {\"message\": \"Rate limit reached for gpt-4o-mini in organization org-abc on requests per min (RPM): Limit 3, Used 3, Requested 1. Please try again in 20s. Visit https://platform.openai.com/account/rate-limits to learn more. You can increase your rate limit by adding a payment method to your account at https://platform.openai.com/account/billing.\", \"type\": \"requests\", \"param\": null, \"code\": \"rate_limit_exceeded\"}}",
+    "{\"error\": {\"message\": \"Rate limit reached for gpt-4o in organization org-abc on tokens per min (TPM): Limit 30000, Used 28000, Requested 4000. Please try again in 4s. Visit https://platform.openai.com/account/rate-limits to learn more. You can increase your rate limit by adding a payment method to your account at https://platform.openai.com/account/billing.\", \"type\": \"tokens\", \"param\": null, \"code\": \"rate_limit_exceeded\"}}",
+    "{\"error\": {\"message\": \"Provider returned error\", \"code\": 429, \"metadata\": {\"raw\": \"{\\\"error\\\": {\\\"code\\\": 429, \\\"message\\\": \\\"Resource has been exhausted (e.g. check quota).\\\", \\\"status\\\": \\\"RESOURCE_EXHAUSTED\\\"}}\", \"provider_name\": \"Google\"}}}",
+    "{\"error\": {\"message\": \"Quota exceeded for quota metric 'Generate Content API requests per minute' and limit 'GenerateContent request limit per minute for a region' of service 'generativelanguage.googleapis.com'.\", \"code\": 429, \"metadata\": {\"provider_name\": \"Google AI Studio\"}}}",
   ])('does NOT flag a transient body: %s', (body) => {
     expect(isUsageLimitResponse(429, body)).toBe(false);
     expect(isUsageLimitResponse(529, body)).toBe(false);
