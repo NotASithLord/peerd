@@ -34,6 +34,44 @@ const makeKernelLane = ({
 };
 
 describe('kernel denylist mutation routes', () => {
+  test('audit records both derived rules and preserves an explicit wildcard', async () => {
+    const { routes, audit } = makeKernelLane();
+    await routes['denylist/add']({ pattern: 'private.example' });
+    expect(audit.at(-1).details.patterns).toEqual(['private.example', '*.private.example']);
+    await routes['denylist/remove']({ pattern: 'private.example' });
+    expect(audit.at(-1).details.patterns).toEqual(['private.example', '*.private.example']);
+    await routes['denylist/add']({ pattern: '*.private.example' });
+    await routes['denylist/add']({ pattern: 'private.example' });
+    const result = await routes['denylist/remove']({ pattern: 'private.example' });
+    expect(result.added).toEqual(['*.private.example']);
+    expect(audit.at(-1).details.patterns).toEqual(['private.example']);
+  });
+
+  test('concurrent edits record only their own effective rules', async () => {
+    const pending: Array<() => void> = [];
+    const kv = makeKv();
+    const persist = kv.set;
+    kv.set = async (key: string, value: any) => {
+      await new Promise<void>((resolve) => pending.push(resolve));
+      await persist(key, value);
+    };
+    const { routes, audit } = makeKernelLane({ kv });
+    const first = routes['denylist/add']({ pattern: 'first.example' });
+    const second = routes['denylist/add']({ pattern: 'second.example' });
+    await Bun.sleep(0);
+    expect(pending).toHaveLength(1);
+    pending.shift()!();
+    await first;
+    await Bun.sleep(0);
+    expect(pending).toHaveLength(1);
+    pending.shift()!();
+    await second;
+    expect(audit.map((entry) => entry.details.patterns)).toEqual([
+      ['first.example', '*.first.example'], ['second.example', '*.second.example'],
+    ]);
+    expect(kv._values.get('denylist.user.v1').added).toEqual(['first.example', 'second.example']);
+  });
+
   test('a successful edit resyncs the network backstop; a refused one does not', async () => {
     const updates: any[] = [];
     const { routes } = makeKernelLane({
@@ -51,6 +89,6 @@ describe('kernel denylist mutation routes', () => {
     const kv = makeKv({ added: ['pre-existing.example'], disabled: [] });
     const { routes } = makeKernelLane({ kv });
     const reply = await routes['denylist/add']({ pattern: 'private.example' });
-    expect(reply.added).toEqual(['pre-existing.example', 'private.example']);
+    expect(reply.added).toEqual(['pre-existing.example', '*.pre-existing.example', 'private.example', '*.private.example']);
   });
 });

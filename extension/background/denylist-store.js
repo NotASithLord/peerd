@@ -23,74 +23,67 @@ export const makeDenylistStore = ({ kv, key, normalizePattern }) => {
   /** @type {string[]} */
   let seed = [];
   /** @type {{ added: string[], disabled: string[] }} */
-  let overlay = { added: [], disabled: [] };
-  /** @type {string[]} */
-  let effective = [];
+  let user = { added: [], disabled: [] };
+  /** @type {string[]} */ let rules = [];
 
-  const recompute = () => {
-    const disabled = new Set(overlay.disabled);
-    const eff = seed.filter((p) => !disabled.has(p));
-    for (const p of overlay.added) if (!eff.includes(p)) eff.push(p);
-    effective = eff;
+  // why: derived rules disappear with their host; explicit wildcards stay independent.
+  const added = () => [...new Set(user.added.flatMap((p) =>
+    p.startsWith('*.') || seed.includes(p) ? [p] : [p, `*.${p}`]))];
+  const refresh = () => { rules = [...new Set(seed.filter((p) => !user.disabled.includes(p)).concat(added()))]; };
+
+  /** @type {Promise<any>} */ let tail = Promise.resolve();
+  const edit = (/** @type {boolean} */ add, /** @type {unknown} */ pattern) => {
+    const result = tail.then(async () => {
+      let p = normalizePattern(pattern);
+      if (!p) return { ok: false, error: 'invalid-pattern' };
+      if (!add && p.startsWith('*.') && !user.added.includes(p)
+          && user.added.includes(p.slice(2))) p = p.slice(2);
+      const prior = user, before = rules;
+      if (add) {
+        if (user.disabled.includes(p)) user = { ...user, disabled: user.disabled.filter((x) => x !== p) };
+        else if (!seed.includes(p) && !user.added.includes(p)) user = { ...user, added: [...user.added, p] };
+      } else if (user.added.includes(p)) {
+        user = { ...user, added: user.added.filter((x) => x !== p) };
+      } else if (seed.includes(p) && !user.disabled.includes(p)) {
+        user = { ...user, disabled: [...user.disabled, p] };
+      } else return { ok: false, error: 'not-found' };
+      refresh();
+      const [from, to] = add ? [rules, before] : [before, rules];
+      const patterns = from.filter((x) => !to.includes(x));
+      try { await kv.set(key, user); }
+      catch (error) {
+        if (!add) { user = prior; refresh(); }
+        throw error;
+      }
+      return { ok: true, pattern: p, seed: seed.includes(p), patterns };
+    });
+    tail = result.catch(() => {});
+    return result;
   };
 
   return {
-    patterns: () => effective,
-    overlay: () => ({ added: [...overlay.added], disabled: [...overlay.disabled] }),
-    /** @param {string} pattern */
-    isSeed: (pattern) => seed.includes(pattern),
+    patterns: () => rules,
+    overlay: () => ({ added: added(), disabled: [...user.disabled] }),
 
-    /** @param {string[]} seedPatterns */
-    async load(seedPatterns) {
-      seed = Array.isArray(seedPatterns) ? seedPatterns : [];
-      const user = await kv.get(key);
-      if (user == null) {
-        overlay = { added: [], disabled: [] };
-      } else if (typeof user !== 'object' || Array.isArray(user)
-          || !Array.isArray(user.added) || !Array.isArray(user.disabled)
-          || user.added.some((/** @type {unknown} */ item) => typeof item !== 'string')
-          || user.disabled.some((/** @type {unknown} */ item) => typeof item !== 'string')) {
+    /** @param {string[]} patterns */
+    async load(patterns) {
+      seed = Array.isArray(patterns) ? patterns : [];
+      const saved = await kv.get(key);
+      if (saved == null) {
+        user = { added: [], disabled: [] };
+      } else if (typeof saved !== 'object' || Array.isArray(saved)
+          || ['added', 'disabled'].some((field) => !Array.isArray(saved[field])
+            || saved[field].some((/** @type {unknown} */ item) => typeof item !== 'string'))) {
         throw new TypeError('denylist user overlay is malformed');
       } else {
-        overlay = { added: [...user.added], disabled: [...user.disabled] };
+        user = { added: [...saved.added], disabled: [...saved.disabled] };
       }
-      recompute();
+      refresh();
     },
 
     /** @param {unknown} pattern */
-    async add(pattern) {
-      const p = normalizePattern(pattern);
-      if (!p) return { ok: false, error: 'invalid-pattern' };
-      if (overlay.disabled.includes(p)) {
-        overlay = { ...overlay, disabled: overlay.disabled.filter((x) => x !== p) };
-      } else if (!seed.includes(p) && !overlay.added.includes(p)) {
-        overlay = { ...overlay, added: [...overlay.added, p] };
-      }
-      recompute();
-      await kv.set(key, overlay);
-      return { ok: true, pattern: p, seed: seed.includes(p) };
-    },
-
+    add: (pattern) => edit(true, pattern),
     /** @param {unknown} pattern */
-    async remove(pattern) {
-      const p = normalizePattern(pattern);
-      if (!p) return { ok: false, error: 'invalid-pattern' };
-      const previous = overlay;
-      if (overlay.added.includes(p)) {
-        overlay = { ...overlay, added: overlay.added.filter((x) => x !== p) };
-      } else if (seed.includes(p) && !overlay.disabled.includes(p)) {
-        overlay = { ...overlay, disabled: [...overlay.disabled, p] };
-      } else {
-        return { ok: false, error: 'not-found' };
-      }
-      recompute();
-      try { await kv.set(key, overlay); }
-      catch (error) {
-        overlay = previous;
-        recompute();
-        throw error;
-      }
-      return { ok: true, pattern: p, seed: seed.includes(p) };
-    },
+    remove: (pattern) => edit(false, pattern),
   };
 };

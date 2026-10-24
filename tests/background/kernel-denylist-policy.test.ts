@@ -46,8 +46,8 @@ describe('lazy native-kernel denylist policy', () => {
     expect(policy.blocks('evilhealth.example')).toBe(false);
     await expect(policy.snapshot()).resolves.toEqual({
       ok: true,
-      patterns: ['*.health.example', 'private.example'],
-      added: ['private.example'],
+      patterns: ['*.health.example', 'private.example', '*.private.example'],
+      added: ['private.example', '*.private.example'],
       disabled: ['bank.example'],
       categories: seed.categories,
     });

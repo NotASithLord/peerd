@@ -178,7 +178,7 @@ test('Settings reads and edits the real policy stores with audit and network syn
   });
   expect(await invoke('denylist/list')).toMatchObject({ ok: true, patterns: ['bank.example'] });
   expect(await invoke('denylist/add', undefined, { pattern: 'blocked.example' }))
-    .toMatchObject({ ok: true, added: ['blocked.example'] });
+    .toMatchObject({ ok: true, added: ['blocked.example', '*.blocked.example'] });
   expect(denylist.blocks('blocked.example')).toBe(true);
   expect(await invoke('denylist/remove', undefined, { pattern: 'blocked.example' }))
     .toMatchObject({ ok: true, added: [] });
