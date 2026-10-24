@@ -554,7 +554,7 @@ const UserMessage = {
                 m('span.attachment-chip-size', formatBytes(a.size)),
               ])))
           : null,
-        renderText(message.content),
+        m(MessageText, { content: message.content }),
         message.error ? m('.error-line', message.error) : null,
       ]),
     ]);
@@ -640,7 +640,7 @@ const ActorReplyMessage = {
         aborted ? ' · cancelled'
           : failed ? ` · ${outcomeUnknown ? 'Outcome unknown' : notRun ? 'Not run' : 'failed'}` : '',
       ]),
-      m('.bubble', renderText(stripUntrustedFences(displayBody))),
+      m('.bubble', m(MessageText, { content: stripUntrustedFences(displayBody) })),
       ]);
   },
 };
@@ -685,7 +685,7 @@ const AssistantMessage = {
         ? m('.thinking-solo', m(ThinkingSpinner))
         : hasText
           ? m('.bubble', [
-              renderText(message.content, { markdown: true }),
+              m(MessageText, { content: message.content, markdown: true }),
               message.error ? m('.error-line', message.error) : null,
             ])
           // why: a turn can FAIL before any token streams (e.g. an Anthropic
@@ -862,25 +862,24 @@ const Reasoning = {
 // (renderMarkdown is injection-safe — see shared/markdown.js); user text
 // stays literal so what the human typed shows verbatim.
 //
-// why: NO keys on the returned vnodes. They get flattened into the
-// parent fragment (.bubble), which also contains unkeyed siblings (muted
-// streaming dot, error line). Mithril forbids mixing keyed + unkeyed
-// children inside one fragment; these never reorder, so positional
-// identity is fine.
-/**
- * @param {string|undefined} content
- * @param {{ markdown?: boolean }} [opts]
- */
-const renderText = (content, { markdown = false } = {}) => {
-  if (typeof content !== 'string' || content.length === 0) return null;
-  if (markdown) {
-    // m.trust is safe here: renderMarkdown HTML-escapes all input and
-    // only emits a fixed, known tag set.
-    return m('.md', m.trust(renderMarkdown(content)));
-  }
-  return content.split('\n').map((line) =>
-    m('div', line || m.trust('&nbsp;'))
-  );
+// why: each text component keeps one position inside its bubble.
+// Its parent uses unkeyed siblings. Its own children also stay unkeyed.
+// State pushes can replace message objects without changing their text.
+// Compare the content string so each component retains only its current render.
+/** @typedef {{ attrs: { content?: string, markdown?: boolean } }} MessageTextVnode */
+const MessageText = {
+  // why: snapshots replace message objects, but each text node keeps its format.
+  /** @param {MessageTextVnode} vnode @param {MessageTextVnode} old */
+  onbeforeupdate: (vnode, old) => vnode.attrs.content !== old.attrs.content,
+  // m.trust is safe here: renderMarkdown HTML-escapes all input and
+  // only emits a fixed, known tag set.
+  /** @param {MessageTextVnode} vnode */
+  view: ({ attrs: { content, markdown = false } }) =>
+    typeof content !== 'string' || content.length === 0 ? null
+      : markdown ? m('.md', m.trust(renderMarkdown(content)))
+        : content.split('\n').map((line) =>
+            m('div', line || m.trust('&nbsp;'))
+          ),
 };
 
 // ─── Tool call card ──────────────────────────────────────────────────────

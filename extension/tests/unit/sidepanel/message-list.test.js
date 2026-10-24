@@ -18,11 +18,44 @@ const flush = async () => {
 const mount = (messages, attrs = {}) => {
   const root = document.createElement('div');
   document.body.appendChild(root);
-  m.mount(root, { view: () => m(MessageList, { messages, ...attrs }) });
-  return { root, unmount: () => { m.mount(root, null); root.remove(); } };
+  /** @type {any} */ let vnode;
+  m.mount(root, { view: () => { vnode = m(MessageList, { messages, ...attrs }); return vnode; } });
+  return { root, vnode: () => vnode, unmount: () => { m.mount(root, null); root.remove(); } };
 };
 
 describe('sidepanel.message-list updates and aborted cards', () => {
+  it('reuses equal text across fresh snapshots and renders same-length and streamed changes', async () => {
+    const messages = [{ role: 'assistant', id: 'text-1', content: '**first**', streaming: false }];
+    const mounted = mount(messages);
+    /** @param {any} node @returns {any} */
+    const findText = (node) => {
+      if (!node) return null;
+      if (Array.isArray(node)) return node.map(findText).find(Boolean);
+      if (node.attrs?.markdown === true && typeof node.tag?.view === 'function') return node.tag;
+      return findText(node.instance) ?? findText(node.children);
+    };
+    const component = findText(mounted.vnode());
+    const view = component?.view;
+    let renders = 0;
+    try {
+      expect(!!component).toBe(true);
+      component.view = (/** @type {any} */ vnode) => { renders += 1; return view(vnode); };
+      messages[0] = { ...messages[0] }; m.redraw.sync();
+      expect(renders).toBe(0);
+      messages[0] = { ...messages[0], content: '**other**' }; m.redraw.sync();
+      expect(renders).toBe(1);
+      expect(mounted.root.querySelector('.md strong')?.textContent).toBe('other');
+      messages[0] = { ...messages[0], content: '**live!**', streaming: true }; m.redraw.sync();
+      expect(renders).toBe(2);
+      expect(mounted.root.querySelector('.md strong')?.textContent).toBe('live!');
+      messages[0] = { ...messages[0], content: '**final**', streaming: false }; m.redraw.sync();
+      expect(renders).toBe(3);
+      messages[0] = { ...messages[0] }; m.redraw.sync();
+      expect(renders).toBe(3);
+      expect(mounted.root.querySelector('.md strong')?.textContent).toBe('final');
+    } finally { if (component) component.view = view; mounted.unmount(); }
+  });
+
   it('follows updates, respects scroll-up, and follows a new chat', async () => {
     const messages = Array.from({ length: 10 }, (_, index) => ({ role: 'user', id: `u${index}`, content: 'line' }));
     const attrs = { sessionId: 'scroll-test' };
