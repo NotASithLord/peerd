@@ -147,6 +147,7 @@ const harness = async (
     onTabRead?: (tabId: number) => Promise<void>|void,
     listSecretNames?: () => Promise<string[]>,
     getSecret?: (name: string) => Promise<string>,
+    resolveProviderSelection?: () => Promise<any>,
   } = {},
 ) => {
   let providerSelections = 0;
@@ -387,7 +388,7 @@ const harness = async (
       set: async (key: string, value: any) => { kvState.set(key, structuredClone(value)); },
     },
     sessionCache: options.sessionCache ?? {
-      sessionGet: async (key: string) => cache.get(key) ?? null,
+      sessionGet: async (key: string) => cache.get(key),
       sessionSet: async (key: string, value: any) => { cache.set(key, structuredClone(value)); },
     },
     canWrite: () => {}, ready: Promise.resolve(),
@@ -434,7 +435,9 @@ const harness = async (
     providerEgress: {},
     resolveProviderSelection: async () => {
       providerSelections += 1;
-      return { ok: true, selected: 'anthropic::claude-sonnet-4-6' };
+      return options.resolveProviderSelection
+        ? options.resolveProviderSelection()
+        : { ok: true, selected: 'anthropic::claude-sonnet-4-6' };
     },
     siteCapture: {
       has: (tabId: number) => tabId === 9,
@@ -954,6 +957,61 @@ describe('kernel turn authority adapter', () => {
     for (let attempt = 0; !ended && attempt < 30; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 0));
     expect(ended).toBe(true);
     expect((await h.sessions.get(h.root.sessionId))?.goalStopNote).toBeUndefined();
+  });
+
+  test.each([
+    { label: 'Plan', mode: 'plan', confirm: false, expected: { permissionMode: 'plan', confirmActions: false } },
+    { label: 'Act with confirmation', mode: 'act', confirm: true, expected: { permissionMode: 'act', confirmActions: true } },
+    { label: 'unset defaults', mode: undefined, confirm: undefined, expected: { permissionMode: 'act', confirmActions: false } },
+    { label: 'invalid null values', mode: null, confirm: null, expected: { permissionMode: 'plan', confirmActions: true } },
+    { label: 'invalid values', mode: 'invalid', confirm: 'off', expected: { permissionMode: 'plan', confirmActions: true } },
+  ])('lazy command owners persist $label before binding', async ({ mode, confirm, expected }) => {
+    const h = await harness();
+    const ensure = h.factories.makeRouteDeps(h.shared).turn.ensureSession;
+    for (const options of [{}, { exactFresh: true }]) {
+      h.cache.delete('currentSessionId');
+      h.cache.set('currentPermissionMode', mode);
+      h.cache.set('currentConfirmActions', confirm);
+      const id = await ensure(options);
+      expect(await h.sessions.get(id)).toMatchObject({ sessionId: id, ...expected });
+      expect(h.cache.get('currentSessionId')).toBe(id);
+      expect(h.cache.get('currentPermissionMode')).toBe(expected.permissionMode);
+      expect(h.cache.get('currentConfirmActions')).toBe(expected.confirmActions);
+    }
+  });
+
+  test('command creation reads the choice after provider selection settles', async () => {
+    const entered = Promise.withResolvers<void>();
+    const selection = Promise.withResolvers<any>();
+    const h = await harness(undefined, {
+      resolveProviderSelection: async () => { entered.resolve(); return selection.promise; },
+    });
+    h.cache.delete('currentSessionId');
+    h.cache.set('currentPermissionMode', 'act');
+    h.cache.set('currentConfirmActions', false);
+    const creating = h.factories.makeRouteDeps(h.shared).turn.ensureSession({ exactFresh: true });
+    await entered.promise;
+    h.cache.set('currentPermissionMode', 'plan');
+    h.cache.set('currentConfirmActions', true);
+    selection.resolve({ ok: true, selected: 'anthropic::claude-sonnet-4-6' });
+    const id = await creating;
+    expect(await h.sessions.get(id)).toMatchObject({ permissionMode: 'plan', confirmActions: true });
+    expect(h.cache.get('currentPermissionMode')).toBe('plan');
+    expect(h.cache.get('currentConfirmActions')).toBe(true);
+  });
+
+  test('an existing command owner keeps its durable permission', async () => {
+    const h = await harness();
+    await h.sessions.update(h.root.sessionId, { permissionMode: 'plan', confirmActions: true });
+    h.cache.set('currentPermissionMode', 'act');
+    h.cache.set('currentConfirmActions', false);
+    const ensure = h.factories.makeRouteDeps(h.shared).turn.ensureSession;
+    expect(await ensure()).toBe(h.root.sessionId);
+    expect(await h.sessions.get(h.root.sessionId)).toMatchObject({ permissionMode: 'plan', confirmActions: true });
+    const fresh = await ensure({ exactFresh: true });
+    expect(fresh).not.toBe(h.root.sessionId);
+    expect(await h.sessions.get(fresh)).toMatchObject({ permissionMode: 'act', confirmActions: false });
+    expect(await h.sessions.get(h.root.sessionId)).toMatchObject({ permissionMode: 'plan', confirmActions: true });
   });
 
   test('real system and tools handlers mutate only their exact bound session', async () => {

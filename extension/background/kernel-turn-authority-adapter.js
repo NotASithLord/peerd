@@ -122,9 +122,7 @@ import {
 } from '/shared/semantic-hook-manifest.js';
 import { readBoundedResponseText } from '/shared/abort.js';
 import { captureSessionAuthority } from '/shared/session-authority-epoch.js';
-import {
-  bindCurrentChat, DEFAULT_CHAT_PERMISSION, rootChatSession,
-} from '/shared/current-session-binding.js';
+import { createCurrentChat, rootChatSession } from '/shared/current-session-binding.js';
 import {
   needsWebWriteConfirm,
   WEB_WRITE_CONFIRM_KEY,
@@ -1155,18 +1153,13 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
   const ensureCurrentSession = async (
     /** @type {{exactFresh?:boolean}} */ options = {},
   ) => {
-    let sessionId = options.exactFresh === true
+    const sessionId = options.exactFresh === true
       ? null : await deps.sessionCache.sessionGet('currentSessionId');
     if (sessionId) return sessionId;
     const active = await ensureActiveProvider();
-    const created = await live.shared.sessions.create({
+    return (await createCurrentChat(live.shared.sessions, deps.sessionCache, {
       provider: active.name, model: active.model,
-      permissionMode: DEFAULT_CHAT_PERMISSION.mode,
-      confirmActions: DEFAULT_CHAT_PERMISSION.confirmActions,
-    });
-    sessionId = created.sessionId;
-    await bindCurrentChat(deps.sessionCache, created);
-    return sessionId;
+    })).sessionId;
   };
   const handleSystemCommand = async (/** @type {string} */ raw,
     /** @type {string|null} */ boundSessionId = null) => {

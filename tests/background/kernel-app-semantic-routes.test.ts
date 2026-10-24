@@ -19,7 +19,7 @@ const semanticCaller = (authority: ReturnType<typeof createKernelSemanticAuthori
 };
 
 const makeState = (fresh = false, failCreate = false) => {
-  let current: string | null = fresh ? null : 'chat';
+  const cache = new Map<string, any>(fresh ? [] : [['currentSessionId', 'chat']]);
   const sessions = new Map<string, any>(fresh ? [] : [['chat', { sessionId: 'chat' }]]);
   let creates = 0;
   const apps: Record<string, any> = {
@@ -52,9 +52,9 @@ const makeState = (fresh = false, failCreate = false) => {
     } },
     appTabUrl: 'chrome-extension://id/engine-tabs/app-tab/index.html',
     sessionCache: {
-      sessionGet: async () => current,
-      sessionSet: async (key: string, value: any) => { if (key === 'currentSessionId') current = value; },
-      sessionDelete: async () => { current = null; },
+      sessionGet: async (key: string) => cache.get(key),
+      sessionSet: async (key: string, value: any) => { cache.set(key, value); },
+      sessionDelete: async (key: string) => { cache.delete(key); },
     },
     appLaunchSessions: {
       get: async (id: string) => sessions.get(id),
@@ -68,7 +68,8 @@ const makeState = (fresh = false, failCreate = false) => {
     },
   });
   const run = semanticCaller(authority);
-  return { apps, tabs, reloads, authority, run, sessions, creates: () => creates, current: () => current };
+  return { apps, tabs, reloads, authority, run, sessions, cache, creates: () => creates,
+    current: (): string|null => cache.get('currentSessionId') ?? null };
 };
 
 describe('sealed App semantic routes', () => {
@@ -78,6 +79,9 @@ describe('sealed App semantic routes', () => {
     expect(state.creates()).toBe(1);
     expect(state.current()).toBe('first-local-owner');
     expect(state.sessions.get(state.current()!)).toMatchObject({ permissionMode: 'act', confirmActions: false });
+    expect(Object.fromEntries(state.cache)).toEqual({
+      currentSessionId: 'first-local-owner', currentPermissionMode: 'act', currentConfirmActions: false,
+    });
     expect(state.tabs).toHaveLength(2);
     for (const tab of state.tabs) expect(tab.url).toEndWith('?owner=first-local-owner');
   });

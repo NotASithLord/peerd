@@ -4160,6 +4160,222 @@ export const STATES = [
     },
   },
 
+  // --- functional: the first send keeps the pending permission choice --------
+  {
+    name: 'pending-chat-permissions', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const extension = process.argv.find(argument => argument.startsWith('--extension='))?.slice('--extension='.length);
+      const files = Object.fromEntries(await Promise.all(['index.html', 'app.js'].map(async name => [name,
+        await readFile(extension ? join(extension, 'peerd-engine/starters/csv-lab', name)
+          : new URL(`../../extension/peerd-engine/starters/csv-lab/${name}`, import.meta.url), 'utf8'),
+      ])));
+      const inspect = async () => {
+        const current = await rpc(ctx.page, { type: 'state/get' });
+        const listed = await rpc(ctx.page, { type: 'apps/list' });
+        if (current?.ok !== true || listed?.ok !== true || !Array.isArray(listed.apps)) {
+          throw new Error('The real permission or App state is unavailable');
+        }
+        const sessionId = current.state?.session?.sessionId ?? null;
+        const durable = sessionId ? await rpc(ctx.page, { type: 'session/get', sessionId }) : null;
+        if (sessionId && durable?.session?.sessionId !== sessionId) throw new Error('The durable chat is unavailable');
+        const ui = await evalIn(ctx.page, `(async () => {
+          'use strict';
+          const { default: m } = await import('/vendor/mithril/mithril.js');
+          m.redraw.sync();
+          const input = document.querySelector('form.input-bar textarea');
+          return {
+            mode: document.querySelector('.planact-mode[aria-pressed="true"]')?.textContent.trim().toLowerCase(),
+            confirmActions: document.querySelector('.planact-confirm')?.getAttribute('aria-pressed') === 'true',
+            busy: !!document.querySelector('form.input-bar button.stop, .message-assistant.streaming'),
+            input: input ? { value: input.value, disabled: input.disabled, focused: document.activeElement === input } : null,
+            deliveryFence: [...document.querySelectorAll('form.input-bar button')].some(button =>
+              ['Check delivery', 'Checking…', 'I checked; allow a new message'].includes(button.textContent)),
+            prompt: document.querySelector('.confirm-modal') ? {
+              title: document.querySelector('.confirm-modal h3')?.textContent,
+              summary: document.querySelector('.confirm-modal .confirm-summary')?.textContent,
+            } : null,
+          };
+        })()`, true);
+        return { ui, composer: current.state?.composer, permission: current.state?.session?.permission, session: durable?.session ?? null,
+          apps: listed.apps, appIds: listed.apps.map(app => app.id).sort() };
+      };
+      const matches = (permission, mode, confirmActions) => permission?.mode === mode
+        && permission?.confirmActions === confirmActions;
+      let previousSessionId = null;
+      let completedPlan = null;
+      for (const mode of ['plan', 'act']) {
+        const confirmActions = mode === 'act';
+        rec.check(`${mode}: the real New chat control is available`,
+          await clickAndSyncRedraw(ctx.page, 'button[aria-label="New chat"]'));
+        const fresh = await waitFor(async () => {
+          const value = await inspect();
+          return !value.session && matches(value.ui, 'act', false)
+            && matches(value.permission, 'act', false) ? value : null;
+        }, { budgetMs: 15_000, pollMs: 80 });
+        rec.check(`${mode}: an untouched new chat has the independent Act and Confirm-off default`, !!fresh);
+        if (!fresh) throw new Error('The fresh chat default did not settle');
+        const selector = mode === 'plan'
+          ? '.planact-mode:first-child:not(:disabled)' : '.planact-confirm[aria-pressed="false"]:not(:disabled)';
+        if (!await clickAndSyncRedraw(ctx.page, selector)) throw new Error('The permission control is unavailable');
+        const selected = await waitFor(async () => {
+          const value = await inspect();
+          return !value.session && matches(value.ui, mode, confirmActions)
+            && matches(value.permission, mode, confirmActions) ? value : null;
+        }, { budgetMs: 10_000, pollMs: 80 });
+        rec.check(`${mode}: the real controls set the pending kernel permission before a chat exists`, !!selected);
+        if (!selected) throw new Error('The pending permission did not settle');
+        if (mode === 'act' && (!completedPlan?.known || completedPlan.readModelCalls() !== 2)) {
+          throw new Error('The prior Plan turn has no known complete receipt');
+        }
+        let beforeSend;
+        const ready = await waitFor(async () => {
+          beforeSend = await inspect();
+          return !beforeSend.session && matches(beforeSend.permission, mode, confirmActions)
+            && matches(beforeSend.ui, mode, confirmActions) && beforeSend.composer?.canSend === true
+            && !beforeSend.ui.busy && !beforeSend.ui.deliveryFence && beforeSend.ui.input?.disabled === false
+            && (beforeSend.ui.input.value === '' || mode === 'act' && beforeSend.ui.input.value === completedPlan.text);
+        }, { budgetMs: 15_000, pollMs: 80 });
+        if (!ready) {
+          rec.observe(`${mode}: the composer did not become ready and empty`, beforeSend);
+          throw new Error('The real composer did not become ready and empty');
+        }
+        if (beforeSend.ui.input.value) {
+          // why: only this completed fixture can be removed. Other drafts keep their custody.
+          if (completedPlan.readModelCalls() !== 2) throw new Error('The prior Plan turn resumed before fixture cleanup');
+          rec.observe('act: exact completed Plan text before fixture cleanup', {
+            ui: beforeSend.ui, permission: beforeSend.permission, composer: beforeSend.composer,
+            priorSessionId: completedPlan.sessionId, priorCallId: completedPlan.callId,
+            priorKnown: completedPlan.known, priorModelCalls: completedPlan.readModelCalls(),
+          });
+          await evalIn(ctx.page, `(() => {
+            'use strict';
+            const input = document.querySelector('form.input-bar textarea');
+            const fenced = [...document.querySelectorAll('form.input-bar button')].some(button =>
+              ['Check delivery', 'Checking…', 'I checked; allow a new message'].includes(button.textContent));
+            if (!input || input.disabled || fenced || input.value !== ${JSON.stringify(completedPlan.text)}) {
+              throw new Error('The completed fixture text changed before cleanup');
+            }
+            input.focus(); input.select();
+          })()`);
+          if (completedPlan.readModelCalls() !== 2) throw new Error('The prior Plan turn resumed before the cleanup keys');
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+          const afterClear = await inspect();
+          rec.observe('act: composer after exact completed fixture cleanup', {
+            ui: afterClear.ui, permission: afterClear.permission, composer: afterClear.composer,
+            sessionId: afterClear.session?.sessionId ?? null, priorModelCalls: completedPlan.readModelCalls(),
+          });
+          if (afterClear.session || !matches(afterClear.permission, mode, confirmActions)
+            || !matches(afterClear.ui, mode, confirmActions) || afterClear.composer?.canSend !== true
+            || afterClear.ui.busy || afterClear.ui.deliveryFence || afterClear.ui.input?.disabled !== false
+            || afterClear.ui.input.value !== '' || completedPlan.readModelCalls() !== 2) {
+            throw new Error('The real keys did not leave the fresh composer empty with unchanged permission');
+          }
+        }
+        const name = `Pending permission ${mode}`;
+        const args = { kind: 'app', name, files };
+        const sentText = `Create the packaged CSV Lab App named ${name}.`;
+        const replyText = `PENDING-PERMISSION-${mode.toUpperCase()}-SETTLED`;
+        let modelCalls = 0;
+        ctx.setModelResponder(index => {
+          modelCalls += 1;
+          return { sse: index === 0 ? sseToolCall('sandbox_create', args) : sseText(replyText) };
+        });
+        await evalIn(ctx.page, `(async () => {
+          'use strict';
+          const { default: m } = await import('/vendor/mithril/mithril.js');
+          const input = document.querySelector('form.input-bar textarea');
+          if (!input || input.value) throw new Error('The real composer is missing or has a draft');
+          input.value = ${JSON.stringify(sentText)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          m.redraw.sync();
+          input.closest('form').requestSubmit();
+          m.redraw.sync();
+        })()`, true);
+        const outcome = async () => {
+          const value = await inspect();
+          const calls = (value.session?.messages ?? []).flatMap(message => message.toolUses ?? [])
+            .filter(call => call.name === 'sandbox_create' && call.input?.name === name);
+          const call = calls[0];
+          const result = (value.session?.messages ?? []).flatMap(message => message.toolResults ?? [])
+            .find(result => result.tool_use_id === call?.id);
+          return { ...value, calls, call, result };
+        };
+        const decision = await waitFor(async () => {
+          const value = await outcome();
+          return value.call && (value.ui.prompt || value.result) ? value : null;
+        }, { budgetMs: 30_000, pollMs: 80 });
+        if (!decision) throw new Error('The real App call did not reach a prompt or result');
+        if (mode === 'act') await rec.shot('confirm-decision');
+        if (decision.ui.prompt) {
+          rec.check(`${mode}: the native prompt names the exact App authority`,
+            decision.ui.prompt.title === 'Confirm action' && decision.ui.prompt.summary?.includes('Create an App'),
+            JSON.stringify(decision.ui.prompt));
+          if (!await clickAndSyncRedraw(ctx.page, '.confirm-modal [data-confirm-reject]')) {
+            throw new Error('The real Reject control is unavailable');
+          }
+        }
+        const settled = await waitFor(async () => {
+          const value = await outcome();
+          return value.result && !value.ui.busy && !value.ui.prompt
+            && value.session.messages.some(message => message.role === 'assistant' && message.content === replyText)
+            ? value : null;
+        }, { budgetMs: 40_000, pollMs: 80 });
+        if (!settled) throw new Error('The correlated App result did not settle');
+        const completeCall = modelCalls === 2 && settled.calls.length === 1 && typeof settled.call.id === 'string'
+            && typeof settled.session.sessionId === 'string' && settled.session.sessionId !== previousSessionId
+            && settled.call.input.kind === 'app' && JSON.stringify(settled.call.input.files) === JSON.stringify(files)
+            && settled.result.tool_use_id === settled.call.id
+            && settled.session.messages.flatMap(message => message.toolUses ?? []).length === 1
+            && settled.session.messages.flatMap(message => message.toolResults ?? []).length === 1
+            && settled.session.messages.filter(message => message.role === 'user' && message.content === sentText).length === 1;
+        rec.check(`${mode}: the first turn has one complete valid App call and its exact result`, completeCall,
+          JSON.stringify({ modelCalls, sessionId: settled.session.sessionId, callId: settled.call.id }));
+        if (mode === 'plan') {
+          let created = null;
+          if (baseRender && settled.result.is_error === false) {
+            try { created = JSON.parse(settled.result.content.split('\n\n')[0]); } catch {}
+          }
+          const knownRefusal = !decision.ui.prompt && settled.result.is_error === true
+            && settled.result.meta?.gates?.some(gate => gate.name === 'persona' && gate.allowed === false && /plan/i.test(gate.reason));
+          const knownAddition = created?.kind === 'app' && created.name === name && typeof created.id === 'string'
+            && settled.apps.some(app => app.id === created.id && app.name === name)
+            && !selected.appIds.includes(created.id) && settled.appIds.length === selected.appIds.length + 1
+            && selected.appIds.every(id => settled.appIds.includes(id));
+          completedPlan = { text: sentText, sessionId: settled.session.sessionId, callId: settled.call.id,
+            readModelCalls: () => modelCalls, known: completeCall && settled.result.outcomeKnown !== false
+              && !/outcome (?:is )?unknown|unconfirmed/i.test(settled.result.content)
+              && (baseRender ? knownAddition : knownRefusal) };
+        }
+        const evidence = { permission: settled.permission, ui: settled.ui,
+          durable: { mode: settled.session.permissionMode, confirmActions: settled.session.confirmActions },
+          beforeAppIds: selected.appIds, afterAppIds: settled.appIds, prompted: !!decision.ui.prompt,
+          callId: settled.call.id, result: { tool_use_id: settled.result.tool_use_id,
+            is_error: settled.result.is_error, content: String(settled.result.content).slice(0, 600) } };
+        // why: BASE must show its real permission loss and App outcome. Only the fixed expectations differ.
+        if (baseRender) rec.observe(`${mode}: merge-base permission and App outcome`, evidence);
+        else {
+          rec.check(`${mode}: the durable chat keeps the selected permission`,
+            matches(evidence.durable, mode, confirmActions), JSON.stringify(evidence.durable));
+          rec.check(`${mode}: the kernel and controls keep the selected permission`,
+            matches(settled.permission, mode, confirmActions) && matches(settled.ui, mode, confirmActions));
+          rec.check(`${mode}: no App is created`, JSON.stringify(selected.appIds) === JSON.stringify(settled.appIds),
+            JSON.stringify({ before: selected.appIds, after: settled.appIds }));
+          rec.check(mode === 'plan' ? 'Plan refuses the first App write without a prompt'
+            : 'Confirm prompts and real Reject refuses the first App write', settled.result.is_error === true
+              && (mode === 'plan' ? !decision.ui.prompt && settled.result.meta?.gates?.some(gate =>
+                gate.name === 'persona' && gate.allowed === false && /plan/i.test(gate.reason))
+                : !!decision.ui.prompt && /declin|reject/i.test(settled.result.content)
+                  && !/outcome (?:is )?unknown/i.test(settled.result.content)), JSON.stringify(settled.result));
+        }
+        await rec.shot(`${mode === 'plan' ? 'plan' : 'confirm'}-settled`);
+        previousSessionId = settled.session.sessionId;
+      }
+    },
+  },
+
   // --- functional: vault lock → gate, unlock → ready (restores unlocked) ------
   {
     name: 'vault-lock', kind: 'functional', phase: 'post-unlock',
