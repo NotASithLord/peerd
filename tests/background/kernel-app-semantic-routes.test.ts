@@ -18,7 +18,7 @@ const semanticCaller = (authority: ReturnType<typeof createKernelSemanticAuthori
   return (route: string, message: any) => control.dispatchProjected(route, message, 'first-party');
 };
 
-const makeState = (fresh = false, failCreate = false) => {
+const makeState = (fresh = false, failCreate = false, openTabs: any[] = []) => {
   let current: string | null = fresh ? null : 'chat';
   const sessions = new Map<string, any>(fresh ? [] : [['chat', { sessionId: 'chat' }]]);
   let creates = 0;
@@ -29,6 +29,8 @@ const makeState = (fresh = false, failCreate = false) => {
     },
   };
   const tabs: any[] = [];
+  const queries: string[] = [];
+  const activations: any[] = [];
   const reloads: string[] = [];
   const catalog = {
     get: async (id: string) => apps[id] ?? null,
@@ -48,7 +50,13 @@ const makeState = (fresh = false, failCreate = false) => {
     vault: { isLocked: () => false, getSecret: async () => null },
     reloadApp: async (appId: string) => { reloads.push(appId); },
     browser: { tabs: {
-      query: async () => [], create: async (value: any) => { tabs.push(value); },
+      // Chrome matches the document URL without its fragment.
+      query: async ({ url }: { url: string }) => {
+        queries.push(url);
+        return openTabs.filter((tab) => tab.url.split('#')[0].startsWith(url.replace(/\*$/, '')));
+      },
+      create: async (value: any) => { tabs.push(value); },
+      update: async (id: number, value: any) => { activations.push({ id, ...value }); },
     } },
     appTabUrl: 'chrome-extension://id/engine-tabs/app-tab/index.html',
     sessionCache: {
@@ -68,10 +76,41 @@ const makeState = (fresh = false, failCreate = false) => {
     },
   });
   const run = semanticCaller(authority);
-  return { apps, tabs, reloads, authority, run, sessions, creates: () => creates, current: () => current };
+  return { apps, tabs, queries, activations, reloads, authority, run, sessions,
+    creates: () => creates, current: () => current };
 };
 
 describe('sealed App semantic routes', () => {
+  const appPage = 'chrome-extension://id/engine-tabs/app-tab/index.html';
+
+  test('reuses the exact owner URL with fragment-free lookup and activation only', async () => {
+    const state = makeState(false, false, [
+      { id: 11, url: `${appPage}#other?owner=chat` },
+      { id: 12, url: `${appPage}#a?owner=other` },
+      { id: 13, url: `${appPage}.other#a?owner=chat` },
+      { id: 14, url: `${appPage}#a?owner=chat` },
+    ]);
+    await expect(state.run('apps/open', { appId: 'a' })).resolves.toEqual({ ok: true });
+    await expect(state.run('apps/open', { appId: 'a' })).resolves.toEqual({ ok: true });
+    expect(state.tabs).toEqual([]);
+    expect(state.activations).toEqual([{ id: 14, active: true }, { id: 14, active: true }]);
+    expect(state.queries).toEqual([`${appPage}*`, `${appPage}*`]);
+    expect(state.apps.a.defaultSessionId).toBe('chat');
+  });
+
+  test.each([
+    ['another App', `${appPage}#other?owner=chat`],
+    ['another owner', `${appPage}#a?owner=other`],
+    ['another resource', `${appPage}.other#a?owner=chat`],
+    ['an extra query', `${appPage}?extra=1#a?owner=chat`],
+    ['no owner', `${appPage}#a`],
+  ])('does not reuse %s as the requested App owner', async (_name, url) => {
+    const state = makeState(false, false, [{ id: 11, url }]);
+    await expect(state.run('apps/open', { appId: 'a' })).resolves.toEqual({ ok: true });
+    expect(state.activations).toEqual([]);
+    expect(state.tabs).toEqual([{ url: `${appPage}#a?owner=chat`, active: true }]);
+  });
+
   test('first keyless semantic opens share a durable owner before opening tabs', async () => {
     const state = makeState(true);
     await Promise.all([state.run('apps/open', { appId: 'a' }), state.run('apps/open', { appId: 'a' })]);
