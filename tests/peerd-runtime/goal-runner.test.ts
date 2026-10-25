@@ -600,6 +600,22 @@ describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
     expect(ends).toEqual([{ phase: 'halted', summary: null, reason }]);
   });
 
+  it('a text-only turn 1 does not count, and a tool turn resets the idle count', async () => {
+    // Turns: text only, idle, tool, idle, idle. Only turns 4 and 5 are idle in a row.
+    const toolCalls = [0, 0, 1, 0, 0];
+    const ends: Array<{ phase: string; summary: string | null; reason: string | null }> = [];
+    let turns = 0;
+    const runner = makeGoalRunner({
+      runTurn: async () => ({ toolCalls: toolCalls[turns++] }),
+      onRunEnd: (_sid, info) => ends.push(info),
+      maxIterations: 20,
+    });
+    await runner.start({ sessionId: 's', goal: 'g' });
+    await settle(() => ends.length > 0);
+    expect(turns).toBe(5);
+    expect(ends).toEqual([{ phase: 'halted', summary: null, reason: 'the agent took no action for 2 turns' }]);
+  });
+
   it('fires onRunEnd once on a terminal phase, carrying phase/summary', async () => {
     const ends: any[] = [];
     let runner: ReturnType<typeof makeGoalRunner>;
