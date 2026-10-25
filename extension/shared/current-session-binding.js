@@ -1,5 +1,5 @@
 // @ts-check
-import { beginSessionAuthorityChange } from './session-authority-epoch.js';
+import { withSessionAuthorityMutation } from './session-authority-epoch.js';
 
 export const DEFAULT_CHAT_PERMISSION = Object.freeze({
   mode: 'act', confirmActions: false,
@@ -24,9 +24,7 @@ export const durableChatPermission = (session) => {
  * @param {{sessionSet:Function,sessionDelete:Function}} sessionCache
  * @param {any|null} session
  */
-export const bindCurrentChat = async (sessionCache, session) => {
-  const finish = beginSessionAuthorityChange(sessionCache);
-  try {
+const bindChat = async (sessionCache, session) => {
   const permission = session ? durableChatPermission(session) : DEFAULT_CHAT_PERMISSION;
   await Promise.all([
     sessionCache.sessionSet('currentPermissionMode', permission.mode),
@@ -38,11 +36,14 @@ export const bindCurrentChat = async (sessionCache, session) => {
     await sessionCache.sessionDelete('currentSessionId');
   }
   return permission;
-  } finally { finish(); }
 };
 
+/** @param {{sessionSet:Function,sessionDelete:Function}} sessionCache @param {any|null} session */
+export const bindCurrentChat = (sessionCache, session) =>
+  withSessionAuthorityMutation(sessionCache, () => bindChat(sessionCache, session));
+
 /** @param {any} sessions @param {any} cache @param {Record<string,unknown>} [fields] */
-export const createCurrentChat = async (sessions, cache, fields = {}) => {
+export const createCurrentChat = (sessions, cache, fields = {}) => withSessionAuthorityMutation(cache, async () => {
   // why: each lazy owner must keep the pending choice before durable binding.
   const [mode = DEFAULT_CHAT_PERMISSION.mode, confirm = DEFAULT_CHAT_PERMISSION.confirmActions] = await Promise.all([
     cache.sessionGet('currentPermissionMode'),
@@ -53,9 +54,9 @@ export const createCurrentChat = async (sessions, cache, fields = {}) => {
     permissionMode: mode === 'act' ? 'act' : 'plan',
     confirmActions: confirm !== false,
   });
-  await bindCurrentChat(cache, created);
+  await bindChat(cache, created);
   return created;
-};
+});
 
 /**
  * Resolve a durable owner without provider IO. Concurrent first launches share

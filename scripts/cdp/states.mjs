@@ -5400,7 +5400,11 @@ export const STATES = [
         let waiting = false;
         child.setModelResponder(async (index) => {
           if (index === 2) { waiting = true; await held; }
-          return { sse: sseText('Continue the requested work.') };
+          // why: exercise the turn cap with active work, independently of the
+          // separate guard that stops consecutive text-only continuations.
+          return { sse: index % 2 === 0
+            ? sseToolCall('read_memory', { scope: 'user' })
+            : sseText('Continue the requested work.') };
         });
         await send('Continue until the Goal turn limit stops this run.', true);
         if (!await waitFor(() => waiting, { budgetMs: 20_000, pollMs: 50 })) throw new Error('Goal did not reach its held turn');
@@ -5412,7 +5416,7 @@ export const STATES = [
         await child.page.send('Page.navigate', { url: 'about:blank' });
         if (!await waitFor(() => evalIn(child.page, `location.href === 'about:blank'`))) throw new Error('panel document did not close');
         release();
-        if (!await waitFor(() => child.modelCallCount() === limit, { budgetMs: 60_000, pollMs: 80 })) throw new Error('closed Goal did not reach its real turn limit');
+        if (!await waitFor(() => child.modelCallCount() === limit * 2, { budgetMs: 60_000, pollMs: 80 })) throw new Error('closed Goal did not reach its real turn limit');
         await sleep(500);
         await child.page.send('Page.navigate', { url: panelUrl });
         await reloadReadyPanel(child, { expectedSessionId: otherId });
