@@ -1,21 +1,37 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { evalIn, waitFor, openExtPage } from './e2e-harness.mjs';
+import { evalIn, waitFor, openExtPage, openWidePage } from './e2e-harness.mjs';
 // Render-only proof. Real composed CSV/WASM execution is in the browser suite.
 
 // The tree under test: a merge-base render names its tree, this branch renders
 // its own. why a file probe: the one-flow Discover (a start list, tiles and a
 // page per app) ships home/discover-pages.js; an older tree stacks sections.
+// why a content probe for phase 2: it adds no file of its own, and the share
+// dialog is its first new view piece. `mine`: the page of the user's own app.
+// `added`: a starter fixture that answers an add.
 export const discoverSurface = () => {
-  if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') return { base: false, flow: true, tree: null };
+  if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') {
+    return { base: false, flow: true, phase2: true, mine: true, added: true, tree: null };
+  }
   const tree = process.argv.find(arg => arg.startsWith('--extension='))?.slice('--extension='.length);
   if (!tree) throw new Error('base visual render requires an explicit extension tree');
-  return { base: true, flow: existsSync(join(tree, 'home/discover-pages.js')), tree };
+  const pages = join(tree, 'home/discover-pages.js');
+  const flow = existsSync(pages);
+  const source = flow ? readFileSync(pages, 'utf8') : '';
+  const starters = join(tree, 'tests/fixtures/starters.js');
+  return {
+    base: true, flow, phase2: source.includes('export const shareDialog'), mine: source.includes('You made this app.'),
+    added: existsSync(starters) && readFileSync(starters, 'utf8').includes("=== 'added'"), tree,
+  };
 };
 
 // Every read a Discover frame may send. Any other route is an effect.
 const READS = ['apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distributed/info', 'contacts/list'];
 const has = text => `document.body.textContent.includes(${JSON.stringify(text)})`;
+// why the tree's own words: changed screens also render on the merge-base
+// tree, in its words, and a check that took either would not prove the new ones.
+const PHASE2 = discoverSurface().phase2;
+const byTree = (now, before) => has(PHASE2 ? now : before);
 const cards = n => `document.querySelectorAll('.disc-card').length === ${n}`;
 const focused = selector => `!!document.activeElement?.matches(${JSON.stringify(selector)})`;
 const panelButtons = labels => `JSON.stringify([...document.querySelectorAll('.disc-panel button')]
@@ -32,9 +48,9 @@ const clickSync = (page, selector, label = null) => evalIn(page, `(async () => {
 
 // [mode, ready on the one-flow Discover, ready on an older tree]
 const KEPT_READY = {
-  home: [has('Try an included app'), has('Add and open Commons')],
-  review: [has('Apply: add local copy'), has('Apply: add local copy')],
-  empty: [has('Apps show up as peers share them'), has('No peer Apps discovered yet')],
+  home: [byTree('Try an app that comes with peerd', 'Try an included app'), has('Add and open Commons')],
+  review: [byTree('Add to Library', 'Apply: add local copy'), has('Apply: add local copy')],
+  empty: [byTree('Looking for people who share apps…', 'Apps show up as peers share them'), has('No peer Apps discovered yet')],
 };
 
 /** Surprise me opens the chosen app's page. It never fetches or installs. */
@@ -112,68 +128,139 @@ const keptState = (mode, narrow) => ({
 });
 
 // 2a screens the merge base never drew: [mode, explore.html frame, ready,
-// the only effects the frame may send]. The fixture answers reads plus the
-// one effect its frame draws, so anything else throws there.
+// the only effects the frame may send, options]. The fixture answers reads
+// plus the one effect its frame draws, so anything else throws there.
+// `phase2`: a screen the phase-1 tree does not draw; `mine`: one a tree
+// without the own-app line does not draw; `narrow`: also at 320px;
+// `narrowCheck`: a [name, check] that holds at 320px only.
 const FLOW_FRAMES = [
-  ['share-link', 'share-off', `${has('Join the peer network first.')}
+  ['share-link', 'share-off', `${byTree('Turn on the peer network first.', 'Join the peer network first.')}
     && document.querySelector('.disc-start-form input')?.value.startsWith('dwapp://')
     && document.querySelector('.disc-start-form button')?.disabled === true`, []],
-  ['connected-empty', 'empty', has('No apps shared yet'), []],
-  ['tiles', 'tiles', `${cards(3)} && ${has('Update ready')} && ${has('Can’t run in this browser')}`, []],
+  ['connected-empty', 'empty', byTree('No shared apps yet', 'No apps shared yet'), []],
+  ['tiles', 'tiles', `${cards(3)} && ${byTree('new version ready', 'Update ready')}
+    && ${byTree('This browser cannot run it', 'Can’t run in this browser')}`, []],
   ['offline', 'offline', `${has('Peer network is offline')} && ${cards(1)}`, []],
-  ['offline-empty', 'offline-empty', `${has('Peer network is offline')} && ${has('Apps you install from peers show up here.')}`, []],
+  ['offline-empty', 'offline-empty', `${has('Peer network is offline')}
+    && ${byTree('You can still open the apps in your Library.', 'Apps you install from peers show up here.')}`, []],
   // why not the empty line: it claims what the Library holds, so it waits for a good read.
   ['offline-reading', 'offline-reading', `${has('Peer network is offline')} && ${has('Checking your Library…')}
-    && !${has('Apps you install from peers')}`, []],
-  ['offline-failed', 'offline-failed', `${has('Peer network is offline')} && ${has('Could not read your Library.')}
-    && !${has('Apps you install from peers')}`, []],
+    && !${has('You can still open the apps')} && !${has('Apps you install from peers')}`, []],
+  ['offline-failed', 'offline-failed', `${has('Peer network is offline')} && ${byTree('peerd could not read your Library.', 'Could not read your Library.')}
+    && !${has('You can still open the apps')} && !${has('Apps you install from peers')}`, []],
   ['installing', 'installing', has('You can leave this page. The install keeps going.'), ['dweb/base/install']],
   // why the status line: focus never lands on Open, which runs the app.
-  ['installed', 'installed', `${focused('.disc-panel .disc-installed')} && ${has('In your Library.')}`, ['dweb/base/install']],
+  ['installed', 'installed', `${focused('.disc-panel .disc-installed')} && ${byTree('is now in your Library.', 'In your Library.')}`,
+    ['dweb/base/install']],
   ['open-unknown', 'open-unknown', `[...document.querySelectorAll('.disc-panel [role="status"]')]
-    .some(line => line.textContent === 'peerd could not confirm whether the app opened. Check your tabs.' && !line.classList.contains('error'))`,
+    .some(line => line.textContent === ${JSON.stringify(PHASE2 ? 'peerd is not sure the app opened. Check your tabs.'
+    : 'peerd could not confirm whether the app opened. Check your tabs.')} && !line.classList.contains('error'))`,
   ['dweb/base/install', 'apps/open']],
-  ['install-failed', 'failed', has('peerd could not install this app. Try again.'), ['dweb/base/install']],
-  ['install-unknown', 'unknown', has('peerd could not confirm whether the install finished.'), ['dweb/base/install']],
-  ['update-conflict', 'conflict', has('Locally modified'), ['dweb/base/update-app']],
+  ['install-failed', 'failed', byTree('peerd could not install Field notes.', 'peerd could not install this app. Try again.'), ['dweb/base/install']],
+  ['install-unknown', 'unknown', byTree('peerd is not sure the install finished.', 'peerd could not confirm whether the install finished.'),
+    ['dweb/base/install']],
+  ['update-conflict', 'conflict', byTree('Changed on this device', 'Locally modified'), ['dweb/base/update-app']],
   // why Open too: the installed version still runs after a failed or unconfirmed update.
-  ['update-failed', 'update-failed', `${has('peerd could not update this app. Try again.')} && ${panelButtons(['Try again', 'Open'])}`,
-    ['dweb/base/update-app']],
-  ['update-unknown', 'update-unknown', `${has('peerd could not confirm whether the update finished.')}
-    && ${panelButtons(['Refresh', 'Open'])}`, ['dweb/base/update-app']],
+  ['update-failed', 'update-failed', `${byTree('peerd could not update Field notes.', 'peerd could not update this app. Try again.')}
+    && ${panelButtons(['Try again', 'Open'])}`, ['dweb/base/update-app']],
+  ['update-unknown', 'update-unknown', PHASE2 ? `${has('peerd is not sure the update finished.')} && ${panelButtons(['Check again', 'Open'])}`
+    : `${has('peerd could not confirm whether the update finished.')} && ${panelButtons(['Refresh', 'Open'])}`, ['dweb/base/update-app']],
   ['update-ready', 'update', `${focused('.disc-back')} && ${has('Update ready')}`, []],
-  ['update-cant-run', 'update-cant-run', `${focused('.disc-back')} && ${has('This update can’t run in this browser.')}`, []],
-  ['cant-run', 'cant-run', `${focused('.disc-back')} && ${has('This app can’t run in this browser.')}`, []],
-  ['maker', 'maker', `${focused('.disc-back')} && ${has('Saved as a contact on this device')}`, []],
+  ['update-cant-run', 'update-cant-run', `${focused('.disc-back')}
+    && ${byTree('This browser cannot run the new version.', 'This update can’t run in this browser.')}`, []],
+  ['cant-run', 'cant-run', `${focused('.disc-back')} && ${byTree('This browser cannot run this app.', 'This app can’t run in this browser.')}`, []],
+  ['maker', 'maker', `${focused('.disc-back')}
+    && ${byTree('Someone you know. You saved this name on this device.', 'Saved as a contact on this device')}`, []],
   // The maker of a share link whose apps no peer shares.
-  ['maker-empty', 'maker-empty', `${focused('.disc-back')} && ${has('Apps from this maker appear here when your peers share them.')}`,
-    ['dweb/base/inspect-address']],
+  ['maker-empty', 'maker-empty', `${focused('.disc-back')} && ${byTree('This maker’s apps show up here when the people you are connected to share them.',
+    'Apps from this maker appear here when your peers share them.')}`, ['dweb/base/inspect-address']],
   // why the margins: the line sits in the 24px rhythm of the view, as every other line does.
   ['commons-unknown', 'commons-unknown', `[...document.querySelectorAll('.disc-view > p')]
-    .some(line => line.textContent.startsWith('Could not confirm whether Commons was added or opened.')
+    .some(line => line.textContent.startsWith(${JSON.stringify(PHASE2 ? 'peerd is not sure Commons was added or opened.'
+    : 'Could not confirm whether Commons was added or opened.')})
       && getComputedStyle(line).marginTop === '0px' && getComputedStyle(line).marginBottom === '0px')`, ['dweb/open-commons']],
+  // The share dialog, open over an app page: focus is inside, on its action.
+  ['share', 'share', `!!document.querySelector('.disc-share[role="dialog"]') && ${focused('[data-share-copy]')}
+    && document.querySelector('.disc-share input')?.value.startsWith('dwapp://')`, [], { phase2: true, narrow: true }],
+  // The Your apps row with more Library apps than it shows. On a narrow
+  // column it stays one line that scrolls sideways, so browsing starts near the top.
+  ['your-apps', 'yours', `document.querySelectorAll('.disc-yours-item').length === 6 && ${has('See all in Library')} && ${cards(3)}`, [],
+    { phase2: true, narrow: true, narrowCheck: ['Your apps stays one line that scrolls sideways on a narrow column', `(() => {
+      const list = document.querySelector('.disc-yours-list');
+      const tops = new Set([...document.querySelectorAll('.disc-yours-item')].map(item => Math.round(item.getBoundingClientRect().top)));
+      return !!list && tops.size === 1 && list.scrollWidth > list.clientWidth;
+    })()`] }],
+  // The user's own app, made and shared from their Library: What to know says
+  // they made it, never that an install checked it against its maker.
+  ['mine', 'mine', `${focused('.disc-back')} && ${has('You made this app.')} && !${has('peerd checked')}`, [], { mine: true }],
 ];
 
-const frameState = ([mode, frame, ready, effects]) => ({
-  name: `discovery-${mode}`, kind:'visual', phase:'post-unlock', responder:null,
+const frameState = ([mode, frame, ready, effects, { phase2 = false, mine = false, narrowCheck = null } = {}],
+  narrow = false) => ({
+  name: `discovery-${mode}${narrow ? '-narrow' : ''}`, kind:'visual', phase:'post-unlock', responder:null,
   async run(ctx, rec) {
-    if (!discoverSurface().flow) {
+    const surface = discoverSurface();
+    if (!surface.flow || (phase2 && !surface.phase2) || (mine && !surface.mine)) {
       rec.observe('merge-base surface', { present:false, reason:'this Discover screen was introduced on this branch' });
       return;
     }
     const page = await openExtPage(ctx, `tests/fixtures/explore.html?state=${frame}`);
     try {
-      await page.send('Emulation.setDeviceMetricsOverride',{width:960,height:900,deviceScaleFactor:1,mobile:false});
+      await page.send('Emulation.setDeviceMetricsOverride',{width:narrow?320:960,height:narrow?1450:900,deviceScaleFactor:1,mobile:false});
       if (!await waitFor(()=>evalIn(page, ready),{budgetMs:8000,pollMs:80})) throw new Error(`Discovery ${mode} did not render`);
       rec.check('discovery surface fits narrow and wide viewport', await evalIn(page,`document.documentElement.scrollWidth <= innerWidth`));
+      if (narrow && narrowCheck) rec.check(narrowCheck[0], await evalIn(page, narrowCheck[1]));
       rec.check('frame sends only reads and the effect it draws', await evalIn(page, `JSON.stringify(window.__exploreFixtureCalls
         .filter(type => !${JSON.stringify(READS)}.includes(type))) === ${JSON.stringify(JSON.stringify(effects))}`));
-      await rec.visualPage(`discovery-${mode}`, page);
+      await rec.visualPage(`discovery-${mode}${narrow ? '-narrow' : ''}`, page);
     } finally { try { page.close(); } catch {} }
   },
 });
 
+// The page Discover's Try opens, in the real Settings shell. The starter
+// fixture draws its section alone, so only this capture shows the title.
+// why either label: the merge-base tree renders its own words.
+const tryPage = {
+  name: 'options-starter', kind:'visual', phase:'post-unlock', responder:null,
+  async run(ctx, rec) {
+    const page = await openWidePage(ctx, 'options/options.html#!/transfer?starter=csv-lab');
+    try {
+      const ready = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.starter-review button')]
+        .some(button => ['Add to Library', 'Apply: add local copy'].includes(button.textContent))`), {budgetMs:15000,pollMs:80});
+      if (!ready) throw new Error('The starter page did not render');
+      rec.check('the page Try opens is titled for what it does', await evalIn(page,
+        `document.querySelector('.options-page > h2')?.textContent === ${JSON.stringify(PHASE2 ? 'Try an app' : 'Backup & restore')}`));
+      await rec.visualPage('options-starter', page);
+    } finally { try { page.close(); } catch {} }
+  },
+};
+
+// The page after an add peerd confirmed: Go to Library leads, and the line
+// says that another add makes a second copy. The fixture answers the add.
+const starterAdded = {
+  name: 'discovery-starter-added', kind:'visual', phase:'post-unlock', responder:null,
+  async run(ctx, rec) {
+    if (!discoverSurface().added) {
+      rec.observe('merge-base surface', { present:false, reason:'the page after an add was introduced on this branch' });
+      return;
+    }
+    const page = await openExtPage(ctx, 'tests/fixtures/starters.html?starter=csv-lab&state=added');
+    try {
+      await page.send('Emulation.setDeviceMetricsOverride',{width:960,height:900,deviceScaleFactor:1,mobile:false});
+      if (!await waitFor(() => evalIn(page, has('Add to Library')), {budgetMs:8000,pollMs:80})) throw new Error('The starter page did not render');
+      await clickSync(page, 'button', 'Add to Library');
+      rec.check('after an add, Go to Library leads and the line says another add makes a second copy', !!await waitFor(() => evalIn(page,
+        `${has('If you add it again, you get a second copy.')} && [...document.querySelectorAll('button')]
+          .some(button => button.textContent === 'Go to Library' && !button.classList.contains('secondary'))`), {budgetMs:4000,pollMs:50}));
+      rec.check('the page sends only its check and the add', await evalIn(page,
+        `JSON.stringify(window.__starterFixtureCalls) === ${JSON.stringify(JSON.stringify(['import/inspect', 'import/apply']))}`));
+      await rec.visualPage('discovery-starter-added', page);
+    } finally { try { page.close(); } catch {} }
+  },
+};
+
 export const STARTER_VISUAL_STATES = [
   ...[false, true].flatMap(narrow => ['home', 'review', 'empty', 'no-results', 'publisher', 'suggestion'].map(mode => keptState(mode, narrow))),
-  ...FLOW_FRAMES.map(frameState),
+  ...FLOW_FRAMES.flatMap(row => [frameState(row), ...row[4]?.narrow ? [frameState(row, true)] : []]),
+  tryPage, starterAdded,
 ];

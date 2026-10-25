@@ -5,6 +5,8 @@
 // holds (heard cards, the Library catalog, saved contacts, network status) to
 // the words and states the 2a design draws. Bun tests pin each rule.
 
+import { matchesWords, searchWords } from './explore-order.js';
+
 /** @typedef {{ dwapp_id?: string, uri?: string, name?: string, slug?: string, seq?: number, publisher?: string, from?: string, version_id?: string, description?: string, size?: number, includes_wasm?: boolean|null, runtimeCompatibility?: {status:string,message:string} }} DwebApp */
 /** @typedef {{action:'install'|'update', versionId:string|null, seq:number|null, uri:string|null}} PendingTarget */
 /** @typedef {{appId?:string, notice?:string, failure?:string}} LinkOutcome */
@@ -38,7 +40,8 @@
 /** @typedef {{kind:'connected'|'looking'|'offline', linked:number}} NetworkState */
 /** @typedef {{ok?:boolean, featureLeases?:{leases?:{dweb?:{status?:string}}}}} ReadyReply */
 /** @typedef {{ok?:boolean, running?:unknown, linkedCount?:unknown}} InfoReply */
-/** @typedef {{id?:unknown, name?:unknown, dweb?:{uri?:unknown, dwapp_id?:unknown, publisher?:unknown, version_id?:unknown}}} CatalogRecord */
+/** @typedef {{id?:unknown, name?:unknown, createdAt?:unknown, dweb?:{uri?:unknown, dwapp_id?:unknown, publisher?:unknown, version_id?:unknown, seed?:unknown}}} CatalogRecord */
+/** @typedef {{id:string, name:string, toneKey:string}} LibraryApp */
 /** @typedef {'start'|'looking'|'empty'|'grid'|'offline'} RootView */
 /** @typedef {'review'|'installing'|'installed'|'failed'|'unknown'} InstallState */
 /** @typedef {'current'|'pending'|'done'|'working'|'failed'|'unknown'} StepState */
@@ -51,9 +54,36 @@ export const createEffects = () => ({
 });
 
 const IN_FLIGHT = Object.freeze(['installing', 'updating']);
-/** A busy value that is not a state word is the failure text itself.
+/** A busy value that is not a state word is a failure: FAILED, UNKNOWN, or
+ * the reason the host gave for a runtime refusal.
  * @param {string|undefined} busy */
 export const isFailure = (busy) => typeof busy === 'string' && busy !== 'installed' && !IN_FLIGHT.includes(busy);
+// why markers, not the words: the line names the app ("peerd could not
+// install Field notes."), and a name is peer text, so the view builds it.
+export const FAILED = 'failed';
+export const UNKNOWN = 'unknown';
+
+/**
+ * The hint under a failed install or update. A runtime refusal keeps its
+ * technical reason for Technical details only.
+ * @param {string} busy a failure value (see isFailure)
+ * @returns {{hint:string, runtime:string|null}}
+ */
+export const failureHint = (busy) => (
+  busy === FAILED || busy === UNKNOWN
+    ? { hint: 'The person who shares it may have gone offline. Try again in a moment.', runtime: null }
+    : { hint: 'This browser cannot run it. Technical details says why.', runtime: busy }
+);
+
+/**
+ * An install or update whose outcome peerd does not know. Neutral words: it
+ * may still finish.
+ * @param {'install'|'update'} action
+ */
+export const unknownLines = (action) => ({
+  status: `peerd is not sure the ${action} finished. It may still finish by itself.`,
+  hint: `Check again before you try to ${action} it again.`,
+});
 
 // why these five tokens in this order: the shipped hex list hashed dwapp_ids
 // into cyan, red, amber, green, magenta. Same hash and order, so every app
@@ -89,7 +119,7 @@ export const bytesLabel = (size) => {
 export const wasmLabel = (includesWasm) => includesWasm === true ? 'Includes WebAssembly'
   : includesWasm === false ? 'No detected WebAssembly files' : 'WebAssembly not specified';
 /** @param {number} n */
-export const peerCountLabel = (n) => `Connected to ${n} ${n === 1 ? 'peer' : 'peers'}`;
+export const peerCountLabel = (n) => `Connected to ${n} ${n === 1 ? 'person' : 'people'}`;
 /** @param {number} n */
 export const appCountLabel = (n) => `${n} ${n === 1 ? 'app' : 'apps'} shared`;
 
@@ -120,10 +150,10 @@ export const networkState = (ready, info) => {
 export const rootView = ({ enabled, net, heardCount, loading, failed, included }) => {
   if (!enabled) return 'start';
   if (net?.kind === 'offline') return 'offline';
-  // why included: the Included pill lists apps that come with peerd, so it
-  // needs no peer and no heard app.
+  // why included: the Comes with peerd pill lists apps that come with peerd,
+  // so it needs no peer and no heard app.
   if (heardCount > 0 || included) return 'grid';
-  // why: "No apps shared yet" is a claim. Make it only after a good read.
+  // why: "No shared apps yet" is a claim. Make it only after a good read.
   return net?.kind === 'connected' && !loading && !failed ? 'empty' : 'looking';
 };
 
@@ -138,7 +168,7 @@ export const libraryStatus = ({ ready, failed, offline = false }) => {
   if (!failed) return ready ? null : 'Checking your Library…';
   if (offline) {
     return ready ? 'Could not refresh your Library. This list may be out of date.'
-      : 'Could not read your Library. Your apps from peers are not listed until peerd can read it.';
+      : 'peerd could not read your Library. Try again in a moment.';
   }
   return ready ? 'Could not refresh your Library. Surprise me stays off until peerd can read it.'
     : 'Could not read your Library. Install stays off until peerd can read it.';
@@ -162,7 +192,7 @@ export const noSuggestionNote = ({ filtered, allInLibrary }) => {
  * @returns {string}
  */
 export const shareLinkError = (message) => String(message).startsWith('File paths are not supported')
-  ? 'File paths are not supported. Paste the share link of the app itself.'
+  ? 'This link points to one file inside an app. Paste the link to the whole app.'
   : 'This is not a share link. Paste the whole link you were sent.';
 
 /**
@@ -177,7 +207,7 @@ export const updateOffer = ({ installed, updatable, mine, incompatible }) => {
   return incompatible ? 'update-cant-run' : 'update';
 };
 
-// why "can't run" for an installed app only at this version: the runtime
+// why "cannot run" for an installed app only at this version: the runtime
 // flag rides the card. An installed app of another version keeps working, so
 // it offers Open. `sameVersion`: the Library holds this card's version.
 // why the Library wins over a failure at this version: the install may have
@@ -185,13 +215,13 @@ export const updateOffer = ({ installed, updatable, mine, incompatible }) => {
 // and a retry would send an update of the version the Library already holds.
 /**
  * First match wins. In-flight tiles carry text and no button; failed and
- * unknown tiles say Review because the app page carries that state.
+ * unknown tiles say "Look at it" because the app page carries that state.
  * @param {{incompatible:boolean, busy?:string, uncertain:boolean, installed:boolean, sameVersion:boolean, updatable:boolean, mine:boolean}} card
  * @returns {{kind:'status', text:string}|{kind:'update'|'open'|'review'}}
  */
 export const tileAction = (card) => {
   const { incompatible, busy, uncertain, installed, sameVersion } = card;
-  if (incompatible && (!installed || sameVersion)) return { kind: 'status', text: 'Can’t run in this browser' };
+  if (incompatible && (!installed || sameVersion)) return { kind: 'status', text: 'This browser cannot run it' };
   if (busy === 'installing') return { kind: 'status', text: 'Installing…' };
   if (busy === 'updating') return { kind: 'status', text: 'Updating…' };
   if (uncertain || (isFailure(busy) && !(installed && sameVersion))) return { kind: 'review' };
@@ -215,9 +245,9 @@ export const pageState = ({ incompatible, conflict, busy, uncertain, installed, 
 };
 
 const STEPS = Object.freeze([
-  { title: 'Review', sub: 'You are here' },
-  { title: 'Install and share', sub: 'peerd checks every file, then adds it to your Library' },
-  { title: 'Open', sub: 'Opens in its own tab' },
+  { title: 'Look at it', sub: 'You are here' },
+  { title: 'Install', sub: 'peerd checks every file, then adds the app to your Library' },
+  { title: 'Open', sub: 'It opens in its own tab' },
 ]);
 /** @type {Record<InstallState, StepState[]>} */
 const STEP_STATES = {
@@ -227,7 +257,7 @@ const STEP_STATES = {
   failed: ['done', 'failed', 'pending'],
   unknown: ['done', 'unknown', 'pending'],
 };
-// why "You are here" only on a current Review step: under a done step it
+// why "You are here" only on a current first step: under a done step it
 // points at a step the user already left.
 /** @param {InstallState} state */
 export const installSteps = (state) => STEPS.map((step, i) => {
@@ -300,10 +330,44 @@ export const libraryPeerApps = (records, heard) => records.flatMap(record => {
 });
 
 /**
+ * The search over the apps that come with peerd, by the words of the query
+ * (see searchWords).
  * @template {{name?:string, description?:string}} T
  * @param {T[]} items @param {string} query
  */
 export const matchQuery = (items, query) => {
-  const search = query.trim().toLowerCase();
-  return search ? items.filter(item => `${item.name ?? ''} ${item.description ?? ''}`.toLowerCase().includes(search)) : items;
+  const words = searchWords(query);
+  return words.length ? items.filter(item => matchesWords(`${item.name ?? ''} ${item.description ?? ''}`, words)) : items;
+};
+
+/** @param {CatalogRecord} record */
+const addedAt = (record) => typeof record.createdAt === 'number' && Number.isFinite(record.createdAt) ? record.createdAt : null;
+
+/**
+ * The "Your apps" row: the apps the Library holds, the most recently added
+ * first. A record with no time keeps its Library place after the dated ones.
+ * `total` counts every app, so the row can link to the rest.
+ * @param {ReadonlyArray<CatalogRecord>} records the 'apps/list' apps
+ * @param {number} max
+ * @returns {{apps: LibraryApp[], total: number}}
+ */
+export const yourApps = (records, max) => {
+  /** @type {{record:CatalogRecord, id:string, at:number|null, index:number}[]} */
+  const rows = records.flatMap((record, index) => typeof record?.id === 'string' && record.id
+    ? [{ record, id: record.id, at: addedAt(record), index }] : []);
+  rows.sort((a, b) => (a.at === null || b.at === null
+    ? Number(a.at === null) - Number(b.at === null) : b.at - a.at) || a.index - b.index);
+  return {
+    total: rows.length,
+    apps: rows.slice(0, max).map(({ record, id }) => {
+      const dweb = record.dweb;
+      // why this key: the tone matches the app's tile, which keys Commons by
+      // its seed and a peer app by its dwapp_id.
+      const key = [dweb?.seed, dweb?.dwapp_id, dweb?.uri].find(value => typeof value === 'string' && value);
+      return {
+        id, name: typeof record.name === 'string' && record.name.trim() ? record.name : 'Unnamed app',
+        toneKey: typeof key === 'string' ? key : id,
+      };
+    }),
+  };
 };

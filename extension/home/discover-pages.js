@@ -23,13 +23,17 @@ import { installSteps } from './discover-model.js';
 export const icon = (name, size) => m('svg.ic', { width: size, height: size, viewBox: '0 0 24 24', 'aria-hidden': 'true' },
   m('use', { href: `#ic-${name}` }));
 
-/** @param {{letter:string, tone:string, variant:'tile'|'page'|'row'|'person'}} props */
+/** @param {{letter:string, tone:string, variant:'tile'|'page'|'row'|'person'|'chip'}} props */
 export const letterAvatar = ({ letter, tone, variant }) => m(`div.disc-letter.disc-letter--${variant}`, {
   'aria-hidden': 'true', style: { background: `var(${tone})` },
 }, letter);
 
 /** @param {Maker} maker */
-export const makerText = (maker) => ['Made by ', maker.name ? m('bdi', maker.name) : m('bdi.type-code.disc-maker-key', maker.key)];
+const makerName = (maker) => maker.name ? m('bdi', maker.name) : m('bdi.type-code.disc-maker-key', maker.key);
+// why the words outside the <bdi>: a saved name is one the user chose, so it
+// says so, and its direction stays inside its own element.
+/** @param {Maker} maker */
+export const makerText = (maker) => ['Made by ', makerName(maker), maker.name ? ', someone you know' : null];
 
 /** "Made by Ana · 48 KB", either part optional.
  * @param {Maker|null} maker @param {string|null} kb */
@@ -50,24 +54,30 @@ export const secondaryButton = ({ label, onclick, disabled, attrs }) => m('butto
 }, label);
 
 /**
+ * Update comes with Open: the installed version still runs.
  * @param {TileAction} action
  * @param {{onOpen:()=>void, onUpdate:()=>void, onReview:()=>void}} on
  */
 export const actionView = (action, on) => {
   if (action.kind === 'status') return m('span.type-small.disc-tile-status', action.text);
   if (action.kind === 'open') return m('button.library-open.disc-tile-action', { type: 'button', onclick: on.onOpen }, ['Open', icon('ext', 13)]);
-  return m('button.library-open.disc-tile-action', {
-    type: 'button', onclick: action.kind === 'update' ? on.onUpdate : on.onReview,
-  }, action.kind === 'update' ? 'Update' : 'Review');
+  if (action.kind === 'update') {
+    return [
+      m('button.library-open.disc-tile-action', { type: 'button', onclick: on.onUpdate }, 'Update'),
+      m('button.secondary.disc-tile-action', { type: 'button', onclick: on.onOpen }, 'Open'),
+    ];
+  }
+  return m('button.library-open.disc-tile-action', { type: 'button', onclick: on.onReview }, 'Look at it');
 };
 
-/** @param {{label:string, onclick:()=>void, disabled?:boolean, open?:boolean}} props */
-export const tileButton = ({ label, onclick, disabled, open }) => m('button.library-open.disc-tile-action', {
-  type: 'button', disabled, onclick,
+/** @param {{label:string, onclick:()=>void, disabled?:boolean, open?:boolean, ariaLabel?:string}} props */
+export const tileButton = ({ label, onclick, disabled, open, ariaLabel }) => m('button.library-open.disc-tile-action', {
+  type: 'button', disabled, onclick, 'aria-label': ariaLabel,
 }, open ? [label, icon('ext', 13)] : label);
 
-// why a stretched name button: a tile without an action ("Can’t run") must
-// still open its page from the keyboard, and the whole tile stays clickable.
+// why a stretched name button: a tile without an action ("This browser cannot
+// run it") must still open its page from the keyboard, and the whole tile
+// stays clickable.
 /** @param {{name:string, cls:string, onOpen?:()=>void}} props */
 const nameView = ({ name, cls, onOpen }) => onOpen
   ? m(`button.disc-tile-open${cls}`, { type: 'button', dir: 'auto', title: name, onclick: onOpen }, name)
@@ -77,17 +87,18 @@ const nameView = ({ name, cls, onOpen }) => onOpen
 // off screen for the tile the user clicked.
 /**
  * @param {{key:string, name:string, letter:string, tone:string, meta:unknown, description?:string,
- *   updateReady?:boolean, action:unknown, error?:unknown, onOpen?:()=>void}} props
+ *   action:unknown, error?:unknown, onOpen?:()=>void}} props
  */
-export const tile = ({ key, name, letter, tone, meta, description, updateReady, action, error, onOpen }) =>
+export const tile = ({ key, name, letter, tone, meta, description, action, error, onOpen }) =>
   m('.disc-card.disc-tile', { key, 'data-key': key }, [
     letterAvatar({ letter, tone, variant: 'tile' }),
     m('.disc-tile-id', [
       nameView({ name, cls: '.type-heading.disc-tile-name', onOpen }),
       m('.type-small.disc-tile-meta', meta),
     ]),
-    description ? m('p.type-body-sm.disc-tile-desc', { dir: 'auto' }, description) : null,
-    updateReady ? m('span.type-small.disc-tile-flag', 'Update ready') : null,
+    description
+      ? m('p.type-body-sm.disc-tile-desc', { dir: 'auto' }, description)
+      : m('p.type-body-sm.disc-tile-desc.is-missing', 'No description from the maker.'),
     m('.disc-actions', action),
     error,
   ]);
@@ -108,14 +119,20 @@ export const appRow = ({ key, name, letter, tone, meta, description, action, err
     m('.disc-app-row-action', action),
   ]);
 
-/** @param {{icon:string, title:string, text:unknown, action:unknown, extra?:unknown}} props */
-export const startRow = ({ icon: name, title, text, action, extra }) => m('li.disc-start-row', [
+/** `note` is a smaller line under the text. @param {{icon:string, title:string, text:unknown, note?:string, action:unknown, extra?:unknown}} props */
+export const startRow = ({ icon: name, title, text, note, action, extra }) => m('li.disc-start-row', [
   m('.disc-start-main', [
     m('span.disc-start-icon', icon(name, 20)),
-    m('.disc-start-text', [m('.type-heading', title), m('.type-body-sm', text)]),
+    m('.disc-start-text', [m('.type-heading', title), m('.type-body-sm', text), note ? m('.type-small.disc-start-small', note) : null]),
   ]),
   m('.disc-start-action', action),
   extra ? m('.disc-start-note', extra) : null,
+]);
+
+/** A boxed line with an icon, as under the start list. @param {{icon:string, text:string}} props */
+export const noteBox = ({ icon: name, text }) => m('.disc-note-box', [
+  m('span.disc-note-icon', icon(name, 18)),
+  m('p.type-body-sm', text),
 ]);
 
 /**
@@ -131,8 +148,8 @@ export const shareRow = ({ value, inputDisabled, checkDisabled, status, note, er
     m('.disc-start-main', [
       m('span.disc-start-icon', icon('ext', 20)),
       m('.disc-start-text', [
-        m('.type-heading', 'Open a share link'),
-        m('.type-body-sm', 'Someone sent you a link to an app? Paste it to check it.'),
+        m('.type-heading', 'Open an app a friend sent you'),
+        m('.type-body-sm', 'Paste the link they shared. You can look at the app before you install it.'),
       ]),
     ]),
     m('form.disc-start-form', {
@@ -166,44 +183,58 @@ export const refreshButton = ({ spinning, onclick }) => m('button.icon.disc-refr
 }, icon('refresh', 16));
 
 /** @type {ReadonlyArray<[Pill, string]>} */
-const PILLS = Object.freeze([['all', 'All'], ['updates', 'Updates'], ['contacts', 'From contacts'], ['included', 'Included']]);
+const PILLS = Object.freeze([['all', 'All'], ['contacts', 'From people you know'], ['updates', 'Updates'], ['included', 'Comes with peerd']]);
 /** @param {{value:Pill, onSelect:(pill:Pill)=>void}} props */
 export const pills = ({ value, onSelect }) => m('.disc-pills', { role: 'group', 'aria-label': 'Show' },
   PILLS.map(([id, label]) => m('button.disc-pill', { type: 'button', 'aria-pressed': String(value === id), onclick: () => onSelect(id) }, label)));
 
+const SEARCH_ID = 'disc-search';
 /** @param {{value:string, oninput:(value:string)=>void}} props */
-export const searchInput = ({ value, oninput }) => m('input.disc-search', {
-  type: 'search', 'aria-label': 'Search apps', placeholder: 'Search apps…', value,
-  oninput: (/** @type {{target:HTMLInputElement}} */ event) => oninput(event.target.value),
-});
+export const searchInput = ({ value, oninput }) => m('.disc-search-field', [
+  m('label.type-label-strong', { for: SEARCH_ID }, 'What do you want to do?'),
+  m('input.disc-search', {
+    id: SEARCH_ID, type: 'search', placeholder: 'For example, split a bill or plan a trip', value,
+    oninput: (/** @type {{target:HTMLInputElement}} */ event) => oninput(event.target.value),
+  }),
+]);
 
-/** @param {{title?:string, text:string, actions:unknown[], boxed?:boolean, status?:boolean}} props */
-export const emptyState = ({ title, text, actions, boxed, status }) => m('.disc-empty', {
+/**
+ * `waiting`: the title is a status with a spinner, as the waiting card draws it.
+ * @param {{title?:string, text:string, actions:unknown[], boxed?:boolean, status?:boolean, waiting?:boolean}} props
+ */
+export const emptyState = ({ title, text, actions, boxed, status, waiting }) => m('.disc-empty', {
   class: boxed ? 'disc-empty--boxed' : '', role: status ? 'status' : undefined,
 }, [
-  title ? m('h2.type-heading', title) : null,
+  title && waiting ? m('.disc-empty-waiting', [
+    m('span.peerd-spinner.peerd-spinner--sm', { 'aria-hidden': 'true' }), m('h2.type-heading', { role: 'status' }, title),
+  ]) : title ? m('h2.type-heading', title) : null,
   m('p.type-body-sm', text),
   actions.some(Boolean) ? m('.disc-empty-actions', actions) : null,
 ]);
 
-/** @param {{onclick:()=>void}} props */
-export const backLink = ({ onclick }) => m('button.linklike.disc-back', { type: 'button', onclick }, [
-  m('span.disc-flip', icon('right', 14)), 'Discover',
+/** `label` names the page Back returns to: an app name is peer text. @param {{onclick:()=>void, label?:string}} props */
+export const backLink = ({ onclick, label = 'Discover' }) => m('button.linklike.disc-back', { type: 'button', onclick }, [
+  m('span.disc-flip', icon('right', 14)), m('bdi', label),
 ]);
 
 /**
- * @param {{name:string, letter:string, tone:string, maker:Maker|null, onMaker:()=>void, kb:string|null,
- *   modified?:boolean, description?:string}} props
+ * `meta` is the size, or where the app is ("In your Library"). `onShare`
+ * opens the share dialog; null when the app has no share link.
+ * @param {{name:string, letter:string, tone:string, maker:Maker|null, onMaker:()=>void, meta:string|null,
+ *   modified?:boolean, description?:string, onShare?:(()=>void)|null}} props
  */
-export const appHead = ({ name, letter, tone, maker, onMaker, kb, modified, description }) => [
+export const appHead = ({ name, letter, tone, maker, onMaker, meta, modified, description, onShare }) => [
   m('.disc-app-head', [
     letterAvatar({ letter, tone, variant: 'page' }),
     m('.disc-app-id', [
       m('h2.type-page-title.disc-app-title', { dir: 'auto' }, name),
       maker ? m('button.linklike.disc-app-maker', { type: 'button', onclick: onMaker }, makerText(maker)) : null,
-      kb ? m('span.type-small.disc-app-size', kb) : null,
-      modified ? m('span.type-small.disc-chip--strong', 'Locally modified') : null,
+      meta ? m('span.type-small.disc-app-size', meta) : null,
+      modified ? m('span.type-small.disc-chip--strong', 'Changed on this device') : null,
     ]),
+    onShare ? m('button.secondary.disc-share-open', { type: 'button', 'data-share-open': '', onclick: onShare }, [
+      icon('share', 16), 'Share',
+    ]) : null,
   ]),
   description
     ? m('p.type-body.disc-app-desc', { dir: 'auto' }, description)
@@ -216,91 +247,131 @@ const stepMark = (state, n) => state === 'done' ? icon('check', 14)
   : state === 'working' ? m('span.peerd-spinner', { 'aria-hidden': 'true' })
     : state === 'failed' ? icon('x', 13) : String(n);
 
+/** @param {string} label @param {()=>void} onclick */
+const linkButton = (label, onclick) => m('button.linklike.disc-link-btn', { type: 'button', onclick }, label);
+
 // why the installed line takes focus (tabindex -1), never Open: Open runs
 // peer code, so one stray key press after the install must not reach it.
 // The action is keyed by its label for the same reason: a fast reply turns
 // "Install and share" into "Open" in one redraw, and a reused node would
 // keep the focus.
 /**
- * The action panel with the three install steps. `message` is the state line
- * (failure or unknown text, or the in-flight note); `notice` is a committed
- * warning after success; `error` is an Open failure. `otherVersion`: the
- * Library holds another version, so the installed line claims no version.
- * `secondary` sits next to `primary`.
- * @param {{state:InstallState, message:string|null, notice:string|null, error:unknown,
- *   primary:ButtonProps|null, secondary?:ButtonProps|null, otherVersion?:boolean}} props
+ * The action panel with the three install steps. `message` is the in-flight
+ * note; `failure` and `unknown` say what went wrong and what to do; `notice`
+ * is a committed warning after success; `error` is an Open failure.
+ * `otherVersion`: the Library holds another version, so the installed line
+ * claims no version. `fresh`: this visit installed it, so the line says so
+ * and names it. `secondary` sits next to `primary`; `sharing` explains what
+ * Install and share does; `onLibrary` adds Go to Library next to Open.
+ * @param {{state:InstallState, name:string, message:string|null,
+ *   failure?:{action:'install'|'update', hint:string}|null, unknown?:{status:string, hint:string}|null,
+ *   notice:string|null, error:unknown, primary:ButtonProps|null, secondary?:ButtonProps|null,
+ *   otherVersion?:boolean, fresh?:boolean, sharing?:string|null, onLibrary?:(()=>void)|null}} props
  */
-export const installPanel = ({ state, message, notice, error, primary, secondary, otherVersion }) => m('.disc-panel', [
-  m('ol.disc-steps', { 'aria-label': 'Install steps' }, installSteps(state).map((step, i) =>
-    m(`li.disc-step.is-${step.state}`, { 'aria-current': ARIA_CURRENT.has(step.state) ? 'step' : undefined }, [
-      m('span.disc-step-mark', stepMark(step.state, i + 1)),
-      m('span.disc-step-text', [
-        m('span.disc-step-title', step.title),
-        step.sub ? m('span.type-small.disc-step-sub', step.sub) : null,
-      ]),
-    ]))),
-  state === 'installing' && message ? m('p.type-small.disc-footnote', { role: 'status' }, message) : null,
-  state === 'installed' || (secondary && otherVersion) ? m('p.type-body-sm.disc-installed', { tabindex: -1, role: 'status' }, otherVersion
-    ? 'In your Library. Open runs the version you have.'
-    : 'In your Library. Peers can get this version from you while your peer network is on.') : null,
-  state === 'failed' && message ? m('p.error.disc-panel-error', { role: 'alert' }, message) : null,
-  state === 'unknown' && message ? m('p.type-body-sm', { role: 'status' }, message) : null,
-  notice ? m('p.type-small.disc-footnote', { role: 'status' }, notice) : null,
-  error,
-  primary ? m('.disc-panel-actions', keyedParts({
+export const installPanel = ({
+  state, name, message, failure, unknown, notice, error, primary, secondary, otherVersion, fresh, sharing, onLibrary,
+}) => {
+  const actions = primary ? m('.disc-panel-actions', keyedParts({
     [primary.label]: primaryButton(primary), ...(secondary ? { [secondary.label]: secondaryButton(secondary) } : {}),
-  })) : null,
-]);
+    library: state === 'installed' && onLibrary ? linkButton('Go to Library', onLibrary) : null,
+  })) : null;
+  return m('.disc-panel', [
+    m('ol.disc-steps', { 'aria-label': 'Install steps' }, installSteps(state).map((step, i) =>
+      m(`li.disc-step.is-${step.state}`, { 'aria-current': ARIA_CURRENT.has(step.state) ? 'step' : undefined }, [
+        m('span.disc-step-mark', stepMark(step.state, i + 1)),
+        m('span.disc-step-text', [
+          m('span.disc-step-title', step.title),
+          step.sub ? m('span.type-small.disc-step-sub', step.sub) : null,
+        ]),
+      ]))),
+    state === 'installing' && message ? m('p.type-small.disc-footnote', { role: 'status' }, message) : null,
+    state === 'installed' || (secondary && otherVersion) ? m('p.type-body-sm.disc-installed', { tabindex: -1, role: 'status' }, otherVersion
+      ? 'Another version of this app is in your Library. Open runs the version you have.'
+      : fresh ? [m('strong', 'Installed.'), ' ', m('bdi', name), ' is now in your Library. Other people can get it from you while your peer network is on.']
+        : 'In your Library. Other people can get it from you while your peer network is on.') : null,
+    state === 'failed' && failure ? [
+      m('p.error.disc-panel-error', { role: 'alert' }, ['peerd could not ', failure.action, ' ', m('bdi', name), '.']),
+      m('p.type-body-sm.disc-hint', failure.hint),
+    ] : null,
+    state === 'unknown' && unknown ? [
+      m('p.type-body-sm', { role: 'status' }, unknown.status),
+      m('p.type-body-sm.disc-hint', unknown.hint),
+    ] : null,
+    notice ? m('p.type-small.disc-footnote', { role: 'status' }, notice) : null,
+    error,
+    sharing && actions ? m('.disc-panel-cta', [actions, m('p.type-small.disc-footnote', sharing)]) : actions,
+  ]);
+};
 
 /**
  * An installed app with a newer version on offer. Open runs the installed
  * version, so nothing here says the user has or shares the new one. `update`
- * is null when the new version can't run in this browser.
+ * is null when the new version cannot run in this browser.
  * @param {{update:ButtonProps|null, open:ButtonProps, notice:string|null, error:unknown}} props
  */
 export const updatePanel = ({ update, open, notice, error }) => m('.disc-panel', [
   update ? m('.type-label-strong', 'Update ready') : m('p.type-body-sm', [
-    m('strong', 'This update can’t run in this browser.'),
-    ' It needs a feature peerd can’t use here. Technical details lists it.',
+    m('strong', 'This browser cannot run the new version.'),
+    ' You can keep using the version you have. Technical details says what it needs.',
   ]),
   notice ? m('p.type-small.disc-footnote', { role: 'status' }, notice) : null,
   error,
-  m('.disc-panel-actions', keyedParts(update ? { update: primaryButton(update), open: secondaryButton(open) } : { open: primaryButton(open) })),
+  update ? m('.disc-panel-cta', [
+    m('.disc-panel-actions', keyedParts({ update: primaryButton(update), open: secondaryButton(open) })),
+    m('p.type-small.disc-footnote', 'After you update, other people can get the new version from you while your peer network is on.'),
+  ]) : m('.disc-panel-actions', keyedParts({ open: primaryButton(open) })),
 ]);
 
 /** @param {{disabled:boolean, onFork:()=>void, onReplace:()=>void, onCancel:()=>void}} props */
 export const conflictPanel = ({ disabled, onFork, onReplace, onCancel }) => m('.disc-panel', [
   m('.type-label-strong', 'Update ready'),
   m('p.type-body-sm', [
-    m('strong', 'You changed this app locally.'),
-    ' The update will not overwrite your changes unless you choose to replace them.',
+    m('strong', 'You changed this app on this device.'),
+    ' The update does not replace your changes unless you choose that.',
   ]),
   m('.disc-panel-actions', [
-    primaryButton({ label: 'Keep a fork & update', onclick: onFork, disabled }),
-    secondaryButton({ label: 'Replace local copy', onclick: onReplace, disabled }),
+    primaryButton({ label: 'Keep my copy and update', onclick: onFork, disabled }),
+    secondaryButton({ label: 'Replace my changes', onclick: onReplace, disabled }),
     secondaryButton({ label: 'Cancel', onclick: onCancel }),
   ]),
-  m('p.type-small.disc-footnote', 'Keeping a fork leaves your copy in the Library next to the new version.'),
+  m('p.type-small.disc-footnote', 'Keep my copy puts your changed copy in your Library, next to the new version.'),
 ]);
 
 export const cantRunPanel = () => m('.disc-panel', m('p.type-body-sm', [
-  m('strong', 'This app can’t run in this browser.'),
-  ' It needs a feature peerd can’t use here. Technical details lists it.',
+  m('strong', 'This browser cannot run this app.'),
+  ' It needs a feature that peerd cannot use here. Technical details says which one.',
 ]));
 
-/** @param {string} name @param {string} text */
+/** @param {string} name @param {unknown} text */
 const safetyRow = (name, text) => m('.disc-safety-row', [
   m('span.disc-safety-icon', icon(name, 16)),
   m('span.type-body-sm.disc-safety-text', text),
 ]);
-// why "direct": the app sandbox CSP blocks every network request of its own,
-// but an app can still reach peers through peerd.
-export const safetyLines = () => m('.disc-section.disc-safety', [
-  m('.type-label-strong', 'Before you install'),
-  safetyRow('key', 'Signed by its maker. peerd checks every file when it installs. This is not a safety review.'),
-  safetyRow('lock', 'Runs on its own, with no direct network access.'),
-  safetyRow('globe', 'Installing also shares this version with peers while your peer network is on.'),
-]);
+// why "by itself": the app sandbox CSP blocks every network request of its
+// own, but an app can still reach peers through peerd.
+// why `checked`: a share link was inspected ('link'), or the Library holds
+// this version ('installed'), so peerd has checked every file. A heard card is
+// only a claim. why the past for 'installed': an edit on this device can
+// change the files after the install, so the check belongs to the install.
+// `action` names what the page offers: an update page updates.
+// why `mine` outranks `checked`: the user made the app, so peerd may never have
+// checked it at an install. Its one line is true in every case.
+const SAFETY_TITLE = 'disc-safety-title';
+/** @param {{maker:Maker|null, checked:'link'|'installed'|null, action?:'install'|'update', mine?:boolean}} props */
+export const safetyLines = ({ maker, checked, action = 'install', mine = false }) => {
+  const made = maker ? ['Made by ', makerName(maker), '. '] : [];
+  const who = maker?.name ? m('bdi', maker.name) : 'its maker';
+  const check = checked === 'installed' ? ['When you installed it, peerd checked that it was exactly the app ', who, ' shared.']
+    : checked === 'link' ? ['peerd checked that this is exactly the app ', who, ' shared.']
+      : [`When you ${action} it, peerd checks that every file is exactly what `, who, ' shared.'];
+  return m('section.disc-section.disc-safety', { 'aria-labelledby': SAFETY_TITLE }, [
+    m('h3.type-label-strong', { id: SAFETY_TITLE }, 'What to know'),
+    safetyRow('key', mine ? 'You made this app. Other people get the files you share from your Library.'
+      : [...made, ...check, ' Nobody reviewed it for safety.']),
+    safetyRow('lock', 'It runs in its own tab and cannot reach the internet by itself.'),
+    safetyRow('globe', 'You can remove it from your Library at any time.'),
+  ]);
+};
 
 /**
  * `footnote` qualifies the facts; `note` reports a Copy failure.
@@ -328,6 +399,83 @@ export const makerHead = ({ title, letter, tone, saved }) => m('.disc-person-hea
   letterAvatar({ letter, tone, variant: 'person' }),
   m('.disc-person-id', [
     m('h2.type-page-title', { dir: 'auto' }, saved ? title : m('bdi.type-code', title)),
-    saved ? m('.type-small', 'Saved as a contact on this device') : null,
+    m('.type-small', saved ? 'Someone you know. You saved this name on this device.' : 'You have not saved a name for this maker.'),
   ]),
 ]);
+
+/**
+ * The "Your apps" row at the top of the network-on roots: Library apps,
+ * each with Open, and a link to the rest. why its own classes: the tile
+ * lookups (.disc-card, .disc-tile, [data-key]) must never count this row.
+ * @param {{apps:{id:string, name:string, letter:string, tone:string, onOpen:()=>void, error?:unknown}[],
+ *   onMore:(()=>void)|null}} props
+ */
+export const yourAppsRow = ({ apps, onMore }) => m('section.disc-yours', { 'aria-labelledby': 'disc-yours-title' }, [
+  m('h2.type-label-strong', { id: 'disc-yours-title' }, 'Your apps'),
+  m('ul.disc-yours-list', apps.map(app => m('li.disc-yours-item', { key: app.id, 'data-app-id': app.id }, [
+    letterAvatar({ letter: app.letter, tone: app.tone, variant: 'chip' }),
+    m('span.type-heading.disc-yours-name', { dir: 'auto', title: app.name }, app.name),
+    m('button.library-open.disc-yours-open', { type: 'button', onclick: app.onOpen }, 'Open'),
+    app.error,
+  ]))),
+  onMore ? linkButton('See all in Library', onMore) : null,
+]);
+
+const SHARE_TITLE = 'disc-share-title';
+const SHARE_LINK = 'disc-share-link';
+const FOCUSABLE = 'button:not([disabled]), input:not([disabled])';
+// why a trap: the dialog is modal, so Tab must cycle inside it until it closes.
+// why the dialog itself counts: it holds focus after a click on its own text.
+/** @param {()=>void} onClose */
+const dialogKeys = (onClose) => (/** @type {KeyboardEvent & {redraw?:boolean}} */ event) => {
+  if (event.key === 'Escape') { event.preventDefault(); onClose(); return; }
+  event.redraw = false;
+  if (event.key !== 'Tab') return;
+  const dialog = /** @type {HTMLElement} */ (event.currentTarget);
+  const controls = /** @type {HTMLElement[]} */ ([...dialog.querySelectorAll(FOCUSABLE)]);
+  const first = controls[0];
+  const last = controls[controls.length - 1];
+  if (!first || !last || document.activeElement === dialog
+      || (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first)?.focus();
+  }
+};
+
+/**
+ * The share dialog: the app's share link to copy. `status` is the copy
+ * outcome ('copied', 'failed' or null). The section moves focus in on open
+ * and back to the Share button on close. A click on the dialog's text
+ * focuses the dialog itself (tabindex -1), so Escape and Tab still work.
+ * @param {{name:string, letter:string, tone:string, address:string, maker:Maker|null, status:'copied'|'failed'|null,
+ *   copyDisabled:boolean, onCopy:()=>void, onClose:()=>void}} props
+ */
+export const shareDialog = ({ name, letter, tone, address, maker, status, copyDisabled, onCopy, onClose }) =>
+  m('.peerd-modal-backdrop.disc-share-backdrop', {
+    onclick: (/** @type {MouseEvent} */ event) => { if (event.target === event.currentTarget) onClose(); },
+  }, m('.peerd-modal.disc-share', {
+    role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': SHARE_TITLE, tabindex: -1, onkeydown: dialogKeys(onClose),
+  }, [
+    m('.disc-share-head', [
+      letterAvatar({ letter, tone, variant: 'chip' }),
+      m('h2.type-heading', { id: SHARE_TITLE }, ['Share ', m('bdi', name)]),
+      m('button.icon.disc-share-close', { type: 'button', 'aria-label': 'Close', onclick: onClose }, icon('x', 16)),
+    ]),
+    m('p.type-body-sm', 'Send this link to a friend. They open it in peerd with the peer network on, and can look at the app before they install it.'),
+    m('label.type-label-strong', { for: SHARE_LINK }, 'Share link'),
+    m('.disc-share-row', [
+      m('input.disc-share-link', {
+        id: SHARE_LINK, type: 'text', readonly: true, value: address,
+        onfocus: (/** @type {{target:HTMLInputElement, redraw?:boolean}} */ event) => { event.redraw = false; event.target.select(); },
+      }),
+      m('button.disc-primary', { type: 'button', 'data-share-copy': '', disabled: copyDisabled, onclick: onCopy }, 'Copy link'),
+    ]),
+    // why a stable status node: a live region must exist before its text changes.
+    m('p.type-small.disc-share-status', { role: 'status', style: status ? null : 'position:absolute' }, status === 'copied'
+      ? [icon('check', 14), 'Link copied.']
+      : status === 'failed' ? 'peerd could not copy the link. Select it and copy it yourself.' : null),
+    m('p.type-small.disc-footnote', [
+      'The link points to this exact version. If ', maker?.name ? m('bdi', maker.name) : 'its maker',
+      ' updates the app later, your friend gets the version you shared.',
+    ]),
+  ]));

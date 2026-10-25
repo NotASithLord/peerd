@@ -92,12 +92,17 @@ const SECTION_LABELS = { off: 'Pasting an address does not connect.', verified: 
 // What each share-link posture draws; the page probes wait for its panel button.
 const panelButton = label => `[...(document.querySelector('#e2e-manual-address .disc-page .disc-panel')?.querySelectorAll('button') ?? [])]
   .some(button => button.textContent === ${JSON.stringify(label)} && !button.disabled)`;
+// why the tree's own words: these states also render on the merge-base tree,
+// in its words, and a check that took either would not prove the new ones.
+const PHASE2 = discoverSurface().phase2;
+const rootHas = (now, before) => `document.querySelector('#e2e-manual-address')?.textContent
+  .includes(${JSON.stringify(PHASE2 ? now : before)})`;
 const SHARE_LINK_READY = {
-  off: `document.querySelector('#e2e-manual-address')?.textContent.includes('Join the peer network first.')`,
+  off: rootHas('Turn on the peer network first.', 'Join the peer network first.'),
   verified: panelButton('Install and share'),
-  rejected: `document.querySelector('#e2e-manual-address')?.textContent.includes('File paths are not supported')`,
-  unknown: `${panelButton('Refresh')} && document.querySelector('#e2e-manual-address').textContent
-    .includes('peerd could not confirm whether the install finished.')`,
+  rejected: rootHas('This link points to one file inside an app.', 'File paths are not supported'),
+  unknown: `${panelButton(PHASE2 ? 'Check again' : 'Refresh')}
+    && ${rootHas('peerd is not sure the install finished.', 'peerd could not confirm whether the install finished.')}`,
   installed: panelButton('Open'),
 };
 

@@ -21,6 +21,10 @@ const apps = [
   return {...app,dwapp_id:`fixture-${i}`,publisher,version_id,seq:2,size:1024 * (i+1),uri:`peerd://${publisher}/${version_id}`};
 });
 const [orbit, notes, garden] = apps;
+// The user's own key, and an app they made and shared from their Library.
+const self = encodeDidKey(new Uint8Array(32).fill(9));
+const own = {name:'Packing list',description:'Pack for a trip, one item at a time.',includes_wasm:false,dwapp_id:'fixture-own',
+  publisher:self,version_id:'9'.repeat(64),seq:1,size:2048,uri:`peerd://${self}/${'9'.repeat(64)}`};
 const OFFLINE = ['offline', 'offline-empty', 'offline-reading', 'offline-failed'];
 // A share link from a maker whose apps no peer shares.
 const loneLink = formatDwappUri({ did: encodeDidKey(new Uint8Array(32).fill(7)), hash: '7'.repeat(64) });
@@ -33,13 +37,18 @@ const record = (id, app, dweb = {}) => ({ id, name: app.name, dweb: {
   uri: app.uri, dwapp_id: app.dwapp_id, version_id: app.version_id, seq: app.seq, publisher: app.publisher, ...dweb,
 } });
 let notesInstalled = false;
+// More Library apps than the Your apps row shows, each added a day apart.
+const MORE = ['Budget board', 'Reading list', 'Trip planner', 'Chess clock', 'Recipe box', 'Habit tracker', 'Photo frame']
+  .map((name, i) => ({ id: `local-more-${i}`, name, createdAt: Date.UTC(2026, 9, 20 - i) }));
 const library = () => frame === 'offline-empty' ? [] : [
   record('local-orbit', orbit),
   ...['conflict', 'tiles', 'update', 'update-cant-run', 'update-failed', 'update-unknown'].includes(frame)
     ? [record('local-notes', notes, { version_id: 'local-notes-v1', seq: 1 })] : [],
   ...notesInstalled ? [record('local-notes', notes)] : [],
+  ...frame === 'yours' ? MORE : [],
+  ...frame === 'mine' ? [record('local-own', own, { local: true })] : [],
 ];
-const heard = ['looking', 'empty'].includes(frame) ? [] : apps;
+const heard = ['looking', 'empty'].includes(frame) ? [] : frame === 'mine' ? [...apps, own] : apps;
 
 /** @type {Record<string, () => unknown>} */
 const EFFECTS = {
@@ -61,7 +70,7 @@ const send = async message => {
   if (message.type === 'contacts/list') return {ok:true,contacts:[{did:notes.publisher,name:'Ana',saved:true}]};
   if (message.type === 'bootstrap/ready') return {ok:true,featureLeases:{leases:{dweb:{status:'active'}}}};
   if (message.type === 'dweb/distributed/info') {
-    return {ok:true,running:!OFFLINE.includes(frame),linkedCount:frame === 'looking' ? 0 : 3,did:encodeDidKey(new Uint8Array(32).fill(9))};
+    return {ok:true,running:!OFFLINE.includes(frame),linkedCount:frame === 'looking' ? 0 : 3,did:self};
   }
   if (message.type === 'dweb/base/install' && Object.hasOwn(EFFECTS, frame)) return EFFECTS[frame]();
   if (message.type === 'dweb/base/install' && frame === 'open-unknown') return EFFECTS.installed();
@@ -87,17 +96,19 @@ const STEPS = {
   conflict: [['.disc-tile-action', 'Update']],
   'update-failed': [['.disc-primary', 'Update']],
   'update-unknown': [['.disc-primary', 'Update']],
-  maker: [['.disc-app-maker', 'Made by Ana']],
+  maker: [['.disc-app-maker', 'Made by Ana, someone you know']],
   'maker-empty': [['button', 'Paste link'], ['.disc-start-form input', null, loneLink],
     ['.disc-start-form button', 'Check link'], ['.disc-app-maker', null]],
-  'commons-unknown': [['.disc-pill', 'Included'], ['.disc-tile-action', 'Add and open Commons']],
+  'commons-unknown': [['.disc-pill', 'Comes with peerd'], ['.disc-tile-action', 'Add and open Commons']],
+  share: [['[data-share-open]', 'Share']],
   'share-off': [['button', 'Paste link'], ['.disc-start-form input', null, formatDwappUri({ did: notes.publisher, hash: notes.version_id })]],
 };
 const OPEN_KEYS = /** @type {Record<string, string>} */ ({
   installing: notes.dwapp_id, installed: notes.dwapp_id, failed: notes.dwapp_id,
   'open-unknown': notes.dwapp_id,
-  unknown: notes.dwapp_id, maker: notes.dwapp_id, 'cant-run': garden.dwapp_id, update: notes.dwapp_id,
+  unknown: notes.dwapp_id, maker: notes.dwapp_id, 'cant-run': garden.dwapp_id, update: notes.dwapp_id, share: notes.dwapp_id,
   'update-cant-run': notes.dwapp_id, 'update-failed': notes.dwapp_id, 'update-unknown': notes.dwapp_id,
+  mine: own.dwapp_id,
 });
 /** @type {string|null} */ let openKey = OPEN_KEYS[frame] ?? null;
 

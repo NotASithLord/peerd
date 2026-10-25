@@ -23,14 +23,14 @@ import { packagedStarter, starterKeys } from '/shared/starter-catalog.js';
 import { discoveryAddress } from './discovery-address.js';
 import { exploreOrder, EXPLORE_WINDOW, nextSuggestion, suggestionKey } from './explore-order.js';
 import {
-  bytesLabel, createEffects, kbLabel, keptCards, letterOf, libraryPeerApps, libraryStatus, matchQuery, networkState,
-  noSuggestionNote, pageState, pillFilter, appCountLabel, peerCountLabel, rootView, savedContactNames, shareLinkError,
-  shortKey, tileAction, toneOf, updateOffer, wasmLabel,
+  bytesLabel, createEffects, FAILED, failureHint, isFailure, kbLabel, keptCards, letterOf, libraryPeerApps, libraryStatus,
+  matchQuery, networkState, noSuggestionNote, pageState, pillFilter, appCountLabel, peerCountLabel, rootView, savedContactNames,
+  shareLinkError, shortKey, tileAction, toneOf, UNKNOWN, unknownLines, updateOffer, wasmLabel, yourApps,
 } from './discover-model.js';
 import {
   actionView, appHead, appRow, backLink, cantRunPanel, conflictPanel, emptyState, installPanel, keyedParts, makerHead,
-  makerMeta, pills, refreshButton, safetyLines, searchInput, secondaryButton, shareRow, startRow, statusRow,
-  techDetails, tile, tileButton, updatePanel,
+  makerMeta, noteBox, pills, refreshButton, safetyLines, searchInput, secondaryButton, shareDialog, shareRow, startRow,
+  statusRow, techDetails, tile, tileButton, updatePanel, yourAppsRow,
 } from './discover-pages.js';
 
 /** @typedef {import('../options/sections/reset-row.js').Send} Send */
@@ -64,16 +64,25 @@ const POLL_MS = 4000;
 const COPIED_MS = 2000;
 const TECH_ID = 'disc-tech-facts';
 const COMMONS_NAME = 'Peerd-to-Peerd Commons';
-const CHOICE_ERROR = 'Your network choice could not be confirmed. Refresh status before choosing again.';
-const RECEIPT_HELD = 'peerd could not confirm whether the install finished. It may still finish, so another install stays blocked.';
+const CHOICE_ERROR = 'peerd could not confirm that the peer network is on. Check again before you try again.';
+const RECEIPT_HELD = 'peerd is not sure the install finished. It may still finish by itself. Install stays off until peerd knows.';
 const KEEPS_GOING = 'You can leave this page. The install keeps going.';
 const CHECKING_LINK = 'Checking the link. peerd downloads the app and checks every file…';
-const INSTALL_UNKNOWN = 'peerd could not confirm whether the install finished. Refresh to check before trying again.';
-const COMMONS_UNKNOWN = 'Could not confirm whether Commons was added or opened. Check your Library and tabs before trying again.';
+const COMMONS_UNKNOWN = 'peerd is not sure Commons was added or opened. Check your Library and your tabs before you try again.';
 const COMMONS_FAILED = 'peerd could not add or open Commons. Try again.';
 const NEEDS_NETWORK = 'New apps need the peer network.';
-const OFFLINE_EMPTY = `Apps you install from peers show up here. ${NEEDS_NETWORK}`;
-const MAKER_EMPTY = 'Apps from this maker appear here when your peers share them.';
+const OFFLINE_EMPTY = `You can still open the apps in your Library. ${NEEDS_NETWORK}`;
+const MAKER_EMPTY = 'This maker’s apps show up here when the people you are connected to share them.';
+const AUDIT_FAILED = 'peerd could not add it to the security log.';
+const SHARING = 'Sharing means other people can get this app from you while your peer network is on.';
+const LOOKING = 'Looking for people who share apps…';
+// why prefixes: an Open in the Your apps row reports in its own row, and a
+// copy in the share dialog in the dialog, never under Technical details.
+const YOURS = 'yours:';
+const SHARE = 'share:';
+const YOURS_MAX = 6;
+// why a marker: the receipt could not be kept, so the install was never sent.
+const RECEIPT_FAILED = 'receipt-failed';
 // why: a heard card carries the maker's own WebAssembly claim. A share link
 // shows what peerd found in the files instead.
 const WASM_HINT = 'The WebAssembly hint comes from the maker. peerd does not check it.';
@@ -122,11 +131,19 @@ export const DiscoverSection = (initialVnode) => {
   /** @type {Route} */ let route = { page: 'root' };
   /** @type {DwebApp|null} */ let pageApp = null;
   /** @type {{key:string, scroll:number}|null} */ let origin = null;
+  // why: a maker page opened from an app's page returns there, and names it.
+  /** @type {{route:Route, name:string}|null} */ let makerFrom = null;
+  // The page key whose share dialog is open.
+  /** @type {string|null} */ let shareFor = null;
+  // Installs this view finished, so their line says "Installed." and names
+  // the app. A remount or a later visit says only where the app is.
+  /** @type {Set<string>} */ const fresh = new Set();
+  let linkFresh = false;
   /** @type {{key:string, epoch:number, route:Route, answered:boolean}|null} */ let keyAsk = null;
   /** @type {{selector:string|null, scroll:number|null, fallback?:string, ifLost?:boolean}|null} */ let pendingFocus = null;
   /** @type {Pill} */ let pill = 'all';
   let query = '';
-  let seed = attrs.initialSeed ?? crypto.getRandomValues(new Uint32Array(1))[0];
+  const seed = attrs.initialSeed ?? crypto.getRandomValues(new Uint32Array(1))[0];
   let limit = EXPLORE_WINDOW;
   let makerLimit = EXPLORE_WINDOW;
   /** @type {string[]} */ let orderedIds = [];
@@ -210,6 +227,7 @@ export const DiscoverSection = (initialVnode) => {
           if (identityMatches || uriOnlyMatches) {
             installedId[id] = local?.appId ?? /** @type {string} */ (byUri.get(/** @type {string} */ (target.uri)));
             busy[id] = 'installed';
+            if (target.action === 'install') fresh.add(id);
             unconfirmed.delete(id);
           }
           // Absence is not a causal receipt: the original install/update send
@@ -238,7 +256,7 @@ export const DiscoverSection = (initialVnode) => {
         ? /** @type {number} */ (app.seq) : null,
       uri: typeof app.uri === 'string' ? app.uri : null,
     });
-    busy[id] = `peerd could not confirm whether the ${action} finished. Refresh to check before trying again.`;
+    busy[id] = UNKNOWN;
   };
 
   /** @param {string} id @param {'install'|'update'} action @param {DwebApp} app @param {unknown} result */
@@ -250,8 +268,9 @@ export const DiscoverSection = (initialVnode) => {
     unconfirmed.delete(id);
     conflicts.delete(id);
     const failure = /** @type {{code?:string,error?:string}} */ (result);
+    // why keep the runtime reason: Technical details shows it.
     busy[id] = RUNTIME_CODES.includes(failure?.code ?? '') && typeof failure?.error === 'string' ? failure.error
-      : `peerd could not ${action} this app. Try again.`;
+      : FAILED;
   };
 
   const refresh = () => {
@@ -408,8 +427,8 @@ export const DiscoverSection = (initialVnode) => {
     finally {
       retrying = false;
       await readStatus();
-      // why after the read-back: Retry went off while it ran, so focus fell
-      // to the body. Land on Retry if still offline, else on Refresh.
+      // why after the read-back: Try again went off while it ran, so focus
+      // fell to the body. Land on it if still offline, else on Refresh.
       pendingFocus = { selector: net?.kind === 'offline' ? '.disc-status button' : '.disc-refresh', fallback: 'h1', scroll: null, ifLost: true };
       redraw();
     }
@@ -470,7 +489,8 @@ export const DiscoverSection = (initialVnode) => {
       const r = await attrs.send({ type: 'dweb/base/install', uri: app.uri, name: app.name, dwappId: id, slug: app.slug, seq: app.seq, publisher: app.publisher });
       if (r?.ok) {
         busy[id] = 'installed';
-        if (r.warning === 'audit-write-failed') notices[id] = 'Installed, but the security audit entry could not be written.';
+        fresh.add(id);
+        if (r.warning === 'audit-write-failed') notices[id] = `Installed, but ${AUDIT_FAILED}`;
         installedId[id] = r.app?.id ?? r.appId ?? null;
         if (installedId[id]) committed.set(id, { appId: installedId[id], version_id: app.version_id ?? null, seq: app.seq ?? 0, read: effects.reads, uri: app.uri });
         announceInstalled(/** @type {string} */ (installedId[id]));
@@ -519,9 +539,9 @@ export const DiscoverSection = (initialVnode) => {
         // FSI and PDI keep its direction inside the quotes, and the name loses
         // its own bidi controls first, so none can close the isolate early.
         const forkName = disarmText(r.fork?.name);
-        if (forkName) warningMessages.push(`Kept your local work as “\u2068${forkName}\u2069” and updated this app.`);
+        if (forkName) warningMessages.push(`Kept your changed copy as “\u2068${forkName}\u2069” and updated this app.`);
         if (warnings.has('audit-write-failed')) {
-          warningMessages.push('Updated, but the security audit entry could not be written.');
+          warningMessages.push(`Updated, but ${AUDIT_FAILED}`);
         } else if (warnings.has('previous-version-cleanup-pending') && !forkName) {
           warningMessages.push('Updated.');
         }
@@ -550,7 +570,7 @@ export const DiscoverSection = (initialVnode) => {
       const result = await attrs.send({ type: 'apps/open', appId });
       if (result?.outcomeKnown === false) throw new Error('app-open-outcome-unknown');
       if (!result?.ok) alertLine = { key, text: 'peerd could not open this app. Try again.' };
-    } catch { alertLine = { key, text: 'peerd could not confirm whether the app opened. Check your tabs.', unknown: true }; }
+    } catch { alertLine = { key, text: 'peerd is not sure the app opened. Check your tabs.', unknown: true }; }
     redraw();
   };
 
@@ -592,7 +612,8 @@ export const DiscoverSection = (initialVnode) => {
     disabled: copyState?.status === 'pending',
     onclick: () => { void copy(field, value); },
   });
-  const copyNote = () => copyState?.status === 'failed' ? 'Could not copy.' : null;
+  const copyNote = () => copyState?.status === 'failed' && !copyState.field.startsWith(SHARE)
+    ? 'Could not copy. Select the text and copy it yourself.' : null;
 
   const forgetPending = () => { sessionStorage.removeItem(PENDING_KEY); linkPending = null; };
 
@@ -601,7 +622,7 @@ export const DiscoverSection = (initialVnode) => {
   const inspectLink = async () => {
     if (!attrs.enabled || linkBusy) return;
     if (linkPending) { openPage({ page: 'link' }, 'paste'); return; }
-    linkError = ''; linkPreview = null; linkAppId = null; linkFailure = ''; linkNotice = '';
+    linkError = ''; linkPreview = null; linkAppId = null; linkFailure = ''; linkNotice = ''; linkFresh = false;
     let target;
     try { target = immutableAppRoot(linkInput); }
     catch (cause) { linkError = shareLinkError(/** @type {Error} */ (cause).message); return; }
@@ -626,11 +647,12 @@ export const DiscoverSection = (initialVnode) => {
           && app.dweb?.hash === target.hash && app.dweb?.publisher === target.publisher)?.id ?? null;
         openPage({ page: 'link' }, 'paste');
       } else {
-        linkError = RUNTIME_CODES.includes(reply?.code) ? reply.error
-          : 'Could not verify this app. Check the link and your peer network connection, then try again.';
+        // why no host text: the share row has no Technical details to hold it.
+        linkError = RUNTIME_CODES.includes(reply?.code) ? 'peerd could not check this app. This browser cannot run it.'
+          : 'peerd could not check this app. The link may be wrong, or the people who have it may be offline. Check the link, then try again.';
       }
     } catch {
-      if (requestEpoch === linkEpoch) linkError = 'Could not check this app. Try again when the peer network is available.';
+      if (requestEpoch === linkEpoch) linkError = 'peerd could not check this app. Wait until the peer network is connected, then try again.';
     } finally {
       linkBusy = '';
       // why: Check link went off while the check ran, so focus fell to the
@@ -650,12 +672,12 @@ export const DiscoverSection = (initialVnode) => {
       if (reply?.ok && typeof reply.app?.id === 'string') {
         sessionStorage.removeItem(PENDING_KEY);
         announceInstalled(reply.app.id);
-        return { appId: reply.app.id, notice: reply.warning === 'audit-write-failed' ? 'Installed, but the security audit entry could not be written.' : '' };
+        return { appId: reply.app.id, notice: reply.warning === 'audit-write-failed' ? `Installed, but ${AUDIT_FAILED}` : '' };
       }
       if (reply?.ok === false && reply?.outcomeKnown !== false && reply?.performed !== true
           && !['effect-completed', 'host-lost', 'transport-lost'].includes(reply?.outcomeKind)) {
         sessionStorage.removeItem(PENDING_KEY);
-        return { failure: RUNTIME_CODES.includes(reply?.code) ? reply.error : 'peerd could not install this app. Try again.' };
+        return { failure: RUNTIME_CODES.includes(reply?.code) && typeof reply.error === 'string' ? reply.error : FAILED };
       }
     } catch { /* no receipt: keep the exact pending address fenced */ }
     return {};
@@ -673,6 +695,7 @@ export const DiscoverSection = (initialVnode) => {
     }
     if (appId) {
       linkAppId = appId;
+      linkFresh = true;
       linkNotice = notice ?? '';
       if (route.page === 'link') pendingFocus = { selector: '.disc-panel .disc-installed', scroll: null, ifLost: true };
       // why: the heard page of this app reads the Library. Read it again, so
@@ -689,7 +712,7 @@ export const DiscoverSection = (initialVnode) => {
     linkPending = target;
     // Persist BEFORE sending so reload keeps its UI receipt; the host owns cross-tab deduplication.
     try { sessionStorage.setItem(PENDING_KEY, target.address); }
-    catch { linkPending = null; linkFailure = 'Could not retain the install receipt. Try again after reloading.'; return; }
+    catch { linkPending = null; linkFailure = RECEIPT_FAILED; return; }
     linkBusy = 'install'; linkFailure = ''; linkNotice = '';
     redraw();
     // why in the effects: the page says "You can leave this page. The install
@@ -713,9 +736,10 @@ export const DiscoverSection = (initialVnode) => {
       // why keep the target: after a reload the receipt is all the page
       // knows about this app, and the page must stay to offer Open. The
       // Library read shows it on its heard page too, as after an install.
-      if (match && typeof match.id === 'string') { linkPreview ??= { ...pending, name: null }; linkAppId = match.id; forgetPending(); void reloadLocal(); }
-      else linkNotice = 'No completed install receipt yet. The original request may still finish; another install remains blocked.';
-    } catch { linkNotice = 'Could not read the Library. Refresh to check again.'; }
+      if (match && typeof match.id === 'string') {
+        linkPreview ??= { ...pending, name: null }; linkAppId = match.id; linkFresh = true; forgetPending(); void reloadLocal();
+      } else linkNotice = 'peerd still cannot tell if the install finished. It may still finish by itself. Install stays off until peerd knows.';
+    } catch { linkNotice = 'peerd could not read your Library. Check again in a moment.'; }
     finally { linkBusy = ''; redraw(); }
   };
 
@@ -740,12 +764,12 @@ export const DiscoverSection = (initialVnode) => {
     let sent = false;
     try {
       const client = await loadDweb();
-      if (!client.loadSeedApp) throw new Error('Commons is unavailable in this build.');
+      if (!client.loadSeedApp) throw new Error('Commons is not in this version of peerd.');
       const commonsSeed = await client.loadSeedApp({ fetchText: async (/** @type {string} */ path) => {
         // The seed loader selects only our own packaged extension asset.
         // eslint-disable-next-line no-restricted-globals
         const response = await fetch(path);
-        if (!response.ok) throw new Error('Could not load packaged Commons.');
+        if (!response.ok) throw new Error('peerd could not load Commons. Reload the page, then try again.');
         return response.text();
       } });
       sent = true;
@@ -768,9 +792,9 @@ export const DiscoverSection = (initialVnode) => {
     try {
       const result = await attrs.send({ type: 'apps/open', appId: commonsId });
       if (result?.outcomeKnown === false) throw new Error('app-open-outcome-unknown');
-      if (!result?.ok) alertLine = { key: 'commons', text: 'Could not open Commons.' };
+      if (!result?.ok) alertLine = { key: 'commons', text: 'peerd could not open Commons. Try again.' };
     }
-    catch { alertLine = { key: 'commons', text: 'Could not confirm whether Commons opened. Check your tabs.', unknown: true }; }
+    catch { alertLine = { key: 'commons', text: 'peerd is not sure Commons opened. Check your tabs.', unknown: true }; }
     finally { commonsBusy = false; redraw(); }
   };
 
@@ -785,6 +809,8 @@ export const DiscoverSection = (initialVnode) => {
     copyState = null;
     alertLine = null;
     surpriseNote = null;
+    shareFor = null;
+    makerFrom = null;
     pendingFocus = { selector: '.disc-back', scroll: 0 };
   };
   /** @param {DwebApp} app */
@@ -793,9 +819,25 @@ export const DiscoverSection = (initialVnode) => {
     pageApp = app;
     openPage({ page: 'app', key: app.dwapp_id }, app.dwapp_id);
   };
-  /** @param {string} did */
-  const openMaker = (did) => { makerLimit = EXPLORE_WINDOW; openPage({ page: 'maker', did }, did); void loadContacts(); };
+  /** @param {string} did @param {string} name the page it opens from */
+  const openMaker = (did, name) => {
+    const from = route;
+    makerLimit = EXPLORE_WINDOW;
+    openPage({ page: 'maker', did }, did);
+    makerFrom = { route: from, name };
+    void loadContacts();
+  };
   const goBack = () => {
+    if (route.page === 'maker' && makerFrom) {
+      route = makerFrom.route;
+      makerFrom = null;
+      techOpen = false;
+      copyState = null;
+      alertLine = null;
+      // why the maker link: it opened the maker page, so Back lands there.
+      pendingFocus = { selector: '.disc-app-maker', fallback: 'h1', scroll: null };
+      return;
+    }
     if (route.page === 'link' && !linkPending) shareOpen = false;
     const key = origin?.key ?? null;
     route = { page: 'root' };
@@ -803,6 +845,7 @@ export const DiscoverSection = (initialVnode) => {
     copyState = null;
     alertLine = null;
     surpriseNote = null;
+    shareFor = null;
     // why the heading as fallback: the tile may be gone (filtered, past the
     // window, or no longer heard). The heading lands focus at the top of the
     // root, as home.js does for a view change.
@@ -815,6 +858,11 @@ export const DiscoverSection = (initialVnode) => {
     origin = null;
   };
   const openShare = () => { shareOpen = true; pendingFocus = { selector: '.disc-start-form input', scroll: null }; };
+  // why the focus moves: the dialog is modal, so focus goes in, and Close,
+  // Escape or a click outside returns it to the Share button.
+  /** @param {string} key */
+  const openShareDialog = (key) => { shareFor = key; pendingFocus = { selector: '[data-share-copy]', scroll: null }; };
+  const closeShareDialog = () => { shareFor = null; pendingFocus = { selector: '[data-share-open]', scroll: null }; };
   // why the epoch: a check still running must not open its page after the
   // row closed. The typed link stays for the next open, as after Back.
   const closeShare = () => {
@@ -857,20 +905,20 @@ export const DiscoverSection = (initialVnode) => {
   const rootOf = (included) => rootView({
     enabled: attrs.enabled, net, heardCount: apps.length, loading, failed: heardFailed, included,
   });
-  // why the pill focus: Included can swap the looking or empty root for the
-  // grid and back. Focus follows to the pressed pill, or, on a root with no
-  // pills, to the button that shows the included apps again.
+  // why the pill focus: Comes with peerd can swap the looking or empty root
+  // for the grid and back. Focus follows to the pressed pill, or, on a root
+  // with no pills, to the link that shows those apps again.
   const pillFocus = '.disc-pill[aria-pressed="true"], [data-included]';
   /** @param {Pill} next */
   const selectPill = (next) => {
-    if (rootOf(pill === 'included') !== rootOf(next === 'included')) pendingFocus = { selector: pillFocus, scroll: null };
+    if (rootOf(pill === 'included') !== rootOf(next === 'included')) pendingFocus = { selector: pillFocus, fallback: 'h1', scroll: null };
     pill = next; limit = EXPLORE_WINDOW; orderedIds = []; surpriseNote = null;
   };
   /** @param {string} value */
   const setQuery = (value) => { query = value; limit = EXPLORE_WINDOW; orderedIds = []; surpriseNote = null; };
   const clearFilters = () => {
     query = ''; pill = 'all'; limit = EXPLORE_WINDOW; orderedIds = []; surpriseNote = null;
-    pendingFocus = { selector: '.disc-search', fallback: pillFocus, scroll: null };
+    pendingFocus = { selector: '.disc-search', fallback: 'h1', scroll: null };
   };
 
   /** @param {DwebApp} app */
@@ -885,7 +933,7 @@ export const DiscoverSection = (initialVnode) => {
     const byUri = app.uri && app.publisher && app.uri.startsWith(`peerd://${app.publisher}/`) ? installedByUri.get(app.uri) ?? null : null;
     const localId = installedId[id] || byUri || tracked?.appId || linked || null;
     // why: until the Library shows the app, a share-link install of it decides
-    // its state here too: running, or unconfirmed with Refresh.
+    // its state here too: running, or unconfirmed with Check again.
     const held = !localId && linkHolds(app);
     return {
       id, localId,
@@ -899,7 +947,7 @@ export const DiscoverSection = (initialVnode) => {
       uncertain: unconfirmed.has(id) || (held && linkBusy !== 'install'),
       incompatible: app.runtimeCompatibility?.status === 'unsupported',
       mine: !!myDid && (app.publisher === myDid || app.from === myDid),
-      state: held ? (linkBusy === 'install' ? 'installing' : INSTALL_UNKNOWN) : busy[id],
+      state: held ? (linkBusy === 'install' ? 'installing' : UNKNOWN) : busy[id],
     };
   };
   // why bound to the version: the token answers one update offer, as in the
@@ -929,22 +977,28 @@ export const DiscoverSection = (initialVnode) => {
   /** @param {DwebApp} app */
   const nameOf = (app) => app.name || (app.dwapp_id ?? '').slice(0, 12);
 
-  /** @param {DwebApp} app @param {boolean} offline */
-  const appTileProps = (app, offline) => {
+  /**
+   * `row`: a row on the maker page, which already names the maker.
+   * @param {DwebApp} app @param {boolean} offline @param {boolean} [row]
+   */
+  const appTileProps = (app, offline, row = false) => {
     const f = facts(app);
     const action = offline ? /** @type {const} */ ({ kind: 'open' }) : tileAction({
       incompatible: f.incompatible, busy: f.state, uncertain: f.uncertain,
       installed: !!f.localId, sameVersion: f.sameVersion, updatable: f.updatable, mine: f.mine,
     });
     const name = nameOf(app);
+    // why the offline grid too: it lists only what the Library holds.
+    const where = offline || f.localId
+      ? `In your Library${action.kind === 'update' ? ' · new version ready' : ''}` : null;
     return {
       key: f.id, name, letter: letterOf(name), tone: toneOf(f.id),
-      meta: makerMeta(makerOf(app.publisher), kbLabel(app.size)), description: app.description,
-      updateReady: action.kind === 'update',
+      meta: where ?? (row ? kbLabel(app.size) : makerMeta(makerOf(app.publisher), kbLabel(app.size))),
+      description: app.description,
       error: rootAlert(f.id, true),
       // why keyed by kind: a poll can turn a focused Open into Update, or
-      // Review into Open. A new node drops the focus, so one key press never
-      // runs an action the user did not choose.
+      // "Look at it" into Open. A new node drops the focus, so one key press
+      // never runs an action the user did not choose.
       action: keyedParts({ [action.kind]: actionView(action, {
         onOpen: () => { void openApp(f.localId, f.id); },
         onReview: () => openAppPage(app),
@@ -1008,20 +1062,19 @@ export const DiscoverSection = (initialVnode) => {
     openAppPage(chosen);
   };
 
-  const reviewStarter = () => FEATURED
-    ? secondaryButton({ label: 'Review starter', onclick: () => openOptions(`transfer?starter=${FEATURED_STARTER}`) }) : null;
-  // why: with the peer network off there is no Included pill, so the start
-  // row names the other packaged starters too.
-  const alsoIncluded = () => {
-    const links = starterKeys.filter(key => key !== FEATURED_STARTER).flatMap(key => {
-      const starter = packagedStarter(key);
-      return starter ? [m('button.linklike', {
-        type: 'button', 'aria-label': `Review ${starter.name}`, onclick: () => openOptions(`transfer?starter=${key}`),
-      }, starter.name)] : [];
-    });
-    return links.length ? [' Also included: ', ...links.flatMap((link, i) => i ? [', ', link] : [link]), '.'] : null;
+  /** `link`: drawn as a link next to a button. @param {boolean} [link] */
+  const tryStarter = (link = false) => {
+    if (!FEATURED) return null;
+    const props = { label: `Try ${FEATURED.name}`, onclick: () => openOptions(`transfer?starter=${FEATURED_STARTER}`) };
+    return link ? m('button.linklike.disc-link-btn', { type: 'button', onclick: props.onclick }, props.label) : secondaryButton(props);
   };
-  const libraryButton = () => secondaryButton({ label: 'Go to Library', onclick: () => attrs.onLibrary?.() });
+  // why: the looking and empty roots draw no pills, but the apps that come
+  // with peerd need no peer, and only Discover adds Commons.
+  const includedLink = () => m('button.linklike.disc-link-btn', {
+    type: 'button', 'data-included': '', onclick: () => selectPill('included'),
+  }, 'See what comes with peerd');
+  const toLibrary = () => attrs.onLibrary?.();
+  const libraryButton = () => secondaryButton({ label: 'Go to Library', onclick: toLibrary });
   /** @param {() => void} onclick */
   const showMore = (onclick) => secondaryButton({ label: 'Show more', onclick, attrs: { class: 'disc-more' } });
   /** @param {boolean} inStatus */
@@ -1033,60 +1086,73 @@ export const DiscoverSection = (initialVnode) => {
     inputDisabled: !!linkPending || linkBusy === 'receipt',
     checkDisabled: !attrs.enabled || !!linkBusy || (!linkPending && !linkInput),
     status: linkPending ? (linkBusy === 'install' ? KEEPS_GOING : RECEIPT_HELD) : linkBusy === 'inspect' ? CHECKING_LINK : null,
-    note: attrs.enabled ? null : 'Join the peer network first.',
+    note: attrs.enabled ? null : 'Turn on the peer network first.',
     error: linkError,
     onCancel: linkPending || linkBusy === 'receipt' ? null : closeShare,
     oninput: (value) => {
       linkInput = value; linkEpoch++; linkPreview = null; linkAppId = null;
-      linkError = ''; linkFailure = ''; linkNotice = '';
+      linkError = ''; linkFailure = ''; linkNotice = ''; linkFresh = false;
     },
     onCheck: () => { void inspectLink(); },
   });
   const heardError = () => heardFailed
-    ? m('p.error', { role: 'alert', 'aria-live': 'assertive' }, 'peerd could not refresh peer apps. Retry when the network is available.')
+    ? m('p.error', { role: 'alert', 'aria-live': 'assertive' }, 'peerd could not check for new apps. Try again in a moment.')
     : null;
   /** @param {string} [key] @param {boolean} [small] */
   const rootAlert = (key, small = false) => alertLine && (!key || alertLine.key === key)
     ? m(small ? 'p.type-small' : 'p', { class: alertLine.unknown ? 'type-body-sm' : 'error', role: alertLine.unknown ? 'status' : 'alert' }, alertLine.text) : null;
+  // why not a Your apps line: that row shows its own, next to its Open.
+  const strayAlert = () => alertLine?.key.startsWith(YOURS) ? null : rootAlert();
   /** @param {boolean} offline */
   const libraryLine = (offline) => {
     const note = libraryStatus({ ready: localReady, failed: localFailed, offline });
     return note ? m('p.type-small.disc-footnote', { role: 'status' }, note) : null;
   };
-  // why: the looking and empty roots draw no pills, but Included lists the
-  // starters and Commons, which need no peer, so they stay one click away.
-  const includedButton = () => secondaryButton({
-    label: 'Show included apps', onclick: () => selectPill('included'), attrs: { 'data-included': '' },
-  });
+  // why the network-on roots only: with the network off Discover sends
+  // nothing, so it has no Library read to show.
+  const yoursRow = () => {
+    const { apps: mine, total } = yourApps(records, YOURS_MAX);
+    return mine.length ? yourAppsRow({
+      apps: mine.map(app => ({
+        id: app.id, name: app.name, letter: letterOf(app.name), tone: toneOf(app.toneKey),
+        onOpen: () => { void openApp(app.id, `${YOURS}${app.id}`); }, error: rootAlert(`${YOURS}${app.id}`, true),
+      })),
+      onMore: total > mine.length ? toLibrary : null,
+    }) : null;
+  };
 
   const startView = () => m('.disc-home.disc-view.disc-start-view', { key: 'start' }, [
     m('header.disc-intro', [
       m('h1.type-hero', 'Discover'),
-      m('p.type-body', 'Small apps people share with each other. Pick a way to start.'),
+      m('p.type-body', 'Small apps that people share with each other. They run in your browser, and nothing installs until you choose.'),
     ]),
     m('ul.disc-start-list', [
+      // why these words: Try opens a Settings page that adds the app, and it
+      // opens from the Library. Discover cannot tell when it is there.
       FEATURED ? startRow({
-        icon: 'cube', title: 'Try an included app',
-        text: [`${FEATURED.name} comes with peerd and works on this device.`, alsoIncluded()], action: reviewStarter(),
+        icon: 'cube', title: 'Try an app that comes with peerd',
+        text: `Add ${FEATURED.name} to your Library, then open it from there. It needs no network and no setup.`, action: tryStarter(),
       }) : null,
       startRow({
-        icon: 'globe', title: 'Join the peer network',
-        text: 'See apps your peers share. Uses some bandwidth and storage, and peers can see your network address. Your private apps, files, chats and keys stay private.',
+        icon: 'globe', title: 'See apps other people share',
+        text: 'Turn on the peer network to connect straight to other people who use peerd. There is no central store.',
+        note: 'It uses some internet and storage, and other people can see your network address. Your files, chats and keys stay private.',
         action: secondaryButton({
-          label: 'Enable peer network', onclick: enableNetwork, disabled: choiceBusy || !!choiceError,
-          attrs: { 'data-network-choice': 'enable' },
+          label: 'Turn on', onclick: enableNetwork, disabled: choiceBusy || !!choiceError,
+          attrs: { 'data-network-choice': 'enable', 'aria-label': 'Turn on the peer network' },
         }),
         extra: choiceError ? [
           m('p.error', { role: 'alert' }, choiceError),
-          secondaryButton({ label: choiceRefreshing ? 'Checking status…' : 'Refresh status', onclick: () => { void refreshChoice(); }, disabled: choiceRefreshing }),
+          secondaryButton({ label: choiceRefreshing ? 'Checking…' : 'Check again', onclick: () => { void refreshChoice(); }, disabled: choiceRefreshing }),
         ] : null,
       }),
       shareOpen ? openShareRow() : startRow({
-        icon: 'ext', title: 'Open a share link',
-        text: 'Someone sent you a link to an app? Paste it to check it.', action: pasteButton(false),
+        icon: 'ext', title: 'Open an app a friend sent you',
+        text: 'Paste the link they shared. You can look at the app before you install it. This needs the peer network.',
+        action: pasteButton(false),
       }),
     ]),
-    m('p.type-small.disc-footnote', 'Share links need the peer network.'),
+    noteBox({ icon: 'lock', text: 'Apps run in their own tab and cannot reach the internet by themselves. You can remove an app from your Library at any time.' }),
   ]);
 
   // why one key for every root while the network is on: a poll can swap the
@@ -1098,23 +1164,22 @@ export const DiscoverSection = (initialVnode) => {
   const shareList = () => shareOpen ? m('ul.disc-start-list', openShareRow()) : null;
 
   // why the status row when connected: a failed heard read keeps this root
-  // with peers linked, and "Looking for peers…" would then be false. The
+  // with peers linked, and "Looking for people…" would then be false. The
   // share row sits under the head, as on the other roots, so it never jumps.
+  // why Paste link here only without the status row: that row has its own.
+  // why the looking line titles the waiting block: its text goes on from it.
   const lookingView = () => {
     const connected = net?.kind === 'connected';
     return rootFrame({
-      head: connected ? null : m('.disc-head-block', [
-        m('h1.type-page-title', 'Discover'),
-        m('span.type-body-sm', { role: 'status' }, [m('span.peerd-spinner.peerd-spinner--sm', { 'aria-hidden': 'true' }), 'Looking for peers…']),
-      ]),
-      title: connected ? m('h1.type-page-title', 'Discover') : null,
+      title: m('h1.type-page-title', 'Discover'),
       status: connected ? statusFor('connected', []) : null,
       heardError: heardError(),
       share: shareList(),
+      yours: yoursRow(),
       waiting: emptyState({
-        title: 'Apps show up as peers share them',
-        text: 'While you wait, try an included app or share one of yours from the Library.',
-        actions: [reviewStarter(), libraryButton(), shareOpen || connected ? null : pasteButton(false), includedButton()],
+        title: connected ? undefined : LOOKING, waiting: !connected,
+        text: 'This can take a minute. While you wait, try an app that comes with peerd.',
+        actions: [tryStarter(), shareOpen || connected ? null : pasteButton(false), includedLink()],
       }),
     });
   };
@@ -1123,20 +1188,17 @@ export const DiscoverSection = (initialVnode) => {
   const statusFor = (kind, shown) => {
     if (kind === 'offline') {
       return statusRow({ text: 'Peer network is offline', count: null, buttons: {
-        retry: m('button.secondary', { type: 'button', disabled: retrying, onclick: () => { void retryConnection(); } }, retrying ? 'Reconnecting…' : 'Retry connection'),
+        retry: m('button.secondary', { type: 'button', disabled: retrying, onclick: () => { void retryConnection(); } }, retrying ? 'Connecting…' : 'Try again'),
       } });
     }
     return statusRow({
-      text: net?.kind === 'connected' ? peerCountLabel(net.linked) : 'Looking for peers…',
+      text: net?.kind === 'connected' ? peerCountLabel(net.linked) : LOOKING,
       count: apps.length ? appCountLabel(apps.length) : null,
       buttons: {
         paste: shareOpen ? null : pasteButton(true),
         surprise: apps.length ? m('button.secondary', {
           type: 'button', disabled: !localReady || localFailed, onclick: () => surprise(shown),
         }, 'Surprise me') : null,
-        shuffle: apps.length ? m('button.secondary', { type: 'button', onclick: () => {
-          seed = crypto.getRandomValues(new Uint32Array(1))[0]; limit = EXPLORE_WINDOW; orderedIds = [];
-        } }, 'Shuffle') : null,
         refresh: refreshButton({ spinning: refreshing, onclick: () => { void manualRefresh(); } }),
       },
     });
@@ -1145,12 +1207,13 @@ export const DiscoverSection = (initialVnode) => {
   const emptyView = () => rootFrame({
     title: m('h1.type-page-title', 'Discover'),
     status: statusFor('connected', []),
-    alert: rootAlert(),
+    alert: strayAlert(),
     share: shareList(),
+    yours: yoursRow(),
     none: emptyState({
-      title: 'No apps shared yet',
-      text: 'Apps appear here when your peers share them. You can share one of yours from the Library.',
-      actions: [libraryButton(), includedButton()],
+      title: 'No shared apps yet',
+      text: 'Apps show up here when the people you are connected to share them. You can share one of yours from your Library.',
+      actions: [libraryButton(), tryStarter(true), includedLink()],
     }),
   });
 
@@ -1158,11 +1221,11 @@ export const DiscoverSection = (initialVnode) => {
     const starters = starterKeys.flatMap(key => {
       const starter = packagedStarter(key);
       return starter ? [{ key: `starter:${key}`, tone: key, name: starter.name, description: starter.description,
-        action: tileButton({ label: 'Review', onclick: () => openOptions(`transfer?starter=${key}`) }) }] : [];
+        action: tileButton({ label: 'Try it', ariaLabel: `Try ${starter.name}`, onclick: () => openOptions(`transfer?starter=${key}`) }) }] : [];
     });
     const commons = {
       key: 'commons', tone: 'commons', name: COMMONS_NAME,
-      description: 'Packaged peer chat. Joining a room is a separate action inside the app.',
+      description: 'Chat with other people who use peerd. Adding it does not join a room. You choose one inside the app.',
       // why keyed: a Commons deleted elsewhere must not turn a focused Open into an add.
       action: keyedParts(commonsId
         ? { open: tileButton({ label: 'Open', open: true, disabled: commonsBusy, onclick: () => { void openCommons(); } }) }
@@ -1195,8 +1258,10 @@ export const DiscoverSection = (initialVnode) => {
       commons: pill === 'included' && effects.commons === 'unknown' && !commonsId
         ? m('p.type-body-sm', { role: 'status' }, COMMONS_UNKNOWN) : null,
       share: shareList(),
-      pills: pills({ value: pill, onSelect: selectPill }),
+      // why not offline with Library apps from peers: the grid then lists them, each with Open.
+      yours: offline && list.length ? null : yoursRow(),
       search: browse ? searchInput({ value: query, oninput: setQuery }) : null,
+      pills: pills({ value: pill, onSelect: selectPill }),
       // why after a good read only: the line says what the Library holds.
       // Until then the Library line says it is checking or could not read it.
       offlineEmpty: browse || !localReady ? null : emptyState({ text: OFFLINE_EMPTY, actions: [] }),
@@ -1215,8 +1280,9 @@ export const DiscoverSection = (initialVnode) => {
     id: TECH_ID, open: techOpen, onToggle: () => { techOpen = !techOpen; }, facts: list, footnote, note: copyNote(),
   });
 
-  /** @param {DwebApp} app */
-  const appFacts = (app) => {
+  /** `runtime`: the reason a runtime refusal gave, which outranks the card's claim.
+   * @param {DwebApp} app @param {string|null} runtime */
+  const appFacts = (app, runtime) => {
     const id = app.dwapp_id ?? '';
     const address = discoveryAddress(app);
     const bytes = bytesLabel(app.size);
@@ -1226,8 +1292,23 @@ export const DiscoverSection = (initialVnode) => {
     if (address) list.push({ label: 'Share link', value: address, code: true, copy: copyButton(`${id}:link`, address) });
     if (bytes) list.push({ label: 'Size', value: bytes });
     list.push({ label: 'WebAssembly', value: wasmLabel(app.includes_wasm) });
-    list.push({ label: 'Runtime', value: app.runtimeCompatibility?.message ?? 'Runtime requirements not specified.' });
+    list.push({ label: 'Runtime', value: runtime ?? app.runtimeCompatibility?.message ?? 'Runtime requirements not specified.' });
     return list;
+  };
+
+  // why the copy guard: "Link copied." names only the link on screen. A copy
+  // that started before the link changed copied the old one.
+  /** @param {string} key @param {{name:string, letter:string, tone:string, address:string, maker:{name:string|null, key:string}|null}} props */
+  const shareView = (key, props) => {
+    const field = `${SHARE}${key}`;
+    const mine = copyState?.field === field ? copyState : null;
+    return shareDialog({
+      ...props,
+      status: mine?.status === 'copied' && mine.value === props.address ? 'copied' : mine?.status === 'failed' ? 'failed' : null,
+      copyDisabled: copyState?.status === 'pending',
+      onCopy: () => { void copy(field, props.address); },
+      onClose: closeShareDialog,
+    });
   };
 
   /** @param {string} key */
@@ -1251,6 +1332,9 @@ export const DiscoverSection = (initialVnode) => {
       ? updateOffer({ installed: true, updatable: f.updatable, mine: f.mine, incompatible: f.incompatible }) : null;
     // why: an install needs the peer network, so it waits, and the line says so.
     const offline = net?.kind === 'offline';
+    // why the Library decides the word: Try again updates when it holds another version.
+    const action = f.localId ? 'update' : 'install';
+    const failure = state === 'failed' && isFailure(f.state) ? failureHint(/** @type {string} */ (f.state)) : null;
     /** @type {ButtonProps|null} */ let primary = null;
     if (state === 'review') {
       primary = { label: 'Install and share', disabled: !app.uri || !localReady || offline, onclick: () => { void install(app); } };
@@ -1259,7 +1343,7 @@ export const DiscoverSection = (initialVnode) => {
     if (state === 'failed') {
       primary = { label: 'Try again', disabled: offline, onclick: () => { void (f.localId ? update(app, f.localId) : install(app)); } };
     }
-    if (state === 'unknown') primary = { label: 'Refresh', disabled: refreshing, onclick: () => { void manualRefresh(); } };
+    if (state === 'unknown') primary = { label: 'Check again', disabled: refreshing, onclick: () => { void manualRefresh(); } };
     // why Open next to them on an update page: the installed version still runs.
     const secondary = (state === 'failed' || state === 'unknown') && localId
       ? { label: 'Open', onclick: () => { void openApp(localId, f.id); } } : null;
@@ -1278,22 +1362,34 @@ export const DiscoverSection = (initialVnode) => {
           open: { label: 'Open', onclick: () => { void openApp(localId, f.id); } }, notice, error,
         })
           : installPanel({
-            state,
-            message: state === 'installing'
-              ? `You can leave this page. The ${f.state === 'updating' ? 'update' : 'install'} keeps going.`
-              : state === 'failed' || state === 'unknown' ? f.state ?? null : null,
+            state, name, fresh: fresh.has(f.id),
+            message: state === 'installing' ? `You can leave this page. The ${f.state === 'updating' ? 'update' : 'install'} keeps going.` : null,
+            failure: failure ? { action, hint: failure.hint } : null,
+            unknown: state === 'unknown' ? unknownLines(unconfirmed.get(f.id)?.action ?? 'install') : null,
             notice, error, primary, secondary, otherVersion: !f.sameVersion,
+            sharing: state === 'review' ? SHARING : null, onLibrary: toLibrary,
           });
+    const address = discoveryAddress(app);
+    if (shareFor === f.id && !address) shareFor = null;
+    const maker = makerOf(app.publisher);
+    const tone = toneOf(f.id);
+    // why checked only for the version the Library holds: peerd checked
+    // every file of it when it installed it. A card heard from peers is only
+    // what they said.
+    const checked = f.localId && f.sameVersion ? 'installed' : null;
     return m('.disc-home.disc-view.disc-page', { key: `app:${key}` }, [
       backLink({ onclick: goBack }),
       appHead({
-        name, letter: letterOf(name), tone: toneOf(f.id), maker: makerOf(app.publisher),
-        onMaker: () => { if (app.publisher) openMaker(app.publisher); },
-        kb: kbLabel(app.size), modified: state === 'conflict', description: app.description,
+        name, letter: letterOf(name), tone, maker,
+        onMaker: () => { if (app.publisher) openMaker(app.publisher, name); },
+        meta: f.localId ? 'In your Library' : kbLabel(app.size), modified: state === 'conflict', description: app.description,
+        onShare: address ? () => openShareDialog(f.id) : null,
       }),
       panel,
-      state === 'cant-run' || state === 'conflict' || offer === 'update-cant-run' ? null : safetyLines(),
-      techView(appFacts(app), typeof app.includes_wasm === 'boolean' ? WASM_HINT : null),
+      state === 'cant-run' || state === 'conflict' || offer === 'update-cant-run' ? null
+        : safetyLines({ maker, checked, action, mine: f.mine }),
+      techView(appFacts(app, failure?.runtime ?? null), typeof app.includes_wasm === 'boolean' ? WASM_HINT : null),
+      shareFor === f.id && address ? shareView(f.id, { name, letter: letterOf(name), tone, address, maker }) : null,
     ]);
   };
 
@@ -1305,7 +1401,7 @@ export const DiscoverSection = (initialVnode) => {
     const card = apps.find(app => discoveryAddress(app) === target.address);
     const name = linkPreview?.name ?? card?.name ?? 'Unnamed app';
     // why: a heard install or update of this version decides this page until
-    // it settles: running, or unconfirmed with Refresh, as on its app page.
+    // it settles: running, or unconfirmed with Check again, as on its app page.
     const held = heardHolds(target.uri);
     const installing = (!!linkPending && linkBusy === 'install') || held?.running === true;
     const localId = linkAppId ?? installedByUri.get(target.uri) ?? heardId(target.uri);
@@ -1315,11 +1411,13 @@ export const DiscoverSection = (initialVnode) => {
       busy: installing ? 'installing' : linkFailure || undefined,
       uncertain: !installing && (!!linkPending || !!held), installed: !!localId, sameVersion: true,
     });
+    const failure = state === 'failed' && linkFailure ? (linkFailure === RECEIPT_FAILED
+      ? { hint: 'Reload the page, then try again.', runtime: null } : failureHint(linkFailure)) : null;
     const blocked = !attrs.enabled || !!linkBusy;
     /** @type {ButtonProps|null} */ const primary = state === 'review'
       ? { label: 'Install and share', disabled: blocked || !linkPreview, onclick: () => { void installLink(); } }
       : state === 'failed' ? { label: 'Try again', disabled: blocked || !linkPreview, onclick: () => { void installLink(); } }
-        : state === 'unknown' ? { label: 'Refresh', disabled: !!linkBusy || refreshing, onclick: () => { void (linkPending ? reconcileLink() : manualRefresh()); } }
+        : state === 'unknown' ? { label: 'Check again', disabled: !!linkBusy || refreshing, onclick: () => { void (linkPending ? reconcileLink() : manualRefresh()); } }
           : state === 'installed' ? { label: 'Open', disabled: !!linkBusy, onclick: () => { void openLinkApp(localId); } } : null;
     const bytes = bytesLabel(linkPreview?.decodedBytes);
     /** @type {Fact[]} */ const list = [
@@ -1329,25 +1427,29 @@ export const DiscoverSection = (initialVnode) => {
     ];
     if (bytes) list.push({ label: 'Size', value: bytes });
     list.push({ label: 'WebAssembly', value: wasmLabel(linkPreview?.containsWasm) });
-    list.push({ label: 'Runtime', value: linkPreview?.runtimeCompatibility?.message ?? 'Runtime requirements not specified.' });
+    list.push({ label: 'Runtime', value: failure?.runtime ?? linkPreview?.runtimeCompatibility?.message ?? 'Runtime requirements not specified.' });
     const tone = toneOf(card?.dwapp_id ?? target.uri);
+    const maker = makerOf(target.publisher);
     return m('.disc-home.disc-view.disc-page', { key: 'link' }, [
       backLink({ onclick: goBack }),
       appHead({
-        name, letter: letterOf(name), tone, maker: makerOf(target.publisher),
-        onMaker: () => openMaker(target.publisher), kb: kbLabel(linkPreview?.decodedBytes), description: card?.description,
+        name, letter: letterOf(name), tone, maker, onMaker: () => openMaker(target.publisher, name),
+        meta: localId ? 'In your Library' : kbLabel(linkPreview?.decodedBytes), description: card?.description,
+        onShare: () => openShareDialog('link'),
       }),
       state === 'cant-run' ? cantRunPanel() : installPanel({
-        state: state === 'conflict' ? 'review' : state,
-        message: state === 'installing' ? `You can leave this page. The ${held?.action ?? 'install'} keeps going.`
-          : state === 'unknown' ? `peerd could not confirm whether the ${held?.action ?? 'install'} finished. Refresh to check before trying again.`
-            : state === 'failed' ? linkFailure : null,
+        state: state === 'conflict' ? 'review' : state, name, fresh: linkFresh,
+        message: state === 'installing' ? `You can leave this page. The ${held?.action ?? 'install'} keeps going.` : null,
+        failure: failure ? { action: 'install', hint: failure.hint } : null,
+        unknown: state === 'unknown' ? unknownLines(held?.action ?? 'install') : null,
         notice: linkNotice || null,
         error: rootAlert('link'),
-        primary,
+        primary, sharing: state === 'review' ? SHARING : null, onLibrary: toLibrary,
       }),
-      state === 'cant-run' ? null : safetyLines(),
+      // why checked: the page opens only after peerd checked every file of the link.
+      state === 'cant-run' ? null : safetyLines({ maker, checked: 'link' }),
       techView(list),
+      shareFor === 'link' ? shareView('link', { name, letter: letterOf(name), tone, address: target.address, maker }) : null,
     ]);
   };
 
@@ -1360,12 +1462,12 @@ export const DiscoverSection = (initialVnode) => {
     const offline = net?.kind === 'offline';
     const made = (offline ? offlineApps() : apps).filter(app => app.publisher === did);
     return m('.disc-home.disc-view.disc-page', { key: `maker:${did}` }, [
-      backLink({ onclick: goBack }),
+      backLink({ onclick: goBack, label: makerFrom?.name ?? 'Discover' }),
       makerHead({ title, letter: letterOf(title), tone: toneOf(did), saved: !!name }),
       m('.disc-section.disc-section--tight', [
         m('.type-label-strong', ['Apps from ', name ? m('bdi', name) : m('bdi.type-code.disc-maker-key', title)]),
         // why a line: a share link's maker often has no app that peers share.
-        made.length ? m('ul.disc-app-list', made.slice(0, makerLimit).map(app => appRow(appTileProps(app, offline))))
+        made.length ? m('ul.disc-app-list', made.slice(0, makerLimit).map(app => appRow(appTileProps(app, offline, true))))
           : m('p.type-body-sm.disc-footnote', MAKER_EMPTY),
       ]),
       made.length > makerLimit ? showMore(() => { focusTile(made[makerLimit]); makerLimit += EXPLORE_WINDOW; }) : null,
@@ -1402,7 +1504,7 @@ export const DiscoverSection = (initialVnode) => {
   return {
     oninit() {
       // why: only the fences (in-flight and unknown effects) outlive a mount,
-      // and an unknown one keeps its text, which says why install stays off.
+      // and an unknown one keeps its marker, so the page says why install stays off.
       // A settled outcome describes the Library as it was, and the user may
       // have deleted or updated the app there since, so the catalog decides.
       for (const id of Object.keys(busy)) if (!['installing', 'updating'].includes(busy[id]) && !unconfirmed.has(id)) delete busy[id];
@@ -1421,7 +1523,7 @@ export const DiscoverSection = (initialVnode) => {
           if (effects.link?.address === saved) { linkBusy = 'install'; void followLink(effects.link); }
         }
       } catch {
-        linkError = 'Could not read the pending install receipt. Reload before installing.';
+        linkError = 'peerd could not check an earlier install. Reload the page before you install.';
         linkBusy = 'receipt';
         shareOpen = true;
       }
@@ -1440,8 +1542,8 @@ export const DiscoverSection = (initialVnode) => {
     view(vnode) {
       attrs = vnode.attrs;
       if (viewEnabled && !attrs.enabled) { linkEpoch++; linkPreview = null; route = { page: 'root' }; }
-      // why the heading: Enable peer network went off while it saved, so
-      // focus fell to the body. Land on the new root, as home.js does.
+      // why the heading: Turn on went off while it saved, so focus fell to
+      // the body. Land on the new root, as home.js does.
       if (!viewEnabled && attrs.enabled) pendingFocus = { selector: 'h1', scroll: null, ifLost: true };
       viewEnabled = attrs.enabled;
       answerKey(attrs.openKey);

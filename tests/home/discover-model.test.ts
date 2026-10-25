@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  appCountLabel, bytesLabel, createEffects, installSteps, isFailure, kbLabel, keptCards, letterOf, libraryPeerApps,
-  libraryStatus, matchQuery, networkState, noSuggestionNote, pageState, peerCountLabel, pillFilter, rootView, savedContactNames,
-  shareLinkError, shortKey, tileAction, toneOf, TONES, updateOffer, wasmLabel,
+  appCountLabel, bytesLabel, createEffects, FAILED, failureHint, installSteps, isFailure, kbLabel, keptCards, letterOf,
+  libraryPeerApps, libraryStatus, matchQuery, networkState, noSuggestionNote, pageState, peerCountLabel, pillFilter, rootView,
+  savedContactNames, shareLinkError, shortKey, tileAction, toneOf, TONES, UNKNOWN, unknownLines, updateOffer, wasmLabel, yourApps,
 } from '../../extension/home/discover-model.js';
 import type { DwebApp } from '../../extension/home/discover-model.js';
 import { encodeDidKey } from '../../extension/shared/address/did.js';
@@ -59,8 +59,8 @@ describe('discover labels', () => {
   });
 
   test('counts and WebAssembly hints read as drawn', () => {
-    expect(peerCountLabel(1)).toBe('Connected to 1 peer');
-    expect(peerCountLabel(3)).toBe('Connected to 3 peers');
+    expect(peerCountLabel(1)).toBe('Connected to 1 person');
+    expect(peerCountLabel(3)).toBe('Connected to 3 people');
     expect(appCountLabel(1)).toBe('1 app shared');
     expect(appCountLabel(6)).toBe('6 apps shared');
     expect(wasmLabel(true)).toBe('Includes WebAssembly');
@@ -73,7 +73,7 @@ describe('discover labels', () => {
     const errorOf = (input: string) => {
       try { immutableAppRoot(input); return null; } catch (cause) { return shareLinkError((cause as Error).message); }
     };
-    expect(errorOf(`${address}/index.html`)).toBe('File paths are not supported. Paste the share link of the app itself.');
+    expect(errorOf(`${address}/index.html`)).toBe('This link points to one file inside an app. Paste the link to the whole app.');
     // Not a link, a leading space, no hash, no maker key, empty.
     for (const input of ['hello', ` ${address}`, address.slice(0, address.lastIndexOf('/')), `dwapp://content/${'a'.repeat(64)}`, '']) {
       expect(errorOf(input)).toBe('This is not a share link. Paste the whole link you were sent.');
@@ -130,8 +130,8 @@ describe('network and root state', () => {
       .toBe('Could not refresh your Library. Surprise me stays off until peerd can read it.');
     expect(libraryStatus({ ready: true, failed: false })).toBe(null);
     // The offline root offers neither Install nor Surprise me, so its lines name what it shows.
-    expect(libraryStatus({ ready: false, failed: true, offline: true }))
-      .toBe('Could not read your Library. Your apps from peers are not listed until peerd can read it.');
+    // An error says what failed, then what to do: the poll reads the Library again.
+    expect(libraryStatus({ ready: false, failed: true, offline: true })).toBe('peerd could not read your Library. Try again in a moment.');
     expect(libraryStatus({ ready: true, failed: true, offline: true })).toBe('Could not refresh your Library. This list may be out of date.');
     expect(libraryStatus({ ready: false, failed: false, offline: true })).toBe('Checking your Library…');
     expect(libraryStatus({ ready: true, failed: false, offline: true })).toBe(null);
@@ -149,14 +149,14 @@ describe('network and root state', () => {
 describe('tile and page states', () => {
   const card = { incompatible: false, busy: undefined, uncertain: false, installed: false, sameVersion: false, updatable: false, mine: false };
 
-  test('tile action ladder: can’t run, in flight, failed or unknown, update, open, review', () => {
-    expect(tileAction({ ...card, incompatible: true })).toEqual({ kind: 'status', text: 'Can’t run in this browser' });
+  test('tile action ladder: cannot run, in flight, failed or unknown, update, open, look at it', () => {
+    expect(tileAction({ ...card, incompatible: true })).toEqual({ kind: 'status', text: 'This browser cannot run it' });
     // The runtime flag rides the version on offer: an installed app of another version still opens.
     expect(tileAction({ ...card, incompatible: true, installed: true, updatable: true })).toEqual({ kind: 'open' });
     expect(tileAction({ ...card, incompatible: true, installed: true })).toEqual({ kind: 'open' });
     // The Library holds the very version the card flags: it can't run here either.
     expect(tileAction({ ...card, incompatible: true, installed: true, sameVersion: true }))
-      .toEqual({ kind: 'status', text: 'Can’t run in this browser' });
+      .toEqual({ kind: 'status', text: 'This browser cannot run it' });
     expect(tileAction({ ...card, busy: 'installing' })).toEqual({ kind: 'status', text: 'Installing…' });
     expect(tileAction({ ...card, busy: 'updating', installed: true })).toEqual({ kind: 'status', text: 'Updating…' });
     expect(tileAction({ ...card, busy: 'peerd could not install this app. Try again.' })).toEqual({ kind: 'review' });
@@ -200,13 +200,33 @@ describe('tile and page states', () => {
     expect(isFailure(undefined)).toBe(false);
     for (const word of ['installing', 'updating', 'installed']) expect(isFailure(word)).toBe(false);
     expect(isFailure('peerd could not install this app. Try again.')).toBe(true);
+    expect(isFailure(FAILED)).toBe(true);
+    expect(isFailure(UNKNOWN)).toBe(true);
   });
 
-  test('install steps for every state; "You are here" only on a current Review step', () => {
+  test('a failure hint: someone may be offline, or the browser cannot run it, with the host reason kept for Technical details', () => {
+    expect(failureHint(FAILED)).toEqual({ hint: 'The person who shares it may have gone offline. Try again in a moment.', runtime: null });
+    expect(failureHint(UNKNOWN)).toEqual({ hint: 'The person who shares it may have gone offline. Try again in a moment.', runtime: null });
+    expect(failureHint('Unsupported App runtime target: wasi.'))
+      .toEqual({ hint: 'This browser cannot run it. Technical details says why.', runtime: 'Unsupported App runtime target: wasi.' });
+  });
+
+  test('an unknown outcome stays neutral and says what to do next', () => {
+    expect(unknownLines('install')).toEqual({
+      status: 'peerd is not sure the install finished. It may still finish by itself.',
+      hint: 'Check again before you try to install it again.',
+    });
+    expect(unknownLines('update')).toEqual({
+      status: 'peerd is not sure the update finished. It may still finish by itself.',
+      hint: 'Check again before you try to update it again.',
+    });
+  });
+
+  test('install steps for every state; "You are here" only on a current first step', () => {
     const table = (state: Parameters<typeof installSteps>[0]) => installSteps(state).map(step => [step.state, step.sub]);
-    const install = 'peerd checks every file, then adds it to your Library';
-    const open = 'Opens in its own tab';
-    expect(installSteps('review').map(step => step.title)).toEqual(['Review', 'Install and share', 'Open']);
+    const install = 'peerd checks every file, then adds the app to your Library';
+    const open = 'It opens in its own tab';
+    expect(installSteps('review').map(step => step.title)).toEqual(['Look at it', 'Install', 'Open']);
     expect(table('review')).toEqual([['current', 'You are here'], ['pending', install], ['pending', open]]);
     expect(table('installing')).toEqual([['done', null], ['working', install], ['pending', open]]);
     expect(table('installed')).toEqual([['done', null], ['done', install], ['current', open]]);
@@ -251,14 +271,14 @@ describe('filters and contacts', () => {
     contacts: new Map([[ana, 'Ana']]),
   };
 
-  test('pills: All keeps every app, Updates and From contacts keep pending apps, Included is not a heard filter', () => {
+  test('pills: All keeps every app, Updates and From people you know keep pending apps, Comes with peerd is not a heard filter', () => {
     expect(pillFilter(apps, 'all', facts)).toEqual(apps);
     expect(pillFilter(apps, 'updates', facts).map(app => app.dwapp_id)).toEqual(['b', 'c']);
     expect(pillFilter(apps, 'contacts', facts).map(app => app.dwapp_id)).toEqual(['a', 'c']);
     expect(pillFilter(apps, 'included', facts)).toEqual([]);
   });
 
-  test('From contacts keys on the full did, never a matching short key', () => {
+  test('From people you know keys on the full did, never a matching short key', () => {
     const lookalike = `did:key:z6MkEvil${ana.slice(-8)}`;
     const rows = pillFilter([{ dwapp_id: 'x', publisher: lookalike }], 'contacts', { ...facts, pending: () => false });
     expect(rows).toEqual([]);
@@ -311,10 +331,36 @@ describe('filters and contacts', () => {
     expect([...grown.keys()]).toEqual(['card-0', 'card-49']);
   });
 
-  test('included search matches name and description without case', () => {
+  test('included search matches name and description without case, by any word of the query', () => {
     const items = [{ name: 'CSV Lab', description: 'Explore CSV tables' }, { name: 'Commons', description: 'Peer chat' }];
     expect(matchQuery(items, 'chat')).toEqual([items[1]]);
     expect(matchQuery(items, '  csv ')).toEqual([items[0]]);
     expect(matchQuery(items, '')).toEqual(items);
+    // A task, as the search label asks for: any longer word finds the app.
+    expect(matchQuery(items, 'chat with a friend')).toEqual([items[1]]);
+    expect(matchQuery(items, 'make tables or chat')).toEqual(items);
+    expect(matchQuery(items, 'a b')).toEqual([]);
+  });
+
+  test('Your apps: the Library apps, the most recently added first, at most `max`, with a total', () => {
+    const records = [
+      { id: 'old', name: 'Old app', createdAt: 100 },
+      { id: 'undated', name: 'Undated app' },
+      { id: 'new', name: 'New app', createdAt: 300 },
+      { id: 'peer', name: 'Peer app', createdAt: 200, dweb: { uri: 'peerd://p/1', dwapp_id: 'peer-app' } },
+      { id: 'commons', name: 'Commons', createdAt: 50, dweb: { seed: 'commons' } },
+      { id: 'linked', name: '  ', dweb: { uri: 'peerd://l/2' } },
+      { name: 'No id', createdAt: 999 },
+      { id: 'bad-time', name: 'Bad time', createdAt: Number.NaN },
+    ];
+    const all = yourApps(records, 10);
+    expect(all.total).toBe(7);
+    expect(all.apps.map(app => app.id)).toEqual(['new', 'peer', 'old', 'commons', 'undated', 'linked', 'bad-time']);
+    // The tone key matches the app's tile: Commons by its seed, a peer app by its dwapp_id.
+    expect(all.apps.map(app => app.toneKey)).toEqual(['new', 'peer-app', 'old', 'commons', 'undated', 'peerd://l/2', 'bad-time']);
+    expect(all.apps.find(app => app.id === 'linked')?.name).toBe('Unnamed app');
+    const few = yourApps(records, 2);
+    expect([few.apps.map(app => app.id), few.total]).toEqual([['new', 'peer'], 7]);
+    expect(yourApps([], 6)).toEqual({ apps: [], total: 0 });
   });
 });

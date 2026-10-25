@@ -371,9 +371,7 @@
 .disc-intro { display: flex; flex-direction: column; gap: 10px; padding-bottom: 4px; }
 .disc-intro h1 { margin: 0; }
 .disc-intro p { margin: 0; color: var(--secondary); max-width: 46ch; }
-.disc-head-block { display: flex; flex-direction: column; gap: 6px; }
-.disc-head-block h1, .disc-view > h1 { margin: 0; }
-.disc-head-block > span { display: inline-flex; align-items: center; gap: 8px; color: var(--secondary); }
+.disc-view > h1 { margin: 0; }
 .disc-section { display: flex; flex-direction: column; gap: 8px; }
 .disc-section--tight { gap: 4px; }
 .disc-btn { min-height: 40px; padding: 0 16px; }
@@ -386,6 +384,7 @@
 .disc-start-list { list-style: none; margin: 0; padding: 0; }
 .disc-start-row { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 18px 0; border-top: 1px solid var(--border); }
 .disc-start-row.is-open { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 12px; }
+.disc-start-view .disc-start-list > :last-child { border-bottom: 1px solid var(--border); }
 /* why the icon and text share one group: on a narrow column the button wraps
    under them, and the icon stays beside its title. */
 .disc-start-main { flex: 1 1 320px; min-width: 0; display: flex; align-items: center; gap: 16px; }
@@ -393,14 +392,17 @@
 .disc-start-icon { flex: none; width: 44px; height: 44px; border-radius: 50%; background: var(--elev2); color: var(--text); display: flex; align-items: center; justify-content: center; }
 .disc-start-text { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .disc-start-row.is-open .disc-start-text { flex: 1; }
-.disc-start-text > :last-child { color: var(--secondary); }
-.disc-start-text button.linklike { padding: 0; }
+.disc-start-text > :not(.type-heading) { color: var(--secondary); }
+.disc-start-small { margin-top: 4px; }
 .disc-start-action { flex: none; }
 .disc-start-note { flex: 1 1 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
 .disc-start-form { display: flex; flex-wrap: wrap; gap: 8px; }
 .disc-start-form input[type="text"] { flex: 1 1 260px; min-width: 0; min-height: 40px; }
 .disc-start-row.is-open > p { margin: 0; }
 .disc-start-form + p:not(.error) { color: var(--secondary); }
+.disc-note-box { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: var(--r3); background: var(--elev); }
+.disc-note-icon { flex: none; display: flex; color: var(--text); padding-top: 2px; }
+.disc-note-box p { margin: 0; color: var(--text); }
 
 /* Letter avatar: one letter on the app's or maker's brand tone. */
 .disc-letter { flex: none; display: flex; align-items: center; justify-content: center; color: var(--on-accent-aa); font-family: var(--font-display); font-weight: 700; line-height: 1; letter-spacing: -0.04em; }
@@ -408,6 +410,7 @@
 .disc-letter--page { width: 72px; height: 72px; border-radius: 18px; font-size: 32px; }
 .disc-letter--row { width: 48px; height: 48px; border-radius: 12px; font-size: 21px; }
 .disc-letter--person { width: 64px; height: 64px; border-radius: 50%; font-family: inherit; font-weight: 600; font-size: 27px; letter-spacing: 0; }
+.disc-letter--chip { width: 40px; height: 40px; border-radius: 10px; font-size: 18px; }
 
 /* Tiles share the Library's card skeleton, so the two home tabs read as one
    surface. */
@@ -424,7 +427,7 @@
 .disc-tile-meta { color: var(--secondary); }
 .disc-home .disc-maker-key { font-size: 12px; }
 .disc-tile-desc { margin: 0; overflow-wrap: anywhere; }
-.disc-home .disc-tile-flag { color: var(--accent-ink); font-weight: 600; }
+.disc-tile-desc.is-missing { color: var(--secondary); }
 .disc-tile-status { color: var(--secondary); }
 .disc-tile-action { min-height: 36px; padding: 0 16px; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
 .disc-actions { position: relative; z-index: 1; align-self: flex-start; display: flex; align-items: center; gap: 6px; margin-top: auto; }
@@ -449,23 +452,50 @@ button.disc-tile-open { display: block; max-width: 100%; padding: 0; border: 0; 
 .disc-pill:hover { color: var(--text); border-color: var(--border-strong); }
 .disc-pill[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
 .disc-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.disc-search { width: 100%; min-height: 42px; margin: 0; font-size: 14px; }
+/* why: the shared label style is an upper-case caption; Discover's labels are plain words. */
+.disc-home label { text-transform: none; letter-spacing: normal; color: var(--text); }
+.disc-search-field { display: flex; flex-direction: column; gap: 8px; }
+.disc-search { width: 100%; min-height: 44px; margin: 0; font-size: 14px; }
+
+/* Your apps: the Library's apps at the top of the network-on roots, each
+   with Open. Not tiles, so the tile classes stay off it. */
+.disc-yours { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+.disc-yours h2 { margin: 0; }
+.disc-yours-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 12px; max-width: 100%; }
+.disc-yours-item { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 10px 14px 10px 10px; border: 1px solid var(--border); border-radius: var(--r4); background: var(--elev); }
+.disc-home .disc-yours-name { flex: 1 1 auto; min-width: 0; max-width: 24ch; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.disc-yours-open { flex: none; min-height: 36px; padding: 0 12px; font-size: 13px; }
+.disc-yours-item > p { flex: 1 1 100%; margin: 0; }
+.disc-yours > button.linklike.disc-link-btn { min-height: 32px; padding: 0; }
+/* why one line that scrolls on a narrow column: six stacked cards push the
+   search far down. The padding keeps focus rings inside the scroll box. */
+@media (max-width: 480px) {
+  .disc-yours-list { flex-wrap: nowrap; overflow-x: auto; padding: 2px 2px 6px; }
+  .disc-yours-item { flex: none; }
+}
+button.linklike.disc-link-btn { min-height: 40px; padding: 0 4px; align-self: auto; }
 
 .disc-empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 12px; padding: 40px 16px; }
 .disc-empty--boxed { border: 1px dashed var(--border); border-radius: var(--r4); }
 .disc-empty h2 { margin: 0; }
+.disc-empty-waiting { display: flex; align-items: center; gap: 10px; }
 .disc-empty p { margin: 0; color: var(--secondary); max-width: 40ch; }
 .disc-empty-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 
 /* App page: back link, header, action panel with the install steps, safety
    lines and Technical details. */
-button.linklike.disc-back { align-self: flex-start; padding: 0; display: inline-flex; align-items: center; gap: 4px; text-decoration: none; }
+button.linklike.disc-back { align-self: flex-start; max-width: 100%; padding: 0; display: inline-flex; align-items: center; gap: 4px; text-decoration: none; }
+/* why an ellipsis: on a maker page Back names the app, which is peer text. */
+.disc-back bdi { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* why an offset ring: these link buttons have little or no padding, so the
    default ring sits on the text. The page opens with focus on Back. */
 .disc-home button.linklike:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .disc-back .disc-flip { display: inline-flex; transform: rotate(180deg); }
 .disc-app-head { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
-.disc-app-id { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+/* why a 160px basis: on a narrow column Share wraps under the name, and the
+   name stays beside its letter. */
+.disc-app-id { flex: 1 1 160px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+button.disc-share-open { flex: none; min-height: 40px; padding: 0 14px; display: inline-flex; align-items: center; gap: 8px; }
 .disc-app-title { margin: 0; overflow-wrap: anywhere; }
 .disc-home .disc-app-title { font-size: 22px; }
 button.linklike.disc-app-maker { padding: 0; font-size: 13px; text-align: left; align-self: flex-start; }
@@ -476,7 +506,9 @@ button.linklike.disc-app-maker { padding: 0; font-size: 13px; text-align: left; 
 .disc-panel { padding: 18px; border: 1px solid var(--border); border-radius: var(--r4); background: var(--elev); display: flex; flex-direction: column; gap: 14px; }
 .disc-panel p { margin: 0; }
 .disc-panel .error { font-size: 14px; }
-.disc-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.disc-panel-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.disc-panel-cta { display: flex; flex-direction: column; gap: 6px; }
+.disc-panel .disc-hint { color: var(--secondary); }
 /* why: after an install, focus moves to this line (never to Open). */
 .disc-installed:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .disc-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0; }
@@ -497,9 +529,10 @@ button.linklike.disc-app-maker { padding: 0; font-size: 13px; text-align: left; 
 .disc-step.is-unknown .disc-step-title { font-weight: 600; color: var(--text); }
 
 .disc-safety { gap: 12px; }
+.disc-safety h3 { margin: 0; }
 .disc-safety-row { display: flex; gap: 12px; align-items: flex-start; }
 .disc-safety-icon { flex: none; width: 32px; height: 32px; border-radius: 50%; background: var(--elev2); color: var(--text); display: flex; align-items: center; justify-content: center; }
-.disc-safety-text { padding-top: 6px; }
+.disc-safety-text { padding-top: 6px; min-width: 0; overflow-wrap: anywhere; }
 .disc-chip--strong { align-self: flex-start; margin-top: 4px; padding: 3px 10px; border: 1px solid var(--border-strong); border-radius: 999px; }
 
 button.linklike.disc-tech-toggle { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; align-self: flex-start; padding: 6px 0; }
@@ -531,6 +564,16 @@ button.linklike.disc-app-maker { max-width: 100%; }
 .disc-tile > .error, .disc-app-row-id > .error { margin: 0; }
 .disc-app-row-action { position: relative; z-index: 1; flex: none; }
 .disc-app-row .disc-tile-open::after { border-radius: var(--r2); }
+/* Share dialog: the shared modal shell, sized like the frame. */
+.disc-share.peerd-modal { width: min(500px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; box-sizing: border-box; padding: 24px; border-radius: var(--r4); display: flex; flex-direction: column; gap: 14px; }
+.disc-share p { margin: 0; overflow-wrap: anywhere; }
+.disc-share-head { display: flex; align-items: center; gap: 12px; }
+.disc-share-head h2 { flex: 1; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.disc-share button.icon { flex: none; width: 40px; height: 40px; }
+.disc-share-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.disc-share-row input { flex: 1 1 260px; min-width: 0; box-sizing: border-box; min-height: 44px; margin: 0; font: 12px/1.4 var(--font-mono); }
+.disc-share-row .disc-primary { flex: none; min-height: 44px; }
+.disc-share-status { display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
 
 /* ── The Network section (home page, dweb preview only) ──────────────────────
    The peers/network-info view + the animated radial peer graph. Peer dots carry

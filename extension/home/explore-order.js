@@ -8,23 +8,63 @@ const rank = (value, seed) => {
   return hash;
 };
 
+// why words, not the whole query: the search asks "What do you want to do?",
+// so people type a task ("split a bill"). An app matches when its text holds
+// any word of 3 or more letters. A query of only shorter words matches as typed.
+// why the filler list: a sentence's small words ("the", "with") are in
+// almost every app's text, so they would match every app.
+const FILLER = new Set(['the', 'and', 'for', 'with', 'you', 'your', 'that', 'this', 'want', 'what', 'did', 'app', 'apps',
+  'can', 'how', 'who', 'are', 'from', 'some', 'need']);
+/** @param {string} query @returns {string[]} */
+export const searchWords = (query) => {
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const long = words.filter(word => [...word].length >= 3 && !FILLER.has(word));
+  return long.length ? long : words.length ? [words.join(' ')] : [];
+};
+/** @param {string} text @param {string[]} words */
+export const matchesWords = (text, words) => {
+  const haystack = text.toLowerCase();
+  return !words.length || words.some(word => haystack.includes(word));
+};
+
+// why not the full did in the text: every one holds "did:key:z6Mk", so any
+// query with "key" would match every app. The maker matches by the short key
+// "Made by" shows, or by the whole did as the query.
 /**
- * One publisher per round. A seed changes only on explicit Shuffle; polling
- * cannot reshuffle existing cards. DID diversity is not Sybil resistance.
+ * How many words of the query an app matches.
+ * @param {{publisher?:string,name?:string,slug?:string,description?:string}} app
+ * @param {string[]} words @param {string} whole the trimmed query, lower case
+ * @param {ReadonlyMap<string,string>|undefined} names
+ */
+const matchCount = (app, words, whole, names) => {
+  const publisher = (app.publisher ?? '').toLowerCase();
+  if (publisher && whole === publisher) return words.length;
+  const text = `${app.name ?? ''} ${app.slug ?? ''} ${names?.get(app.publisher ?? '') ?? ''} ${app.description ?? ''}`.toLowerCase();
+  const key = publisher.slice(-8);
+  return words.filter(word => text.includes(word) || (!!key && word === key)).length;
+};
+
+/**
+ * One publisher per round. The seed is fixed for a visit; polling cannot
+ * reshuffle existing cards. DID diversity is not Sybil resistance. With a
+ * query, an app that matches more of its words comes first.
  * `names`: saved contact names by full did, so a search finds the maker
  * name a tile shows.
  * @template {{dwapp_id?:string,publisher?:string,name?:string,slug?:string,description?:string}} T
  * @param {T[]} apps @param {{query?:string, seed?:number, names?:ReadonlyMap<string,string>}} [options]
  */
 export const exploreOrder = (apps, { query = '', seed = 0, names } = {}) => {
-  const search = query.trim().toLowerCase();
+  const words = searchWords(query);
+  const whole = query.trim().toLowerCase();
   /** @type {Map<string,T[]>} */ const groups = new Map();
+  /** @type {Map<string,number>} */ const hits = new Map();
   const seen = new Set();
   for (const app of apps) {
     if (!app.dwapp_id || seen.has(app.dwapp_id)) continue;
     seen.add(app.dwapp_id);
-    const text = `${app.name ?? ''} ${app.slug ?? ''} ${app.publisher ?? ''} ${names?.get(app.publisher ?? '') ?? ''} ${app.description ?? ''}`;
-    if (search && !text.toLowerCase().includes(search)) continue;
+    const count = matchCount(app, words, whole, names);
+    if (words.length && !count) continue;
+    hits.set(app.dwapp_id, count);
     const publisher = app.publisher || 'unspecified';
     const group = groups.get(publisher) ?? [];
     group.push(app); groups.set(publisher, group);
@@ -43,7 +83,8 @@ export const exploreOrder = (apps, { query = '', seed = 0, names } = {}) => {
     }
     publishers = next;
   }
-  return ordered;
+  // why a stable sort: ties keep the seeded order.
+  return ordered.sort((a, b) => (hits.get(b.dwapp_id ?? '') ?? 0) - (hits.get(a.dwapp_id ?? '') ?? 0));
 };
 
 export const SURPRISE_HISTORY_LIMIT = 512;

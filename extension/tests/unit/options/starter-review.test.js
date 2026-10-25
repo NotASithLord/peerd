@@ -12,7 +12,7 @@ const mount = (component, attrs) => { const root = document.createElement('div')
 const button = (root, text) => [...root.querySelectorAll('button')].find(node => node.textContent === text);
 
 describe('packaged starters', () => {
-  it('actual Settings shell mounts ordinary transfer and remounts each starter review', async () => {
+  it('actual Settings shell mounts ordinary transfer and remounts each starter review under its own title', async () => {
     const originalParam = m.route.param;
     /** @type {string|undefined} */ let starter;
     m.route.param = () => starter;
@@ -24,39 +24,56 @@ describe('packaged starters', () => {
         return message.type === 'import/inspect' ? {ok:true,summary:{kind:'app',size:93,fileCount:4}} : {ok:true};
       } });
       const root = view.root;
+      const title = () => root.querySelector('.options-page > h2')?.textContent;
       expect(!!root.querySelector('#exppass')).toBe(true);
+      expect(title()).toBe('Backup & restore');
       starter = 'csv-lab'; await flush();
-      await until(() => !!button(root, 'Apply: add local copy'));
+      await until(() => !!button(root, 'Add to Library'));
       expect(root.textContent).toContain('CSV Lab');
+      // Discover's Try opens this page, and it only adds the app.
+      expect(title()).toBe('Try an app');
       const first = calls.filter(call => call.type === 'import/inspect')[0].envelope;
       starter = 'wasm-image'; await flush();
-      await until(() => !!button(root, 'Apply: add local copy'));
+      await until(() => !!button(root, 'Add to Library'));
       expect(root.textContent).toContain('WebAssembly Image Lab');
       expect(calls.filter(call => call.type === 'import/inspect').length).toBe(2);
       expect(calls.filter(call => call.type === 'import/inspect')[1].envelope === first).toBe(false);
       starter = undefined; await flush();
       expect(!!view.root.querySelector('#exppass')).toBe(true);
+      expect(title()).toBe('Backup & restore');
       expect(calls.some(call => call.type === 'import/apply')).toBe(false);
     } finally { try { view?.close(); } finally { m.route.param = originalParam; } }
   });
-  it('Options inspects packaged data and requires Apply, then a separate Library action', async () => {
+  it('after an add peerd confirms, Go to Library leads and the line says that another add makes a second copy', async () => {
+    const view = mount(StarterReview, { starter:'csv-lab', send:async (/** @type {{type:string}} */ message) =>
+      message.type === 'import/inspect' ? {ok:true,summary:{kind:'app',size:2,fileCount:2}} : {ok:true,kind:'app',id:'app-copy'} });
+    try {
+      await until(() => !!button(view.root, 'Add to Library'));
+      expect(button(view.root, 'Go to Library')?.classList.contains('secondary')).toBe(true);
+      button(view.root, 'Add to Library')?.click(); await flush();
+      expect(view.root.querySelector('[role="status"]')?.textContent)
+        .toBe('Added to your Library. Open it from there. If you add it again, you get a second copy.');
+      expect(button(view.root, 'Go to Library')?.classList.contains('secondary')).toBe(false);
+    } finally { view.close(); }
+  });
+  it('Options inspects packaged data and requires Add to Library, then a separate Library action', async () => {
     const calls = /** @type {any[]} */ ([]);
     const view = mount(StarterReview, { starter:'wasm-image', send:async (/** @type {any} */ message) => {
       calls.push(message);
       return message.type === 'import/inspect' ? {ok:true,summary:{kind:'app',size:93,fileCount:4}} : {ok:true,kind:'app',id:'app-copy'};
     } });
     try {
-      await until(() => !!button(view.root, 'Apply: add local copy'));
+      await until(() => !!button(view.root, 'Add to Library'));
       expect(calls.map(call => call.type)).toEqual(['import/inspect']);
-      button(view.root, 'Apply: add local copy')?.click(); await flush();
+      button(view.root, 'Add to Library')?.click(); await flush();
       expect(calls.map(call => call.type)).toEqual(['import/inspect','import/apply']);
       expect(calls[1].envelope).toBe(calls[0].envelope);
-      expect(button(view.root, 'Apply: add local copy')).toBe(undefined);
-      expect(view.root.textContent).toContain('Local copy added');
-      expect(!!button(view.root, 'View in Library')).toBe(true);
+      expect(button(view.root, 'Add to Library')).toBe(undefined);
+      expect(view.root.textContent).toContain('Added to your Library.');
+      expect(!!button(view.root, 'Go to Library')).toBe(true);
     } finally { view.close(); }
   });
-  it('an in-flight Apply cannot be duplicated by another click', async () => {
+  it('an in-flight Add to Library cannot be duplicated by another click', async () => {
     let applied = 0;
     /** @type {(value:any)=>void} */ let release = () => {};
     const view = mount(StarterReview, { starter:'csv-lab', send:async (/** @type {any} */ message) => {
@@ -64,14 +81,35 @@ describe('packaged starters', () => {
       applied++; return new Promise(resolve => { release = resolve; });
     } });
     try {
-      await until(() => !!button(view.root, 'Apply: add local copy'));
-      const apply = button(view.root, 'Apply: add local copy');
+      await until(() => !!button(view.root, 'Add to Library'));
+      const apply = button(view.root, 'Add to Library');
       apply?.click(); apply?.click(); await flush();
       expect(applied).toBe(1);
       expect(button(view.root, 'Adding…')?.disabled).toBe(true);
       release({ok:true,kind:'app',id:'app-copy'}); await flush();
-      expect(view.root.textContent).toContain('Local copy added');
+      expect(view.root.textContent).toContain('Added to your Library.');
     } finally { release({ok:false,outcomeKnown:false}); view.close(); }
+  });
+  it('says what the app is in plain words, with no package jargon; a failure says what failed, then what to do', async () => {
+    /** @param {unknown} inspect */
+    const reviewOf = (inspect) => mount(StarterReview, { starter:'csv-lab', send:async (/** @type {{type:string}} */ message) =>
+      message.type === 'import/inspect' ? inspect : {ok:false,error:'import-rejected'} });
+    const view = reviewOf({ok:true,summary:{kind:'app',size:7920,fileCount:5}});
+    try {
+      await until(() => !!button(view.root, 'Add to Library'));
+      const text = view.root.textContent ?? '';
+      expect(view.root.querySelector('h3')?.textContent).toBe('CSV Lab');
+      expect(text).toContain('Comes with peerd. It runs on this device and needs no network.');
+      for (const jargon of ['Peerd', 'App', 'bundle bytes', 'files;', 'packaged', 'local copy']) expect(text.includes(jargon)).toBe(false);
+      button(view.root, 'Add to Library')?.click(); await flush();
+      expect(view.root.querySelector('[role="alert"]')?.textContent).toBe('peerd could not add the app to your Library. Reload the page, then try again.');
+    } finally { view.close(); }
+    const unchecked = reviewOf({ok:false,error:'raw inspection text'});
+    try {
+      await until(() => !!unchecked.root.querySelector('[role="alert"]'));
+      expect(unchecked.root.querySelector('[role="alert"]')?.textContent).toBe('peerd could not check this app. Reload the page, then try again.');
+      expect(button(unchecked.root, 'Add to Library')).toBe(undefined);
+    } finally { unchecked.close(); }
   });
   it('missing, malformed, rejected and unknown apply replies clear the payload without claiming failure or retrying', async () => {
     for (const result of [null, undefined, {ok:true}, {ok:true,kind:'app'}, {ok:true,kind:'app',id:''}, {ok:false,outcomeKnown:false}, 'throw']) {
@@ -81,10 +119,10 @@ describe('packaged starters', () => {
         applied++; if (result === 'throw') throw new Error('lost'); return result;
       } });
       try {
-        await until(() => !!button(view.root, 'Apply: add local copy'));
-        button(view.root, 'Apply: add local copy')?.click(); await flush();
+        await until(() => !!button(view.root, 'Add to Library'));
+        button(view.root, 'Add to Library')?.click(); await flush();
         expect(applied).toBe(1);
-        expect(button(view.root, 'Apply: add local copy')).toBe(undefined);
+        expect(button(view.root, 'Add to Library')).toBe(undefined);
         expect(view.root.textContent).toContain('Check your Library');
         expect(view.root.textContent?.includes('starter was not added')).toBe(false);
       } finally { view.close(); }

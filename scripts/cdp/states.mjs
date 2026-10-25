@@ -4289,7 +4289,7 @@ export const STATES = [
         rec.check('Discover enable persists only network participation, not agent work',
           optedIn?.dwebEnabled === true && optedIn.dwebAgentEnabled === false, JSON.stringify(optedIn));
         // Discover reads status once the choice lands: connected, looking or offline.
-        const statusLine = '.disc-status-live[role="status"], .disc-head-block [role="status"]';
+        const statusLine = '.disc-status-live[role="status"], .disc-empty-waiting [role="status"]';
         const statusVisible = await waitFor(() => evalIn(page,
           `!!document.querySelector(${JSON.stringify(statusLine)})`),
         { budgetMs: 15_000, pollMs: 50 });
@@ -4302,7 +4302,7 @@ export const STATES = [
         })`);
         rec.check('connection status is separate from saved consent and leaves controls usable',
           !!statusVisible && !consentUi.enableOffered && consentUi.controls.length > 0
-            && /^(Connected to \d+ peers?|Looking for peers…|Peer network is offline)$/.test(consentUi.status ?? ''),
+            && /^(Connected to \d+ (people|person)|Looking for people who share apps…|Peer network is offline)$/.test(consentUi.status ?? ''),
           JSON.stringify(consentUi));
         await rec.shotPage('discover-network-enabled', page);
         await page.send('Page.reload', { ignoreCache: true });
@@ -4918,10 +4918,11 @@ export const STATES = [
     name: narrow ? 'home-explore-narrow' : 'home-explore', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
-      const { flow } = discoverSurface();
+      const { flow, phase2 } = discoverSurface();
       const page = await openExtPage(ctx, 'tests/fixtures/explore.html');
       try {
-        await page.send('Emulation.setDeviceMetricsOverride', {width:narrow ? 320 : 960,height:narrow ? 1200 : 760,deviceScaleFactor:1,mobile:false});
+        // why 1400 narrow: the Your apps row and the search label sit above the one-column tiles.
+        await page.send('Emulation.setDeviceMetricsOverride', {width:narrow ? 320 : 960,height:narrow ? 1400 : 760,deviceScaleFactor:1,mobile:false});
         const ready = await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 3`), {budgetMs:8000,pollMs:80});
         const fullView = await evalIn(page, `(() => {
           const cards = [...document.querySelectorAll('.disc-card')];
@@ -4933,17 +4934,18 @@ export const STATES = [
         rec.check('Explore renders all publisher claims including legacy unknown in full view', ready === true && fullView === true);
         await rec.visualPage(narrow ? 'home-explore-narrow' : 'home-explore', page);
         if (flow) {
+          // why the tree's own label: the merge-base tree renders its own words.
           const pick = (label) => evalIn(page, `(async () => {
             [...document.querySelectorAll('.disc-pill')].find(pill => pill.textContent === ${JSON.stringify(label)}).click();
             (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
             return [...document.querySelectorAll('.disc-tile-name')].map(node => node.textContent);
           })()`, true);
-          rec.check('From contacts keeps only the saved contact’s app',
-            JSON.stringify(await pick('From contacts')) === JSON.stringify(['Field notes']));
+          rec.check('From people you know keeps only the saved contact’s app',
+            JSON.stringify(await pick(phase2 ? 'From people you know' : 'From contacts')) === JSON.stringify(['Field notes']));
           rec.check('Updates is empty while every installed app is current', (await pick('Updates')).length === 0
             && await evalIn(page, `document.body.textContent.includes('No matching apps')`));
-          const included = await pick('Included');
-          rec.check('Included lists both packaged starters and Commons',
+          const included = await pick(phase2 ? 'Comes with peerd' : 'Included');
+          rec.check('Comes with peerd lists both packaged starters and Commons',
             included.length === 3 && included.includes('Peerd-to-Peerd Commons'));
           rec.check('All restores every shared app', (await pick('All')).length === 3);
           rec.check('Explore controls and cards fit the viewport',
@@ -4998,8 +5000,10 @@ export const STATES = [
         if (!await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 3`), {budgetMs:8000,pollMs:80})) {
           throw new Error('Explore did not render');
         }
+        // why the tree's own label: the merge-base tree renders its own words.
+        const label = discoverSurface().phase2 ? 'Comes with peerd' : 'Included';
         await evalIn(page, `(async () => {
-          [...document.querySelectorAll('.disc-pill')].find(pill => pill.textContent === 'Included').click();
+          [...document.querySelectorAll('.disc-pill')].find(pill => pill.textContent === ${JSON.stringify(label)}).click();
           (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
         })()`, true);
         // why wait for an enabled Commons action: it stays off until the Library read lands.
@@ -5205,6 +5209,10 @@ export const STATES = [
         rec.check('Library and Discover render both committed warning details',
           warningText.includes('security audit entry could not be written')
             && (warningText.match(/Older shared bytes will be cleaned up/g) ?? []).length === 2,
+          JSON.stringify({ discoverWarning, warningLayout }));
+        // why its own check: only the Library says the words above.
+        rec.check('Discover says in plain words that the security log missed the update',
+          (warningLayout?.texts?.[1] ?? '').includes('peerd could not add it to the security log.'),
           JSON.stringify({ discoverWarning, warningLayout }));
         rec.check('combined warning statuses fit the narrow viewport',
           warningLayout?.documentWidth <= warningLayout?.viewportWidth

@@ -171,7 +171,7 @@ try {
       return true;
     })()`);
   }
-  await click('Enable peer network');
+  await click('Turn on');
   const receiver = await until('actual offscreen network active', async () => { const r = await rpc(ctx.page, { type: 'dweb/distributed/info' }); evidence.lastNetworkInfo = r; evidence.rendezvousTunnels = tunnels; return r?.running && r.did && r.rendezvous === 'up' ? r : null; });
   if (process.env.P2P_ACTIVATION_RACE === '1') {
     evidence.activationDemand = await evaluate(ctx.page, `(() => {
