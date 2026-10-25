@@ -6691,7 +6691,11 @@ export const STATES = [
     responder: null,
     async run(ctx, rec) {
       const base = process.env.PEERD_VISUAL_BASE_RENDER === '1';
-      const warning = 'peerd could not confirm whether the starter was added. Check your Library before reviewing another copy.';
+      const phase2 = discoverSurface().phase2;
+      const applyLabel = phase2 ? 'Add to Library' : 'Apply: add local copy';
+      const warning = phase2
+        ? 'peerd is not sure the app was added. Check your Library before you add it again.'
+        : 'peerd could not confirm whether the starter was added. Check your Library before reviewing another copy.';
       const title = 'Confirm actions: ON - asks when required. Reads and quick compute can run without asking.';
       const modelCallsBefore = ctx.modelCallCount();
       await chooseFixtureNetwork(ctx, false);
@@ -6708,7 +6712,7 @@ export const STATES = [
         const ready = await waitFor(() => evalIn(page, `(() => {
           'use strict';
           const apply = document.querySelector('.starter-review > button:first-of-type');
-          return apply?.textContent === 'Apply: add local copy' && !apply.disabled
+          return apply?.textContent === ${JSON.stringify(applyLabel)} && !apply.disabled
             && JSON.stringify(window.__starterFixtureCalls) === '["import/inspect"]';
         })()`), { budgetMs: 8_000, pollMs: 80 });
         if (!ready) throw new Error('The packaged starter inspection did not settle');
@@ -6717,18 +6721,18 @@ export const STATES = [
         }
         const unknown = await waitFor(() => evalIn(page, `(() => {
           'use strict';
-          const alert = document.querySelector('.starter-review [role="alert"]');
+          const alert = document.querySelector(${JSON.stringify(`.starter-review [role="${phase2 ? 'status' : 'alert'}"]`)});
           if (!alert) return null;
           return { text: alert.textContent, calls: window.__starterFixtureCalls,
             apply: [...document.querySelectorAll('.starter-review button')]
-              .some(button => button.textContent === 'Apply: add local copy') };
+              .some(button => button.textContent === ${JSON.stringify(applyLabel)}) };
         })()`), { budgetMs: 8_000, pollMs: 80 });
         rec.observe('actual starter warning', unknown);
         rec.check('one real inspection and one refused Apply leave no Apply control',
           unknown?.apply === false
             && JSON.stringify(unknown.calls) === '["import/inspect","import/apply"]', JSON.stringify(unknown));
         rec.check('the starter outcome remains unconfirmed',
-          unknown?.text?.includes('could not confirm') === true
+          unknown?.text?.includes(phase2 ? 'not sure the app was added' : 'could not confirm') === true
             && !unknown.text.includes('starter was not added'), JSON.stringify(unknown));
         if (!base) rec.check('the starter warning gives no Refresh or replay assurance', unknown?.text === warning);
         // why: this existing fixture inspects real packaged bytes but has no mutation authority.
@@ -10339,13 +10343,16 @@ export const STATES = [
       try {
         options = await openWidePage(ctx, 'options/options.html#!/transfer?starter=csv-lab', { ready: '.starter-review' });
         const apply = '.starter-review > button:first-of-type';
+        const phase2 = discoverSurface().phase2;
+        const applyLabel = phase2 ? 'Add to Library' : 'Apply: add local copy';
+        const installedText = phase2 ? 'Added to your Library.' : 'Local copy added.';
         const reviewReady = await waitFor(() => evalIn(options,
-          `document.querySelector(${JSON.stringify(apply)})?.textContent.trim() === 'Apply: add local copy'
+          `document.querySelector(${JSON.stringify(apply)})?.textContent.trim() === ${JSON.stringify(applyLabel)}
             && document.querySelector(${JSON.stringify(apply)}).disabled === false`));
         if (!reviewReady) throw new Error('The packaged CSV Lab review is not ready');
         await clickAndSyncRedraw(options, apply);
         const installed = await waitFor(() => evalIn(options,
-          `document.querySelector('.starter-review')?.innerText.includes('Local copy added.')`));
+          `document.querySelector('.starter-review')?.innerText.includes(${JSON.stringify(installedText)})`));
         rec.check('the real packaged CSV Lab copy is installed', installed === true);
         if (!installed) throw new Error('The CSV Lab Apply outcome is not known');
         const listed = await rpc(ctx.page, { type: 'apps/list' });
