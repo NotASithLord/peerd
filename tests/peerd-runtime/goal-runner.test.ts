@@ -583,6 +583,23 @@ describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
     expect(calls.length).toBe(1);
   });
 
+  it.each([
+    ['the agent took no action for 2 turns', true],
+    ['a turn failed', false],
+  ] as const)('the second idle continuation ends the run with the reason "%s"', async (reason, ok) => {
+    const ends: any[] = [];
+    let turns = 0;
+    const runner = makeGoalRunner({
+      runTurn: async () => ({ ok: ++turns < 3 || ok, toolCalls: 0 }),
+      onRunEnd: (_sid, info) => ends.push(info),
+      maxIterations: 20,
+    });
+    await runner.start({ sessionId: 's', goal: 'g' });
+    await settle(() => ends.length > 0);
+    expect(turns).toBe(3);
+    expect(ends).toEqual([{ phase: 'halted', summary: null, reason }]);
+  });
+
   it('fires onRunEnd once on a terminal phase, carrying phase/summary', async () => {
     const ends: any[] = [];
     let runner: ReturnType<typeof makeGoalRunner>;

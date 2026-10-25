@@ -292,7 +292,8 @@ export const makeGoalRunner = ({
         run.idle = !first && outcome?.toolCalls === 0 ? run.idle + 1 : 0;
         if (outcome && (outcome.ok === false || outcome.stopReason === 'aborted' || run.idle === 2)) {
           run.halted = true;
-          run.lastError = run.idle === 2 || outcome.stopReason === 'aborted' ? null : 'a turn failed';
+          run.lastError = outcome.stopReason === 'aborted' ? null
+            : outcome.ok === false ? 'a turn failed' : 'the agent took no action for 2 turns';
           break;
         }
         if (alive()) await persist(run);
