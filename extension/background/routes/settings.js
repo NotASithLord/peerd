@@ -34,23 +34,22 @@ export const makeSettingsRoutes = (deps) => {
       if (!(await awaitSettings())) return { ok: false, error: 'settings-unavailable' };
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       const names = await vault.listSecretNames();
-      if (names.length > 0
-          && (typeof passphrase !== 'string' || passphrase.length < EXPORT_PASSPHRASE_MIN_LENGTH)) {
+      const networkEnabled = !!dwebTransfer && settingsStore.get().dwebEnabled === true;
+      if (names.length > 0 && (typeof passphrase !== 'string' || passphrase.length < EXPORT_PASSPHRASE_MIN_LENGTH)) {
         // A backup may unlock both stored credentials and a permanent peer identity.
         return { ok: false, error: 'passphrase-required' };
       }
-      /** @type {Record<string, string>} */
-      const secrets = {};
+      if (dwebTransfer && !networkEnabled && names.some((/** @type {string} */ name) => name.startsWith('distributed/identity/')))
+        return { ok: false, error: 'identity-export-network-off' };
+      /** @type {Record<string, string>} */ const secrets = {};
       for (const name of names.filter((/** @type {string} */ candidate) => !isCustodySecretName(candidate))) {
         const value = await vault.getSecret(name);
         if (typeof value === 'string') secrets[name] = value;
       }
       let dweb = null;
-      try {
-        dweb = dwebTransfer ? await dwebTransfer.exportRecord(passphrase) : null;
-      } catch {
-        // Once a local identity exists, omitting it would create a backup that
-        // looks successful but cannot restore the user's permanent did.
+      try { dweb = networkEnabled ? await dwebTransfer.exportRecord(passphrase) : null; }
+      catch {
+        // why: never omit a local identity from a successful backup.
         return { ok: false, error: 'identity-export-failed' };
       }
       const payload = await buildExport({

@@ -73,7 +73,13 @@ export async function* callOpenAi(args) {
     _sleep = abortableSleep,
   } = args;
 
-  const body = toOpenAiBody({ model, system, messages, tools, maxTokens });
+  // why: the direct OpenAI API refuses `max_tokens` for gpt-5.x and o-series
+  // models (400 "Use 'max_completion_tokens' instead") and accepts the new
+  // field on every chat model. The shared formatter keeps `max_tokens` because
+  // OpenRouter, GLM and Ollama still expect it, so the rename lives here only.
+  const { max_tokens: outputLimit, ...formatted } = /** @type {Record<string, unknown>} */ (
+    toOpenAiBody({ model, system, messages, tools, maxTokens }));
+  const body = { ...formatted, max_completion_tokens: outputLimit };
 
   for (let attempt = 1; ; attempt++) {
     const res = await openInitialResponseWithRetry(

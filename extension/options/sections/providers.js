@@ -77,6 +77,21 @@ const providerLogo = (name) => {
   return m('span.provider-logo.logo-generic', (String(name)[0] ?? '?').toUpperCase());
 };
 
+// why: the test route reports an answered request as `http-<status>` (a 401
+// arrives as `invalid-key`). An answer is not a reachability failure, so name
+// the status and the next step; only a transport error reads "couldn't reach".
+/** @param {unknown} error @returns {string | null} */
+const providerAnswerCopy = (error) => {
+  const status = Number(/^http-(\d{3})$/.exec(String(error ?? ''))?.[1] ?? 0);
+  if (!status) return null;
+  if (status === 402 || status === 429) {
+    return `The provider refused the request (${status}). Check your plan, credit or rate limit, then test again.`;
+  }
+  if (status === 403) return `The provider refused this key (${status}). Check its permissions and model access.`;
+  if (status >= 500) return `The provider is having problems (${status}). Try again later.`;
+  return `The provider rejected the test request (${status}). Check your account on the provider’s site, then test again.`;
+};
+
 export const ProvidersSection = {
   /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
   oninit(vnode) {
@@ -122,8 +137,14 @@ export const ProvidersSection = {
 
   // Fetch per-provider key status (which providers have a key stored).
   // Called on mount and after any key save so the badges stay accurate.
-  /** @param {{ state: any, attrs: { state: any, send: Send } }} vnode */
-  async loadProviderStatus(vnode) {
+  // why `probe`: the kernel admits one provider/test at a time, so a refresh
+  // that a key test follows at once (the post-save path) must not spend that
+  // slot on a keyless daemon re-probe; saving a key changes no daemon.
+  /**
+   * @param {{ state: any, attrs: { state: any, send: Send } }} vnode
+   * @param {{ probe?: boolean }} [options]
+   */
+  async loadProviderStatus(vnode, { probe = true } = {}) {
     const generation = vnode.state.providerStatusGeneration + 1;
     vnode.state.providerStatusGeneration = generation;
     vnode.state.providerStatusError = false;
@@ -142,7 +163,7 @@ export const ProvidersSection = {
       // (no card message) so an unused provider doesn't shout a red error on
       // mount; clicking Test still gives the full message.
       for (const p of r.providers) {
-        if (p.keyless && p.liveModels) ProvidersSection.probeConnection(vnode, p.name);
+        if (probe && p.keyless && p.liveModels) ProvidersSection.probeConnection(vnode, p.name);
       }
       return r;
     } catch {
@@ -196,7 +217,7 @@ export const ProvidersSection = {
     const provider = state.providers ?? { current: 'anthropic', hasKey: false };
     const providerModel = state.settings?.providerModel ?? '';
     const actorExecution = state.capabilities?.actorExecution;
-    const actorUnavailable = actorExecution && actorExecution.status !== 'available';
+    const actorUnavailable = actorExecution && !['available', 'not-started'].includes(actorExecution.status);
 
     /**
      * @param {{ type: string } & Record<string, any>} message
@@ -250,16 +271,14 @@ export const ProvidersSection = {
           ui.keyEditing[name] = false;   // collapse the editor back to the badge
           ui.keyMsg[name] = { ok: true, text: 'Saved; encrypted in the vault.' };
           // Refresh the badges so this provider flips to "Key saved".
-          await ProvidersSection.loadProviderStatus({ attrs: { state, send }, state: ui });
-          // Auto-verify so the user never has to click Test (the ask). For
-          // OpenRouter the model panel below loads the live catalog; that load
-          // IS the verification (and populates the curation list).
+          await ProvidersSection.loadProviderStatus({ attrs: { state, send }, state: ui }, { probe: false });
+          // Auto-verify so the user never has to click Test (the ask). The
+          // OpenRouter model panel below also reloads the live catalog for the
+          // curation list; that catalog is public, so only the test verifies.
           if (name === 'openrouter') ui.orReloadToken = (ui.orReloadToken ?? 0) + 1;
           m.redraw();
-          if (name !== 'openrouter') {
-            ui.keyBusy[name] = false;
-            await testKey(name);
-          }
+          ui.keyBusy[name] = false;
+          await testKey(name);
         } else {
           const uncertain = isUnknownMutationOutcome(reply);
           ui.keyUncertain[name] = uncertain;
@@ -317,7 +336,9 @@ export const ProvidersSection = {
               : reply?.error === 'no-models' ? 'Ollama is running, but it has no models installed. Get one with: ollama pull qwen3:8b'
               : name === 'ollama' && reply?.error === 'unreachable'
                 ? 'Couldn’t reach Ollama. Start it with: ollama serve'
-              : 'Couldn’t reach the provider.',
+              : reply?.code === 'feature-route-concurrency-exhausted'
+                ? 'Another provider check is running. Test again in a moment.'
+              : (providerAnswerCopy(reply?.error) ?? 'Couldn’t reach the provider.'),
           };
       if (name === 'ollama' && (reply?.ok || reply?.reachable)) ui.modelOptionsKey = '';
       m.redraw();
@@ -451,6 +472,7 @@ export const ProvidersSection = {
                   type: 'password',
                   autocomplete: 'off',
                   spellcheck: false,
+                  'aria-label': `${p.label} API key`,
                   placeholder: keyPlaceholder(p.name),
                   value: draft,
                   disabled: busy,
@@ -476,8 +498,14 @@ export const ProvidersSection = {
             ])
           : null,
         // Card-level message (Save OR Test) — shows whether the form is open or
-        // collapsed (Test runs while the card is collapsed).
-        msg ? m(`p.key-msg${msg.ok ? '.ok' : '.err'}`, msg.text) : null,
+        // collapsed (Test runs while the card is collapsed). Always mounted with
+        // role=status so the result is announced: a live region announces
+        // changes inside a region that already exists, and this line is
+        // replaced twice within milliseconds after a save.
+        m('p.key-msg', {
+          role: 'status',
+          class: msg ? (msg.ok ? 'ok' : 'err') : '',
+        }, msg ? msg.text : null),
         ui.keyUncertain[p.name] && !p.keyless && draft
           ? m('button.secondary', {
               type: 'button', disabled: !!ui.keyBusy[p.name],
@@ -576,7 +604,7 @@ export const ProvidersSection = {
       // OpenRouter model curation — only once a key is saved (the gateway has
       // hundreds of models, so the user checks which ones the chat picker
       // offers). Reload token bumps after a key save so a replaced key
-      // re-verifies + re-lists.
+      // re-lists the catalog; the card's own test verifies the key.
       (providerRows.find((p) => p.name === 'openrouter')?.hasKey)
         ? [m('.settings-divider'), m(OpenRouterModels, { state, send, reloadToken: ui.orReloadToken ?? 0 })]
         : null,
@@ -821,8 +849,9 @@ const OllamaRecommendation = {
 // dropdown. So Settings is where the user picks the ones they want: a search
 // box over the LIVE catalog plus checkboxes; the checked ids persist to
 // settings.openrouterModels and become the chat picker's OpenRouter options.
-// The catalog load doubles as key verification (a 401/403 → "rejected"), which
-// is why saving an OpenRouter key auto-(re)loads this panel — no Test click.
+// The catalog is public, so loading it says nothing about the key; the card's
+// post-save test verifies that. Saving a key still (re)loads this panel so the
+// curation list is fresh.
 
 // How many of the curated "popular" seed to show before the user searches.
 const OPENROUTER_PREVIEW_COUNT = 20;
@@ -846,7 +875,7 @@ const OpenRouterModels = {
   },
   /** @param {{ state: any, attrs: { reloadToken?: number, send: Send, state?: any } }} vnode */
   onupdate(vnode) {
-    // A key save bumps reloadToken — re-verify + re-list against the new key.
+    // A key save bumps reloadToken: reload the catalog for the curation list.
     if ((vnode.attrs.reloadToken ?? 0) !== vnode.state.loadedToken) {
       vnode.state.loadedToken = vnode.attrs.reloadToken ?? 0;
       OpenRouterModels.load(vnode);
@@ -919,7 +948,7 @@ const OpenRouterModels = {
   view(vnode) {
     const ui = vnode.state;
     if (ui.loading && !ui.models) {
-      return m('.or-models', m('p.hint', 'Verifying key & loading models…'));
+      return m('.or-models', m('p.hint', 'Loading models…'));
     }
     if (ui.error) return m('.or-models', m('p.error.hint', ui.error));
     /** @type {OpenRouterModel[]} */

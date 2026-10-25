@@ -8,6 +8,8 @@
 
 import { describe, test, expect } from 'bun:test';
 import { createSessionStore } from '../../../extension/peerd-runtime/sessions/store.js';
+import { SessionNotFoundError } from '../../../extension/peerd-runtime/errors.js';
+import { mapError } from '../../../extension/sidepanel/error-display.js';
 
 // A keyPath-aware in-memory IDB with the batched getMany the real wrapper
 // exposes (session_messages keyed by `id`, sessions by `sessionId`).
@@ -54,6 +56,22 @@ const makeStore = (idb: any) => {
 };
 
 describe('session store v2 — per-message records', () => {
+  test('a missing chat does not prove that a chat was reset', async () => {
+    const idb = makeIdb();
+    const store = makeStore(idb);
+    const existing = await store.create();
+    const missing = await store.appendMessage('never-created', {
+      id: 'refused-message', role: 'user', content: 'hello', when: 1000,
+    }).catch((cause) => cause);
+    expect(missing).toBeInstanceOf(SessionNotFoundError);
+    expect(await store.get('never-created')).toBeUndefined();
+    expect(await store.get(existing.sessionId)).toEqual(existing);
+    expect(idb._tbl('sessions').size).toBe(1);
+    expect(idb._tbl('session_messages').size).toBe(0);
+    expect(mapError(missing instanceof SessionNotFoundError ? 'session-not-found' : missing))
+      .toBe('This chat is unavailable. Open another chat or start a new one.');
+  });
+
   test('create stores a v2 metadata record with no inline messages', async () => {
     const idb = makeIdb();
     const store = makeStore(idb);

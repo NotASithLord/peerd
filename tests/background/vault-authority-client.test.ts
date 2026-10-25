@@ -68,12 +68,18 @@ describe('sealed vault authority channel', () => {
       }],
     });
     try {
+      client.touch();
+      expect(acquisitions).toBe(0);
       await client.initializeWithPrfOnly({ prfOutput: new Uint8Array(32).fill(5),
         credentialId: new Uint8Array([1]), prfSalt: new Uint8Array(32).fill(6) });
       expect(client.snapshot().locked).toBe(false);
       await client.lock();
+      const lockedAcquisitions = acquisitions;
+      client.touch();
+      expect(acquisitions).toBe(lockedAcquisitions);
       client.close();
       const before = acquisitions;
+      client.touch();
       const snapshot = client.snapshot();
       expect(snapshot).toMatchObject({ initialized: true, locked: true, unlockedAt: 0 });
       expect(Object.isFrozen(snapshot)).toBe(true);
@@ -81,6 +87,42 @@ describe('sealed vault authority channel', () => {
       await Promise.resolve();
       expect(acquisitions).toBe(before);
     } finally { client.close(); }
+  });
+
+  test('activity resets the real sealed vault timer without refreshing on status reads', async () => {
+    const storage = makeStorage();
+    const originalTimer = globalThis.setTimeout;
+    let schedules = 0;
+    globalThis.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+      if (delay === 17_321) schedules += 1;
+      return originalTimer(handler, delay, ...args);
+    }) as typeof setTimeout;
+    const client = makeVaultAuthorityClient({
+      offscreen: true, offscreenUrl, workerUrl,
+      kv: storage.kv, idb: storage.idb, sessionCache: storage.sessionCache,
+      withHost: async (run) => run(vaultLease),
+      listWindowClients: async () => [{ url: offscreenUrl,
+        postMessage: (offer: { channelId: string }, ports: MessagePort[]) => {
+          void serveVaultAuthority({ port: ports[0], channelId: offer.channelId });
+        },
+      }],
+    });
+    try {
+      await client.initializeWithPrfOnly({ prfOutput: new Uint8Array(32).fill(5),
+        credentialId: new Uint8Array([1]), prfSalt: new Uint8Array(32).fill(6) });
+      await client.setAutoLockMs(17_321);
+      await client.status();
+      expect(schedules).toBe(1);
+      const authority = client.captureRequestAuthority();
+      client.touch();
+      await client.status();
+      expect(schedules).toBe(2);
+      expect(authority()).toBe(true);
+    } finally {
+      globalThis.setTimeout = originalTimer;
+      await client.lock();
+      client.close();
+    }
   });
 
   test.each(['lock', 'replace', 'delete'] as const)('prepared credential authority retires before pending %s custody', async (operation) => {

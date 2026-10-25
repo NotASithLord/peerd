@@ -26,10 +26,13 @@ const base64FileBytes = (/** @type {string} */ value) => {
 
 /** @param {Record<string,any>} deps */
 export const createKernelDwebRouteOwner = (deps) => {
+  // why the revoke relay is required: a Home block that kept the agent's A2A
+  // consent would be weaker than dweb_block, so the routes never load without it.
   if (!deps?.enabled || !deps.engine || !deps.relays || !deps.transfer
       || typeof deps.ensureDwebFeature !== 'function'
       || typeof deps.withIdentityMutation !== 'function'
-      || typeof deps.currentDwebHostEpoch !== 'function') {
+      || typeof deps.currentDwebHostEpoch !== 'function'
+      || typeof deps.relays.revokeDwebPeer !== 'function') {
     throw new TypeError('kernel-dweb-route-runtime-config-invalid');
   }
   const { engine, relays, transfer } = deps;
@@ -154,6 +157,7 @@ export const createKernelDwebRouteOwner = (deps) => {
         transfer.onSettingsChanging(patch);
         await deps.settingsStore.update(patch);
         await transfer.onSettingsChanged(patch);
+        await deps.pushState();
         return { ok: true, running: false };
       },
       withDwebPublication: engine.withDwebPublication,
@@ -165,6 +169,7 @@ export const createKernelDwebRouteOwner = (deps) => {
       getCurrentSessionId: deps.getCurrentSessionId,
       dwebPublicationGeneration: engine.dwebPublicationGeneration,
       ensureAppTrackerReady: deps.ensureAppTrackerReady,
+      revokePeer: relays.revokeDwebPeer,
     }),
     ...makeDwebSelfRoutes({
       dwebReady,

@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test';
 import { createAppLaunchOwner } from '../../extension/shared/current-session-binding.js';
 
-const fixture = (initial: string|null = null, fail = false) => {
-  let current = initial;
+const fixture = (initial: string|null = null, fail = false, pending: Record<string, unknown> = {}) => {
+  const cache = new Map<string, unknown>(Object.entries(pending));
+  if (initial) cache.set('currentSessionId', initial);
   let creates = 0;
   const records = new Map<string, any>();
   const resolve = createAppLaunchOwner({
@@ -15,11 +16,11 @@ const fixture = (initial: string|null = null, fail = false) => {
       return session;
     },
   }, {
-    sessionGet: async () => current,
-    sessionSet: async (key: string, value: any) => { if (key === 'currentSessionId') current = value; },
-    sessionDelete: async () => { current = null; },
+    sessionGet: async (key: string) => cache.get(key),
+    sessionSet: async (key: string, value: any) => { cache.set(key, value); },
+    sessionDelete: async (key: string) => { cache.delete(key); },
   });
-  return { resolve, creates: () => creates, current: () => current, records };
+  return { resolve, creates: () => creates, current: () => cache.get('currentSessionId') ?? null, records, cache };
 };
 
 test('concurrent first opens share a persisted and bound owner without provider IO', async () => {
@@ -43,4 +44,26 @@ test('a failed durable creation refuses every waiting launch', async () => {
   const results = await Promise.allSettled([f.resolve(null), f.resolve(null)]);
   expect(results.map(r => r.status)).toEqual(['rejected', 'rejected']);
   expect(f.current()).toBeNull();
+});
+
+test.each([
+  { label: 'Plan', mode: 'plan', confirm: false, expected: { permissionMode: 'plan', confirmActions: false } },
+  { label: 'Act with confirmation', mode: 'act', confirm: true, expected: { permissionMode: 'act', confirmActions: true } },
+  { label: 'unset defaults', mode: undefined, confirm: undefined, expected: { permissionMode: 'act', confirmActions: false } },
+  { label: 'invalid null values', mode: null, confirm: null, expected: { permissionMode: 'plan', confirmActions: true } },
+  { label: 'invalid values', mode: 'invalid', confirm: 'off', expected: { permissionMode: 'plan', confirmActions: true } },
+])('first App owner keeps $label without provider fields', async ({ mode, confirm, expected }) => {
+  const f = fixture(null, false, { currentPermissionMode: mode, currentConfirmActions: confirm });
+  expect(await Promise.all([f.resolve(null), f.resolve(null)])).toEqual(['root', 'root']);
+  expect(f.creates()).toBe(1);
+  expect(f.records.get('root')).toEqual({ ...expected, sessionId: 'root' });
+  expect(Object.fromEntries(f.cache)).toEqual({
+    currentSessionId: 'root', currentPermissionMode: expected.permissionMode,
+    currentConfirmActions: expected.confirmActions,
+  });
+  f.cache.set('currentPermissionMode', 'act');
+  f.cache.set('currentConfirmActions', false);
+  expect(await f.resolve(null)).toBe('root');
+  expect(f.records.get('root')).toEqual({ ...expected, sessionId: 'root' });
+  expect(f.creates()).toBe(1);
 });

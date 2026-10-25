@@ -14,6 +14,7 @@ import {
   safeForegroundTabContext,
 } from '/peerd-runtime/loop/turn-authority-driver.js';
 import { projectControllerToolSurface } from '/peerd-runtime/controller-tool-projection.js';
+import { makeTurnSlots } from '/peerd-runtime/loop/turn-slots.js';
 import { ACTOR_CREDENTIAL_BOUNDARY_FAILURE } from '/peerd-runtime/errors.js';
 
 /** Minimal deps maybeAutoResume touches; the rest stay undefined (never invoked). */
@@ -32,6 +33,72 @@ test('makeTurnAuthorityDriver returns the two entry points', () => {
   const d = makeTurnAuthorityDriver(deps());
   expect(typeof d.runAgentTurn).toBe('function');
   expect(typeof d.maybeAutoResume).toBe('function');
+});
+
+describe('first-turn permission binding', () => {
+  test.each([
+    { label: 'Plan', mode: 'plan', confirm: false, expected: { permissionMode: 'plan', confirmActions: false } },
+    { label: 'Act with confirmation', mode: 'act', confirm: true, expected: { permissionMode: 'act', confirmActions: true } },
+    { label: 'unset defaults', mode: undefined, confirm: undefined, expected: { permissionMode: 'act', confirmActions: false } },
+    { label: 'invalid null values', mode: null, confirm: null, expected: { permissionMode: 'plan', confirmActions: true } },
+    { label: 'invalid values', mode: 'invalid', confirm: 'off', expected: { permissionMode: 'plan', confirmActions: true } },
+  ])('persists $label before claiming the turn', async ({ mode, confirm, expected }) => {
+    const cache = new Map<string, unknown>([
+      ['currentPermissionMode', mode], ['currentConfirmActions', confirm],
+    ]);
+    let created: any;
+    const claimed = new Error('creation boundary reached');
+    const driver = makeTurnAuthorityDriver({
+      vault: { isLocked: () => false },
+      sessionCache: {
+        sessionGet: async (key: string) => cache.get(key),
+        sessionSet: async (key: string, value: unknown) => { cache.set(key, value); },
+      },
+      ensureActiveProvider: async () => ({ name: 'ollama', model: 'qwen3:8b' }),
+      sessions: { create: async (fields: any) => {
+        expect(cache.has('currentSessionId')).toBe(false);
+        created = { ...fields, sessionId: 'fresh' };
+        return created;
+      } },
+      // why: this test ends after the real creation and binding, before model IO.
+      turnSlots: { claim: () => { throw claimed; } },
+    });
+    await expect(driver.runAgentTurn({ userText: 'Keep this permission.' })).rejects.toBe(claimed);
+    expect(created).toEqual({ ...expected, sessionId: 'fresh', provider: 'ollama', model: 'qwen3:8b' });
+    expect(Object.fromEntries(cache)).toEqual({
+      currentSessionId: 'fresh', currentPermissionMode: expected.permissionMode,
+      currentConfirmActions: expected.confirmActions,
+    });
+  });
+
+  test('reads a choice made while provider selection waits', async () => {
+    const entered = Promise.withResolvers<void>();
+    const provider = Promise.withResolvers<{ name: string; model: string }>();
+    const cache = new Map<string, unknown>([
+      ['currentPermissionMode', 'act'], ['currentConfirmActions', false],
+    ]);
+    let created: any;
+    const claimed = new Error('creation boundary reached');
+    const driver = makeTurnAuthorityDriver({
+      vault: { isLocked: () => false },
+      sessionCache: {
+        sessionGet: async (key: string) => cache.get(key),
+        sessionSet: async (key: string, value: unknown) => { cache.set(key, value); },
+      },
+      ensureActiveProvider: async () => { entered.resolve(); return provider.promise; },
+      sessions: { create: async (fields: any) => (created = { ...fields, sessionId: 'fresh' }) },
+      turnSlots: { claim: () => { throw claimed; } },
+    });
+    const turn = driver.runAgentTurn({ userText: 'Keep the later choice.' });
+    await entered.promise;
+    cache.set('currentPermissionMode', 'plan');
+    cache.set('currentConfirmActions', true);
+    provider.resolve({ name: 'ollama', model: 'qwen3:8b' });
+    await expect(turn).rejects.toBe(claimed);
+    expect(created).toMatchObject({ permissionMode: 'plan', confirmActions: true });
+    expect(cache.get('currentPermissionMode')).toBe('plan');
+    expect(cache.get('currentConfirmActions')).toBe(true);
+  });
 });
 
 describe('foreground tab prompt context', () => {
@@ -144,6 +211,8 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
   controllerFailureCode = '',
   waitForProjectionAbort = false,
   uiVisible = false,
+  slots = null as any,
+  runTurn = null as any,
 } = {}) => {
   const turnAbortController = new AbortController();
   const session: any = {
@@ -255,7 +324,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
       },
       setCost: async () => {},
     },
-    turnSlots: {
+    turnSlots: slots ?? {
       claim: () => ({ controller: turnAbortController, release: () => { releases++; } }),
       isBusy: () => false,
     },
@@ -299,7 +368,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
     auditLog: { append: async (entry: any) => { audits.push(entry); } },
     postChatNote: (note: string) => { chatNotes.push(note); },
     recordModelCall: (call: any) => recordedModelCalls.push(call),
-    runUserTurn: dynamicIsolation
+    runUserTurn: runTurn ?? (dynamicIsolation
       ? async function* (ctx: any) {
         // Mirror the sealed turn controller's exact authority protocol. The
         // old fixture ran the raw loop in the SW shell, bypassing the
@@ -353,7 +422,7 @@ const turnDeps = (kind: 'chat' | 'actor' | 'spawned', {
         signal: ctx.signal,
       })) { /* drain */ }
       yield { type: 'stop', sessionId: 's1', stopReason: 'end_turn' };
-    },
+    }),
     trimEnricher: { queue: () => {}, drain: async () => {} },
     contextWindowFor: () => null,
     liveContextWindow: () => null,
@@ -417,7 +486,7 @@ describe('runAgentTurn credential custody', () => {
   test('a mid-turn actor-host failure updates the next model prompt', async () => {
     const fixture = turnDeps('chat', { dynamicIsolation: true });
     expect(await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'delegate work' }))
-      .toEqual({ ok: true, stopReason: 'end_turn' });
+      .toEqual({ ok: true, stopReason: 'end_turn', toolCalls: 0 });
     const projectedCalls = fixture.modelCalls.filter((call) => Array.isArray(call.tools));
     expect(projectedCalls).toHaveLength(2);
     expect(projectedCalls[0].tools.map((tool: any) => tool.name))
@@ -477,7 +546,7 @@ describe('runAgentTurn credential custody', () => {
     const fixture = turnDeps('chat', { streamBoundaryFailure: true });
     expect(await fixture.driver.runAgentTurn({
       sessionId: 's1', userText: 'inspect the page',
-    })).toEqual({ ok: false, stopReason: undefined });
+    })).toEqual({ ok: false, stopReason: undefined, toolCalls: 0 });
 
     expect(fixture.broadcasts).toContainEqual(expect.objectContaining({
       type: 'turn/error', error: ACTOR_CREDENTIAL_BOUNDARY_FAILURE,
@@ -488,7 +557,7 @@ describe('runAgentTurn credential custody', () => {
   test('uses the controller-projected provider failure without provider classes', async () => {
     const fixture = turnDeps('chat', { controllerFailureCode: 'provider-http-401' });
     expect(await fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'hello' }))
-      .toEqual({ ok: false, stopReason: null });
+      .toEqual({ ok: false, stopReason: null, toolCalls: 0 });
     expect(fixture.broadcasts).toContainEqual(expect.objectContaining({
       type: 'turn/error', sessionId: 's1', error: 'provider-http-401',
       code: 'provider-http-401',
@@ -500,7 +569,7 @@ describe('runAgentTurn credential custody', () => {
     const fixture = turnDeps('chat', { turnUnknown: true, boundaryFailure: true });
     expect(await fixture.driver.runAgentTurn({
       sessionId: 's1', userText: 'commit and continue',
-    })).toEqual({ ok: false, stopReason: null });
+    })).toEqual({ ok: false, stopReason: null, toolCalls: 0 });
     expect(fixture.broadcasts).toContainEqual(expect.objectContaining({
       type: 'turn/error',
       code: 'controller-call-timeout',
@@ -523,7 +592,7 @@ describe('runAgentTurn credential custody', () => {
     });
     expect(await fixture.driver.runAgentTurn({
       sessionId: 's1', userText: 'inspect the page',
-    })).toEqual({ ok: false, stopReason: undefined });
+    })).toEqual({ ok: false, stopReason: undefined, toolCalls: 0 });
     expect(fixture.broadcasts).toEqual([]);
   });
 
@@ -599,5 +668,44 @@ describe('runAgentTurn credential custody', () => {
 
     expect(fixture.modelCalls).toEqual([]);
     expect(fixture.recordedModelCalls).toEqual([]);
+  });
+});
+
+
+describe('streaming slot ownership', () => {
+  test.each(['steer', 'queued wake'])('an old %s cannot hide the new turn Stop', async (mode) => {
+    const slots = makeTurnSlots();
+    const entries: any[] = [], releases: Array<() => void> = [];
+    let entered = () => {};
+    let progress = new Promise<void>((resolve) => { entered = resolve; });
+    const runTurn = async function* (context: any) {
+      entries.push(context);
+      const held = new Promise<void>((resolve) => { releases.push(resolve); });
+      entered();
+      await held;
+      yield { type: 'stop', sessionId: 's1', stopReason: 'end_turn' };
+    };
+    const fixture = turnDeps('chat', { slots, runTurn, uiVisible: true });
+    const first = fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'first' });
+    await progress;
+    progress = new Promise<void>((resolve) => { entered = resolve; });
+    let second: Promise<any> | undefined;
+    if (mode === 'steer') {
+      second = fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'second' });
+      await progress;
+      expect(entries[0].signal.aborted).toBe(true);
+    } else {
+      slots.runWhenIdleClaimed('s1', (turnLease) => {
+        second = fixture.driver.runAgentTurn({ sessionId: 's1', userText: 'second', turnLease });
+      });
+    }
+    releases[0]!();
+    await first;
+    await progress;
+    expect(entries[1].signal.aborted).toBe(false);
+    expect(fixture.broadcasts.filter((event) => event.type === 'turn/streaming' && !event.streaming)).toEqual([]);
+    releases[1]!();
+    await second;
+    expect(fixture.broadcasts.filter((event) => event.type === 'turn/streaming' && !event.streaming)).toHaveLength(1);
   });
 });

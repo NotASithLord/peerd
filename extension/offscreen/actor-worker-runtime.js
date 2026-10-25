@@ -60,7 +60,7 @@ import {
 import { AGENT_PROGRAM, isExecutionDescription } from '/shared/execution-protocol.js';
 import { originOf } from '/shared/url-origin.js';
 import { createActorModelEgress } from './actor-model-egress.js';
-import { ACTOR_WORKER_PROTOCOL } from './actor-worker-protocol.js';
+import { ACTOR_WORKER_PROTOCOL } from '/shared/actor-worker-protocol.js';
 import { nestedActorProgramCallId } from '/shared/actor-channel-protocol.js';
 import { normalizeSemanticToolFailure } from '/shared/semantic-tool-failure.js';
 

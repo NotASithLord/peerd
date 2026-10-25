@@ -26,6 +26,8 @@ import { KERNEL_DEMAND_SUPPORT_ROUTE_NAMES } from '../shared/kernel-feature-rout
 import { createOriginPacingStore } from '/peerd-runtime/pacing-authority.js';
 import { normalizeApiOrigin } from '../shared/api-origin.js';
 import { makePacedOriginRoutes } from './routes/paced-origins.js';
+import { makeLearnedOrigins } from '/peerd-runtime/kernel-turn-authority.js';
+import { makeKernelLearnedOriginRoutes } from './settings-store.js';
 
 /** @param {Record<string,any>} deps */
 export const createKernelDemandSupport = (deps) => {
@@ -41,6 +43,19 @@ export const createKernelDemandSupport = (deps) => {
     },
   });
   void originPacing.hydrate();
+  // why: Settings and the classifier must use the same live set.
+  const learnedOrigins = makeLearnedOrigins({
+    load: async () => deps.kv.get('learnedOrigins.v1'),
+    save: async (all) => deps.kv.set('learnedOrigins.v1', all),
+    onLearn: (host, reason) => {
+      void deps.auditLog.append({ type: 'origin_learned_sensitive', details: { host, reason } }).catch(() => {});
+    },
+    onForget: (hosts) => {
+      for (const host of hosts) void deps.auditLog.append({
+        type: 'origin_unlearned_sensitive', details: { host },
+      }).catch(() => {});
+    },
+  });
   const appCatalog = createKernelAppCatalog({ idb: deps.idb });
   const keyedOriginAuthority = createKernelKeyedOriginAuthority(deps.vault);
   const repositoryKernelFetch = makeRepositoryKernelFetch({
@@ -71,6 +86,7 @@ export const createKernelDemandSupport = (deps) => {
   });
   const directRoutes = Object.freeze({
     ...makePacedOriginRoutes({ originPacing, normalizeApiOrigin }),
+    ...makeKernelLearnedOriginRoutes({ learnedOrigins }),
     'debug/pacing': async (/** @type {any} */ message = {}) => {
       const origin = normalizeApiOrigin(message.origin);
       if (deps.settingsStore.get().devMode === true && origin && typeof message.status === 'number') {
@@ -168,5 +184,6 @@ export const createKernelDemandSupport = (deps) => {
     keyedOriginAuthority,
     normalizeSettingsPatch,
     originPacing,
+    learnedOrigins,
   });
 };

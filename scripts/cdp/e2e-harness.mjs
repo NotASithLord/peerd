@@ -342,47 +342,71 @@ export async function capturePage(page, { bringToFront = true } = {}) {
  * it (both themes) and closes it. Used for the full-tab / large-view baselines.
  * @param {object} ctx  from launchPeerd
  * @param {string} path  extension-relative, e.g. 'home/home.html'
- * @param {{ metrics?: object }} [opts]
+ * @param {{ metrics?: object, newWindow?: boolean }} [opts]
  */
-export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready } = {}) {
+export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, newWindow = false } = {}) {
   const url = `chrome-extension://${ctx.sw.id}/${String(path).replace(/^\//, '')}`;
-  const created = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json();
-  const page = await attach(created.webSocketDebuggerUrl);
-  const disconnect = page.close;
-  page.close = () => {
-    disconnect();
-    return fetch(`http://127.0.0.1:${ctx.port}/json/close/${created.id}`).catch(() => {});
-  };
-  await page.send('Runtime.enable');
-  await page.send('Page.enable');
-  await page.send('Emulation.setDeviceMetricsOverride', metrics);
-  await setEmulatedTheme(page, 'light');
-  await page.send('Page.addScriptToEvaluateOnNewDocument', { source: stableStyleSource });
-  await page.send('Page.bringToFront');
-  await page.send('Page.navigate', { url });
-  // why `ready` is overridable: the default probe waits for a Mithril mount at
-  // `#app`, which is right for the SPA pages and WRONG for every standalone tab
-  // page — the engine tabs render into their own ids (and their hard-fail cards
-  // replace <body> outright), so they would time out here forever despite having
-  // painted. Those pages are exactly the ones with no visual coverage, so the
-  // probe has to be the caller's to choose.
-  const probe = ready
-    ? `document.readyState !== 'loading' && !!document.querySelector(${JSON.stringify(ready)})`
-    : `document.readyState === 'complete' && !!document.querySelector('#app > *')`;
-  const mounted = await waitFor(() => evalIn(page, probe), { budgetMs: READY_BUDGET_MS });
-  if (!mounted) {
-    const state = await evalIn(page, `({
-      href: location.href,
-      readyState: document.readyState,
-      visibilityState: document.visibilityState,
-      title: document.title,
-      body: document.body?.innerText?.slice(0, 500) ?? null,
-      app: document.querySelector('#app')?.innerHTML?.slice(0, 500) ?? null,
-    })`).catch((error) => ({ error: String(error) }));
-    try { page.close(); } catch { /* */ }
-    throw new Error(`wide page never mounted: ${path} ${JSON.stringify({ state, events: page.events })}`);
+  let created;
+  if (newWindow) {
+    // why: separate Home windows keep the native panel's window unchanged.
+    const version = await (await fetch(`http://127.0.0.1:${ctx.port}/json/version`)).json();
+    const browser = await attach(version.webSocketDebuggerUrl);
+    let targetId;
+    try {
+      ({ targetId } = await browser.send('Target.createTarget', { url: 'about:blank', newWindow: true }));
+      created = await waitFor(async () => (await cdpList(ctx.port)).find((target) => target.id === targetId),
+        { budgetMs: READY_BUDGET_MS, pollMs: 25 });
+      if (!created) throw new Error('The owned window target did not appear');
+    } catch (error) {
+      if (targetId) await fetch(`http://127.0.0.1:${ctx.port}/json/close/${targetId}`).catch(() => {});
+      throw error;
+    } finally { browser.close(); }
+  } else {
+    created = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json();
   }
-  return page;
+  let page;
+  let disconnect;
+  try {
+    page = await attach(created.webSocketDebuggerUrl);
+    disconnect = page.close;
+    page.close = () => {
+      disconnect();
+      return fetch(`http://127.0.0.1:${ctx.port}/json/close/${created.id}`).catch(() => {});
+    };
+    await page.send('Runtime.enable');
+    await page.send('Page.enable');
+    await page.send('Emulation.setDeviceMetricsOverride', metrics);
+    await setEmulatedTheme(page, 'light');
+    await page.send('Page.addScriptToEvaluateOnNewDocument', { source: stableStyleSource });
+    await page.send('Page.bringToFront');
+    await page.send('Page.navigate', { url });
+    // why `ready` is overridable: the default probe waits for a Mithril mount at
+    // `#app`, which is right for the SPA pages and WRONG for every standalone tab
+    // page - the engine tabs render into their own ids (and their hard-fail cards
+    // replace <body> outright), so they would time out here forever despite having
+    // painted. Those pages are exactly the ones with no visual coverage, so the
+    // probe has to be the caller's to choose.
+    const probe = ready
+      ? `document.readyState !== 'loading' && !!document.querySelector(${JSON.stringify(ready)})`
+      : `document.readyState === 'complete' && !!document.querySelector('#app > *')`;
+    const mounted = await waitFor(() => evalIn(page, probe), { budgetMs: READY_BUDGET_MS });
+    if (!mounted) {
+      const state = await evalIn(page, `({
+        href: location.href,
+        readyState: document.readyState,
+        visibilityState: document.visibilityState,
+        title: document.title,
+        body: document.body?.innerText?.slice(0, 500) ?? null,
+        app: document.querySelector('#app')?.innerHTML?.slice(0, 500) ?? null,
+      })`).catch((error) => ({ error: String(error) }));
+      throw new Error(`wide page never mounted: ${path} ${JSON.stringify({ state, events: page.events })}`);
+    }
+    return page;
+  } catch (error) {
+    try { disconnect?.(); } catch { /* */ }
+    await fetch(`http://127.0.0.1:${ctx.port}/json/close/${created.id}`).catch(() => {});
+    throw error;
+  }
 }
 
 // ---- raw CDP attach over Chrome's WebSocket (no npm client) -----------------
@@ -536,6 +560,8 @@ export async function findPeerdSw(port) {
  * @param {string} [opts.tagsModel]  model name returned by GET /api/tags.
  * @param {boolean} [opts.interceptModel] attach Fetch interception to the
  *   service worker; false for physical lifecycle tests that must not pin it.
+ * @param {boolean} [opts.resumeAuxiliaryWorkers] let another worker observer own
+ *   startup release when false. Fetch interception stays enabled.
  * @param {boolean} [opts.captureBootTimeline] prove and timestamp the visible
  *   inline shell before accepting the evaluated module marker.
  * @param {(page: object) => Promise<void>} [opts.beforePanelNavigate] install
@@ -551,7 +577,7 @@ export async function findPeerdSw(port) {
  */
 export async function launchPeerd({
   modelResponder, tagsModel = 'qwen3:8b', extensionDir = EXT,
-  interceptModel = true, captureBootTimeline = false, beforePanelNavigate,
+  interceptModel = true, resumeAuxiliaryWorkers = true, captureBootTimeline = false, beforePanelNavigate,
   panelPath = 'sidepanel/sidepanel.html', expectedBackgroundEntry, proxyServer,
   webRtcLoopbackAcceptance = false,
   enforceWebSecurity = false, headless = true,
@@ -689,10 +715,11 @@ export async function launchPeerd({
       body: Buffer.from(bodyStr).toString('base64'),
     });
     try {
-      if (url.includes('/v1/chat/completions')) {
+      if (url.includes('/v1/chat/completions') || url === 'https://api.anthropic.com/v1/messages') {
         const spec = await currentResponder(modelCalls++, request);
         if (spec?.delayMs) await sleep(spec.delayMs);
-        if (spec?.sse != null) await fulfill('text/event-stream', spec.sse, spec.status ?? 200);
+        if (spec?.continueRequest === true) await connection.send('Fetch.continueRequest', { requestId });
+        else if (spec?.sse != null) await fulfill('text/event-stream', spec.sse, spec.status ?? 200);
         else if (spec?.status) await fulfill(spec.contentType ?? 'application/json', spec.body ?? '{}', spec.status);
         else await fulfill('text/event-stream', sseText('e2e-smoke-ok'));
       } else if (url.includes('/api/tags')) {
@@ -707,7 +734,7 @@ export async function launchPeerd({
       }
     } catch { /* the worker, controller, or request may have been physically torn down */ }
   };
-  const attachFetchTarget = async (targetId) => {
+  const attachFetchTarget = async (targetId, targetType) => {
     if (!browserConn) throw new Error('browser CDP connection unavailable');
     const { sessionId } = await browserConn.send('Target.attachToTarget', {
       targetId,
@@ -735,10 +762,13 @@ export async function launchPeerd({
       },
     };
     browserConn.on(onTargetEvent);
-    await connection.send('Runtime.runIfWaitingForDebugger');
+    if (targetType !== 'worker' || resumeAuxiliaryWorkers) await connection.send('Runtime.runIfWaitingForDebugger');
     await connection.send('Runtime.enable').catch(() => {});
     await connection.send('Fetch.enable', { patterns: [
       { urlPattern: '*11434*' },
+      { urlPattern: 'https://openrouter.ai/api/v1/chat/completions' },
+      { urlPattern: 'https://api.anthropic.com/v1/messages', requestStage: 'Request' },
+      { urlPattern: 'https://api.openai.com/v1/chat/completions' },
       { urlPattern: 'https://remote-module.test/*' },
     ] });
     return connection;
@@ -761,7 +791,7 @@ export async function launchPeerd({
         || auxiliaryFetchConnections.has(targetId) || auxiliaryFetchPending.has(targetId)) return;
     auxiliaryFetchPending.add(targetId);
     try {
-      const connection = await attachFetchTarget(targetId);
+      const connection = await attachFetchTarget(targetId, targetInfo.type);
       auxiliaryFetchConnections.set(targetId, connection);
     } catch { /* the short-lived target may retire before attachment */ }
     finally { auxiliaryFetchPending.delete(targetId); }
@@ -796,36 +826,42 @@ export async function launchPeerd({
   const nativePanel = String(manifest.side_panel?.default_path ?? '').replace(/^\//, '')
     === String(panelPath).replace(/^\//, '');
   let page;
+  let reopenNativePanel = async () => { throw new Error('the side panel is not browser-owned'); };
   if (nativePanel) {
     if (!browserConn) throw new Error('browser CDP connection unavailable');
-    const { targetInfos: actionTargets = [] } = await browserConn.send('Target.getTargets', {
-      filter: [{ type: 'tab', exclude: false }, { exclude: false }],
-    });
-    const actionTabs = actionTargets.filter(
-      (entry) => entry.type === 'tab' && entry.url === 'about:blank',
-    );
-    if (actionTabs.length === 0) {
-      throw new Error(`Chrome did not expose an action tab target: ${JSON.stringify(actionTargets)}`);
-    }
-    /** @type {any} */ let target = null;
-    for (const actionTarget of actionTabs) {
-      await browserConn.send('Extensions.triggerAction', {
-        id: sw.id, targetId: actionTarget.targetId,
+    const findNativePanelTarget = async () => {
+      const { targetInfos = [] } = await browserConn.send('Target.getTargets');
+      return targetInfos.find(
+        (entry) => entry.targetId !== created.id && entry.url === panelUrl,
+      ) ?? null;
+    };
+    const openNativePanelTarget = async (budgetMs) => {
+      const { targetInfos: actionTargets = [] } = await browserConn.send('Target.getTargets', {
+        filter: [{ type: 'tab', exclude: false }, { exclude: false }],
       });
-      target = await waitFor(async () => {
-        const { targetInfos = [] } = await browserConn.send('Target.getTargets');
-        return targetInfos.find(
-          (entry) => entry.targetId !== created.id && entry.url === panelUrl,
-        ) ?? null;
-      }, { budgetMs: Math.min(10_000, READY_BUDGET_MS), pollMs: 25 });
-      if (target) break;
-    }
+      const actionTabs = actionTargets.filter(
+        (entry) => entry.type === 'tab' && entry.url === 'about:blank',
+      );
+      if (actionTabs.length === 0) {
+        throw new Error(`Chrome did not expose an action tab target: ${JSON.stringify(actionTargets)}`);
+      }
+      for (const actionTarget of actionTabs) {
+        await browserConn.send('Target.activateTarget', { targetId: actionTarget.targetId }).catch(() => {});
+        await browserConn.send('Extensions.triggerAction', {
+          id: sw.id, targetId: actionTarget.targetId,
+        });
+        const target = await waitFor(findNativePanelTarget, { budgetMs, pollMs: 25 });
+        if (target) return target;
+      }
+      return null;
+    };
+    const target = await openNativePanelTarget(Math.min(10_000, READY_BUDGET_MS));
     if (!target) {
       activationPage.close();
       cleanup();
       throw new Error('browser-owned side panel target never appeared');
     }
-    const { sessionId } = await browserConn.send('Target.attachToTarget', {
+    let { sessionId } = await browserConn.send('Target.attachToTarget', {
       targetId: target.targetId,
       flatten: true,
     });
@@ -864,6 +900,34 @@ export async function launchPeerd({
       events,
       on: (listener) => listeners.add(listener),
       off: (listener) => listeners.delete(listener),
+    };
+    // why: the kernel's sidepanel/close disables the browser-owned panel, which
+    // destroys this document target and strands the handle above. A state that
+    // closes the panel for real calls this afterwards: it binds the handle to
+    // the panel's next document (opened through the action when no product
+    // gesture already did) and boots that document under the same emulation.
+    reopenNativePanel = async () => {
+      const previousSessionId = sessionId;
+      let next = await findNativePanelTarget();
+      // The kernel re-enables the panel 250 ms after closing it, and an action
+      // click inside that window opens nothing.
+      for (let attempt = 0; !next && attempt < 3; attempt += 1) next = await openNativePanelTarget(4_000);
+      if (!next) throw new Error('browser-owned side panel target did not reappear');
+      ({ sessionId } = await browserConn.send('Target.attachToTarget', { targetId: next.targetId, flatten: true }));
+      browserConn.send('Target.detachFromTarget', { sessionId: previousSessionId }).catch(() => {});
+      await page.send('Runtime.enable');
+      await page.send('Page.enable');
+      await page.send('Network.enable');
+      await armDeterministicCapture(page);
+      await page.send('Page.bringToFront');
+      const priorTimeOrigin = await evalIn(page, 'performance.timeOrigin').catch(() => null);
+      await page.send('Page.reload');
+      const remounted = await waitFor(() => evalIn(page, `performance.timeOrigin !== ${priorTimeOrigin}
+        && document.readyState === 'complete'
+        && document.documentElement?.dataset.peerdBootModule === 'evaluated'
+        && !!document.documentElement?.dataset.peerdBootStage`).catch(() => false),
+      { budgetMs: READY_BUDGET_MS, pollMs: 25 });
+      if (!remounted) throw new Error('side panel did not remount after reopen');
     };
   } else {
     page = activationPage;
@@ -993,6 +1057,9 @@ export async function launchPeerd({
     // Swap the model behaviour + reset the per-state call counter — lets one
     // Chrome run many states back-to-back (the single-Chrome verify path).
     setModelResponder: (fn) => { currentResponder = fn || (() => ({ sse: sseText('e2e-smoke-ok') })); modelCalls = 0; },
+    // Rebind `page` to the browser-owned side panel after a state closed it for
+    // real (see the definition above); it throws outside the native-panel launch.
+    reopenNativePanel: () => reopenNativePanel(),
     // Authoritative MV3 retirement. Target.closeTarget is not sufficient
     // evidence: it can close a debugger target without proving Chrome stopped
     // the registered worker version. This uses the ServiceWorker domain,
@@ -1017,24 +1084,31 @@ export async function launchPeerd({
       try { swConn?.close(); } catch { /* */ }
       swConn = null;
       context.swConn = null;
-      await page.send('ServiceWorker.stopWorker', { versionId: currentVersion.versionId });
-      const stoppedVersion = await waitFor(() => {
-        const row = serviceWorkerVersions.get(currentVersion.versionId);
-        return row?.runningStatus === 'stopped' ? row : null;
-      }, { budgetMs: 8_000, pollMs: 25 });
-      if (!stoppedVersion) {
-        throw new Error(`ServiceWorker version ${currentVersion.versionId} remained running`);
-      }
-      const gone = await waitFor(async () => {
-        const current = await findPeerdSw(port);
-        return !current || current.targetId !== old.targetId;
-      }, { budgetMs: 8_000, pollMs: 50 });
-      if (!gone) throw new Error('MV3 service-worker target did not terminate');
-      return {
-        ...old,
-        versionId: currentVersion.versionId,
-        stoppedRunningStatus: stoppedVersion.runningStatus,
+      // why: a new wake can replace the stopped row before the next poll.
+      let observedStop = null;
+      const onStopped = (method, { versions = [] } = {}) => {
+        if (method !== 'ServiceWorker.workerVersionUpdated') return;
+        observedStop ??= versions.find((row) => row.versionId === currentVersion.versionId
+          && String(row.scriptURL) === old.url && row.runningStatus === 'stopped') ?? null;
       };
+      page.on(onStopped);
+      try {
+        await page.send('ServiceWorker.stopWorker', { versionId: currentVersion.versionId });
+        const stoppedVersion = await waitFor(() => observedStop, { budgetMs: 8_000, pollMs: 25 });
+        if (!stoppedVersion) {
+          throw new Error(`ServiceWorker version ${currentVersion.versionId} remained running`);
+        }
+        const gone = await waitFor(async () => {
+          const current = await findPeerdSw(port);
+          return !current || current.targetId !== old.targetId;
+        }, { budgetMs: 8_000, pollMs: 50 });
+        if (!gone) throw new Error('MV3 service-worker target did not terminate');
+        return {
+          ...old,
+          versionId: currentVersion.versionId,
+          stoppedRunningStatus: stoppedVersion.runningStatus,
+        };
+      } finally { page.off(onStopped); }
     },
     // Backward-compatible name, now backed by authoritative stopWorker rather
     // than Target.closeTarget. New production acceptance should call the

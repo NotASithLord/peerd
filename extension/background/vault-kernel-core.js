@@ -191,8 +191,7 @@ export const buildVaultKernelState = ({
     capabilities: {
       ...runtimeCapabilities,
       actorExecution: actorIsolation ?? {
-        status: 'temporarily_unavailable', host: actorHost,
-        reason: 'controller-not-ready', retryable: true,
+        status: 'not-started', host: actorHost, reason: null, retryable: false,
       },
     },
     settings: { ...settings, vaultAutoLockMs: autoLockMs },

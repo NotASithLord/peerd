@@ -108,7 +108,7 @@ export const ModeSelector = {
         title: !isAct
           ? 'Switch to Act to change confirmation'
           : confirms
-            ? 'Confirm actions: ON — every non-read action asks before running'
+            ? 'Confirm actions: ON - asks when required. Reads and quick compute can run without asking.'
             : 'Confirm actions: OFF — the agent runs without asking, until you halt',
         onclick: () => setConfirm(!confirms),
       }, confirms ? 'Confirm: on' : 'Confirm: off'),

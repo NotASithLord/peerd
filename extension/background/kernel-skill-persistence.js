@@ -1,6 +1,6 @@
 // @ts-check
 
-import { parseSkillDocument, validSkillProjection } from '../shared/skill-document.js';
+import { parseSkillDocument, SkillParseError, validSkillProjection } from '../shared/skill-document.js';
 
 const DB_NAME = 'peerd-skills';
 const DB_VERSION = 1;
@@ -94,7 +94,9 @@ export const createKernelSkillPersistence = ({
   const commit = async (/** @type {string} */ text, /** @type {{
    * origin?:string|null,replace?:boolean,source?:'local'|'git'|'manifest'}} */ options = {}) => {
     const parsed = parseSkillDocument(text);
-    if (!validSkillProjection(parsed)) throw new TypeError('skill-projection-invalid');
+    if (!validSkillProjection(parsed)) throw new SkillParseError(!parsed.name
+      ? 'Skill not installed: the name needs a letter a-z or a digit.'
+      : 'Skill not installed: shorten the description, version, license or tool list.');
     canWrite?.();
     const skill = /** @type {Record<string,any>} */ (parsed);
     const meta = {

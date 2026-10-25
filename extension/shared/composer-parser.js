@@ -4,7 +4,7 @@
 /** @typedef {{kind:ComposerRefKind,arg:string,raw:string,start:number,end:number}} ComposerRefToken */
 
 const COMMAND_RE = /^\s*\/([a-zA-Z0-9][a-zA-Z0-9_-]*)(?=\s|$)/;
-const REF_RE = /(^|\s)@(tab|file)(?::([^\s@]+))?/g;
+const REF_RE = /(^|\s)@(?:(file):("(?:[^"\\\n]|\\.)*")|(tab|file)(?::([^\s@]+))?)/g;
 
 /** @param {string} source */
 export const parseComposerCommandName = (source) => COMMAND_RE.exec(source)?.[1] ?? null;
@@ -24,10 +24,13 @@ export const parseComposerRefs = (source) => {
   let match;
   while ((match = REF_RE.exec(source)) !== null) {
     const lead = match[1];
-    const kind = /** @type {ComposerRefKind} */ (match[2]);
-    let arg = match[3] ?? '';
+    const kind = /** @type {ComposerRefKind} */ (match[2] ?? match[4]);
+    let arg = match[5] ?? '';
+    if (match[3]) {
+      try { arg = JSON.parse(match[3]); } catch { arg = ''; }
+    }
     let trimmed = 0;
-    if (arg && /[.,;:!?)]$/.test(arg)) { arg = arg.slice(0, -1); trimmed = 1; }
+    if (!match[3] && arg && /[.,;:!?)]$/.test(arg)) { arg = arg.slice(0, -1); trimmed = 1; }
     const start = match.index + lead.length;
     const end = match.index + match[0].length - trimmed;
     refs.push({ kind, arg, raw: source.slice(start, end), start, end });

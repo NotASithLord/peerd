@@ -217,7 +217,7 @@ export const VaultGate = {
     // §5f: one message element, two severities. A red line is reserved for a
     // WRONG ANSWER; conditions render the same line in the neutral voice.
     const gateError = () => (ui.error
-      ? m('p.gate-msg', { class: ui.errorKind === 'wrong' ? 'is-wrong' : '' }, [
+      ? m('p#vault-error.gate-msg[role=alert]', { class: ui.errorKind === 'wrong' ? 'is-wrong' : '' }, [
           m('span.gate-msg-dot', { 'aria-hidden': 'true' }),
           ui.error,
         ])
@@ -678,14 +678,14 @@ export const VaultGate = {
       m('form', { onsubmit: unlockWithPassphrase }, [
         m('.input-row', [
           m('label', { for: 'pass' }, prfEnrolled ? 'Recovery passphrase' : 'Passphrase'),
-          m('input', {
-            id: 'pass',
-            type: 'password',
-            autocomplete: 'current-password',
+          m('input#pass[type=password][autocomplete=current-password]', {
             value: ui.passphrase,
-            disabled: ui.busy || !backendReady,
+            // why: Read-only keeps focus while the submit guard blocks duplicate unlocks.
+            disabled: !backendReady, readOnly: ui.busy, 'aria-busy': String(ui.busy),
             // §5f: only the wrong answer marks the field.
             class: ui.errorKind === 'wrong' && ui.error ? 'is-error' : '',
+            'aria-invalid': ui.errorKind === 'wrong' && ui.error ? 'true' : undefined,
+            'aria-describedby': ui.errorKind === 'wrong' && ui.error ? 'vault-error' : undefined,
             oninput: (/** @type {Event} */ e) => { ui.passphrase = /** @type {HTMLInputElement} */ (e.target).value; },
             autofocus: true,
           }),

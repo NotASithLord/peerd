@@ -217,12 +217,13 @@ describe('fixed provider egress authority', () => {
   test.each(['anthropic', 'openrouter', 'openai', 'glm', 'ollama'])(
     'preserves %s native nonrouting options and the exact granted alias', async (providerId) => {
       const sent: unknown[] = [];
+      let touches = 0;
       const authority = createProviderEgressAuthority({
         safeFetch: async (_url, init) => {
           sent.push(JSON.parse(String(init?.body)));
           return new Response();
         },
-        vault: { getSecret: async () => 'vault-key' },
+        vault: { getSecret: async () => 'vault-key', touch: () => { touches += 1; } },
         settingsStore: { get: () => ({}) },
       });
       const tools = providerId === 'anthropic' ? [{
@@ -255,7 +256,37 @@ describe('fixed provider egress authority', () => {
         permits: (provider, model) => provider === providerId && model === 'granted-latest',
       })).toMatchObject({ ok: true, outcomeKnown: true });
       expect(sent).toEqual([nativeBody]);
+      expect(touches).toBe(1);
       await authority.closeOwner(owner);
     },
   );
+
+  test('only admitted local generations reset idle activity', async () => {
+    let touches = 0;
+    const authority = createProviderEgressAuthority({
+      safeFetch: async () => new Response('{}'),
+      vault: { getSecret: async () => null, touch: () => { touches += 1; } },
+      settingsStore: { get: () => ({}) },
+      localModelAuthority: {
+        open: async () => crypto.randomUUID(), read: async () => null,
+        cancel: async () => {}, closeOwner: async () => {},
+      },
+    });
+    const grant = { owner: {}, maxOutputTokens: 64, permits: () => true, permitsProvider: () => true };
+    const request = { providerId: 'local-webgpu', modelId: 'local',
+      messages: [], system: '', tools: [], maxTokens: 64 };
+    await authority.readModelInventory({ providerId: 'ollama' }, grant);
+    await authority.readModelContext({ providerId: 'ollama', modelId: 'local' }, grant);
+    expect(touches).toBe(0);
+    expect(await authority.openLocalGeneration({ ...request, maxTokens: 65 }, grant))
+      .toMatchObject({ ok: false });
+    const stop = new AbortController();
+    stop.abort();
+    expect(await authority.openLocalGeneration(request, { ...grant, signal: stop.signal }))
+      .toMatchObject({ ok: false });
+    expect(touches).toBe(0);
+    expect(await authority.openLocalGeneration(request, grant)).toMatchObject({ ok: true });
+    expect(touches).toBe(1);
+    await authority.closeOwner(grant.owner);
+  });
 });

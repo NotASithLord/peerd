@@ -159,3 +159,40 @@ describe('webFetch - response policy', () => {
     expect(reason).toBe('private_network');
   });
 });
+
+describe('webFetch request attempt audit', () => {
+  test.each(['network', 'abort'])('%s failure records only the destination and method, then rethrows the exact cause', async (kind) => {
+    const cause = kind === 'abort' ? new DOMException('PRIVATE CAUSE', 'AbortError') : new TypeError('PRIVATE CAUSE');
+    let calls = 0;
+    const h = setup({ fetchFn: async () => { calls += 1; throw cause; } });
+    await expect(h.webFetch('https://collector.example/upload?token=PRIVATE-QUERY', {
+      method: 'POST', body: 'PRIVATE-BODY', headers: { authorization: 'PRIVATE-HEADER' },
+    })).rejects.toBe(cause);
+    expect(calls).toBe(1);
+    expect(h.audits).toEqual([{ type: 'web_fetch', details: {
+      origin: 'https://collector.example', path: '/upload', method: 'POST', outcome: 'unknown',
+      error: kind === 'abort' ? 'AbortError' : 'NetworkError',
+    } }]);
+    expect(JSON.stringify(h.audits)).not.toContain('PRIVATE');
+  });
+
+  test('a response remains audited when pacing observation fails', async () => {
+    const cause = new Error('pacing write failed');
+    const h = setup({ pace: {
+      reserve: async () => ({ outcome: 'go', waitedMs: 0 }), observe: async () => { throw cause; },
+      isWriteMethod: () => false, canonicalOrigin: (origin: string) => origin,
+    } });
+    await expect(h.webFetch('https://collector.example/report')).rejects.toBe(cause);
+    expect(h.audits).toEqual([{ type: 'web_fetch', details: {
+      origin: 'https://collector.example', path: '/report', method: 'GET',
+    } }]);
+  });
+
+  test('a pre-aborted request never enters fetch or creates an attempted-request row', async () => {
+    const stop = new AbortController(); stop.abort();
+    const h = setup();
+    await expect(h.webFetch('https://collector.example/report', { signal: stop.signal })).rejects.toBeDefined();
+    expect(h.fetched()).toBeNull();
+    expect(h.audits).toEqual([]);
+  });
+});

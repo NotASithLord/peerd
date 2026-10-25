@@ -493,7 +493,15 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
     }
     assertDenylist();
     signal?.throwIfAborted();
-    const res = await _fetch(resource, finalInit);
+    let res;
+    try { res = await _fetch(resource, finalInit); }
+    catch (cause) {
+      // why: a failed reply does not prove that the target received nothing.
+      _audit({ type: 'web_fetch', details: { origin: u.origin, path: u.pathname, method,
+        outcome: 'unknown', error: /** @type {{name?:string}} */ (cause)?.name === 'AbortError' ? 'AbortError' : 'NetworkError' } }).catch(() => {});
+      throw cause;
+    }
+    _audit({ type: 'web_fetch', details: { origin: u.origin, path: u.pathname, method } }).catch(() => {});
     if (pace && paceKey) await pace.observe({
       origin: paceKey, responseAtMs: Date.now(), status: res.status,
       retryAfter: res.headers?.get?.('retry-after') ?? null,
@@ -502,9 +510,6 @@ export const makeWebFetch = ({ getDenylist, matchDenylist, audit, fetchFn, pace 
       _audit({ type: 'egress_denied', details: { origin: u.origin, reason: 'redirect_blocked', status: res.status } }).catch(() => {});
       throw new EgressDeniedError(u.origin, 'redirect_blocked');
     }
-    // why: audit successful web fetches too. The "what URLs has the
-    // agent touched?" question becomes answerable from the audit log.
-    _audit({ type: 'web_fetch', details: { origin: u.origin, path: u.pathname, method } }).catch(() => {});
     return res;
   };
 };

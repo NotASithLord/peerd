@@ -83,7 +83,7 @@ export const VM_TAB_GROUP_TITLE = 'peerd';
 /**
  * Reply shape from the VM tab's vm/* handlers. Dynamic over the message
  * channel — typed to the fields the client reads back.
- * @typedef {{ ok?: boolean, error?: string, result?: { stdout: string, stderr: string, exitCode: number, durationMs: number, timing?: { totalMs: number, tailMs: number } }, ready?: boolean }} VmTabReply
+ * @typedef {{ ok?: boolean, error?: string, result?: { stdout: string, stderr: string, exitCode: number, durationMs: number, timing?: { totalMs: number, tailMs: number } }, ready?: boolean, shellExited?: boolean }} VmTabReply
  */
 
 /**
@@ -227,17 +227,19 @@ export const createVmClient = ({
   };
 
   /**
-   * Cheap, shell-INDEPENDENT liveness check. vm/is-ready only reports whether the
-   * tab's event loop is alive, so a frozen tab fails it (no answer) while a tab
-   * merely busy running a long command still passes — unlike a shell probe it can't
-   * be confused with a slow command. Short timeout; any error reads as "not alive".
+   * Check shell readiness without running a command. A busy live shell still passes;
+   * a dead shell or frozen tab fails. Any probe error reads as "not ready".
    * @param {number} tabId @param {string} vmId @returns {Promise<boolean>}
    */
   const probeAlive = async (tabId, vmId) => {
     try {
       const r = await sendRaced(tabId, vmId, { type: 'vm/is-ready' }, readyProbeMs);
+      if (r?.shellExited === true) throw Object.assign(new VMNotReadyError('VM shell exited. The command was not sent.'), {
+        outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+      });
       return r?.ready === true;
-    } catch {
+    } catch (cause) {
+      if (/** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown === true) throw cause;
       return false;
     }
   };
@@ -270,32 +272,15 @@ export const createVmClient = ({
       }
     }
 
-    /** @type {VmTabReply} */
-    let response;
-    try {
-      response = await sendRaced(tabId, vmId, message);
-    } catch (e) {
-      // Reactive backstop: a tab that freezes MID-call hits the channel timeout (its
-      // event loop is dead, so even its per-run timer can't fire — distinct from a
-      // slow command, which the tab answers at its cmd-timeout). Recreate once and
-      // retry; a second timeout is terminal.
-      const unresponsive = !!(/** @type {{ vmUnresponsive?: boolean }} */ (e)?.vmUnresponsive);
-      if (!unresponsive || !reboot) throw e;
-      tabId = await recreateTab(vmId);
-      try {
-        response = await sendRaced(tabId, vmId, message);
-      } catch (e2) {
-        if (/** @type {{ vmUnresponsive?: boolean }} */ (e2)?.vmUnresponsive) {
-          throw new VMNotReadyError(
-            `vm ${vmId} is unresponsive — reloaded its tab and it still did not answer `
-            + `${message.type} after ${messageTimeoutMs / 1000}s. The VM may be wedged; create a fresh one.`,
-          );
-        }
-        throw e2;
-      }
-    }
+    // why: reload can lose completed guest writes. A dead shell must fail closed.
+    // A timeout or active shell exit can follow a disk change. Never replay it.
+    const response = await sendRaced(tabId, vmId, message);
     if (!response || response.ok !== true) {
-      throw reviveError(response?.error ?? 'vm call returned no response');
+      const error = reviveError(response?.error ?? 'VM did not reply');
+      if (response?.shellExited === true) Object.assign(error, {
+        outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+      });
+      throw error;
     }
     lastUsed.set(vmId, now());
     return response;

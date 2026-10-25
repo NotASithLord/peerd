@@ -12,13 +12,14 @@
 
 import browser from '/shared/browser-api.js';
 import {
-  createEditor, isRemoteSpecifier, makeFetchRemote,
+  createEditor, isRemoteSpecifier, makeFetchRemote, opfsHelpers, NOTEBOOK_CUSTODY_ROOT,
   moduleImportPolicyMessage, MODULE_SYNTAX_ERROR_CODE,
   REMOTE_MODULE_CAPABILITY_BLOCKED_MESSAGE,
   remoteModuleCapabilityBlockedMessage,
   UnsupportedNativeModuleImportError,
 } from '/peerd-engine/index.js';
 import { renderReturnValue } from './output-render.js';
+import { recoverMirrorState } from './mirror-state.js';
 // The sealed worker source (realm seal + peerd.* surface + bridges) is shared
 // with the headless offscreen job runner so the security surface can't diverge.
 import {
@@ -38,7 +39,14 @@ if (!notebookId) {
 
 const NOTEBOOK_PATH = 'notebook.js';
 const BEFORE_AGENT_PATH = 'notebook.before-agent.js';
-const HIDDEN_FILES = new Set([BEFORE_AGENT_PATH]);
+const LAST_AGENT_PATH = 'mirror.json';
+
+/** @param {string} path */
+const assertAgentFileMutation = (path) => {
+  if (typeof path === 'string' && path.split('/').filter(Boolean).join('/') === BEFORE_AGENT_PATH) {
+    throw new DOMException('aborted', 'AbortError');
+  }
+};
 
 // A peerd-owned tab carries the trigger to pull the side panel in — so you can
 // keep chatting from this Notebook without a round-trip back to home. Mounted
@@ -75,13 +83,23 @@ const setTitleStatus = (status) =>
     ? `peerd · notebook ${notebookId} — ${status}`
     : `peerd · notebook ${notebookId}`;
 
+// why: defer output mutations until the resize delivery is complete.
+const OUTPUT_HISTORY = 5_000;
+/** @type {Element|null} */ let outputTail = null;
+new ResizeObserver(() => requestAnimationFrame(() => {
+  // why: a resize alone must not move the reader.
+  if (outputTail === els.output.lastElementChild) return;
+  outputTail = els.output.lastElementChild;
+  while (els.output.childElementCount > OUTPUT_HISTORY) els.output.firstElementChild?.remove();
+  els.outputPane.scrollTop = els.outputPane.scrollHeight;
+})).observe(els.output);
+
 /** @param {string} cls @param {string} text */
 const appendLine = (cls, text) => {
   const line = document.createElement('span');
   line.className = `log-line ${cls}`;
   line.textContent = `${text}\n`;
   els.output.appendChild(line);
-  els.outputPane.scrollTop = els.outputPane.scrollHeight;
 };
 
 const showApp = () => { els.boot.hidden = true; els.app.hidden = false; };
@@ -97,6 +115,8 @@ const assertOpfsWritable = async () => {
   throw new Error(response?.error
     ?? 'Notebook files are read-only because their storage format cannot be updated safely. No data was changed.');
 };
+
+const mirrorOpfs = opfsHelpers([NOTEBOOK_CUSTODY_ROOT, notebookId], { beforeMutation: assertOpfsWritable });
 
 /** @param {string} text @param {boolean} busy */
 const setRunStatus = (text, busy) => {
@@ -223,13 +243,6 @@ const makeResolverDeps = (onRemoteFetch, signal, deadlineAt) => ({
 // "add a kernel for speed": the answer is to persist the expensive result to a
 // file, not to keep RAM warm.
 // ---------------------------------------------------------------------------
-
-// Dim everything already in the output pane when a NEW run starts: the pane is
-// a transcript, so the previous run's output stays visible (a loop feel even
-// though every realm is fresh) while the current run's output reads bright.
-const dimPreviousOutput = () => {
-  for (const child of els.output.children) child.classList.add('nb-prev');
-};
 
 let hostedWorkerSequence = 0;
 const workerHostPort = new Promise((resolve, reject) => {
@@ -358,7 +371,10 @@ const timedOutResult = (timeoutMs, usedRemoteModules = false) => ({
 
 /** @param {string} code @param {number} [timeoutMs] @param {string} [entryPath] @param {AbortSignal} [signal] */
 const runEvalInternal = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PATH, signal) => {
-  dimPreviousOutput();
+  // why: each run uses a new realm.
+  // Keep old output in the transcript for comparison.
+  // Dim old output so the current run is clear.
+  for (const child of els.output.children) child.classList.add('nb-prev');
   setRunStatus('Running notebook.', true);
   const deadlineAt = Date.now() + timeoutMs;
   let source;
@@ -508,13 +524,6 @@ const runEvalInternal = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PAT
           return;
         }
         if (m.type === 'log') { appendLine(`log-${m.level}`, m.text); return; }
-        if (m.type === 'display') {
-          // peerd.self.display(value) — render rich output mid-run (same path as
-          // the return value: descriptors → table/chart, rows → table, else JSON).
-          renderReturnValue(els.output, m.value);
-          els.outputPane.scrollTop = els.outputPane.scrollHeight;
-          return;
-        }
         if (m.type === 'actor-request') {
           if (usedRemoteModules) {
             worker.postMessage({
@@ -608,6 +617,7 @@ const runEvalInternal = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PAT
             return;
           }
           try {
+            if (m.op === 'write' || m.op === 'delete') assertAgentFileMutation(m.args.path);
             let result;
             if (m.op === 'read') result = await editor.opfs.read(m.args.path);
             else if (m.op === 'write') { await editor.opfs.write(m.args.path, m.args.content); result = null; }
@@ -643,13 +653,15 @@ const runEvalInternal = async (code, timeoutMs = 30000, entryPath = NOTEBOOK_PAT
           }
           return;
         }
-        if (m.type === 'done') {
-          clearTimeout(timer);
-          try { worker.terminate(); } catch {}
-          if (m.value !== undefined && !m.error) {
-            renderReturnValue(els.output, m.value);
-            els.outputPane.scrollTop = els.outputPane.scrollHeight;
+        if (m.type === 'done' || m.type === 'display') {
+          if (m.type === 'done') {
+            clearTimeout(timer);
+            try { worker.terminate(); } catch {}
           }
+          // peerd.self.display(value) - use the return value renderer.
+          // Tables, charts, JSON, and plain values keep the same output.
+          if (m.type === 'display' || m.value !== undefined && !m.error) renderReturnValue(els.output, m.value);
+          if (m.type === 'display') return;
           // Map stack frames in the entry blob back to notebook.js:<line> so
           // the pane (and the agent's tool result) point at the user's code.
           const workerUrl = ev.workerUrl ?? url;
@@ -867,19 +879,47 @@ const onNotebookMessage = (msg, sender, sendResponse) => {
             sendResponse({ ok: true, result: busyResult() });
             return;
           }
-          // Mirror the agent's code into notebook.js with a one-shot
-          // backup of whatever the user had there.
+          // why: The saved marker protects the previous notebook.js across reloads.
           let result;
           const deadlineTimer = setTimeout(
             () => controller.abort('deadline'), msg.timeoutMs ?? 30000,
           );
           try {
+            const previousMarker = await mirrorOpfs.read(LAST_AGENT_PATH).catch((error) => {
+              if (error?.name === 'NotFoundError') return null;
+              throw error;
+            });
+            if (editor.getActiveFile() !== NOTEBOOK_PATH) await editor.switchToFile(NOTEBOOK_PATH);
             throwIfAborted(controller.signal);
-            if (editor.getActiveFile() !== NOTEBOOK_PATH) {
-              await editor.switchToFile(NOTEBOOK_PATH);
+            if (editor.getActiveFile() !== NOTEBOOK_PATH) throw new DOMException('aborted', 'AbortError');
+            const originalCode = editor.getActiveContent();
+            const marker = recoverMirrorState(previousMarker, originalCode);
+            let pending = false, replacementStarted = false;
+            try {
               throwIfAborted(controller.signal);
+              // why: retain both complete images so reload can distinguish an
+              // unstarted replacement from a committed one without losing its backup.
+              await mirrorOpfs.write(LAST_AGENT_PATH, JSON.stringify({
+                pending: true, code: msg.code, originalCode, previousCode: marker?.code ?? null,
+              }));
+              pending = true;
+              if (editor.getActiveFile() !== NOTEBOOK_PATH) await editor.switchToFile(NOTEBOOK_PATH);
+              throwIfAborted(controller.signal);
+              if (editor.getActiveFile() !== NOTEBOOK_PATH) throw new DOMException('aborted', 'AbortError');
+              await editor.replaceActiveWith(msg.code, {
+                backupTo: editor.getActiveContent() === marker?.code ? undefined : BEFORE_AGENT_PATH,
+                signal: controller.signal,
+                beforeReplace: () => { replacementStarted = true; },
+              });
+              await mirrorOpfs.write(LAST_AGENT_PATH, JSON.stringify({ code: msg.code }));
+              pending = false;
+            } finally {
+              // why: An incomplete mirror must not claim the next code as saved.
+              if (pending && !replacementStarted) {
+                if (previousMarker === null) await mirrorOpfs.delete(LAST_AGENT_PATH);
+                else await mirrorOpfs.write(LAST_AGENT_PATH, previousMarker);
+              }
             }
-            await editor.replaceActiveWith(msg.code, { backupTo: BEFORE_AGENT_PATH });
             throwIfAborted(controller.signal);
             result = await runEvalInternal(
               msg.code, msg.timeoutMs ?? 30000, NOTEBOOK_PATH, controller.signal,
@@ -908,6 +948,7 @@ const onNotebookMessage = (msg, sender, sendResponse) => {
           } else sendResponse({ ok: true, stopped: false });
           return;
         case 'js/write-file':
+          assertAgentFileMutation(msg.path);
           await editor.opfs.write(msg.path, msg.content);
           await editor.refreshTree();
           sendResponse({ ok: true });
@@ -1007,7 +1048,6 @@ const setupResizer = () => {
     mountEl: byId('editor-mount'),
     opfsBase: ['peerd-notebooks', notebookId],
     pinnedFile: NOTEBOOK_PATH,
-    hiddenFiles: HIDDEN_FILES,
     beforeOpfsMutation: assertOpfsWritable,
     onRun: runFromEditor,
     onSaved: () => setSaveStatus('saved'),

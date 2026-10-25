@@ -13,6 +13,7 @@ export const KERNEL_DEMAND_SUPPORT_ROUTE_NAMES = Object.freeze([
   'denylist/list', 'commands/list', 'composer/files', 'composer/tabs',
   'settings/update', 'settings/reset',
   'paced/list', 'paced/forget', 'paced/clear', 'debug/pacing',
+  'learned/list', 'learned/forget', 'learned/clear',
 ]);
 
 export const KERNEL_SESSION_SUPPORT_ROUTE_NAMES = Object.freeze([
@@ -53,7 +54,7 @@ export const KERNEL_EXECUTABLE_SEMANTIC_ROUTE_NAMES = Object.freeze([
 ]);
 
 export const KERNEL_ENGINE_ATTACH_ROUTE_NAMES = Object.freeze(
-  'vm/tab-ready js/tab-ready pod/tab-adopt app/tab-ready app/actor-retry'.split(' '),
+  'vm/tab-ready vm/tab-failed js/tab-ready pod/tab-adopt app/tab-ready app/actor-retry'.split(' '),
 );
 
 export const KERNEL_EXECUTABLE_ROUTE_NAMES = Object.freeze([
@@ -66,7 +67,7 @@ export const KERNEL_TRANSFER_ROUTE_NAMES = Object.freeze(
 );
 
 export const KERNEL_DWEB_ROUTE_NAMES = Object.freeze(
-  'dweb/app-authority-generations dweb/app-install dweb/app-record-served dweb/app-snapshot dweb/app-update dweb/audit dweb/base/announce dweb/base/find dweb/base/heard dweb/base/install dweb/base/inspect-address dweb/base/install-address dweb/base/room dweb/base/share-app dweb/base/start dweb/base/status dweb/base/stop dweb/base/update-app dweb/base/updates dweb/distributed/info dweb/ensure-seed-app dweb/peer-policy dweb/meta-admit dweb/open-commons dweb/self-apply-surface dweb/self-prepare-offer dweb/self-read-surface dweb/self-restore dweb/self-status'.split(' '),
+  'dweb/app-authority-generations dweb/app-install dweb/app-record-served dweb/app-snapshot dweb/app-update dweb/audit dweb/base/announce dweb/base/find dweb/base/heard dweb/base/install dweb/base/inspect-address dweb/base/install-address dweb/base/room dweb/base/share-app dweb/base/start dweb/base/status dweb/base/stop dweb/base/update-app dweb/base/updates dweb/blocked-peers dweb/distributed/info dweb/ensure-seed-app dweb/peer-block dweb/peer-policy dweb/peer-unblock dweb/meta-admit dweb/open-commons dweb/self-apply-surface dweb/self-prepare-offer dweb/self-read-surface dweb/self-restore dweb/self-status'.split(' '),
 );
 
 export const KERNEL_REPOSITORY_ROUTE_NAMES = Object.freeze(

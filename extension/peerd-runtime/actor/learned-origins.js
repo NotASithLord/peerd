@@ -45,7 +45,7 @@ import { sensitivityHost } from './origin-sensitivity.js';
 
 /** @typedef {import('./origin-sensitivity.js').SensitivityReason} SensitivityReason */
 
-/** The reasons this store may record. Mirrors LEARNED_REASONS next door. */
+/** The store accepts only these two observed signals. */
 const ALLOWED = new Set(['password-field', 'confirmed-write']);
 
 /**
@@ -79,6 +79,7 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
   const learned = new Map();
   /** @type {Promise<unknown>} */
   let chain = Promise.resolve();
+  let lastWrite = chain;
   let ready = false;
   let loadFailed = false;
   /** Did a signal land while the boot read was still in flight? */
@@ -153,10 +154,7 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
     // set rather than the racing writer's partial view.
     if (pendingDuringHydrate || needsRewrite) {
       pendingDuringHydrate = false;
-      const snapshot = Object.fromEntries(learned);
-      chain = chain
-        .then(() => save(snapshot))
-        .catch((e) => report('post-hydrate save failed', e));
+      persist();
     }
   };
 
@@ -191,9 +189,8 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
       for (const host of removed) tombstones.add(host);
     }
     const snapshot = Object.fromEntries(learned);
-    chain = chain
-      .then(() => save(snapshot))
-      .catch((e) => report('save failed — this change is heap-only until the next write', e));
+    lastWrite = chain.then(() => save(snapshot));
+    chain = lastWrite.catch((e) => report('Save failed. The next write can save this change.', e));
   };
 
   /**
@@ -282,7 +279,7 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
       clearedDuringHydrate = true;
       if (learned.size === 0) { persist([]); return 0; }
     }
-    if (learned.size === 0) return 0;
+    if (learned.size === 0) { persist([]); return 0; }
     const forgotten = [...learned.keys()];
     learned.clear();
     try { onForget?.(forgotten); } catch { /* best-effort */ }
@@ -292,7 +289,8 @@ export const makeLearnedOrigins = ({ load, save, onLearn, onForget, onError }) =
 
   /** Test/settings seam. */
   const size = () => learned.size;
-  const settled = () => chain.then(() => undefined, () => undefined);
+  /** @param {{ strict?: boolean }} [options] */
+  const settled = ({ strict = false } = {}) => (strict ? lastWrite : chain).then(() => undefined);
   // Authority-minting callers need to distinguish an authoritative empty set
   // from a storage failure. Ordinary roaming classification keeps its
   // documented fail-open behavior and does not consult this status.

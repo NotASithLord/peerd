@@ -66,6 +66,17 @@ export class ResponseTooLargeError extends Error {
   }
 }
 
+/** @param {Uint8Array} head @param {string} contentType */
+export const responseTextDecoder = (head, contentType) => {
+  // why: a BOM wins over HTTP metadata. Markup needs its own HTML parser.
+  if (head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf) return new TextDecoder();
+  if (head[0] === 0xfe && head[1] === 0xff) return new TextDecoder('utf-16be');
+  if (head[0] === 0xff && head[1] === 0xfe) return new TextDecoder('utf-16le');
+  const parameter = [...contentType.matchAll(/;([^;=]+)=[ \t]*(?:"((?:\\.|[^"\\])*)\\?(?:"|$)|([^;]*))/g)]
+    .find(([, name, quoted, value]) => name.trim().toLowerCase() === 'charset' && (quoted !== undefined || /[^ \t\r\n]/.test(value)));
+  try { return new TextDecoder(parameter?.[2]?.replace(/\\(.)/g, '$1') ?? parameter?.[3] ?? 'utf-8'); } catch { return new TextDecoder(); }
+};
+
 const readBoundedResponse = async (
   /** @type {Response|any} */ response, /** @type {number} */ limit,
   /** @type {AbortSignal|undefined} */ signal, /** @type {boolean} */ asText,
@@ -89,7 +100,7 @@ const readBoundedResponse = async (
   }
   const reader = response.body.getReader();
   /** @type {Uint8Array[]} */ const chunks = [];
-  const decoder = asText ? new TextDecoder() : null;
+  /** @type {TextDecoder|null} */ let decoder = null;
   let text = '';
   let total = 0;
   let truncated = false;
@@ -101,11 +112,20 @@ const readBoundedResponse = async (
         reader, signal, 'The response read was aborted.',
       );
       if (done && !asText) break;
-      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value ?? 0);
+      let chunk = value instanceof Uint8Array ? value : new Uint8Array(value ?? 0);
       if (asText) {
-        const decoded = done
-          ? /** @type {TextDecoder} */ (decoder).decode()
-          : /** @type {TextDecoder} */ (decoder).decode(chunk, { stream: true });
+        // why: the BOM can span chunks. Empty chunks do not choose the decoder.
+        if (!decoder && (total || chunk.length < 3)) {
+          if (chunk.length) chunks.push(chunk);
+          total += chunk.length;
+          chunk = new Uint8Array(total);
+          let offset = 0;
+          for (const part of chunks) { chunk.set(part, offset); offset += part.length; }
+          if (!done && (!total || total === 1 && [0xef, 0xfe, 0xff].includes(chunk[0]) || total === 2 && chunk[0] === 0xef && chunk[1] === 0xbb)) continue;
+          chunks.length = 0;
+        }
+        decoder ??= responseTextDecoder(chunk, response.headers?.get?.('content-type') ?? '');
+        const decoded = decoder.decode(chunk, { stream: !done });
         const remaining = Math.max(0, limit - text.length);
         text += decoded.slice(0, remaining);
         truncated = decoded.length > remaining;

@@ -237,6 +237,7 @@ export const createKernelDemandPlane = (deps) => {
       denylist: deps.denylist,
       repositories: support.repositories,
       originPacing: support.originPacing,
+      learnedOrigins: support.learnedOrigins,
       reloadApp,
       appCatalog: support.appCatalog,
       bindAppRegistry: support.appCatalog.bindLiveRegistry,
@@ -306,6 +307,8 @@ export const createKernelDemandPlane = (deps) => {
         if (!custody.isCurrent()) throw new Error('kernel-production-generation-retired');
         deps.bindNetwork(owner.sourceProjectionGeneration);
         liveProduction = owner;
+        // why: publish health without waiting for this controller callback.
+        void deps.pushState().catch(() => {});
       },
       withControllerLease: (/** @type {()=>any} */ operation) =>
         deps.featureHost.runtime.runWithLease(

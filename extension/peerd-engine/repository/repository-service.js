@@ -1,6 +1,7 @@
 // @ts-check
 
 import { createKeyedQueue } from '../command-queue.js';
+import { NOTEBOOK_CUSTODY_ROOT } from '../notebook-registry.js';
 import { REPOSITORY_MAX_GIT_HTTP_BODY_BYTES } from '/shared/repository-channel.js';
 import { createOpfsGitFs } from './opfs-fs.js';
 import { repositoryPaths, appRepositoryRef } from './paths.js';
@@ -630,12 +631,8 @@ export const createRepositoryService = ({
 
   /** @param {{kind:string,id:string}} ref @param {{worktree?:boolean}} [opts] */
   const destroy = (ref, { worktree = false } = {}) => run(ref, async ({ fs: repoFs, dir, gitdir }) => {
-    try { await repoFs.promises.rm(gitdir, { recursive: true, force: true }); }
-    catch (error) {
-      if ((/** @type {{code?:string}} */ (error)).code !== 'ENOENT') throw error;
-    }
-    if (worktree) {
-      try { await repoFs.promises.rm(dir, { recursive: true, force: true }); }
+    for (const path of [gitdir, ...(worktree ? [dir, ...(ref.kind === 'notebook' ? [`/${NOTEBOOK_CUSTODY_ROOT}/${ref.id}`] : [])] : [])]) {
+      try { await repoFs.promises.rm(path, { recursive: true, force: true }); }
       catch (error) {
         if ((/** @type {{code?:string}} */ (error)).code !== 'ENOENT') throw error;
       }

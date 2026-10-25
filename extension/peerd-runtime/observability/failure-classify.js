@@ -73,15 +73,20 @@ const RULES = [
   // "provider stream ended early (likely rate limit or network drop)" —
   // the guess in the parenthetical must not reclassify a dead stream.
   { kind: 'provider', test: /\bprovider stream ended early\b/i },
-  { kind: 'limits', test: /HTTP 402\b|HTTP 429\b|\busage limit\b|\bspend limit\b|\brate.?limit/i },
+  // The not_run alternative is a tool call cut by the output ceiling (the
+  // agent loop's result): the provider's limit spoke, not a bug.
+  { kind: 'limits', test: /HTTP 402\b|HTTP 429\b|\busage limit\b|\bspend limit\b|\brate.?limit|^not_run: .*output limit/i },
   // why agent sits ABOVE timeout: an actor-reported failure ("could not
   // complete your request: … timed out …") is the AGENT's account — the
   // delegated turn ran and failed in its own words; the timeout detail
   // inside it must not reclassify who failed.
   { kind: 'agent', test: /\bcould not complete your request\b|\bthe actor turn failed\b|\bREPORTED FAILURE\b|\bproduced no text reply\b/i },
   { kind: 'timeout', test: /\btimed? ?out\b|VMRunTimeoutError|\bwall.?clock\b.*\bexceeded\b/i },
-  { kind: 'provider', test: /^Provider '.+' HTTP \d+|OllamaNotRunning|\bOllama\b.*\b(not running|unreachable)\b|\bFailed to fetch\b/i },
-  { kind: 'environment', test: /^no_option_matching:|\bno element matching\b|\bactor tool relay failed\b|^fetch_failed:|\bfetch returned HTTP\b|\bHTTP \d+ for http/i },
+  // why the `<provider>: ` prefix: an OpenAI-compatible mid-stream error chunk
+  // reaches the transcript as "openrouter: <message>". It sits below limits so
+  // "openrouter: Rate limit exceeded" still classifies as limits.
+  { kind: 'provider', test: /^(openrouter|openai|glm|ollama): |^Provider '.+' HTTP \d+|OllamaNotRunning|\bOllama\b.*\b(not running|unreachable)\b|\bFailed to fetch\b/i },
+  { kind: 'environment', test: /^no_option_matching:|\bno element matching\b|\bactor tool relay failed\b|^(fetch_failed|document_too_large|pdf_password_required):|\bfetch returned HTTP\b|\bHTTP \d+ for http/i },
   { kind: 'environment', test: /VM(NotReady|BootFailed|TabClosed|NetworkDenied)|\bthe VM tab (was )?closed\b|\bsandbox\b.*\b(crash|failed to boot)\b|\bworker (crashed|terminated unexpectedly)\b/i },
 ];
 

@@ -3,6 +3,7 @@ import { makeSerialLane } from '/shared/cold-util.js';
 import { setUserPeerBlocked, refreshDiscoverySetting } from './dweb-peer-policy.js';
 
 import { effectReceiptFields } from './host-effect-verdict.js';
+import { VMBootFailedError } from '/peerd-engine/background.js';
 
 import { createAuthorityEffectScheduler } from './authority-effect-scheduler.js';
 import {
@@ -43,7 +44,6 @@ import {
   groupResourceLossNotices,
   makeFixedSiteClientOriginGuard,
   makeJudgeLanding,
-  makeLearnedOrigins,
   makeLifecycleBoot,
   makeMeshDispatch,
   makeOriginStateStore,
@@ -122,9 +122,7 @@ import {
 } from '/shared/semantic-hook-manifest.js';
 import { readBoundedResponseText } from '/shared/abort.js';
 import { captureSessionAuthority } from '/shared/session-authority-epoch.js';
-import {
-  bindCurrentChat, DEFAULT_CHAT_PERMISSION, rootChatSession,
-} from '/shared/current-session-binding.js';
+import { createCurrentChat, rootChatSession } from '/shared/current-session-binding.js';
 import {
   needsWebWriteConfirm,
   WEB_WRITE_CONFIRM_KEY,
@@ -162,7 +160,7 @@ import {
 } from './app-actor-policy.js';
 
 import { sha256Hex } from '/shared/util.js';
-import { ACTOR_WORKER_PROTOCOL } from '/offscreen/actor-worker-protocol.js';
+import { ACTOR_WORKER_PROTOCOL } from '/shared/actor-worker-protocol.js';
 import {
   WEB_ACTOR_SOURCE_PROJECTION_KEY,
   webActorSourceProjectionRow,
@@ -565,22 +563,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       return true;
     } catch { return false; }
   };
-  const learnedOrigins = makeLearnedOrigins({
-    load: async () => deps.kv.get('learnedOrigins.v1'),
-    save: async (all) => deps.kv.set('learnedOrigins.v1', all),
-    onLearn: (host, reason) => {
-      deps.auditLog.append({
-        type: 'origin_learned_sensitive', details: { host, reason },
-      }).catch(() => {});
-    },
-    onForget: (hosts) => {
-      for (const host of hosts) {
-        deps.auditLog.append({
-          type: 'origin_unlearned_sensitive', details: { host },
-        }).catch(() => {});
-      }
-    },
-  });
+  const learnedOrigins = deps.learnedOrigins;
   const engineLiveness = makeEngineLiveness({ storage: deps.kv });
   const numericTabAuthorityFor = async (/** @type {unknown} */ liveUrl) => {
     await learnedOrigins.hydrate();
@@ -642,14 +625,6 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
   /** @type {any} */
   let goalRunner = null;
 
-  const resolveActiveProvider = () => {
-    const settings = deps.settingsStore.get();
-    const provider = providerEgressPolicy(settings.providerName);
-    if (!provider || (settings.providerName === 'local-webgpu' && deps.firefox)) {
-      throw new Error('no-provider');
-    }
-    return { name: settings.providerName, model: String(settings.providerModel ?? '') };
-  };
   const ensureActiveProvider = async () => {
     await deps.ready;
     const selection = await deps.resolveProviderSelection(null);
@@ -757,6 +732,15 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     (await dwebShare()).prepare(appId);
   const shareLocalApp = async (/** @type {string} */ appId, /** @type {any} */ prepared) =>
     (await dwebShare())(appId, undefined, prepared);
+  // why one revocation for every block: the agent's dweb_block and a Home block
+  // write the same policy, so both retire the remembered A2A consent and close
+  // the dweb agent's conversations with that peer.
+  const revokeA2aPeer = async (/** @type {string} */ did) => {
+    await a2aApprovedReady;
+    a2aApprovalRevision++;
+    if (dwebAgentOwner) await dwebAgentOwner.revokePeer(did);
+    else { a2aApprovedDids.delete(did); await persistA2aApproved(); }
+  };
   const withDwebPublication = (/** @type {(current:()=>boolean)=>Promise<any>} */ operation) =>
     engine.withDwebPublication(async (/** @type {()=>boolean} */ current) => {
       if (!current() || !dwebTransportOn()) return { ok: false, error: 'dweb-disabled' };
@@ -783,12 +767,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       return setUserPeerBlocked({
         kv: deps.kv, vault: deps.vault, browser: deps.browser,
         current: () => engine.dwebPublicationGeneration() === generation,
-        revokePeer: async (/** @type {string} */ did) => {
-          await a2aApprovedReady;
-          a2aApprovalRevision++;
-          if (dwebAgentOwner) await /** @type {any} */ (dwebAgentOwner).revokePeer(did);
-          else { a2aApprovedDids.delete(did); await persistA2aApproved(); }
-        },
+        revokePeer: revokeA2aPeer,
       }, args);
     },
     setDiscovery: async (/** @type {any} */ { enabled } = {}) => {
@@ -829,7 +808,12 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     const activeTab = tab && {
       id: tab.id, windowId: tab.windowId, url: tab.url ?? '', origin: originOf(tab.url ?? ''),
     };
-    const providerName = session?.provider ?? resolveActiveProvider().name;
+    // why: the first turn must bind the same usable provider as the composer.
+    const settings = deps.settingsStore.get();
+    const freshProvider = session?.provider && session?.model ? null
+      : providerEgressPolicy(settings.providerName) && !(settings.providerName === 'local-webgpu' && deps.firefox)
+        ? { name: settings.providerName, model: String(settings.providerModel ?? '') } : await ensureActiveProvider();
+    const providerName = session?.provider ?? freshProvider?.name ?? '';
     const actorType = options.actorType;
     const actorBacking = options.actorBacking;
     const requestedActorSurface = options.actorSurface
@@ -1065,7 +1049,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       allowlist: Object.freeze([...HARDCODED_ALLOWLIST, ...userEndpoints]),
       provider: {
         name: providerName,
-        model: session?.model ?? resolveActiveProvider().model,
+        model: session?.model ?? freshProvider?.model ?? '',
         hasKey: await providerCredentialReady(providerName),
       },
       vault: { isLocked: deps.vault.isLocked() },
@@ -1113,6 +1097,16 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
   const uiConnected = () => live?.shared.uiPorts.size > 0;
   const post = (/** @type {any} */ message) => {
     if (uiConnected()) live.shared.uiPorts.broadcast(message);
+  };
+  // why: a new user turn must clear every older terminal save.
+  const goalNotes = makeSerialLane();
+  const clearGoalStopNote = async (/** @type {string} */ sessionId) => {
+    const cleared = await goalNotes(async () => {
+      if (!(await live.shared.sessions.getMetadata(sessionId))?.goalStopNote) return false;
+      await live.shared.sessions.update(sessionId, { goalStopNote: null });
+      return true;
+    });
+    if (cleared && uiConnected()) await deps.pushState();
   };
   const rootSessionIdFor = (/** @type {string} */ sessionId) =>
     rootChatSession(live.shared.sessions, sessionId).catch(() => null);
@@ -1163,18 +1157,13 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
   const ensureCurrentSession = async (
     /** @type {{exactFresh?:boolean}} */ options = {},
   ) => {
-    let sessionId = options.exactFresh === true
+    const sessionId = options.exactFresh === true
       ? null : await deps.sessionCache.sessionGet('currentSessionId');
     if (sessionId) return sessionId;
     const active = await ensureActiveProvider();
-    const created = await live.shared.sessions.create({
+    return (await createCurrentChat(live.shared.sessions, deps.sessionCache, {
       provider: active.name, model: active.model,
-      permissionMode: DEFAULT_CHAT_PERMISSION.mode,
-      confirmActions: DEFAULT_CHAT_PERMISSION.confirmActions,
-    });
-    sessionId = created.sessionId;
-    await bindCurrentChat(deps.sessionCache, created);
-    return sessionId;
+    })).sessionId;
   };
   const handleSystemCommand = async (/** @type {string} */ raw,
     /** @type {string|null} */ boundSessionId = null) => {
@@ -2412,12 +2401,12 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     directActorHost?.bindRelayRoutes(actorClient?.routes ?? {});
     live.actorIsolationReady = actorIsolationAvailable(baseActorIsolation) && isolationState
       ? isolationState.load(baseActorIsolation).then((stored) => {
-        live.actorIsolation = stored ?? baseActorIsolation;
-        return live.actorIsolation;
+        live.actorIsolation = stored ?? baseActorIsolation; return live.actorIsolation;
       }).catch((cause) => {
-        live.actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, cause);
-        return live.actorIsolation;
+        live.actorIsolation = actorIsolationTemporarilyUnavailable(baseActorIsolation, cause); return live.actorIsolation;
       }) : Promise.resolve(baseActorIsolation);
+    // why: health can settle after publication. Do not block controller startup.
+    void live.actorIsolationReady.then(() => deps.pushState()).catch(() => {});
     live.actorIsolationState = isolationState;
     live.runActorIsolated = async (/** @type {any} */ job, /** @type {any} */ options = {}) => {
       await live.actorIsolationReady;
@@ -2599,15 +2588,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     };
     const asyncActors = makeAsyncActors({
       spawnActor,
-      turnSlots: {
-        runWhenIdle: (/** @type {string} */ sessionId, /** @type {any} */ operation) =>
-          shared.turnSlots.runWhenIdle(sessionId, operation),
-        runWhenIdleClaimed: (/** @type {string} */ sessionId,
-          /** @type {any} */ operation) => shared.turnSlots.runWhenIdleClaimed(sessionId, operation),
-        generation: (/** @type {string} */ sessionId) => shared.turnSlots.generation(sessionId),
-        isBusy: (/** @type {string} */ sessionId) => shared.turnSlots.isBusy(sessionId),
-        stop: (/** @type {string} */ sessionId) => shared.turnSlots.stop(sessionId),
-      },
+      turnSlots: shared.turnSlots,
       stopSubtree: (/** @type {string} */ sessionId) => spawnActorCore.stopSubtree(sessionId),
       reenter: (/** @type {any} */ request) => live.runAgentTurn(request),
       getActiveSessionId: () => deps.sessionCache.sessionGet('currentSessionId'),
@@ -2798,6 +2779,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       isOffscreenSender: deps.isOffscreenSender,
     });
     const appActorChat = makeAppActorChatHandler({
+      isVaultLocked: () => deps.vault.isLocked(),
       isTrustedSender: deps.isTrustedSender, appTabTracker: engine.appTabTracker,
       ensureAppActorBinding, sessions: shared.sessions,
       messageActor: actorMessaging.messageActor,
@@ -2922,17 +2904,20 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     };
     const trustedEngineMessage = (/** @type {any} */ sender) =>
       deps.isTrustedSender(sender) && typeof sender?.tab?.id === 'number';
+    const vmTabState = async (/** @type {any} */ message, /** @type {any} */ sender, failed = false) => {
+      if (!trustedEngineMessage(sender) || typeof message?.vmId !== 'string'
+          || engine.vmTabTracker.parseVmIdFromUrl(sender.tab.url) !== message.vmId
+          || !await engine.vmRegistry.get(message.vmId)) return false;
+      const liveTabId = engine.vmTabTracker.getTabId(message.vmId);
+      if ((failed || liveTabId != null) && liveTabId !== sender.tab.id) return false;
+      if (failed) engine.vmTabTracker.onTabFailed(message.vmId, new VMBootFailedError('startup', 'Check the VM tab for details.'));
+      else engine.vmTabTracker.onTabReady(message.vmId, sender.tab.id);
+      await syncNetworkCustody();
+      return false;
+    };
     const engineRoutes = {
-      'vm/tab-ready': async (/** @type {any} */ message, /** @type {any} */ sender) => {
-        if (!trustedEngineMessage(sender) || typeof message?.vmId !== 'string'
-            || engine.vmTabTracker.parseVmIdFromUrl(sender.tab.url) !== message.vmId
-            || !await engine.vmRegistry.get(message.vmId)) return false;
-        const liveTabId = engine.vmTabTracker.getTabId(message.vmId);
-        if (liveTabId != null && liveTabId !== sender.tab.id) return false;
-        engine.vmTabTracker.onTabReady(message.vmId, sender.tab.id);
-        await syncNetworkCustody();
-        return false;
-      },
+      'vm/tab-ready': vmTabState,
+      'vm/tab-failed': (/** @type {any} */ message, /** @type {any} */ sender) => vmTabState(message, sender, true),
       'js/tab-ready': async (/** @type {any} */ message, /** @type {any} */ sender) => {
         if (!trustedEngineMessage(sender) || typeof message?.notebookId !== 'string'
             || engine.jsTabTracker.parseIdFromUrl(sender.tab.url) !== message.notebookId
@@ -3472,6 +3457,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       dwebInbound: dwebAgentOwner.onMessage,
       syncDwebAgentRoom: dwebAgentOwner.syncRoom,
       onDwebStopped: dwebAgentOwner.roomStopped,
+      revokeDwebPeer: revokeA2aPeer,
       onSettingsChanged: async (/** @type {any} */ patch) => {
         if (patch?.watchAgentTab === true) await live.tabAffordances.focusAgentTab();
         if (Object.hasOwn(patch ?? {}, 'frontDoorView')) {
@@ -3491,8 +3477,11 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       noteAgentTab: (/** @type {number} */ tabId, /** @type {any} */ tab) =>
         live.tabAffordances.noteAgentTab(tabId, tab),
       bindGoalRunner: (/** @type {any} */ runner) => { goalRunner = runner; },
-      beforeGoalStart: (/** @type {{sessionId:string}} */ request) =>
-        prewalk.armForRun(request?.sessionId),
+      beforeGoalStart: async (/** @type {{sessionId:string}} */ request) => {
+        await goalRunner?.stop(request.sessionId);
+        await clearGoalStopNote(request.sessionId);
+        await prewalk.armForRun(request.sessionId);
+      },
       hasUnresolvedSideEffects: async (/** @type {string} */ sessionId) => {
         await lifecycleArmed;
         if (await lifecycleBoot.operationLog.unknownIntentOverflowed?.()) return true;
@@ -3501,21 +3490,16 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         }
         return false;
       },
-      onGoalRunEnd: (/** @type {string} */ sessionId, /** @type {any} */ info) => {
+      onGoalRunEnd: async (/** @type {string} */ sessionId, /** @type {any} */ info) => {
         prewalk.restoreForRun(sessionId).catch(() => {});
-        void deps.sessionCache.sessionGet('currentSessionId').then((/** @type {any} */ current) => {
-          if (current !== sessionId) return;
-          if (info?.phase === 'capped') {
-            deps.postChatNote(
-              `Goal run stopped after reaching the ${GOAL_MAX_ITERATIONS}-turn limit.`,
-              null,
-              sessionId,
-            );
-          } else if (info?.phase === 'halted') {
-            deps.postChatNote(info?.reason
-              ? `Goal run stopped (${info.reason}).` : 'Goal run stopped.', null, sessionId);
-          }
-        }).catch(() => {});
+        const text = info?.phase === 'capped'
+          ? `Goal run stopped after reaching the ${GOAL_MAX_ITERATIONS}-turn limit.`
+          : info?.phase === 'halted' && info.reason ? `Goal run stopped (${info.reason}).` : null;
+        if (!text) return;
+        await goalNotes(() => shared.sessions.update(sessionId, {
+          goalStopNote: { id: crypto.randomUUID(), text: text.slice(0, 1_000), at: Date.now() },
+        }));
+        if (uiConnected()) await deps.pushState();
       },
       broadcastAgentTab: () => live.tabAffordances.broadcastAgentTab(),
       onUiConnect: async (/** @type {any} */ port,
@@ -3711,7 +3695,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       runInit: (/** @type {any} */ message = {}, /** @type {any} */ options = undefined) =>
         deps.runMemoryInit(message, options),
       handleSystemCommand, handleToolsCommand,
-      postChatNote: deps.postChatNote, spawnActor: live.spawnActor,
+      postChatNote: deps.postChatNote, spawnActor: live.spawnActor, clearGoalStopNote,
       browser: deps.browser, ensureSession: ensureCurrentSession,
       actorRecoveryReady: () => live.actorRecoveryGate.ready(),
       actorMessaging: live.actorMessaging,

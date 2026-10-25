@@ -44,11 +44,13 @@ const saveJsonFile = (payload, filename) => {
  * Component-local state for ChatView.
  * @typedef {Object} ChatViewState
  * @property {boolean} goalArmed             the Goal toggle's arm state (UI-only)
+ * @property {number} sendSequence                 local composer submissions
  * @property {string|null|undefined} _sid    which chat the arm state belongs to
  * @property {boolean} hadMessages           whether this chat already mounted a transcript
  * @property {boolean} hasObservedSession    whether initial session hydration has completed
  * @property {Map<string|undefined, Set<string>>} seenRecoveryIdsBySession recovery announcements already heard per chat
  * @property {boolean} [debugMenuOpen]       the debug-export flyout's open state
+ * @property {HTMLElement | null} [debugTrigger] the persistent debug button
  * @property {boolean} [inspectorOpen]       the context-inspector modal's open state
  * @property {Array<Record<string, any>>|null} [snapshots]  the inspector's fetched snapshots (null = loading)
  * @property {string|null} [snapshotsError]  why the fetch failed (locked vault, etc.), for an honest modal
@@ -64,11 +66,9 @@ const saveJsonFile = (payload, filename) => {
 export const ChatView = {
   /** @param {ChatViewVnode} vnode */
   oninit(vnode) {
-    // Goal arming is pure composer intent (it just flags the next send as
-    // goal:true), so it lives here as UI-only state — no SW round-trip. Reset
-    // when the chat changes (each chat owns its own run), mirroring the
-    // InputBar's per-session draft swap.
-    vnode.state.goalArmed = false;
+    // why local state: Goal arms this chat's next send without a worker request.
+    // Each surface owns its send sequence. Reset Goal on chat changes, like InputBar's draft.
+    vnode.state.goalArmed = false; vnode.state.sendSequence = 0;
     vnode.state._sid = vnode.attrs.state?.session?.sessionId;
     vnode.state.hadMessages = (vnode.attrs.state?.session?.messages?.length ?? 0) > 0;
     vnode.state.hasObservedSession = vnode.state._sid != null;
@@ -127,10 +127,11 @@ export const ChatView = {
       }).engine !== null;
 
     return m('.chat-view', [
-      // Inline banner on the latest error from the SW. Sticks until a
-      // new message succeeds (which sets lastError back to null via the
-      // state push).
-      state.lastError ? m('.error-banner', [
+      // Inline banner on the latest error from the SW. Sticks until the next
+      // send (turn/streaming) or a chat switch (state push) clears lastError.
+      // role=alert: a screen reader hears the mapped copy when it lands, so
+      // the transcript's settle announcer only says that the turn failed.
+      state.lastError ? m('.error-banner', { role: 'alert' }, [
         m('span', mapError(state.lastError)),
         // why conditional: only offer "Open settings" when Settings can
         // actually fix it (key/auth → providers, spend limit → costs). A
@@ -148,7 +149,7 @@ export const ChatView = {
       // Rate-limit retry indicator. Without this the retry is a blank
       // spinner — the user thinks it's broken and keeps re-sending (which
       // aborts the retry), so the error never surfaces. Make it loud.
-      state.rateLimit ? m('.rate-limit-banner', [
+      state.rateLimit ? m('.rate-limit-banner', { role: 'status' }, [
         m('span.rl-spinner', { 'aria-hidden': 'true' }, '⏳'),
         m('span',
           `Rate limited — retrying${state.rateLimit.attempt ? ` (attempt ${state.rateLimit.attempt})` : ''}. `
@@ -191,7 +192,7 @@ export const ChatView = {
         actorExecution: state.capabilities?.actorExecution,
       })
         : m(MessageList, {
-            sessionId: state.session?.sessionId,
+            sessionId: state.session?.sessionId, followSequence: ui.sendSequence,
             announceOnMount,
             seenRecoveryIdsBySession: ui.seenRecoveryIdsBySession,
             messages,
@@ -218,6 +219,9 @@ export const ChatView = {
             confirmEvents: (state.confirmEvents ?? []).filter((e) => e.sessionId === state.session?.sessionId),
             uiActions,
             send,
+            // The viewed chat's turn lifecycle: the settle announcer speaks
+            // once when this flips from true to false.
+            streaming: !!state.streaming,
             // A model turn may be idle after acknowledging asynchronous actor
             // work. That is not yet the human task's final answer; mirror the
             // route's in-flight guard so the UI never offers a no-op verdict.
@@ -282,7 +286,7 @@ export const ChatView = {
         state.session?.sessionId ? m('.debug-export', [
           m('button.debug-export-btn', {
             title: 'Debug: export this chat\'s debug bundle (a local file — nothing is sent anywhere)',
-            onclick: () => { ui.debugMenuOpen = !ui.debugMenuOpen; },
+            onclick: (/** @type {Event} */ event) => { ui.debugTrigger = /** @type {HTMLElement} */ (event.currentTarget); ui.debugMenuOpen = !ui.debugMenuOpen; },
           }, 'debug'),
           ui.debugMenuOpen ? m('.debug-menu-backdrop', {
             onclick: () => { ui.debugMenuOpen = false; },
@@ -331,7 +335,7 @@ export const ChatView = {
       // (The per-chat usage chip lives inside the InputBar action row,
       // next to the mic/Send buttons — feature 06.)
       m(InputBar, {
-        state, send, voiceManager,
+        state, send, voiceManager, onSubmit: () => { ui.sendSequence += 1; },
         goalArmed: ui.goalArmed,
         onGoalSent: () => { ui.goalArmed = false; },
       }),
@@ -340,7 +344,7 @@ export const ChatView = {
       ui.inspectorOpen ? m(ContextInspector, {
         snapshots: ui.snapshots ?? null,
         error: ui.snapshotsError ?? null,
-        onClose: () => { ui.inspectorOpen = false; },
+        onClose: () => { ui.inspectorOpen = false; ui.debugTrigger?.focus(); },
       }) : null,
     ]);
   },
@@ -742,7 +746,7 @@ export const EmptyState = {
       ? m('.path-menu', { class: isHome ? 'path-menu--home' : '' }, prompts.map((p, i) => {
           const shown = ui.shown?.[i] ?? Infinity;
           const done = shown >= p.text.length;
-          const actorUnavailable = attrs.actorExecution && attrs.actorExecution.status !== 'available' && p.type !== 'ask';
+          const actorUnavailable = attrs.actorExecution && !['available', 'not-started'].includes(attrs.actorExecution.status ?? '') && p.type !== 'ask';
           const blocked = p.blocked === true;
           // cursor shows only once this tile has STARTED typing and isn't done
           const typing = (ui.started?.[i] ?? true) && !done;

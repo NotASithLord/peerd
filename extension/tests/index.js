@@ -78,12 +78,14 @@ import './unit/engine-tabs/notebook-tab/notebook-output-render.test.js';
 
 // --- chassis: app-tab ---
 import './unit/engine-tabs/app-tab/app-binary-assets.test.js';
+import './unit/engine-tabs/app-tab/consent-bar.test.js';
 
 // --- red-team (in-browser tier): real-realm sandbox escape + CSP fences ---
 import './unit/red-team/sandbox-escape.test.js';
 
 // --- chassis: vm-tab ---
 import './unit/engine-tabs/vm-tab/firefox-webvm-note.test.js';
+import './unit/engine-tabs/vm-tab/disk-lock.test.js';
 import './unit/peerd-engine/repository.test.js';
 
 // --- chassis: offscreen (headless JS jobs / script) ---
@@ -117,6 +119,7 @@ import './unit/sidepanel/model-picker.test.js';
 import './unit/sidepanel/tools-chip.test.js';
 import './unit/sidepanel/attachments.test.js';
 import './unit/sidepanel/composer-readiness.test.js';
+import './unit/sidepanel/composer-palette.test.js';
 import './unit/sidepanel/message-list.test.js';
 import './unit/sidepanel/protected-tab-starter.test.js';
 import './unit/sidepanel/vault-shell.test.js';
@@ -129,6 +132,8 @@ import './unit/sidepanel/confirm-note.test.js';
 import './unit/sidepanel/chat-reducer-confirm.test.js';
 import './unit/sidepanel/onboarding-provider-step.test.js';
 import './unit/sidepanel/site-client-confirm.test.js';
+import './unit/sidepanel/context-inspector.test.js';
+import './unit/sidepanel/sessions-view.test.js';
 import './unit/sidepanel/learned-origins-view.test.js';
 import './unit/sidepanel/paced-origins-view.test.js';
 import './unit/sidepanel/pacing-bar.test.js';
@@ -143,14 +148,17 @@ import './unit/options/provider-races.test.js';
 import './unit/options/git-credentials.test.js';
 import './unit/options/transfer-identity.test.js';
 import './unit/options/contributor-metrics.test.js';
+import './unit/options/starter-review.test.js';
+import './unit/options/memory-safety.test.js';
+import './unit/options/activity-window.test.js';
+import './unit/options/settings-form-names.test.js';
+import './unit/options/settings-focus-contrast.test.js';
 
 // --- home (chassis): the full-tab Library page ---
 import './unit/home/library-section.test.js';
 import './unit/home/discover-section.test.js';
-import './unit/home/immutable-address-section.test.js';
 import './unit/home/actors-section.test.js';
 import './unit/home/contacts-section.test.js';
 import './unit/home/network-section.test.js';
 
-import './unit/home/starter-section.test.js';
 import './unit/engine-tabs/app-tab/starter-apps.test.js';

@@ -1,5 +1,5 @@
 // @ts-check
-import { beginSessionAuthorityChange } from '../shared/session-authority-epoch.js';
+import { withSessionAuthorityMutation } from '../shared/session-authority-epoch.js';
 
 import {
   KERNEL_SUPPORT_EFFECTS_BY_ROUTE,
@@ -103,45 +103,46 @@ export const createKernelSessionAuthority = (deps) => {
       /** @type {{patch:Record<string,'plan'|'act'|boolean>}} */ { patch },
     ) => {
       const finishAuthorityChange = deps.sessions.beginAuthorityChange?.() ?? (() => {});
-      const finishCacheChange = beginSessionAuthorityChange(deps.sessionCache);
       try {
-      await deps.ready;
-      if (typeof deps.sessionCache?.sessionSet !== 'function') {
-        throw new Error('session-cache-write-unavailable');
-      }
-      try {
-        for (const [key, value] of /** @type {const} */ ([
-          ['currentPermissionMode', patch.permissionMode],
-          ['currentConfirmActions', patch.confirmActions],
-        ])) {
-          if (value !== undefined) await deps.sessionCache.sessionSet(key, value);
-        }
-        const [sessionId, mode, confirmActions] = await Promise.all([
-          deps.sessionCache.sessionGet('currentSessionId'),
-          deps.sessionCache.sessionGet('currentPermissionMode'),
-          deps.sessionCache.sessionGet('currentConfirmActions'),
-        ]);
-        let session;
-        if (typeof sessionId === 'string' && sessionId && !deps.vault.isLocked()) {
-          if (typeof deps.sessions.updateMetadata !== 'function') {
-            throw new Error('session-atomic-update-unavailable');
+        return await withSessionAuthorityMutation(deps.sessionCache, async () => {
+          await deps.ready;
+          if (typeof deps.sessionCache?.sessionSet !== 'function') {
+            throw new Error('session-cache-write-unavailable');
           }
-          session = await deps.sessions.updateMetadata(sessionId, patch);
-        }
-        const permission = deps.resolvePermission(session, mode, confirmActions);
-        void deps.auditLog?.append({
-          type: 'mode_changed',
-          sessionId: typeof sessionId === 'string' ? sessionId : null,
-          details: permission,
-        }).catch(() => {});
-        void Promise.resolve(deps.pushState?.()).catch(() => {});
-        return permission;
-      } catch (cause) {
-        const error = cause instanceof Error ? cause : new Error(String(cause));
-        Object.assign(error, { outcomeKnown: false, retryable: false });
-        throw error;
-      }
-      } finally { finishCacheChange(); finishAuthorityChange(); }
+          try {
+            for (const [key, value] of /** @type {const} */ ([
+              ['currentPermissionMode', patch.permissionMode],
+              ['currentConfirmActions', patch.confirmActions],
+            ])) {
+              if (value !== undefined) await deps.sessionCache.sessionSet(key, value);
+            }
+            const [sessionId, mode, confirmActions] = await Promise.all([
+              deps.sessionCache.sessionGet('currentSessionId'),
+              deps.sessionCache.sessionGet('currentPermissionMode'),
+              deps.sessionCache.sessionGet('currentConfirmActions'),
+            ]);
+            let session;
+            if (typeof sessionId === 'string' && sessionId && !deps.vault.isLocked()) {
+              if (typeof deps.sessions.updateMetadata !== 'function') {
+                throw new Error('session-atomic-update-unavailable');
+              }
+              session = await deps.sessions.updateMetadata(sessionId, patch);
+            }
+            const permission = deps.resolvePermission(session, mode, confirmActions);
+            void deps.auditLog?.append({
+              type: 'mode_changed',
+              sessionId: typeof sessionId === 'string' ? sessionId : null,
+              details: permission,
+            }).catch(() => {});
+            void Promise.resolve(deps.pushState?.()).catch(() => {});
+            return permission;
+          } catch (cause) {
+            const error = cause instanceof Error ? cause : new Error(String(cause));
+            Object.assign(error, { outcomeKnown: false, retryable: false });
+            throw error;
+          }
+        });
+      } finally { finishAuthorityChange(); }
     },
   });
   const effectAllowed = (/** @type {string} */ operation, /** @type {any} */ payload,

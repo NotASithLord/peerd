@@ -5,6 +5,7 @@
 // `.name` survives structured-clone across the SW/port boundary.
 
 import { TypedError } from '/shared/errors.js';
+import { providerMetadata } from './metadata.js';
 
 /** Generic provider failure (non-2xx, malformed body, parse error). */
 export class ProviderError extends TypedError {
@@ -72,9 +73,7 @@ export class ProviderUsageLimitError extends TypedError {
    * @param {{ status?: number, detail?: string }} [opts]
    */
   constructor(provider, { status, detail } = {}) {
-    const label = typeof provider === 'string' && provider.length
-      ? provider[0].toUpperCase() + provider.slice(1)
-      : 'Provider';
+    const label = providerMetadata(provider)?.label ?? 'Provider';
     const suffix = detail ? ` (${detail})` : '';
     super(`${label} usage limit reached — your account is out of credit or over a spend/usage cap. Check your ${label} account billing & limits, then try again.${suffix}`);
     this.provider = provider;

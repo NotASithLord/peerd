@@ -17,6 +17,7 @@
 // output re-enters fenced via usedEgress (tools/defs/script.js).
 
 import { bytesToBase64, base64ToBytes } from './util.js';
+import { responseTextDecoder } from './abort.js';
 
 /**
  * @typedef {Object} BridgedFetchResponse the sw/web-fetch wire shape
@@ -57,9 +58,7 @@ const contentTypeOf = (headers) => {
  * No `extract` → the response is returned as-is, byte-for-byte (the raw
  * behavior every existing caller keeps).
  *
- * Bodies are decoded as UTF-8 regardless of any header charset (parity with
- * the raw bridge path and fetch_url — Response.text() is UTF-8-only too), so
- * a legacy-charset page extracts with mojibake rather than failing.
+ * Decode like fetch_url. The raw bridge keeps its original bytes.
  *
  * @param {BridgedFetchResponse | null | undefined} resp
  * @param {{ extract?: unknown, url?: string, extractMarkdown?: ExtractMarkdownFn | null }} opts
@@ -78,7 +77,8 @@ export const applyFetchExtract = async (resp, { extract, url, extractMarkdown })
   if (!resp?.ok || !resp.bodyB64 || typeof extractMarkdown !== 'function') return passthrough;
   if (!isHtmlContentType(contentTypeOf(resp.headers))) return passthrough;
   try {
-    const html = new TextDecoder().decode(base64ToBytes(resp.bodyB64));
+    const bytes = base64ToBytes(resp.bodyB64);
+    const html = responseTextDecoder(bytes, contentTypeOf(resp.headers)).decode(bytes);
     const result = await extractMarkdown({ html, url });
     if (!result?.readerable || typeof result.markdown !== 'string' || !result.markdown.trim()) {
       return passthrough;

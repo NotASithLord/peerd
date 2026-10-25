@@ -53,6 +53,15 @@ describe('parseRefs — @tab and @file', () => {
     expect(refs[0].arg).toBe('readme.md');
     expect(refs[0].raw).toBe('@file:readme.md');
   });
+  test('quoted files preserve spaces, escaped quotes and final punctuation', () => {
+    const path = 'docs/my "notes".';
+    const source = `read @file:${JSON.stringify(path)}, then @tab:7`;
+    const [file, tab] = parseRefs(source);
+    expect(file.arg).toBe(path);
+    expect(source.slice(file.start, file.end)).toBe(`@file:${JSON.stringify(path)}`);
+    expect(tab.arg).toBe('7');
+    expect(parseRefs('@tab:"7"')[0].arg).toBe('"7"');
+  });
   test('an email address is NOT a reference (word-boundary anchor)', () => {
     expect(parseRefs('mail me at ariel@tab.com')).toHaveLength(0);
     expect(parseRefs('user@file.io')).toHaveLength(0);

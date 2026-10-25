@@ -5,6 +5,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { planTrim } from '../../../extension/peerd-runtime/loop/trim.js';
+import { mergeEnrichment } from '../../../extension/peerd-runtime/loop/rolling-summary.js';
 
 const big = (i: number, chars = 400) => ({
   role: i % 2 === 0 ? 'user' : 'assistant',
@@ -13,6 +14,41 @@ const big = (i: number, chars = 400) => ({
   when: i,
 });
 const convo = (n: number, chars = 400): any[] => Array.from({ length: n }, (_, i) => big(i, chars));
+
+describe('token trim hysteresis', () => {
+  const messages = convo(40, 1000);
+  const first = planTrim(messages, { contextWindow: 10_000 });
+  const state = mergeEnrichment(first.summaryState!, { facts: ['Keep the saved goal.'] });
+
+  test('keeps the watermark until the sent slice crosses the trigger', () => {
+    const small = [...messages, { ...big(40, 1000), id: 'next' }];
+    const held = planTrim(small, { contextWindow: 10_000, summaryState: state });
+    expect(held.newlyDropped).toEqual([]);
+    expect(held.summaryState).toEqual(state);
+    expect(held.messages[0].id).toBe(first.messages[0].id);
+    const grown = [...small, ...convo(14, 1000).map((message, index) => ({ ...message, id: `new-${index}` }))];
+    const advanced = planTrim(grown, { contextWindow: 10_000, summaryState: state });
+    expect(advanced.summaryState!.covered).toBeGreaterThan(state.covered);
+    expect(advanced.newlyDropped[0].id).toBe(messages[state.covered].id);
+    expect(advanced.summaryState!.facts).toEqual(state.facts);
+  });
+
+  test.each([400, 600])('a compaction dip to %s characters cannot rewind a valid anchor', (characters) => {
+    const compacted = messages.map((message, index) => index < state.covered ? { ...message, content: 'x'.repeat(characters) } : message);
+    const held = planTrim(compacted, { contextWindow: 10_000, summaryState: state });
+    expect(held.didTrim).toBe(true);
+    expect(held.summaryState).toEqual(state);
+    expect(held.newlyDropped).toEqual([]);
+    expect(held.messages[0].content).toContain('Keep the saved goal.');
+  });
+
+  test('a larger model window restores the complete history', () => {
+    const restored = planTrim(messages, { contextWindow: 100_000, summaryState: state });
+    expect(restored.didTrim).toBe(false);
+    expect(restored.messages).toEqual(messages);
+    expect(restored.summaryState).toBeNull();
+  });
+});
 
 describe('planTrim — message-count parity (window absent)', () => {
   test('no contextWindow + under soft cap → no trim', () => {

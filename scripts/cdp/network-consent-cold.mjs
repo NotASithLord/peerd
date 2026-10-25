@@ -415,7 +415,22 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
             requireResult(evidence.observerErrors.length === 0, `Observer failed: ${evidence.observerErrors.join('\n')}`);
             for (const [sessionId, scope] of [...retirements]) {
               requireResult(scope.ready, `Unobserved target retired: ${scope.target.targetId}`);
-              await activeDiagnostic(`target destruction target=${scope.target.targetId}`, () => scope.destroyedWait, 3_000, signal);
+              try {
+                await activeDiagnostic(`target destruction target=${scope.target.targetId}`, () => scope.destroyedWait, 3_000, signal);
+              } catch (error) {
+                checkActive();
+                const probes = await Promise.allSettled([
+                  connection.send('Target.getTargets', { filter: [{}] }, undefined, signal),
+                  connection.send('Target.getTargetInfo', { targetId: scope.target.targetId }, undefined, signal),
+                ]);
+                evidence.retirementDiagnostics ??= [];
+                evidence.retirementDiagnostics.push({ sessionId, target: scope.target,
+                  ready: scope.ready, detached: scope.detached, destroyed: scope.destroyed,
+                  probes: probes.map((probe, index) => ({ method: index ? 'Target.getTargetInfo' : 'Target.getTargets',
+                    ...(probe.status === 'fulfilled' ? { result: probe.value } : { error: String(probe.reason) }) })) });
+                persist();
+                throw error;
+              }
               checkActive();
               lifecycle({ method: 'observer.retirementConfirmed', sessionId, targetId: scope.target.targetId });
               retirements.delete(sessionId); scopes.delete(sessionId);

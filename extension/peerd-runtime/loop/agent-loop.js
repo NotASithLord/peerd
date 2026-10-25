@@ -88,6 +88,7 @@ const REQUIRED_CTX = [
 const DISPATCH_DEADLINE_MS = 10 * 60_000;
 const UNKNOWN_TOOL_OUTCOME = 'outcome_unknown: Verify the target before retrying.';
 const UNKNOWN_TURN_OUTCOME = 'Turn outcome unknown. Check the session before retrying.';
+const TRUNCATED_TOOL_CALL = 'not_run: The output limit cut this call before its arguments ended. Split the work into smaller calls.';
 const REASONING_BUDGET_TOKENS = 2048;
 const REASONING_EFFORT_LEVELS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
 const DEFAULT_REASONING_EFFORT = 'medium';
@@ -305,6 +306,7 @@ export async function* runUserTurn(ctx) {
   // chat, nothing durable, and a re-prompt restarted the same doomed
   // reasoning from scratch. Bounded so a pathological prompt can't loop
   // the provider forever; the 64k default ceiling makes this rare.
+  // A tool call cut at the ceiling shares the bound (the not_run round below).
   const MAX_TRUNCATION_CONTINUES = 2;
   let truncationContinues = 0;
   /** @type {InternalMessage | null} */
@@ -622,6 +624,10 @@ export async function* runUserTurn(ctx) {
             });
           } catch { /* enrichment is advisory */ }
         }
+      } else if (!trimPlan.didTrim && session.trimSummary && (ctx.contextWindow ?? 0) > 0) {
+        // why: a larger window must not revive the old cut at the target band.
+        try { await sessions.setTrimSummary?.(sessionId, null); session = { ...session, trimSummary: undefined }; }
+        catch { /* retry the reconstructible trim update next turn */ }
       }
       for await (const ev of callModel({
         provider: session.provider,
@@ -800,15 +806,27 @@ export async function* runUserTurn(ctx) {
       }
     }
 
+    // why: the sealed host closes ordinary writes on abort. Settle first.
+    if (wasAborted() && typeof ctx.finalizeAbort === 'function') {
+      await finalizeAbort(assistantStub.id, textBuf);
+      return;
+    }
+
     // Parse tool-use input JSON. Anthropic streams partial_json
     // fragments; we concatenate, then JSON.parse the whole thing. An
     // empty buffer means the model passed `{}` implicitly.
     /** @type {ToolUseBlock[]} */
     const toolUses = [];
+    const invalidArguments = new Map();
     for (const tu of pendingToolUses.values()) {
       let input;
-      try { input = tu.inputBuf ? JSON.parse(tu.inputBuf) : {}; }
-      catch { input = {}; }
+      try {
+        input = tu.inputBuf ? JSON.parse(tu.inputBuf) : {};
+        if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('arguments must be an object');
+      } catch {
+        input = {};
+        invalidArguments.set(tu.id, `invalid_arguments: The arguments were not a valid JSON object (${tu.inputBuf.length} characters received). Nothing ran. Resend the call with complete JSON.`);
+      }
       toolUses.push({ id: tu.id, name: tu.name, input });
     }
 
@@ -844,6 +862,48 @@ export async function* runUserTurn(ctx) {
 
     if (errored) return;
     if (stopReason !== 'tool_use' || toolUses.length === 0) {
+      // A tool call cut by the output limit never ran: its arguments are
+      // incomplete (an unparseable buffer reads as `{}`), so dispatching it
+      // would act on nothing. Answer every cut tool_use with a not_run result
+      // (the next model call must pair each tool_use) and continue, bounded
+      // like the thinking-only truncation below, so the model can split the
+      // work instead of leaving a dangling call the panel shows as running.
+      // why the abort guard and the bound run BEFORE the append: a history
+      // that ends on a user message with tool results reads as resumable
+      // (resume-detect 'model-call-pending'), so auto-resume would re-drive
+      // the turn past the bound on every chat open and undo a Stop. Ending
+      // here instead leaves the last cut call a dangling tool_use on the
+      // aborted / max_tokens message: not resumable, settled in the panel,
+      // and paired by the format layer's orphan repair on the next turn.
+      if (stopReason === 'max_tokens' && toolUses.length > 0) {
+        if (wasAborted()) {
+          if (!await finalizeAbort(assistantStub.id, undefined)) {
+            yield {
+              type: 'stop', sessionId,
+              messageId: assistantStub.id, stopReason: 'aborted',
+            };
+          }
+          return;
+        }
+        if (truncationContinues >= MAX_TRUNCATION_CONTINUES) return;
+        truncationContinues += 1;
+        /** @type {InternalMessage} */
+        const notRunMessage = {
+          role: 'user',
+          content: '',
+          toolResults: toolUses.map((tu) => ({
+            tool_use_id: tu.id,
+            content: TRUNCATED_TOOL_CALL,
+            is_error: true,
+            outcomeKnown: true,
+          })),
+          id: uuidv7(now),
+          when: now(),
+        };
+        session = await sessions.appendMessage(sessionId, notRunMessage);
+        yield { type: 'state', session };
+        continue;
+      }
       // Thinking-only truncation → auto-continue (see counter above).
       // Continuation rides a synthetic USER turn — the API-sanctioned
       // shape (a trailing assistant message would be a prefill, which
@@ -884,17 +944,8 @@ export async function* runUserTurn(ctx) {
       return;
     }
 
-    // Re-check abort AFTER the stream ended, BEFORE any side-effecting dispatch.
-    // why: a hard spend-limit halt / Stop / steer can abort() in the GAP between
-    // the stream finishing and dispatch — the limit's abort() rides the `usage`
-    // event, which adapters emit one event BEFORE `message-stop`, so the
-    // for-await ends normally and the mid-stream AbortError branch (:563) never
-    // sees it. Without this guard the loop would run every already-emitted
-    // tool_use this step (writes / call_api / vm / edit / app side effects) and
-    // persist their results before the next loop-top check (:303) finally
-    // catches the abort. Mark the turn aborted — so detectInterruptedTurn treats
-    // it as a deliberate stop, NOT a resumable tools-pending interruption — and
-    // short-circuit before the dispatch waves.
+    // why: raw-loop callers retain pending tool records before this guard.
+    // Stop between the stream and dispatch must not run pending effects.
     if (wasAborted()) {
       if (!await finalizeAbort(assistantStub.id, undefined)) {
         yield {
@@ -930,14 +981,14 @@ export async function* runUserTurn(ctx) {
             if (signal) { try { signal.removeEventListener('abort', onAbort); } catch { /* stub signal in tests */ } }
             resolveDispatch(v);
           };
-          /** @param {unknown} cause @param {'aborted'|'timeout'} [kind] */
+          /** @param {unknown} cause @param {'aborted'|'timeout'|'invalid_arguments'} [kind] */
           const failWith = (cause, kind) => {
-            // why: deadline/abort failures are synthesized HERE, bypassing the
+            // why: local refusals and deadline/abort failures bypass the
             // dispatcher audit — emit tool_failed so the log matches is_error.
             // A timeout waited the full deadline before we gave up (a real,
             // known wall-clock); an abort can fire at any moment, so 0.
             const detail = /** @type {{message?:string,code?:string,outcomeKnown?:boolean,retryable?:boolean}} */ (cause);
-            const outcomeUnknown = detail?.outcomeKnown === false || kind !== undefined;
+            const outcomeUnknown = detail?.outcomeKnown === false || kind === 'aborted' || kind === 'timeout';
             if (kind) appendAudit({
               type: 'tool_failed', sessionId,
               details: {
@@ -967,6 +1018,10 @@ export async function* runUserTurn(ctx) {
             () => failWith(new Error(`tool call did not settle within ${Math.round(DISPATCH_DEADLINE_MS / 60_000)} minutes; treating it as hung and moving on`), 'timeout'),
             DISPATCH_DEADLINE_MS,
           );
+          if (invalidArguments.has(tu.id)) {
+            failWith(new Error(invalidArguments.get(tu.id)), 'invalid_arguments');
+            return;
+          }
           toolDispatch({ id: tu.id, name: tu.name, args: tu.input }).then(
             (/** @type {ToolResult} */ r) => finish(r),
             (/** @type {unknown} */ e) => failWith(e),

@@ -12,6 +12,24 @@ const settle = async (pred: () => boolean, tries = 500) => {
 type TurnArgs = { sessionId: string; userText: string; synthetic: boolean; trusted?: boolean };
 
 describe('makeGoalRunner — the goal loop', () => {
+  it('keeps the run lease until its terminal reason is durable', async () => {
+    let release!: () => void;
+    let entered = false, leased = false;
+    const stored = new Promise<void>((resolve) => { release = resolve; });
+    const runner = makeGoalRunner({
+      runTurn: async () => ({ ok: true }), maxIterations: 1,
+      onRunEnd: async () => { entered = true; await stored; },
+      withRun: async (operation) => { leased = true; try { await operation(); } finally { leased = false; } },
+    });
+    await runner.start({ sessionId: 'goal-chat', goal: 'finish the task' });
+    await settle(() => entered);
+    expect(entered).toBe(true);
+    expect(leased).toBe(true);
+    release();
+    await settle(() => !leased);
+    expect(leased).toBe(false);
+  });
+
   it('stop() reports a failed durable removal', async () => {
     const kv = makeKv();
     kv.store.set(GOAL_RUNS_KEY, { s: { goal: 'keep going', iteration: 1, startedAt: 1 } });
@@ -432,7 +450,11 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
     runner = makeGoalRunner({
       runTurn: async () => {
         seenWhileLive = kv.store.get(GOAL_RUNS_KEY);
-        if (failWrite) kv.set = async () => { throw new Error('write failed'); };
+        if (failWrite && seenWhileLive?.s1?.iteration === 1) return { toolCalls: 0 };
+        if (failWrite) {
+          kv.set = async () => { throw new Error('write failed'); };
+          return { toolCalls: 0 };
+        }
         runner.halt('s1');
       },
       kv, onRunEnd: (_sid, info) => ends.push(info),
@@ -441,30 +463,40 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
     await settle(() => runner.get('s1') === null);
     expect(seenWhileLive?.s1).toMatchObject({ goal: 'do it' });
     expect(runner.get('s1')).toBeNull();
-    expect(ends).toEqual([{ phase: 'halted', summary: null, reason: null }]);
+    expect(ends).toEqual([{ phase: 'halted', summary: null,
+      reason: failWrite ? 'the goal recovery state could not be saved' : null }]);
     expect(await runner.resume()).toEqual({ resumed: 0 });
     kv.set = write;
     await runner.stop('s1');
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
   });
 
-  it('resume() rehydrates a persisted run and continues it as a synthetic continuation', async () => {
+  it.each([0, 1, 2])('resume() preserves the hidden continuation and idle count: %s', async (idle) => {
     const kv = makeKv();
-    // Seed storage as if the SW died mid-run at iteration 2.
-    kv.store.set(GOAL_RUNS_KEY, { sBoot: { goal: 'keep building', iteration: 2, startedAt: 1 } });
+    // With one idle turn, worker loss interrupts the next continuation.
+    kv.store.set(GOAL_RUNS_KEY, { sBoot: { goal: 'keep building', iteration: idle === 1 ? 3 : 2, startedAt: 1, idle } });
     const calls: TurnArgs[] = [];
+    const ends: any[] = [];
     let runner: ReturnType<typeof makeGoalRunner>;
     runner = makeGoalRunner({
-      runTurn: async (a: TurnArgs) => { calls.push(a); runner.complete('sBoot', 'done'); },
-      kv,
+      runTurn: async (a: TurnArgs) => {
+        calls.push(a);
+        if (!idle) runner.complete('sBoot', 'done');
+        return { toolCalls: 0 };
+      },
+      kv, onRunEnd: (_sid, info) => ends.push(info),
     });
     const res = await runner.resume();
     expect(res.resumed).toBe(1);
     await settle(() => runner.get('sBoot') === null);
     // Continues from the persisted iteration → a HIDDEN continuation that still
     // carries the goal, NOT the goal replayed as a fresh visible message.
-    expect(calls[0].synthetic).toBe(true);
-    expect(calls[0].userText).toContain('keep building');
+    if (idle < 2) {
+      expect(calls[0].synthetic).toBe(true);
+      expect(calls[0].userText).toContain('keep building');
+    }
+    expect(calls).toHaveLength(idle < 2 ? 1 : 0);
+    expect(ends[0].phase).toBe(idle ? 'halted' : 'done');
     expect(kv.store.get(GOAL_RUNS_KEY)).toEqual({});
   });
 
@@ -568,6 +600,39 @@ describe('makeGoalRunner — outcome hardening (no runaway on failure)', () => {
     await runner.start({ sessionId: 's', goal: 'g' });
     await settle(() => !runner.isActive('s'));
     expect(calls.length).toBe(1);
+  });
+
+  it.each([
+    ['the agent took no action for 2 turns', true],
+    ['a turn failed', false],
+  ] as const)('the second idle continuation ends the run with the reason "%s"', async (reason, ok) => {
+    const ends: any[] = [];
+    let turns = 0;
+    const runner = makeGoalRunner({
+      runTurn: async () => ({ ok: ++turns < 3 || ok, toolCalls: 0 }),
+      onRunEnd: (_sid, info) => ends.push(info),
+      maxIterations: 20,
+    });
+    await runner.start({ sessionId: 's', goal: 'g' });
+    await settle(() => ends.length > 0);
+    expect(turns).toBe(3);
+    expect(ends).toEqual([{ phase: 'halted', summary: null, reason }]);
+  });
+
+  it('a text-only turn 1 does not count, and a tool turn resets the idle count', async () => {
+    // Turns: text only, idle, tool, idle, idle. Only turns 4 and 5 are idle in a row.
+    const toolCalls = [0, 0, 1, 0, 0];
+    const ends: Array<{ phase: string; summary: string | null; reason: string | null }> = [];
+    let turns = 0;
+    const runner = makeGoalRunner({
+      runTurn: async () => ({ toolCalls: toolCalls[turns++] }),
+      onRunEnd: (_sid, info) => ends.push(info),
+      maxIterations: 20,
+    });
+    await runner.start({ sessionId: 's', goal: 'g' });
+    await settle(() => ends.length > 0);
+    expect(turns).toBe(5);
+    expect(ends).toEqual([{ phase: 'halted', summary: null, reason: 'the agent took no action for 2 turns' }]);
   });
 
   it('fires onRunEnd once on a terminal phase, carrying phase/summary', async () => {

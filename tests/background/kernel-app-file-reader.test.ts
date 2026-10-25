@@ -4,6 +4,8 @@ import {
   makeKernelAppEditorRoutes,
 } from '../../extension/background/kernel-app-file-reader.js';
 import { makeKernelComposerRoutes } from '../../extension/background/kernel-composer-routes.js';
+import { candidatesFor } from '../../extension/sidepanel/components/command-palette.js';
+import { composerReferenceRequests } from '../../extension/shared/composer-reference-policy.js';
 
 const appFiles = (overrides: Record<string, any> = {}) => ({
   listApp: async () => [],
@@ -32,14 +34,37 @@ describe('native kernel App file picker', () => {
       appFiles: appFiles({
         listApp: async (appId: string) => {
           calls.push(appId);
-          return ['/index.html', '/assets/logo.png', '/assets/nested/data.json'];
+          return ['/index.html', '/assets/my notes.md', '/assets/nested/data.json'];
         },
       }),
     });
     await expect(reader.list()).resolves.toEqual([
-      '/index.html', '/assets/logo.png', '/assets/nested/data.json',
+      '/index.html', '/assets/my notes.md', '/assets/nested/data.json',
     ]);
     expect(calls).toEqual(['app-1']);
+    const routes = makeKernelComposerRoutes({
+      browser: {}, kv: { list: async () => ({}) }, idb: { get: async () => null },
+      sessionCache: { sessionGet: async () => 'chat' }, vault: { isLocked: () => false },
+      denylist: { ready: async () => ({ ok: true }), blocks: () => false, patterns: () => [], snapshot: async () => ({}) },
+      appFiles: reader,
+    });
+    const { files } = await routes['composer/files']();
+    expect(files).toEqual(['index.html', 'assets/my notes.md', 'assets/nested/data.json']);
+    const picks = candidatesFor({ type: 'ref', kind: 'file', query: '', from: 0, to: 6 }, { files });
+    for (const [index, pick] of picks.entries()) {
+      expect(composerReferenceRequests(pick.insert, [])).toEqual([
+        { operation: 'turn.compose.read-file', payload: { path: files[index] } },
+      ]);
+    }
+  });
+
+  test.each(['plain.md', 'my notes.md', '"report.md"', '"report".md',
+    String.raw`docs\report.md`, String.raw`"report\name".md`, String.raw`docs\my notes.md`,
+  ])('the real picker keeps the exact valid App path %s', (path) => {
+    const [pick] = candidatesFor({ type: 'ref', kind: 'file', query: '', from: 0, to: 6 }, { files: [path] });
+    expect(composerReferenceRequests(pick.insert, [])).toEqual([
+      { operation: 'turn.compose.read-file', payload: { path } },
+    ]);
   });
 
   test('forwards exact App reads to the authenticated file facade', async () => {
@@ -158,6 +183,29 @@ describe('native kernel App file picker', () => {
     })).resolves.toEqual({ ok: true });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(calls).toContainEqual(['reload', 'app-1']);
+  });
+
+  test('invalid App JSON stops before file writes and consent changes', async () => {
+    const calls: string[] = [];
+    const routes = makeKernelAppEditorRoutes({
+      vault: { isLocked: () => false },
+      catalog: { get: async () => ({ id: 'app-1', entryFile: 'index.html' }) },
+      files: { writeText: async () => { calls.push('write'); } },
+      repositories: { coordinate: async (_ref: any, operation: () => Promise<any>) => {
+        calls.push('coordinate'); return operation();
+      } },
+      withAppDwebAuthority: async (_id: string, operation: () => Promise<any>) => {
+        calls.push('consent'); return operation();
+      },
+      isAppSender: () => true,
+    });
+    for (const type of ['app/editor/write', 'app/editor-write'] as const) {
+      for (const path of ['peerd.json', 'data/document.json', 'DATA/State.JSON']) {
+        await expect(routes[type]({ appId: 'app-1', path, content: '{' }, 'exact-app'))
+          .resolves.toEqual({ ok: false, code: 'app-file-invalid-json', error: `${path} is not valid JSON` });
+      }
+    }
+    expect(calls).toEqual([]);
   });
 
   test('editor routes fail locked before OPFS, catalog mutation, or repository startup', async () => {

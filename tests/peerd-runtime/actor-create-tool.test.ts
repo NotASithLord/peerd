@@ -81,6 +81,25 @@ describe('actor_create tool — MED-1: the SYNC result is fenced as untrusted', 
     expect(r.content.indexOf('HIT WALL-CLOCK TIMEOUT')).toBeLessThan(r.content.indexOf('<untrusted_web_content'));
   });
 
+  test('an incomplete sync result stays partial outside its fence', async () => {
+    const result = await actorCreateTool.execute({ task: 'inspect', sync: true }, syncCtx({
+      result: 'The actor ended without a final reply.', incomplete: true,
+    }) as any) as any;
+    expect(result.content).toContain('ENDED WITHOUT A FINAL REPLY, result is partial');
+    expect(result.content).not.toContain('STOPPED before finishing');
+    expect(result.content.indexOf('ENDED WITHOUT')).toBeLessThan(result.content.indexOf('<untrusted_web_content'));
+  });
+
+  test('a known incomplete failure does not claim zero target work or permit replay', async () => {
+    const result = await actorCreateTool.execute({ task: 'inspect', sync: true }, syncCtx({
+      result: 'The actor did not complete.', incomplete: true, executionFailed: true, outcomeKnown: true,
+    }) as any) as any;
+    expect(result).toMatchObject({ ok: false, outcomeKnown: true, retryable: false });
+    expect(result).not.toHaveProperty('performed');
+    expect(result.error).toContain('FAILED BEFORE FINISHING');
+    expect(result.error).not.toContain('BEFORE TARGET WORK RAN');
+  });
+
   test('a post-start execution failure is a trusted unknown-outcome error', async () => {
     const r = await actorCreateTool.execute({ task: 'change it', sync: true }, syncCtx({
       result: 'the target may have changed before the worker stopped',

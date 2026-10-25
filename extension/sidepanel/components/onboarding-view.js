@@ -48,7 +48,6 @@ import m from '/vendor/mithril/mithril.js';
 import { PEER_NAME_MAX } from '/peerd-runtime/ui.js';
 import { ProviderStep } from './onboarding-provider-step.js';
 import { PeerNetworkStep } from './onboarding-network-step.js';
-export { PeerNetworkStep, PeerNetworkStatus } from './onboarding-network-step.js';
 import { DWEB_ENABLED } from '/shared/channel-config.js';
 
 /** @typedef {import('../chat-reducer.js').ChatState} ChatState */

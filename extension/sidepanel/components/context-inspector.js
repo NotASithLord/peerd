@@ -15,6 +15,7 @@
 // browser restart means "nothing captured yet", not "nothing ran".
 
 import m from '/vendor/mithril/mithril.js';
+import { confirmationDialogAttrs } from '/shared/ui-effects.js';
 
 /** @param {number} when */
 const timeOf = (when) => new Date(when).toLocaleTimeString();
@@ -58,14 +59,14 @@ const Snapshot = {
  * @typedef {{ snapshots: Array<Record<string, any>> | null, error?: string | null, onClose: () => void }} ContextInspectorAttrs
  */
 export const ContextInspector = {
-  /** @param {{ attrs: ContextInspectorAttrs }} vnode */
-  view: ({ attrs: { snapshots, error = null, onClose } }) => m('.peerd-modal-backdrop', { onclick: onClose },
-    m('.peerd-modal.context-inspector', { onclick: (/** @type {Event} */ e) => e.stopPropagation() }, [
+  /** @param {{ attrs: ContextInspectorAttrs, state: {returnFocus?: HTMLElement | null} }} vnode */
+  view: ({ attrs: { snapshots, error = null, onClose }, state }) => m('.peerd-modal-backdrop', { onclick: onClose },
+    m('.peerd-modal.context-inspector', { ...confirmationDialogAttrs('context-inspector-title', onClose, state), onclick: (/** @type {Event} */ e) => e.stopPropagation() }, [
       m('.ctx-header', [
-        m('span.ctx-title', 'context inspector'),
+        m('span.ctx-title#context-inspector-title', 'context inspector'),
         m('span.ctx-subtitle', 'what each model call carried, newest first'),
         m('.spacer'),
-        m('button.ctx-close', { onclick: onClose, title: 'close' }, '✕'),
+        m('button.ctx-close', { onclick: onClose, title: 'close', 'aria-label': 'Close', 'data-confirm-reject': '' }, '✕'),
       ]),
       snapshots === null
         ? m('.ctx-empty', 'loading…')
