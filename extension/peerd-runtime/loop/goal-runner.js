@@ -121,7 +121,12 @@ export const makeGoalRunner = ({
       if (r.completed || r.halted) continue;
       out[sid] = { goal: r.goal, iteration: r.iteration, idle: r.idle, startedAt: r.startedAt };
     }
-    return enqueuePersistence(() => kv.set(GOAL_RUNS_KEY, out)).catch(() => { if (owner) owner.halted = true; });
+    return enqueuePersistence(() => kv.set(GOAL_RUNS_KEY, out)).catch(() => {
+      if (owner) {
+        owner.halted = true;
+        owner.lastError = 'the goal recovery state could not be saved';
+      }
+    });
   };
 
   /** @param {string} sid @returns {GoalRun | null} */

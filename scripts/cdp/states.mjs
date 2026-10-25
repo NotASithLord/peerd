@@ -6279,8 +6279,8 @@ export const STATES = [
         const backup = await sendNotebook({ type: 'js/read-file', path: 'notebook.before-agent.js' });
         const notebook = await sendNotebook({ type: 'js/read-file', path: 'notebook.js' });
         const visible = await evalIn(page, `!!document.querySelector('.pe-node[data-path="notebook.before-agent.js"]')`);
-        rec.check('reload preserves the visible backup and blocks an incomplete mirror marker',
-          blocked?.result?.stopped === true && backup?.content === draft && notebook?.content === 'return 44' && visible === true,
+        rec.check('reload recovers a journaled replacement and preserves the visible backup',
+          blocked?.result?.value === 45 && backup?.content === draft && notebook?.content === 'return 45' && visible === true,
           JSON.stringify({ blocked, backup, notebook, visible }));
         const removed = await evalIn(page, `(async () => {
           const { createRepositoryService } = await import('/peerd-engine/index.js');

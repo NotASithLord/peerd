@@ -445,7 +445,8 @@ describe('makeGoalRunner — persistence + resume (survives SW restart / other c
     await settle(() => runner.get('s1') === null);
     expect(seenWhileLive?.s1).toMatchObject({ goal: 'do it' });
     expect(runner.get('s1')).toBeNull();
-    expect(ends).toEqual([{ phase: 'halted', summary: null, reason: null }]);
+    expect(ends).toEqual([{ phase: 'halted', summary: null,
+      reason: failWrite ? 'the goal recovery state could not be saved' : null }]);
     expect(await runner.resume()).toEqual({ resumed: 0 });
     kv.set = write;
     await runner.stop('s1');

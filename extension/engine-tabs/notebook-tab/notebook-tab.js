@@ -19,6 +19,7 @@ import {
   UnsupportedNativeModuleImportError,
 } from '/peerd-engine/index.js';
 import { renderReturnValue } from './output-render.js';
+import { recoverMirrorState } from './mirror-state.js';
 // The sealed worker source (realm seal + peerd.* surface + bridges) is shared
 // with the headless offscreen job runner so the security surface can't diverge.
 import {
@@ -887,14 +888,19 @@ const onNotebookMessage = (msg, sender, sendResponse) => {
               if (error?.name === 'NotFoundError') return null;
               throw error;
             });
-            const marker = previousMarker === null ? null : JSON.parse(previousMarker);
-            if (previousMarker !== null && (!marker || marker.pending || typeof marker.code !== 'string')) {
-              throw new DOMException('aborted', 'AbortError');
-            }
+            if (editor.getActiveFile() !== NOTEBOOK_PATH) await editor.switchToFile(NOTEBOOK_PATH);
+            throwIfAborted(controller.signal);
+            if (editor.getActiveFile() !== NOTEBOOK_PATH) throw new DOMException('aborted', 'AbortError');
+            const originalCode = editor.getActiveContent();
+            const marker = recoverMirrorState(previousMarker, originalCode);
             let pending = false, replacementStarted = false;
             try {
               throwIfAborted(controller.signal);
-              await mirrorOpfs.write(LAST_AGENT_PATH, JSON.stringify({ pending: true }));
+              // why: retain both complete images so reload can distinguish an
+              // unstarted replacement from a committed one without losing its backup.
+              await mirrorOpfs.write(LAST_AGENT_PATH, JSON.stringify({
+                pending: true, code: msg.code, originalCode, previousCode: marker?.code ?? null,
+              }));
               pending = true;
               if (editor.getActiveFile() !== NOTEBOOK_PATH) await editor.switchToFile(NOTEBOOK_PATH);
               throwIfAborted(controller.signal);
