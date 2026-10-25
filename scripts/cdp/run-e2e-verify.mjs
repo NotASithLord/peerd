@@ -149,6 +149,17 @@ const makeRecorder = (ctx, state) => {
 };
 
 async function runState(ctx, state, results) {
+  // why: real VM boot needs the browser's cross-origin isolation guarantees;
+  // a private profile keeps this state independent of the shared fixture browser.
+  if (state.isolatedWebSecurity === true) {
+    const isolated = await launchPeerd({ extensionDir: ctx.extensionDir, enforceWebSecurity: true });
+    try {
+      await unlockAndReady(isolated.page);
+      await freezeAnimations(isolated);
+      await runState(isolated, { ...state, isolatedWebSecurity: false }, results);
+    } finally { await isolated.close(); }
+    return;
+  }
   const rec = makeRecorder(ctx, state);
   if (state.responder) ctx.setModelResponder(state.responder);
   try {

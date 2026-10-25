@@ -32,6 +32,7 @@ const sandboxes = [
 export const HOME_SETTINGS_STATES = [
   {
     name: 'engine-task-tab-names', kind: 'visual', phase: 'post-unlock',
+    isolatedWebSecurity: true,
     responder: (index) => ({ sse: index === 0 ? sseToolCalls(sandboxes.map(({ kind, name }) => ({
       name: 'sandbox_create', args: { kind, name, ...(kind === 'app'
         ? { files: { 'index.html': '<!doctype html><title>Named App</title><h1>Named App</h1>' } } : {}) },
@@ -151,11 +152,11 @@ export const HOME_SETTINGS_STATES = [
         if (!choice) throw new Error('The real network opt-in did not render');
         await observeRequests(page);
         await evalIn(page, `document.querySelector('[data-network-choice="enable"]').click()`);
-        const retry = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.peer-network-status button')].some((button) => button.textContent === 'Retry connection' && !button.disabled)`), { budgetMs: 30_000 });
+        const retry = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.peer-network-status button, .disc-status button')].some((button) => /^Retry(?: connection)?$/.test(button.textContent) && !button.disabled)`), { budgetMs: 30_000 });
         if (!retry) throw new Error('The saved network choice did not expose its real Start route');
         // why: enabling also starts the host. Retry connection is the shipped
         // control for the same Start route after participation is saved.
-        await evalIn(page, `document.querySelector('.peer-network-status button').click()`);
+        await evalIn(page, `[...document.querySelectorAll('.peer-network-status button, .disc-status button')].find((button) => /^Retry(?: connection)?$/.test(button.textContent) && !button.disabled).click()`);
         const started = await waitFor(() => evalIn(page, `globalThis.__homeSettingsProof.messages.find((entry) => entry.type === 'dweb/base/start' && entry.reply?.ok === true)`), { budgetMs: 30_000 });
         rec.check('real opt-in and the Start route receive successful receipts', !!started, JSON.stringify(started));
         if (!started) throw new Error('The real network Start did not settle');
@@ -167,7 +168,7 @@ export const HOME_SETTINGS_STATES = [
           && new Set([panelBefore.windowId, ...ownedHomes.map((home) => home.windowId)]).size === 3
           && new Set(ownedHomes.map((home) => home.tabId)).size === 2, JSON.stringify({ panelBefore, ownedHomes }));
         const bothReady = await waitFor(async () => await evalIn(page, `!!document.querySelector('[data-home-view="network"]')`)
-          && await evalIn(other, `!!document.querySelector('[data-home-view="network"]') && !!document.querySelector('.peer-network-status')`), { budgetMs: 15_000 });
+          && await evalIn(other, `!!document.querySelector('[data-home-view="network"]') && !!document.querySelector('.peer-network-status, .disc-status')`), { budgetMs: 15_000 });
         if (!bothReady) throw new Error('Both real Home pages did not receive the enabled state');
         await observeRequests(other);
         await observeRequests(ctx.page);
