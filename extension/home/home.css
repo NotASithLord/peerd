@@ -680,6 +680,24 @@
 .contact-app { color: var(--fg-muted); }
 .contact-counts { font-size: 11px; }
 .contact-detail-actions { display: flex; gap: 6px; }
+/* Blocked makers: the makers blocked in Discover, each with Unblock. Neutral
+   avatars: a blocked maker gets no brand tone. */
+.contacts-blocked { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 24px; }
+.contacts-blocked h2 { margin: 0; font-size: 13px; line-height: 1.45; font-weight: 600; color: var(--text); }
+.contacts-blocked p { margin: 0; }
+.contacts-blocked-note { font-size: 12px; line-height: 1.45; color: var(--secondary); }
+.contacts-blocked-list { list-style: none; align-self: stretch; margin: 8px 0 0; padding: 0; }
+.contacts-blocked-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 12px 0; border-top: 1px solid var(--border); }
+.contacts-blocked-row:last-child { border-bottom: 1px solid var(--border); }
+.contacts-blocked-avatar { flex: none; width: 40px; height: 40px; border-radius: 50%; background: var(--elev2); color: var(--text); display: flex; align-items: center; justify-content: center; font-size: 17px; font-weight: 600; }
+.contacts-blocked-avatar.is-key { font-family: var(--font-mono); font-size: 13px; }
+.contacts-blocked-id { flex: 1 1 120px; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.contacts-blocked-name { font-size: 15px; line-height: 1.45; font-weight: 600; overflow-wrap: anywhere; }
+.contacts-blocked-key { font-family: var(--font-mono); font-size: 13px; font-weight: 400; }
+.contacts-blocked-meta { font-size: 12px; line-height: 1.45; color: var(--secondary); }
+.contacts-blocked-row > button, .contacts-blocked-retry { flex: none; min-height: 40px; padding: 0 16px; }
+.contacts-blocked-row > p { flex: 1 1 100%; }
+.contacts-unblocked:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* The vault gate (locked / set-up / loading) sits in the UPPER THIRD of the
    tall full-tab page rather than dead-center — the wordmark + unlock read

@@ -14,10 +14,15 @@
 // last seen). A pure CLIENT: it never imports the dweb module (the boundary),
 // so the brand palette is inlined, same as network-section.js. Mounted only
 // when DWEB_ENABLED + dweb-on (home.js), so it ships inert on the store build.
+//
+// Under the list, Blocked makers: the makers blocked in Discover
+// (`dweb/blocked-peers`), each with Unblock (`dweb/peer-unblock`).
 
 import m from '/vendor/mithril/mithril.js';
+import { blockedRows, blockedSet, effectOutcome } from './blocked-makers.js';
 
 export const CONTACTS_REQUEST_TIMEOUT_MS = 35_000;
+const BLOCKED_TITLE = 'contacts-blocked-title';
 
 /**
  * Bound a Home request even if browser messaging never settles while a cold
@@ -120,7 +125,7 @@ const liveStatus = (live) => {
 /** @param {Contact} row */
 const displayName = (row) => (row.name && row.name.trim() ? row.name.trim() : null);
 
-/** The Contacts section. attrs: { send, requestTimeoutMs? } */
+/** The Contacts section. attrs: { send, requestTimeoutMs?, pollMs? } */
 export const ContactsSection = () => {
   /** @type {Contact[] | null} */
   let contacts = null;          // null = loading; else the contacts/list rows
@@ -144,6 +149,21 @@ export const ContactsSection = () => {
   /** @type {ReturnType<typeof setInterval> | number} */
   let timer = 0;
   let dead = false;
+  // Makers the user blocked in Discover (dweb/blocked-peers): null until the
+  // first good read.
+  /** @type {Set<string> | null} */
+  let blockedDids = null;
+  let blockedFailed = false;
+  /** @type {Promise<boolean> | null} */
+  let blockedRequest = null;
+  /** @type {string | null} */
+  let unblockingDid = null;
+  /** @type {Map<string, 'failed' | 'unknown'>} */
+  const unblockIssues = new Map();
+  let unblockedNote = false;
+  // why: the pressed button goes off or away, so focus moves once it settles.
+  /** @type {string | null} */
+  let focusTarget = null;
 
   /**
    * @param {Send} send
@@ -176,6 +196,79 @@ export const ContactsSection = () => {
       if (!dead) m.redraw();
     });
     return listRequest;
+  };
+
+  /**
+   * @param {Send} send
+   * @param {number} timeoutMs
+   * @returns {Promise<boolean>} whether the list was read
+   */
+  const refreshBlocked = (send, timeoutMs) => {
+    if (blockedRequest) return blockedRequest;
+    blockedRequest = (async () => {
+      const next = blockedSet(await boundedRequest(
+        Promise.resolve().then(() => send({ type: 'dweb/blocked-peers' })), timeoutMs, true,
+      ));
+      blockedFailed = !next;
+      if (!next) return false;
+      blockedDids = next;
+      // why: an unblock whose reply was lost, or one made in another tab, is
+      // done once the list drops the maker.
+      for (const did of [...unblockIssues.keys()]) if (!next.has(did)) { unblockIssues.delete(did); unblockedNote = true; }
+      return true;
+    })().finally(() => {
+      blockedRequest = null;
+      if (!dead) m.redraw();
+    });
+    return blockedRequest;
+  };
+
+  /** @param {string} did @param {'done' | 'failed' | 'unknown'} outcome */
+  const settleUnblock = (did, outcome) => {
+    if (outcome === 'done') {
+      if (blockedDids) blockedDids = new Set([...blockedDids].filter((blockedDid) => blockedDid !== did));
+      unblockIssues.delete(did);
+      unblockedNote = true;
+      focusTarget = '.contacts-unblocked';
+    } else {
+      unblockIssues.set(did, outcome);
+      focusTarget = `[data-unblock="${CSS.escape(did)}"]`;
+    }
+  };
+
+  // why one write and then only reads: a lost reply may have unblocked them.
+  // why after the read in flight, with no read until it settles: a read that
+  // started before the unblock must not bring its row back.
+  /** @param {Send} send @param {string} did @param {number} timeoutMs */
+  const unblock = async (send, did, timeoutMs) => {
+    if (unblockingDid) return;
+    unblockingDid = did;
+    unblockIssues.delete(did);
+    unblockedNote = false;
+    m.redraw();
+    await blockedRequest;
+    const reply = await boundedRequest(
+      Promise.resolve().then(() => send({ type: 'dweb/peer-unblock', did })), timeoutMs, false,
+    );
+    unblockingDid = null;
+    if (dead) return;
+    settleUnblock(did, effectOutcome(reply));
+    m.redraw();
+  };
+
+  // why a read that starts after the unblock reply: the stored list is the receipt.
+  /** @param {Send} send @param {string} did @param {number} timeoutMs */
+  const checkUnblock = async (send, did, timeoutMs) => {
+    if (unblockingDid) return;
+    unblockingDid = did;
+    m.redraw();
+    await blockedRequest;
+    const read = await refreshBlocked(send, timeoutMs);
+    unblockingDid = null;
+    if (dead) return;
+    if (read && unblockIssues.has(did)) settleUnblock(did, blockedDids?.has(did) ? 'failed' : 'done');
+    else focusTarget = read ? '.contacts-unblocked' : `[data-unblock="${CSS.escape(did)}"]`;
+    m.redraw();
   };
 
   // Live presence enrichment — best-effort; a failure just drops the status dot.
@@ -376,22 +469,99 @@ export const ContactsSection = () => {
     ]);
   };
 
+  /**
+   * @param {Send} send
+   * @param {{did:string, name:string|null, key:string, letter:string}} maker
+   * @param {number} timeoutMs
+   */
+  const blockedRow = (send, maker, timeoutMs) => {
+    const issue = unblockIssues.get(maker.did);
+    const busy = unblockingDid === maker.did;
+    // why a <bdi>: a saved name can run right to left, and text follows it.
+    const who = () => (maker.name ? m('bdi', maker.name) : m('bdi.contacts-blocked-key', maker.key));
+    return m('li.contacts-blocked-row', { key: maker.did }, [
+      m('.contacts-blocked-avatar', { class: maker.name ? '' : 'is-key', 'aria-hidden': 'true' }, maker.letter),
+      m('.contacts-blocked-id', [m('span.contacts-blocked-name', who()), m('span.contacts-blocked-meta', 'Blocked.')]),
+      issue === 'unknown'
+        ? m('button.secondary', {
+            type: 'button', 'data-unblock': maker.did, disabled: !!unblockingDid,
+            onclick: () => { void checkUnblock(send, maker.did, timeoutMs); },
+          }, busy ? 'Checking…' : 'Check again')
+        : m('button.secondary', {
+            type: 'button', 'data-unblock': maker.did, disabled: !!unblockingDid,
+            'aria-label': busy ? undefined : `Unblock ${maker.name ?? maker.key}`,
+            onclick: () => { void unblock(send, maker.did, timeoutMs); },
+          }, busy ? 'Unblocking…' : 'Unblock'),
+      issue === 'failed' ? m('p.error', { role: 'alert' }, ['peerd could not unblock ', who(), '. Try again.']) : null,
+      issue === 'unknown'
+        ? m('p.contacts-blocked-note', { role: 'status' }, ['peerd is not sure ', who(), ' is unblocked. Check again before you try again.'])
+        : null,
+    ]);
+  };
+
+  // why hidden when nobody is blocked, but kept after the last unblock: its
+  // status line says when their apps come back.
+  /** @param {Send} send @param {number} timeoutMs */
+  const blockedSection = (send, timeoutMs) => {
+    if (!blockedDids) {
+      return blockedFailed ? m('section.contacts-blocked', { 'aria-labelledby': BLOCKED_TITLE }, [
+        m('h2', { id: BLOCKED_TITLE }, 'Blocked makers'),
+        m('p.error', { role: 'alert' }, 'peerd could not load your blocked makers. Try again.'),
+        m('button.secondary.contacts-blocked-retry', {
+          type: 'button', disabled: !!blockedRequest, onclick: () => { void refreshBlocked(send, timeoutMs); },
+        }, 'Try again'),
+      ]) : null;
+    }
+    if (!blockedDids.size && !unblockedNote) return null;
+    /** @type {Map<string, string>} */
+    const names = new Map();
+    for (const contact of contacts ?? []) {
+      const name = displayName(contact);
+      if (name) names.set(contact.did, name);
+    }
+    const makers = blockedRows(blockedDids, names);
+    return m('section.contacts-blocked', { 'aria-labelledby': BLOCKED_TITLE }, [
+      m('h2', { id: BLOCKED_TITLE }, 'Blocked makers'),
+      m('p.contacts-blocked-note', 'Their apps are hidden in Discover, and peerd does not connect to them.'),
+      makers.length
+        ? m('ul.contacts-blocked-list', makers.map((maker) => blockedRow(send, maker, timeoutMs)))
+        : m('p.contacts-blocked-note', 'You have not blocked anyone.'),
+      // why a stable status node: a live region must exist before its text changes.
+      m('p.contacts-blocked-note.contacts-unblocked', {
+        role: 'status', tabindex: -1, style: unblockedNote ? null : 'position:absolute',
+      }, unblockedNote ? 'After you unblock someone, their apps show up again the next time peerd hears from them.' : null),
+    ]);
+  };
+
   return {
-    /** @param {{ attrs: { send: Send, requestTimeoutMs?: number } }} vnode */
+    /** @param {{ attrs: { send: Send, requestTimeoutMs?: number, pollMs?: number } }} vnode */
     oninit(vnode) {
       refresh(vnode.attrs.send, vnode.attrs.requestTimeoutMs);
       refreshLive(vnode.attrs.send);
+      void refreshBlocked(vnode.attrs.send, vnode.attrs.requestTimeoutMs ?? CONTACTS_REQUEST_TIMEOUT_MS);
     },
-    /** @param {{ attrs: { send: Send, requestTimeoutMs?: number } }} vnode */
+    /** @param {{ attrs: { send: Send, requestTimeoutMs?: number, pollMs?: number } }} vnode */
     oncreate(vnode) {
       timer = setInterval(() => {
         if (document.hidden) return;
         if (!listFailure) refresh(vnode.attrs.send, vnode.attrs.requestTimeoutMs);
         refreshLive(vnode.attrs.send);
-      }, 5000);
+        if (!unblockingDid) void refreshBlocked(vnode.attrs.send, vnode.attrs.requestTimeoutMs ?? CONTACTS_REQUEST_TIMEOUT_MS);
+      }, vnode.attrs.pollMs ?? 5000);
+    },
+    /** @param {{ dom: Element }} vnode */
+    onupdate(vnode) {
+      if (!focusTarget) return;
+      const selector = focusTarget;
+      focusTarget = null;
+      // why only when focus was lost: never take it from a control the user moved to.
+      const active = document.activeElement;
+      if (active && active !== document.body) return;
+      const target = vnode.dom.querySelector(selector);
+      if (target instanceof HTMLElement) target.focus();
     },
     onremove() { dead = true; if (timer) clearInterval(timer); },
-    /** @param {{ attrs: { send: Send, requestTimeoutMs?: number } }} vnode */
+    /** @param {{ attrs: { send: Send, requestTimeoutMs?: number, pollMs?: number } }} vnode */
     view(vnode) {
       const send = vnode.attrs.send;
       const timeoutMs = vnode.attrs.requestTimeoutMs ?? CONTACTS_REQUEST_TIMEOUT_MS;
@@ -416,6 +586,7 @@ export const ContactsSection = () => {
                 'No known peers yet. Peers you meet on the network — and anyone you '
                 + 'install an app from — show up here, ready to name.')
             : m('ul.peerd-disc-list', list.map((r) => row(send, r, timeoutMs))),
+        blockedSection(send, timeoutMs),
       ]);
     },
   };

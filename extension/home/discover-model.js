@@ -64,18 +64,25 @@ export const isFailure = (busy) => typeof busy === 'string' && busy !== 'install
 // install Field notes."), and a name is peer text, so the view builds it.
 export const FAILED = 'failed';
 export const UNKNOWN = 'unknown';
+// why its own marker: the host refuses the files of a maker the user blocked,
+// and only the user can undo that.
+export const BLOCKED = 'blocked';
+/** The host's refusal of a blocked maker's files. */
+export const BLOCKED_ERROR = 'publisher-user-blocked';
 
 /**
  * The hint under a failed install or update. A runtime refusal keeps its
  * technical reason for Technical details only.
  * @param {string} busy a failure value (see isFailure)
+ * @param {'install'|'update'} [action] what failed
  * @returns {{hint:string, runtime:string|null}}
  */
-export const failureHint = (busy) => (
-  busy === FAILED || busy === UNKNOWN
+export const failureHint = (busy, action = 'install') => {
+  if (busy === BLOCKED) return { hint: `You blocked the maker of this app. To ${action} it, unblock them in Contacts.`, runtime: null };
+  return busy === FAILED || busy === UNKNOWN
     ? { hint: 'The person who shares it may have gone offline. Try again in a moment.', runtime: null }
-    : { hint: 'This browser cannot run it. Technical details says why.', runtime: busy }
-);
+    : { hint: 'This browser cannot run it. Technical details says why.', runtime: busy };
+};
 
 /**
  * An install or update whose outcome peerd does not know. Neutral words: it
@@ -327,6 +334,11 @@ export const pillFilter = (apps, pill, { updatable, pending, contacts }) => {
     : typeof app.publisher === 'string' && contacts.has(app.publisher)));
 };
 
+// why the store's rule: Contacts saves a name trimmed, with inner spaces
+// collapsed and at most 64 characters, so a read shows it in this form.
+/** @param {string} name */
+export const savedNameForm = (name) => name.trim().replace(/\s+/g, ' ').slice(0, 64);
+
 // why saved rows only, keyed by the full did: an unsaved row has no name the
 // user chose, and a presence or card name is whatever the peer claims.
 /** @param {unknown} rows the 'contacts/list' contacts */
@@ -339,6 +351,20 @@ export const savedContactNames = (rows) => {
   }
   return names;
 };
+
+/**
+ * What the maker page menu offers. A saved maker is renamed; an unsaved one
+ * gets a name, as Contacts does. why Block needs the user's own key: a block
+ * of yourself would hide your own apps and refuse your own files, so Block
+ * waits until peerd knows the page is someone else's. A blocked maker is
+ * unblocked in Contacts, so the page offers no second block.
+ * @param {{did:string, myDid:string|null, saved:boolean, blocked:boolean}} maker
+ * @returns {{rename:string, block:boolean}}
+ */
+export const makerMenu = ({ did, myDid, saved, blocked }) => ({
+  rename: saved ? 'Rename' : 'Add a name',
+  block: !blocked && typeof myDid === 'string' && !!myDid && myDid !== did,
+});
 
 /**
  * The heard cards the offline grid can still use: the latest read, plus

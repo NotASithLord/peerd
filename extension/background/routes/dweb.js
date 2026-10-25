@@ -1,8 +1,9 @@
 // @ts-check
 // Gate dependency-injected dweb routes by build and user settings.
 
-import { userPeerPolicy } from '../dweb-peer-policy.js';
+import { setUserPeerBlocked, userPeerPolicy } from '../dweb-peer-policy.js';
 import { withDeadline } from '/shared/cold-util.js';
+import { policyDid } from '/shared/peer-policy.js';
 import { finiteEffectReceiptFields } from '../host-effect-verdict.js';
 import { appReleaseDescriptorMatches } from '/shared/app-dweb-identity.js';
 
@@ -17,7 +18,7 @@ export const makeDwebRoutes = (deps) => {
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady, repositories,
     isOffscreenSender, createDwebRollbackGuard, getCurrentSessionId,
-    dwebPublicationGeneration, ensureAppTrackerReady,
+    dwebPublicationGeneration, ensureAppTrackerReady, revokePeer,
   } = deps;
   if (typeof ensureDwebFeature !== 'function'
       || typeof dwebPublicationGeneration !== 'function') {
@@ -239,6 +240,20 @@ export const makeDwebRoutes = (deps) => {
     return record;
   };
 
+  // why Home only (the default dweb admission) and no network gate: a block
+  // is the user's own click in Discover or Contacts. It writes the policy the
+  // agent's dweb_block writes, and the host reads that policy before it joins.
+  // A block also runs dweb_block's revocation (`revokePeer`): the agent's
+  // remembered A2A consent and its conversations with them end.
+  /** @param {unknown} did @param {boolean} block */
+  const setPeerBlocked = async (did, block) => {
+    if (!DWEB_ENABLED) return dwebDisabled();
+    try { policyDid(did); } catch { return { ...refuse('invalid-peer-did'), outcomeKnown: true }; }
+    const generation = dwebPublicationGeneration();
+    return setUserPeerBlocked({ kv, vault, browser, revokePeer, current: () => dwebPublicationGeneration() === generation },
+      { did: /** @type {string} */ (did), block });
+  };
+
   /** @type {ReturnType<typeof makeDwebRoutes>} */
   const routes = {
     'dweb/peer-policy': async (_message, sender) => {
@@ -247,6 +262,14 @@ export const makeDwebRoutes = (deps) => {
       try { return { ok: true, policy: await userPeerPolicy(kv).snapshot(), discoveryEnabled: settingsStore.get().dwebDiscoveryEnabled === true }; }
       catch (error) { return failureResult(error); }
     },
+    'dweb/blocked-peers': async () => {
+      if (!DWEB_ENABLED) return dwebDisabled();
+      if (vault.isLocked()) return refuse('vault-locked');
+      try { return { ok: true, blocked: (await userPeerPolicy(kv).snapshot()).blocked }; }
+      catch (error) { return failureResult(error); }
+    },
+    'dweb/peer-block': ({ did } = {}) => setPeerBlocked(did, true),
+    'dweb/peer-unblock': ({ did } = {}) => setPeerBlocked(did, false),
     'dweb/app-authority-generations': async (_msg, sender) => {
       if (isOffscreenSender?.(sender) !== true) return refuse('offscreen-sender-required');
       if (!DWEB_ENABLED) return dwebDisabled();

@@ -407,14 +407,90 @@ export const techDetails = ({ id, open, onToggle, facts, footnote, note }) => m(
 ]);
 
 // why the code style without a saved name: the title is then the short key,
-// drawn as "Made by" draws it everywhere else.
-/** @param {{title:string, letter:string, tone:string, saved:boolean}} props */
-export const makerHead = ({ title, letter, tone, saved }) => m('.disc-person-head', [
+// drawn as "Made by" draws it everywhere else. `menu` ends the head.
+/** @param {{title:string, letter:string, tone:string, saved:boolean, menu?:unknown}} props */
+export const makerHead = ({ title, letter, tone, saved, menu }) => m('.disc-person-head', [
   letterAvatar({ letter, tone, variant: 'person' }),
   m('.disc-person-id', [
     m('h2.type-page-title', { dir: 'auto' }, saved ? title : m('bdi.type-code', title)),
     m('.type-small', saved ? 'Someone you know. You saved this name on this device.' : 'You have not saved a name for this maker.'),
   ]),
+  menu ?? null,
+]);
+
+/** Arrows, Home and End move through the items; Escape closes. @param {()=>void} onEscape */
+const menuKeys = (onEscape) => (/** @type {KeyboardEvent & {redraw?:boolean}} */ event) => {
+  if (event.key === 'Escape') { event.preventDefault(); onEscape(); return; }
+  event.redraw = false;
+  const items = /** @type {HTMLElement[]} */ ([.../** @type {HTMLElement} */ (event.currentTarget).querySelectorAll('[role="menuitem"]')]);
+  const index = items.indexOf(/** @type {HTMLElement} */ (document.activeElement));
+  const target = event.key === 'ArrowDown' ? items[(index + 1) % items.length]
+    : event.key === 'ArrowUp' ? items[(index - 1 + items.length) % items.length]
+      : event.key === 'Home' ? items[0] : event.key === 'End' ? items.at(-1) : null;
+  if (!target) return;
+  event.preventDefault();
+  target.focus({ preventScroll: true });
+};
+
+/**
+ * The maker page menu, drawn as the Library's kebab menu. Focus moves to the
+ * first item when it opens. `onClose(refocus)`: Escape closes it with focus
+ * back on its button; Tab or a click elsewhere just closes it.
+ * @param {{maker:Maker, open:boolean, rename:string, block:boolean, onToggle:()=>void,
+ *   onClose:(refocus:boolean)=>void, onRename:()=>void, onBlock:()=>void}} props
+ */
+export const makerMenuView = ({ maker, open, rename, block, onToggle, onClose, onRename, onBlock }) => {
+  const label = `More for ${maker.name ?? maker.key}`;
+  return m('.disc-maker-menu', {
+    onfocusout: (/** @type {FocusEvent & {redraw?:boolean}} */ event) => {
+      const next = event.relatedTarget;
+      if (!open || (next instanceof Node && /** @type {Element} */ (event.currentTarget).contains(next))) { event.redraw = false; return; }
+      onClose(false);
+    },
+  }, [
+    m('button.icon.library-kebab.disc-kebab', {
+      type: 'button', 'data-maker-menu': '', 'aria-haspopup': 'menu', 'aria-expanded': String(open), 'aria-label': label, onclick: onToggle,
+    }, icon('dots', 18)),
+    open ? m('.library-menu.disc-menu', {
+      role: 'menu', 'aria-label': label, onkeydown: menuKeys(() => onClose(true)),
+      oncreate: (/** @type {{dom:Element}} */ { dom }) => {
+        const first = dom.querySelector('[role="menuitem"]');
+        if (first instanceof HTMLElement) first.focus({ preventScroll: true });
+      },
+    }, [
+      m('button.library-menu-item', { type: 'button', role: 'menuitem', onclick: onRename }, rename),
+      block ? m('.library-menu-sep', { role: 'separator' }) : null,
+      block ? m('button.library-menu-item.is-danger', { type: 'button', role: 'menuitem', onclick: onBlock }, ['Block ', makerName(maker)]) : null,
+    ]) : null,
+  ]);
+};
+
+const RENAME_ID = 'disc-rename-name';
+/**
+ * Name a maker on this device, as Contacts does. `failed`: the last save
+ * failed, so the form says so and stays.
+ * @param {{value:string, busy:boolean, failed:boolean, canSave:boolean,
+ *   oninput:(value:string)=>void, onSave:()=>void, onCancel:()=>void}} props
+ */
+export const renameForm = ({ value, busy, failed, canSave, oninput, onSave, onCancel }) => m('form.disc-rename', {
+  onsubmit: (/** @type {Event} */ event) => { event.preventDefault(); if (canSave && !busy) onSave(); },
+}, [
+  m('label.type-label-strong', { for: RENAME_ID }, 'Name'),
+  m('.disc-rename-row', [
+    m('input', {
+      id: RENAME_ID, type: 'text', value, maxlength: 64, placeholder: 'Add a name…', autocomplete: 'off', disabled: busy,
+      oninput: (/** @type {{target:HTMLInputElement}} */ event) => oninput(event.target.value),
+      onkeydown: (/** @type {KeyboardEvent} */ event) => { if (event.key === 'Escape' && !busy) { event.preventDefault(); onCancel(); } },
+    }),
+    m('button.disc-primary', { type: 'submit', disabled: busy || !canSave }, busy ? 'Saving…' : 'Save'),
+    m('button.secondary.disc-btn', { type: 'button', disabled: busy, onclick: onCancel }, 'Cancel'),
+  ]),
+  failed ? m('p.error', { role: 'alert' }, 'peerd could not save the name. Try again.') : null,
+]);
+
+/** A blocked maker's page says so in place of their apps. Focus lands here after a block. @param {{maker:Maker}} props */
+export const blockedLine = ({ maker }) => m('p.type-body-sm.disc-blocked', { role: 'status', tabindex: -1 }, [
+  makerName(maker), ' is blocked. You can undo this in Contacts.',
 ]);
 
 /**
@@ -439,7 +515,8 @@ const SHARE_TITLE = 'disc-share-title';
 const SHARE_LINK = 'disc-share-link';
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled])';
 // why a trap: the dialog is modal, so Tab must cycle inside it until it closes.
-// why the dialog itself counts: it holds focus after a click on its own text.
+// why the dialog itself counts: it holds focus while every control is off, and
+// after a click on its own text.
 /** @param {()=>void} onClose */
 const dialogKeys = (onClose) => (/** @type {KeyboardEvent & {redraw?:boolean}} */ event) => {
   if (event.key === 'Escape') { event.preventDefault(); onClose(); return; }
@@ -493,3 +570,39 @@ export const shareDialog = ({ name, letter, tone, address, maker, status, copyDi
       ' updates the app later, your friend gets the version you shared.',
     ]),
   ]));
+
+const BLOCK_TITLE = 'disc-block-title';
+const BLOCK_TEXT = 'disc-block-text';
+/**
+ * The block confirm. It opens on Cancel (the section moves focus). `issue` is
+ * the last try: 'failed' says so and keeps Block; 'unknown' stays neutral and
+ * offers Check again, which reads the blocked list. While `busy` every
+ * control is off, the dialog itself holds focus (tabindex -1), and the
+ * section ignores Cancel.
+ * @param {{maker:Maker, busy:boolean, issue:'failed'|'unknown'|null, onConfirm:()=>void, onCancel:()=>void, onCheck:()=>void}} props
+ */
+export const blockDialog = ({ maker, busy, issue, onConfirm, onCancel, onCheck }) => m('.peerd-modal-backdrop.disc-block-backdrop', {
+  onclick: (/** @type {MouseEvent} */ event) => { if (event.target === event.currentTarget) onCancel(); },
+}, m('.peerd-modal.disc-block', {
+  role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': BLOCK_TITLE, 'aria-describedby': BLOCK_TEXT, tabindex: -1,
+  onkeydown: dialogKeys(onCancel),
+}, [
+  m('h2.type-heading', { id: BLOCK_TITLE }, ['Block ', makerName(maker), '?']),
+  m('p.type-body-sm', { id: BLOCK_TEXT },
+    'Their apps leave Discover. peerd stops downloading their files and disconnects from them. Apps you already installed stay in your Library.'),
+  m('p.type-small.disc-footnote', 'You can undo this in Contacts.'),
+  issue === 'failed' ? m('p.error', { role: 'alert' }, ['peerd could not block ', makerName(maker), '. Try again.']) : null,
+  issue === 'unknown'
+    ? m('p.type-body-sm', { role: 'status' }, ['peerd is not sure ', makerName(maker), ' is blocked. Check again before you try again.'])
+    : null,
+  // why keyed: Check again replaces Block, and a reused node would keep its focus.
+  m('.peerd-modal-actions.disc-block-actions', keyedParts({
+    cancel: m('button.secondary.disc-btn', { type: 'button', 'data-block-cancel': '', disabled: busy, onclick: onCancel }, 'Cancel'),
+    check: issue === 'unknown' ? m('button.secondary.disc-btn', {
+      type: 'button', 'data-block-check': '', disabled: busy, onclick: onCheck,
+    }, busy ? 'Checking…' : 'Check again') : null,
+    block: issue === 'unknown' ? null : m('button.disc-danger.disc-btn', {
+      type: 'button', 'data-block-confirm': '', disabled: busy, onclick: onConfirm,
+    }, busy ? 'Blocking…' : ['Block ', makerName(maker)]),
+  })),
+]));

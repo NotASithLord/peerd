@@ -234,8 +234,12 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
   store: COLD_GRAPH_RATCHETS,
   preview: Object.freeze({
     chrome: Object.freeze({
+      // The Home routes that block, unblock and list makers (the same durable
+      // user peer policy dweb_block writes, with the same A2A consent
+      // revocation through the turn relay) add thin handlers to an existing
+      // module and no module. Remeasured with no reserve.
       serviceWorker: Object.freeze({
-        modules: 416, graphBytes: 2_213_778, entryBytes: 207,
+        modules: 416, graphBytes: 2_214_663, entryBytes: 207,
         inputSha256: '58d2f25738ab54bc3d031da25c83859d31d29c5759b2459aeb9739b2bca138fd',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),

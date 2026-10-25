@@ -6,7 +6,7 @@ import { discoverSurface } from './starter-visuals.mjs';
 
 // Reads Discover sends while the peer network is on. Any other route but the
 // inspection is an effect.
-const READS = ['apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distributed/info', 'contacts/list'];
+const READS = ['apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distributed/info', 'contacts/list', 'dweb/blocked-peers'];
 
 // The older tree's separate address section, as it shipped.
 const renderSection = (mode) => `(async () => {
@@ -69,6 +69,7 @@ const renderShareLink = (mode) => `(async () => {
       ? [{ id: 'app-fixture', dweb: target }] : [] };
     if (message.type === 'dweb/base/heard') return { ok: true, apps: [] };
     if (message.type === 'contacts/list') return { ok: true, contacts: [] };
+    if (message.type === 'dweb/blocked-peers') return { ok: true, blocked: [] };
     if (message.type === 'bootstrap/ready') return { ok: true, featureLeases: { leases: { dweb: { status: 'active' } } } };
     if (message.type === 'dweb/distributed/info') return { ok: true, running: true, linkedCount: 1 };
     if (message.type !== 'dweb/base/inspect-address') throw new Error('unexpected fixture mutation');

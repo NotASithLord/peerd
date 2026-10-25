@@ -8,11 +8,11 @@ import { evalIn, waitFor, openExtPage, openWidePage } from './e2e-harness.mjs';
 // page per app) ships home/discover-pages.js; an older tree stacks sections.
 // why a content probe for phase 2: it adds no file of its own, and the share
 // dialog is its first new view piece. `says`: The app says it is the next.
-// `mine`: the page of the user's own app. `added`: a starter fixture that
-// answers an add.
+// `blocks`: the block confirm (blocking a maker) after that. `mine`: the page
+// of the user's own app. `added`: a starter fixture that answers an add.
 export const discoverSurface = () => {
   if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') {
-    return { base: false, flow: true, phase2: true, says: true, mine: true, added: true, tree: null };
+    return { base: false, flow: true, phase2: true, says: true, blocks: true, mine: true, added: true, tree: null };
   }
   const tree = process.argv.find(arg => arg.startsWith('--extension='))?.slice('--extension='.length);
   if (!tree) throw new Error('base visual render requires an explicit extension tree');
@@ -22,13 +22,13 @@ export const discoverSurface = () => {
   const starters = join(tree, 'tests/fixtures/starters.js');
   return {
     base: true, flow, phase2: source.includes('export const shareDialog'), says: source.includes('export const saysItSection'),
-    mine: source.includes('You made this app.'),
+    blocks: source.includes('export const blockDialog'), mine: source.includes('You made this app.'),
     added: existsSync(starters) && readFileSync(starters, 'utf8').includes("=== 'added'"), tree,
   };
 };
 
 // Every read a Discover frame may send. Any other route is an effect.
-const READS = ['apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distributed/info', 'contacts/list'];
+const READS = ['apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distributed/info', 'contacts/list', 'dweb/blocked-peers'];
 const has = text => `document.body.textContent.includes(${JSON.stringify(text)})`;
 // why the tree's own words: changed screens also render on the merge-base
 // tree, in its words, and a check that took either would not prove the new ones.
@@ -133,9 +133,10 @@ const keptState = (mode, narrow) => ({
 // the only effects the frame may send, options]. The fixture answers reads
 // plus the one effect its frame draws, so anything else throws there.
 // `phase2`: a screen the phase-1 tree does not draw; `says`: one a tree
-// without The app says it does not draw; `mine`: one a tree without the
-// own-app line does not draw; `narrow`: also at 320px; `narrowCheck`: a
-// [name, check] that holds at 320px only.
+// without The app says it does not draw; `blocks`: one a tree that cannot
+// block a maker does not draw; `mine`: one a tree without the own-app line
+// does not draw; `narrow`: also at 320px; `narrowCheck`: a [name, check]
+// that holds at 320px only.
 const FLOW_FRAMES = [
   ['share-link', 'share-off', `${byTree('Turn on the peer network first.', 'Join the peer network first.')}
     && document.querySelector('.disc-start-form input')?.value.startsWith('dwapp://')
@@ -205,14 +206,28 @@ const FLOW_FRAMES = [
   // The user's own app, made and shared from their Library: What to know says
   // they made it, never that an install checked it against its maker.
   ['mine', 'mine', `${focused('.disc-back')} && ${has('You made this app.')} && !${has('peerd checked')}`, [], { mine: true }],
+  // Block a maker: the maker menu open, its confirm open on Cancel, and the
+  // maker page after the block, with focus on the line that says so.
+  ['maker-menu', 'maker-menu', `${focused('.disc-menu [role="menuitem"]')}
+    && document.querySelectorAll('.disc-menu [role="menuitem"]').length === 2`, [], { blocks: true }],
+  ['block-confirm', 'block-confirm', `!!document.querySelector('.disc-block[role="dialog"]') && ${focused('[data-block-cancel]')}`,
+    [], { blocks: true, narrow: true }],
+  ['blocked', 'blocked', `${focused('.disc-blocked')} && ${has('Ana is blocked. You can undo this in Contacts.')}`,
+    ['dweb/peer-block'], { blocks: true }],
+  // A block whose reply was lost: neutral words, and Check again in place of Block.
+  ['block-unknown', 'block-unknown', `${focused('[data-block-check]')}
+    && ${has('peerd is not sure Ana is blocked. Check again before you try again.')}`, ['dweb/peer-block'], { blocks: true }],
+  // Rename from the maker menu: the form opens with the saved name and focus in it.
+  ['maker-rename', 'maker-rename', `${focused('.disc-rename input')} && document.querySelector('.disc-rename input')?.value === 'Ana'`,
+    [], { blocks: true, narrow: true }],
 ];
 
-const frameState = ([mode, frame, ready, effects, { phase2 = false, says = false, mine = false, narrowCheck = null } = {}],
+const frameState = ([mode, frame, ready, effects, { phase2 = false, says = false, blocks = false, mine = false, narrowCheck = null } = {}],
   narrow = false) => ({
   name: `discovery-${mode}${narrow ? '-narrow' : ''}`, kind:'visual', phase:'post-unlock', responder:null,
   async run(ctx, rec) {
     const surface = discoverSurface();
-    if (!surface.flow || (phase2 && !surface.phase2) || (says && !surface.says) || (mine && !surface.mine)) {
+    if (!surface.flow || (phase2 && !surface.phase2) || (says && !surface.says) || (blocks && !surface.blocks) || (mine && !surface.mine)) {
       rec.observe('merge-base surface', { present:false, reason:'this Discover screen was introduced on this branch' });
       return;
     }
@@ -225,6 +240,34 @@ const frameState = ([mode, frame, ready, effects, { phase2 = false, says = false
       rec.check('frame sends only reads and the effect it draws', await evalIn(page, `JSON.stringify(window.__exploreFixtureCalls
         .filter(type => !${JSON.stringify(READS)}.includes(type))) === ${JSON.stringify(JSON.stringify(effects))}`));
       await rec.visualPage(`discovery-${mode}${narrow ? '-narrow' : ''}`, page);
+    } finally { try { page.close(); } catch {} }
+  },
+});
+
+// Blocked makers in Contacts: [mode, contacts.html frame, ready, the only
+// effects the frame may send]. why a file probe: the fixture is new here.
+const CONTACT_READS = ['contacts/list', 'dweb/distributed/info', 'dweb/blocked-peers'];
+const CONTACT_FRAMES = [
+  ['blocked', 'blocked', `document.querySelectorAll('.contacts-blocked-row').length === 2 && ${has('Blocked makers')}`, [], { narrow: true }],
+  ['unblocked', 'unblocked', `${focused('.contacts-unblocked')} && document.querySelectorAll('.contacts-blocked-row').length === 1`,
+    ['dweb/peer-unblock']],
+];
+const contactsState = ([mode, frame, ready, effects], narrow = false) => ({
+  name: `contacts-${mode}${narrow ? '-narrow' : ''}`, kind:'visual', phase:'post-unlock', responder:null,
+  async run(ctx, rec) {
+    const surface = discoverSurface();
+    if (surface.base && !existsSync(join(surface.tree, 'tests/fixtures/contacts.html'))) {
+      rec.observe('merge-base surface', { present:false, reason:'the blocked makers list was introduced on this branch' });
+      return;
+    }
+    const page = await openExtPage(ctx, `tests/fixtures/contacts.html?state=${frame}`);
+    try {
+      await page.send('Emulation.setDeviceMetricsOverride',{width:narrow?320:960,height:narrow?1100:760,deviceScaleFactor:1,mobile:false});
+      if (!await waitFor(()=>evalIn(page, ready),{budgetMs:8000,pollMs:80})) throw new Error(`Contacts ${mode} did not render`);
+      rec.check('contacts fit narrow and wide viewport', await evalIn(page,`document.documentElement.scrollWidth <= innerWidth`));
+      rec.check('frame sends only reads and the effect it draws', await evalIn(page, `JSON.stringify(window.__contactsFixtureCalls
+        .filter(type => !${JSON.stringify(CONTACT_READS)}.includes(type))) === ${JSON.stringify(JSON.stringify(effects))}`));
+      await rec.visualPage(`contacts-${mode}${narrow ? '-narrow' : ''}`, page);
     } finally { try { page.close(); } catch {} }
   },
 });
@@ -274,5 +317,6 @@ const starterAdded = {
 export const STARTER_VISUAL_STATES = [
   ...[false, true].flatMap(narrow => ['home', 'review', 'empty', 'no-results', 'publisher', 'suggestion'].map(mode => keptState(mode, narrow))),
   ...FLOW_FRAMES.flatMap(row => [frameState(row), ...row[4]?.narrow ? [frameState(row, true)] : []]),
+  ...CONTACT_FRAMES.flatMap(row => [contactsState(row), ...row[4]?.narrow ? [contactsState(row, true)] : []]),
   tryPage, starterAdded,
 ];

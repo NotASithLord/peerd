@@ -51,6 +51,8 @@ const library = () => frame === 'offline-empty' ? [] : [
   ...frame === 'mine' ? [record('local-own', own, { local: true })] : [],
 ];
 const heard = ['looking', 'empty'].includes(frame) ? [] : frame === 'mine' ? [...apps, own] : apps;
+// Makers the user blocked: the blocked frame adds one.
+/** @type {string[]} */ const blocked = [];
 
 /** @type {Record<string, () => unknown>} */
 const EFFECTS = {
@@ -70,6 +72,9 @@ const send = async message => {
     return frame === 'offline-failed' ? {ok:false} : {ok:true,apps:library()};
   }
   if (message.type === 'contacts/list') return {ok:true,contacts:[{did:notes.publisher,name:'Ana',saved:true}]};
+  if (message.type === 'dweb/blocked-peers') return {ok:true,blocked:[...blocked]};
+  if (message.type === 'dweb/peer-block' && frame === 'blocked') { blocked.push(String(message.did)); return {ok:true,durable:true,revision:1}; }
+  if (message.type === 'dweb/peer-block' && frame === 'block-unknown') return EFFECTS.unknown();
   if (message.type === 'bootstrap/ready') return {ok:true,featureLeases:{leases:{dweb:{status:'active'}}}};
   if (message.type === 'dweb/distributed/info') {
     return {ok:true,running:!OFFLINE.includes(frame),linkedCount:frame === 'looking' ? 0 : 3,did:self};
@@ -101,6 +106,15 @@ const STEPS = {
   'update-failed': [['.disc-primary', 'Update']],
   'update-unknown': [['.disc-primary', 'Update']],
   maker: [['.disc-app-maker', 'Made by Ana, someone you know']],
+  'maker-menu': [['.disc-app-maker', 'Made by Ana, someone you know'], ['[data-maker-menu]', null]],
+  'block-confirm': [['.disc-app-maker', 'Made by Ana, someone you know'], ['[data-maker-menu]', null],
+    ['.disc-menu [role="menuitem"]', 'Block Ana']],
+  blocked: [['.disc-app-maker', 'Made by Ana, someone you know'], ['[data-maker-menu]', null],
+    ['.disc-menu [role="menuitem"]', 'Block Ana'], ['[data-block-confirm]', 'Block Ana']],
+  'block-unknown': [['.disc-app-maker', 'Made by Ana, someone you know'], ['[data-maker-menu]', null],
+    ['.disc-menu [role="menuitem"]', 'Block Ana'], ['[data-block-confirm]', 'Block Ana']],
+  'maker-rename': [['.disc-app-maker', 'Made by Ana, someone you know'], ['[data-maker-menu]', null],
+    ['.disc-menu [role="menuitem"]', 'Rename']],
   'maker-empty': [['button', 'Paste link'], ['.disc-start-form input', null, loneLink],
     ['.disc-start-form button', 'Check link'], ['.disc-app-maker', null]],
   'says-checked': [['button', 'Paste link'], ['.disc-start-form input', null, loneLink], ['.disc-start-form button', 'Check link']],
@@ -114,6 +128,8 @@ const OPEN_KEYS = /** @type {Record<string, string>} */ ({
   unknown: notes.dwapp_id, maker: notes.dwapp_id, 'cant-run': garden.dwapp_id, update: notes.dwapp_id, share: notes.dwapp_id,
   'update-cant-run': notes.dwapp_id, 'update-failed': notes.dwapp_id, 'update-unknown': notes.dwapp_id,
   'says-unknown': notes.dwapp_id, 'says-nothing': orbit.dwapp_id, mine: own.dwapp_id,
+  'maker-menu': notes.dwapp_id, 'block-confirm': notes.dwapp_id, blocked: notes.dwapp_id,
+  'block-unknown': notes.dwapp_id, 'maker-rename': notes.dwapp_id,
 });
 /** @type {string|null} */ let openKey = OPEN_KEYS[frame] ?? null;
 

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { createKernelDwebRouteOwner } from '../../extension/background/kernel-dweb-route-runtime.js';
 import { KERNEL_DWEB_ROUTE_NAMES } from '../../extension/shared/kernel-feature-route-inventory.js';
+import { encodeDidKey } from '../../extension/shared/address/did.js';
 
 const registry = {
   list: async () => [], get: async () => null, update: async () => null,
@@ -27,7 +28,10 @@ const deps = (over: Record<string, any> = {}) => ({
     invalidateDwebPublications: () => {},
     dwebPublicationGeneration: () => 0,
   },
-  relays: { sessions: { list: async () => [], importPortable: async () => {} } },
+  relays: {
+    sessions: { list: async () => [], importPortable: async () => {} },
+    revokeDwebPeer: async (_did: string) => {},
+  },
   transfer: {
     memory: { exportAll: async () => ({}), importAll: async () => ({}) },
     normalizeImportedSettings: (patch: any) => patch,
@@ -61,6 +65,22 @@ describe('kernel dweb route runtime', () => {
 
   test('refuses construction without shared identity custody', () => {
     expect(() => createKernelDwebRouteOwner(deps({ withIdentityMutation: null })))
+      .toThrow('kernel-dweb-route-runtime-config-invalid');
+  });
+
+  test('a Home block runs the revocation the agent block runs, and the routes never load without it', async () => {
+    const revoked: string[] = [];
+    const maker = encodeDidKey(new Uint8Array(32).fill(8));
+    let stored: unknown = null;
+    const runtime = createKernelDwebRouteOwner(deps({
+      relays: { ...deps().relays, revokeDwebPeer: async (did: string) => { revoked.push(did); } },
+      kv: { get: async () => stored, set: async (_key: string, value: unknown) => { stored = value; } },
+      browser: { runtime: { getContexts: async () => [], sendMessage: async () => ({ ok: true }) } },
+    }));
+    expect(await runtime.routes['dweb/peer-block']({ did: maker })).toMatchObject({ ok: true, durable: true });
+    expect(await runtime.routes['dweb/peer-unblock']({ did: maker })).toMatchObject({ ok: true, durable: true });
+    expect(revoked).toEqual([maker]);
+    expect(() => createKernelDwebRouteOwner(deps({ relays: { ...deps().relays, revokeDwebPeer: undefined } })))
       .toThrow('kernel-dweb-route-runtime-config-invalid');
   });
 

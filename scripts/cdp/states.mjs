@@ -5014,7 +5014,7 @@ export const STATES = [
         })()`), {budgetMs:4000,pollMs:50});
         rec.check('Included lists both packaged starters and Commons and sends only reads', !!included
           && await evalIn(page, `window.__exploreFixtureCalls.every(type =>
-            ['apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distributed/info', 'contacts/list'].includes(type))`));
+            ['apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distributed/info', 'contacts/list', 'dweb/blocked-peers'].includes(type))`));
         rec.check('Explore controls and cards fit the viewport', await evalIn(page, `document.documentElement.scrollWidth <= innerWidth`));
         await rec.visualPage('home-explore-included', page);
       } finally { try { page.close(); } catch { /* */ } }
@@ -5149,6 +5149,56 @@ export const STATES = [
             `document.documentElement.dataset.peerdBootStage === 'app-ready' && !!document.querySelector('.input-bar textarea')`).catch(() => false),
           { budgetMs: 20_000, pollMs: 80 })) throw new Error('notification fixture did not restore the side panel');
         }
+        if (!wasOn) await chooseFixtureNetwork(ctx, false);
+      }
+    },
+  },
+
+  // Blocking a maker, for real: only the exact Home page may change the stored
+  // policy, Contacts lists what it stores, and Unblock there undoes it.
+  {
+    name: 'home-block-maker', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const available = await evalIn(ctx.page, `(async () =>
+        (await import('/shared/channel-config.js')).DWEB_ENABLED)()`, true);
+      if (!available) { rec.check('unsupported host has no maker block', true); return; }
+      if (!discoverSurface().blocks) {
+        rec.observe('merge-base surface', { present: false, reason: 'blocking a maker was introduced on this branch' });
+        return;
+      }
+      const wasOn = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings?.dwebEnabled === true;
+      await chooseFixtureNetwork(ctx, true);
+      const maker = await evalIn(ctx.page, `(async () =>
+        (await import('/shared/address/did.js')).encodeDidKey(new Uint8Array(32).fill(6)))()`, true);
+      const key = JSON.stringify(maker.slice(-8));
+      const page = await openWidePage(ctx, 'home/home.html#contacts');
+      try {
+        rec.check('a first-party page other than Home cannot block a maker',
+          (await rpc(ctx.page, { type: 'dweb/peer-block', did: maker }))?.error === 'kernel-route-unauthorized');
+        rec.check('neither can it read the blocked list',
+          (await rpc(ctx.page, { type: 'dweb/blocked-peers' }))?.error === 'kernel-route-unauthorized');
+        const blocked = await rpc(page, { type: 'dweb/peer-block', did: maker });
+        rec.check('Home blocks a maker by the full did, and the policy is stored', blocked?.durable === true, JSON.stringify(blocked));
+        rec.check('the stored list names the blocked maker',
+          (await rpc(page, { type: 'dweb/blocked-peers' }))?.blocked?.includes(maker) === true);
+        // Contacts reads the list on its own poll.
+        const listed = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.contacts-blocked-row')]
+          .some(row => row.textContent.includes(${key}))`), { budgetMs: 10_000, pollMs: 100 });
+        rec.check('Contacts lists the blocked maker', !!listed);
+        await evalIn(page, `(() => {
+          const row = [...document.querySelectorAll('.contacts-blocked-row')].find(node => node.textContent.includes(${key}));
+          const button = row?.querySelector('button');
+          button?.focus(); button?.click();
+        })()`);
+        const unblocked = await waitFor(() => evalIn(page, `document.querySelector('.contacts-unblocked')?.textContent
+          === 'After you unblock someone, their apps show up again the next time peerd hears from them.'`), { budgetMs: 10_000, pollMs: 100 });
+        rec.check('Unblock in Contacts says when their apps come back', !!unblocked);
+        rec.check('the stored list no longer names them',
+          (await rpc(page, { type: 'dweb/blocked-peers' }))?.blocked?.includes(maker) === false);
+      } finally {
+        try { await rpc(page, { type: 'dweb/peer-unblock', did: maker }); } catch { /* the check above reports it */ }
+        try { await page.close(); } catch { /* */ }
         if (!wasOn) await chooseFixtureNetwork(ctx, false);
       }
     },

@@ -674,6 +674,19 @@ describe('kernel turn authority adapter', () => {
     })).toEqual({ outcomeKnown: false, performed: true });
   });
 
+  test('the revocation a Home block runs retires the remembered A2A consent, as dweb_block does', async () => {
+    const cache = new Map<string, unknown>([['a2aApprovedDids', ['did:key:alice', 'did:key:bob']]]);
+    const h = await harness(undefined, {
+      dweb: true,
+      sessionCache: {
+        sessionGet: async (key) => cache.get(key) ?? null,
+        sessionSet: async (key, value) => { cache.set(key, structuredClone(value)); },
+      },
+    });
+    await h.runtime.relays.revokeDwebPeer('did:key:alice');
+    expect(cache.get('a2aApprovedDids')).toEqual(['did:key:bob']);
+  });
+
   test('the parentless dweb daemon keeps only its fixed stored permission', async () => {
     const dweb = {
       sessionId: 'dweb-1', kind: 'actor', actorType: 'dweb',

@@ -6,7 +6,7 @@
 const READ_SEGMENT = /(?:^|\/)(?:get|list|read|status|info|heard|updates|overview|count|history|diff|options|total)$/;
 const READ_TYPES = new Set([
   'app/get-meta', 'bootstrap/ready', 'commands/list', 'composer/files', 'composer/tabs',
-  'export/artifact',
+  'dweb/blocked-peers', 'export/artifact',
   'import/inspect', 'local-model/catalog', 'local-model/probe', 'memory/export',
   'memory/suggestions', 'openrouter/models', 'pod/get-meta', 'session/contextSnapshots',
   'session/debugBundle', 'session/get', 'state/get', 'surfaces/get',

@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  appCountLabel, bytesLabel, createEffects, FAILED, failureHint, installSteps, isFailure, kbLabel, keptCards, letterOf,
-  libraryPeerApps, libraryStatus, matchQuery, networkState, noSuggestionNote, pageState, peerCountLabel, pillFilter, rootView,
-  savedContactNames, saysIt, shareLinkError, shortKey, tileAction, toneOf, TONES, UNKNOWN, unknownLines, updateOffer,
+  appCountLabel, BLOCKED, bytesLabel, createEffects, FAILED, failureHint, installSteps, isFailure, kbLabel, keptCards, letterOf,
+  libraryPeerApps, libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, peerCountLabel, pillFilter, rootView,
+  savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, tileAction, toneOf, TONES, UNKNOWN, unknownLines, updateOffer,
   verifiedDeclared, wasmLabel, yourApps,
 } from '../../extension/home/discover-model.js';
 import type { DwebApp } from '../../extension/home/discover-model.js';
@@ -212,6 +212,13 @@ describe('tile and page states', () => {
       .toEqual({ hint: 'This browser cannot run it. Technical details says why.', runtime: 'Unsupported App runtime target: wasi.' });
   });
 
+  test('a blocked maker is a failure whose hint says who chose it and how to undo it, in the words of the action', () => {
+    expect(isFailure(BLOCKED)).toBe(true);
+    expect(failureHint(BLOCKED)).toEqual({ hint: 'You blocked the maker of this app. To install it, unblock them in Contacts.', runtime: null });
+    expect(failureHint(BLOCKED, 'update')).toEqual({ hint: 'You blocked the maker of this app. To update it, unblock them in Contacts.', runtime: null });
+    expect(failureHint(FAILED, 'update').hint).toBe('The person who shares it may have gone offline. Try again in a moment.');
+  });
+
   test('an unknown outcome stays neutral and says what to do next', () => {
     expect(unknownLines('install')).toEqual({
       status: 'peerd is not sure the install finished. It may still finish by itself.',
@@ -336,6 +343,22 @@ describe('filters and contacts', () => {
     const lookalike = `did:key:z6MkEvil${ana.slice(-8)}`;
     const rows = pillFilter([{ dwapp_id: 'x', publisher: lookalike }], 'contacts', { ...facts, pending: () => false });
     expect(rows).toEqual([]);
+  });
+
+  test('maker menu: Rename a saved maker, name an unsaved one, and Block only someone else known not to be you', () => {
+    expect(makerMenu({ did: ana, myDid: bob, saved: true, blocked: false })).toEqual({ rename: 'Rename', block: true });
+    expect(makerMenu({ did: ana, myDid: bob, saved: false, blocked: false })).toEqual({ rename: 'Add a name', block: true });
+    // Your own page, and a page while peerd has not read your key.
+    expect(makerMenu({ did: ana, myDid: ana, saved: false, blocked: false })).toEqual({ rename: 'Add a name', block: false });
+    for (const myDid of [null, '']) expect(makerMenu({ did: ana, myDid, saved: true, blocked: false }).block).toBe(false);
+    // Already blocked: Contacts undoes it, so no second block.
+    expect(makerMenu({ did: ana, myDid: bob, saved: true, blocked: true })).toEqual({ rename: 'Rename', block: false });
+  });
+
+  test('a name in the form Contacts saves it: trimmed, inner spaces collapsed, at most 64 characters', () => {
+    expect(savedNameForm('  Bob \t  Smith ')).toBe('Bob Smith');
+    expect(savedNameForm('Ana')).toBe('Ana');
+    expect(savedNameForm(`${'a'.repeat(70)}`)).toBe('a'.repeat(64));
   });
 
   test('saved contact names: saved rows with a non-empty name only, keyed by the full did', () => {

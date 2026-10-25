@@ -757,6 +757,15 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     (await dwebShare()).prepare(appId);
   const shareLocalApp = async (/** @type {string} */ appId, /** @type {any} */ prepared) =>
     (await dwebShare())(appId, undefined, prepared);
+  // why one revocation for every block: the agent's dweb_block and a Home block
+  // write the same policy, so both retire the remembered A2A consent and close
+  // the dweb agent's conversations with that peer.
+  const revokeA2aPeer = async (/** @type {string} */ did) => {
+    await a2aApprovedReady;
+    a2aApprovalRevision++;
+    if (dwebAgentOwner) await dwebAgentOwner.revokePeer(did);
+    else { a2aApprovedDids.delete(did); await persistA2aApproved(); }
+  };
   const withDwebPublication = (/** @type {(current:()=>boolean)=>Promise<any>} */ operation) =>
     engine.withDwebPublication(async (/** @type {()=>boolean} */ current) => {
       if (!current() || !dwebTransportOn()) return { ok: false, error: 'dweb-disabled' };
@@ -783,12 +792,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       return setUserPeerBlocked({
         kv: deps.kv, vault: deps.vault, browser: deps.browser,
         current: () => engine.dwebPublicationGeneration() === generation,
-        revokePeer: async (/** @type {string} */ did) => {
-          await a2aApprovedReady;
-          a2aApprovalRevision++;
-          if (dwebAgentOwner) await /** @type {any} */ (dwebAgentOwner).revokePeer(did);
-          else { a2aApprovedDids.delete(did); await persistA2aApproved(); }
-        },
+        revokePeer: revokeA2aPeer,
       }, args);
     },
     setDiscovery: async (/** @type {any} */ { enabled } = {}) => {
@@ -3472,6 +3476,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       dwebInbound: dwebAgentOwner.onMessage,
       syncDwebAgentRoom: dwebAgentOwner.syncRoom,
       onDwebStopped: dwebAgentOwner.roomStopped,
+      revokeDwebPeer: revokeA2aPeer,
       onSettingsChanged: async (/** @type {any} */ patch) => {
         if (patch?.watchAgentTab === true) await live.tabAffordances.focusAgentTab();
         if (Object.hasOwn(patch ?? {}, 'frontDoorView')) {

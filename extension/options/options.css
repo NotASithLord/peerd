@@ -569,6 +569,25 @@ button.linklike.disc-app-maker { max-width: 100%; }
 .disc-tile > .error, .disc-app-row-id > .error { margin: 0; }
 .disc-app-row-action { position: relative; z-index: 1; flex: none; }
 .disc-app-row .disc-tile-open::after { border-radius: var(--r2); }
+/* The maker menu: the Library's kebab menu, opening down from the head. */
+.disc-maker-menu { position: relative; flex: none; }
+.disc-person-head button.disc-kebab { width: 40px; height: 40px; }
+.library-menu.disc-menu { top: calc(100% + 4px); bottom: auto; min-width: 200px; }
+.disc-rename { display: flex; flex-direction: column; gap: 8px; }
+.disc-rename p { margin: 0; }
+.disc-rename-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.disc-rename-row input { flex: 1 1 220px; min-width: 0; min-height: 40px; margin: 0; }
+/* why: after a block, focus moves to this line. */
+.disc-blocked:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* why its own rule: button.danger is scoped to Settings (.options-page). */
+button.disc-danger { background: transparent; color: var(--danger-ink); border-color: var(--danger); font-weight: 600; }
+button.disc-danger:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
+/* Block confirm: the shared modal shell, sized like the frame. */
+.disc-block.peerd-modal { width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; box-sizing: border-box; padding: 24px; border-radius: var(--r4); display: flex; flex-direction: column; gap: 14px; }
+.disc-block h2, .disc-block p { margin: 0; overflow-wrap: anywhere; }
+.disc-block .peerd-modal-actions { margin: 0; flex-wrap: wrap; }
+.disc-block .disc-btn { min-height: 44px; }
+
 /* Share dialog: the shared modal shell, sized like the frame. */
 .disc-share.peerd-modal { width: min(500px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; box-sizing: border-box; padding: 24px; border-radius: var(--r4); display: flex; flex-direction: column; gap: 14px; }
 .disc-share p { margin: 0; overflow-wrap: anywhere; }

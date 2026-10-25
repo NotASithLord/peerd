@@ -12,7 +12,8 @@
 // One component, four pages: the root (start list while the peer network is
 // off; looking, empty, tile grid or offline grid while it is on), an app
 // page, a share-link page and a maker page. Pure rules live in
-// discover-model.js and view pieces in discover-pages.js.
+// discover-model.js (blocked makers in blocked-makers.js, shared with
+// Contacts) and view pieces in discover-pages.js.
 
 import m from '/vendor/mithril/mithril.js';
 import { immutableAppRoot } from '/shared/address/immutable-app-root.js';
@@ -20,17 +21,20 @@ import { disarmText } from '/shared/disarm-text.js';
 import { loadDweb } from '/shared/dweb-loader.js';
 import { openOptions } from '/shared/open-options.js';
 import { packagedStarter, starterKeys } from '/shared/starter-catalog.js';
+import { blockedSet, effectOutcome, withoutBlocked } from './blocked-makers.js';
 import { discoveryAddress } from './discovery-address.js';
 import { exploreOrder, EXPLORE_WINDOW, nextSuggestion, suggestionKey } from './explore-order.js';
 import {
-  bytesLabel, createEffects, FAILED, failureHint, isFailure, kbLabel, keptCards, letterOf, libraryPeerApps, libraryStatus,
-  matchQuery, networkState, noSuggestionNote, pageState, pillFilter, appCountLabel, peerCountLabel, rootView, savedContactNames,
-  saysIt, shareLinkError, shortKey, tileAction, toneOf, UNKNOWN, unknownLines, updateOffer, verifiedDeclared, wasmLabel, yourApps,
+  BLOCKED, BLOCKED_ERROR, bytesLabel, createEffects, FAILED, failureHint, isFailure, kbLabel, keptCards, letterOf, libraryPeerApps,
+  libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, pillFilter, appCountLabel, peerCountLabel, rootView,
+  savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, tileAction, toneOf, UNKNOWN, unknownLines, updateOffer,
+  verifiedDeclared, wasmLabel, yourApps,
 } from './discover-model.js';
 import {
-  actionView, appHead, appRow, backLink, cantRunPanel, conflictPanel, emptyState, installPanel, keyedParts, makerHead,
-  makerMeta, noteBox, pills, refreshButton, safetyLines, saysItSection, searchInput, secondaryButton, shareDialog, shareRow,
-  startRow, statusRow, techDetails, tile, tileButton, updatePanel, yourAppsRow,
+  actionView, appHead, appRow, backLink, blockDialog, blockedLine, cantRunPanel, conflictPanel, emptyState, installPanel,
+  keyedParts, makerHead, makerMenuView, makerMeta, noteBox, pills, refreshButton, renameForm, safetyLines, saysItSection,
+  searchInput, secondaryButton, shareDialog, shareRow, startRow, statusRow, techDetails, tile, tileButton, updatePanel,
+  yourAppsRow,
 } from './discover-pages.js';
 
 /** @typedef {import('../options/sections/reset-row.js').Send} Send */
@@ -75,6 +79,7 @@ const OFFLINE_EMPTY = `You can still open the apps in your Library. ${NEEDS_NETW
 const MAKER_EMPTY = 'This maker’s apps show up here when the people you are connected to share them.';
 const AUDIT_FAILED = 'peerd could not add it to the security log.';
 const SHARING = 'Sharing means other people can get this app from you while your peer network is on.';
+const BLOCKED_LINK = 'You blocked the maker of this app. To look at it, unblock them in Contacts.';
 const LOOKING = 'Looking for people who share apps…';
 // why prefixes: an Open in the Your apps row reports in its own row, and a
 // copy in the share dialog in the dialog, never under Technical details.
@@ -118,6 +123,14 @@ export const DiscoverSection = (initialVnode) => {
   /** @type {Map<string, {appId:string, version_id:string|null, seq:number}>} */ let installedByDwappId = new Map();
   /** @type {string|null} */ let commonsId = null;
   /** @type {Map<string, string>} */ let contactNames = new Map();
+  // Makers the user blocked, by full did: their apps leave every Discover list.
+  /** @type {Set<string>} */ let blockedDids = new Set();
+  // why counts: a read that started before this view changed a list (a block,
+  // a saved name) must not undo that change on screen.
+  let blockedReads = 0;
+  let blockedChanged = 0;
+  let contactReads = 0;
+  let contactsChanged = 0;
   /** @type {string|null} */ let myDid = null;
   /** @type {NetworkState|null} */ let net = null;
   let retrying = false;
@@ -135,6 +148,13 @@ export const DiscoverSection = (initialVnode) => {
   /** @type {{route:Route, name:string}|null} */ let makerFrom = null;
   // The page key whose share dialog is open.
   /** @type {string|null} */ let shareFor = null;
+  // The maker page's menu, name form and block confirm. A page change closes them.
+  let menuOpen = false;
+  /** @type {{did:string, value:string, busy:boolean, failed:boolean}|null} */ let renaming = null;
+  /** @type {{did:string, name:string}|null} */ let renameUnknown = null;
+  /** @type {string|null} */ let blockFor = null;
+  let blockBusy = false;
+  /** @type {'failed'|'unknown'|null} */ let blockIssue = null;
   // Installs this view finished, so their line says "Installed." and names
   // the app. A remount or a later visit says only where the app is.
   /** @type {Set<string>} */ const fresh = new Set();
@@ -177,6 +197,7 @@ export const DiscoverSection = (initialVnode) => {
   let appliedRefreshEpoch = 0;
   let statusInFlight = false;
   let contactsInFlight = false;
+  /** @type {Promise<boolean>|null} */ let blockedInFlight = null;
 
   const redraw = () => { if (!dead) m.redraw(); };
   const scrollHost = () => rootDom?.closest('.home-content') ?? document.scrollingElement;
@@ -270,7 +291,7 @@ export const DiscoverSection = (initialVnode) => {
     const failure = /** @type {{code?:string,error?:string}} */ (result);
     // why keep the runtime reason: Technical details shows it.
     busy[id] = RUNTIME_CODES.includes(failure?.code ?? '') && typeof failure?.error === 'string' ? failure.error
-      : FAILED;
+      : failure?.error === BLOCKED_ERROR ? BLOCKED : FAILED;
   };
 
   const refresh = () => {
@@ -291,8 +312,10 @@ export const DiscoverSection = (initialVnode) => {
           const retained = new Map(apps.filter(app => app.dwapp_id
             && (unconfirmed.has(app.dwapp_id) || ['installing', 'updating'].includes(busy[app.dwapp_id])))
             .map(app => [app.dwapp_id, app]));
-          apps = [...next.map(app => retained.get(app.dwapp_id) ?? app),
-            ...[...retained.values()].filter(app => !seen.has(/** @type {string} */ (app.dwapp_id)))];
+          // why here too: the host drops a blocked maker's cards on its own
+          // policy read, which can come after this view's block.
+          apps = withoutBlocked([...next.map(app => retained.get(app.dwapp_id) ?? app),
+            ...[...retained.values()].filter(app => !seen.has(/** @type {string} */ (app.dwapp_id)))], blockedDids);
           heardCache = keptCards(heardCache, next, id => installedByDwappId.has(id) || unconfirmed.has(id)
             || ['installing', 'updating'].includes(busy[id]));
           heardFailed = false;
@@ -336,11 +359,35 @@ export const DiscoverSection = (initialVnode) => {
   const loadContacts = async () => {
     if (contactsInFlight) return;
     contactsInFlight = true;
+    const started = ++contactReads;
     try {
       const reply = await attrs.send({ type: 'contacts/list' });
-      if (reply?.ok) contactNames = savedContactNames(reply.contacts);
+      if (reply?.ok && started > contactsChanged) contactNames = savedContactNames(reply.contacts);
     } catch { /* "Made by" falls back to the short key */ }
     finally { contactsInFlight = false; redraw(); }
+  };
+
+  /** @param {Set<string>} next */
+  const applyBlocked = (next) => {
+    blockedDids = next;
+    apps = withoutBlocked(apps, blockedDids);
+  };
+  // why with the contacts, not in the poll: Contacts unblocks in another view
+  // or tab, and a return here reads again. Resolves whether the list was read.
+  /** @returns {Promise<boolean>} */
+  const loadBlocked = () => {
+    if (blockedInFlight) return blockedInFlight;
+    const started = ++blockedReads;
+    blockedInFlight = (async () => {
+      try {
+        const next = blockedSet(await attrs.send({ type: 'dweb/blocked-peers' }));
+        if (!next || dead) return false;
+        if (started > blockedChanged) applyBlocked(next);
+        return true;
+      } catch { return false; /* keep the last list */ }
+      finally { blockedInFlight = null; redraw(); }
+    })();
+    return blockedInFlight;
   };
 
   const poll = () => { void loadLocal(); void refresh(); void readStatus(); };
@@ -350,11 +397,12 @@ export const DiscoverSection = (initialVnode) => {
     if (timer) return;
     poll();
     void loadContacts();
+    void loadBlocked();
     timer = setInterval(() => { if (!document.hidden) poll(); }, POLL_MS);
     // Returning to the tab should re-sync at once, not after the next 4s tick.
     // why contacts here, not in the poll: another Home tab can save a maker
     // as a contact meanwhile, and the read also walks the audit log.
-    onVisible = () => { if (!document.hidden) { poll(); void loadContacts(); } };
+    onVisible = () => { if (!document.hidden) { poll(); void loadContacts(); void loadBlocked(); } };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', onVisible);
   };
@@ -584,7 +632,7 @@ export const DiscoverSection = (initialVnode) => {
     if (refreshing) return;
     refreshing = true;
     redraw();
-    await Promise.allSettled([loadLocal(), refresh(), readStatus(), loadContacts()]);
+    await Promise.allSettled([loadLocal(), refresh(), readStatus(), loadContacts(), loadBlocked()]);
     refreshing = false;
     redraw();
   };
@@ -630,6 +678,8 @@ export const DiscoverSection = (initialVnode) => {
     let target;
     try { target = immutableAppRoot(linkInput); }
     catch (cause) { linkError = shareLinkError(/** @type {Error} */ (cause).message); return; }
+    // why no send: the host refuses a blocked maker's files, so the check would only fail.
+    if (blockedDids.has(target.publisher)) { linkError = BLOCKED_LINK; return; }
     const requestEpoch = ++linkEpoch;
     // why the route too: a check can take many seconds. Its page opens only
     // if the user is still where they asked; a page they opened meanwhile
@@ -653,7 +703,8 @@ export const DiscoverSection = (initialVnode) => {
       } else {
         // why no host text: the share row has no Technical details to hold it.
         linkError = RUNTIME_CODES.includes(reply?.code) ? 'peerd could not check this app. This browser cannot run it.'
-          : 'peerd could not check this app. The link may be wrong, or the people who have it may be offline. Check the link, then try again.';
+          : reply?.error === BLOCKED_ERROR ? BLOCKED_LINK
+            : 'peerd could not check this app. The link may be wrong, or the people who have it may be offline. Check the link, then try again.';
       }
     } catch {
       if (requestEpoch === linkEpoch) linkError = 'peerd could not check this app. Wait until the peer network is connected, then try again.';
@@ -681,7 +732,8 @@ export const DiscoverSection = (initialVnode) => {
       if (reply?.ok === false && reply?.outcomeKnown !== false && reply?.performed !== true
           && !['effect-completed', 'host-lost', 'transport-lost'].includes(reply?.outcomeKind)) {
         sessionStorage.removeItem(PENDING_KEY);
-        return { failure: RUNTIME_CODES.includes(reply?.code) && typeof reply.error === 'string' ? reply.error : FAILED };
+        return { failure: RUNTIME_CODES.includes(reply?.code) && typeof reply.error === 'string' ? reply.error
+          : reply.error === BLOCKED_ERROR ? BLOCKED : FAILED };
       }
     } catch { /* no receipt: keep the exact pending address fenced */ }
     return {};
@@ -805,6 +857,8 @@ export const DiscoverSection = (initialVnode) => {
   // why in-component routes: no shell, hash or history change. Leaving the
   // root keeps its scroll and the tile that opened the page, so Back can
   // return both.
+  // why not a block in flight: its outcome still lands, on whatever page is open.
+  const closeMakerParts = () => { menuOpen = false; renaming = null; renameUnknown = null; if (!blockBusy) { blockFor = null; blockIssue = null; } };
   /** @param {Route} next @param {string} originKey */
   const openPage = (next, originKey) => {
     if (route.page === 'root') origin = { key: originKey, scroll: scrollHost()?.scrollTop ?? 0 };
@@ -815,6 +869,7 @@ export const DiscoverSection = (initialVnode) => {
     surpriseNote = null;
     shareFor = null;
     makerFrom = null;
+    closeMakerParts();
     pendingFocus = { selector: '.disc-back', scroll: 0 };
   };
   /** @param {DwebApp} app */
@@ -830,8 +885,10 @@ export const DiscoverSection = (initialVnode) => {
     openPage({ page: 'maker', did }, did);
     makerFrom = { route: from, name };
     void loadContacts();
+    void loadBlocked();
   };
   const goBack = () => {
+    closeMakerParts();
     if (route.page === 'maker' && makerFrom) {
       route = makerFrom.route;
       makerFrom = null;
@@ -872,6 +929,114 @@ export const DiscoverSection = (initialVnode) => {
   const closeShare = () => {
     linkEpoch++; shareOpen = false; linkError = '';
     pendingFocus = { selector: '[data-paste-link]', scroll: null };
+  };
+
+  // The maker menu. Escape, Cancel and a finished name return focus to its
+  // button, as the Library's menu does.
+  const MENU_BUTTON = '[data-maker-menu]';
+  /** @param {boolean} refocus */
+  const closeMenu = (refocus) => {
+    if (!menuOpen) return;
+    menuOpen = false;
+    if (refocus) pendingFocus = { selector: MENU_BUTTON, scroll: null };
+  };
+  /** @param {string} did */
+  const startRename = (did) => {
+    menuOpen = false;
+    renaming = { did, value: contactNames.get(did) ?? '', busy: false, failed: false };
+    renameUnknown = null;
+    pendingFocus = { selector: '.disc-rename input', scroll: null };
+  };
+  const cancelRename = () => { renaming = null; pendingFocus = { selector: MENU_BUTTON, scroll: null }; };
+  // why one write and then a read, never a replay: a lost reply may have saved it.
+  /** @param {string} did */
+  const saveName = async (did) => {
+    const form = renaming;
+    const name = form?.value.trim() ?? '';
+    if (!form || form.did !== did || form.busy || !name) return;
+    form.busy = true; form.failed = false;
+    redraw();
+    /** @type {'done'|'failed'|'unknown'} */ let outcome = 'unknown';
+    /** @type {string|null} */ let kept = null;
+    try {
+      const reply = await attrs.send({ type: 'contacts/set', did, name });
+      outcome = effectOutcome(reply);
+      kept = typeof reply?.contact?.name === 'string' ? reply.contact.name : null;
+    } catch { /* unknown */ }
+    if (dead || renaming !== form) return;
+    form.busy = false;
+    if (outcome === 'failed') {
+      form.failed = true;
+      // why Save: the line says to try again, as Block does in its confirm.
+      pendingFocus = { selector: '.disc-rename button[type="submit"]', scroll: null, ifLost: true };
+    } else {
+      renaming = null;
+      // why the reply's name, else the store's form of it: a read shows the name as the store saved it.
+      if (outcome === 'done') { contactsChanged = contactReads; contactNames = new Map(contactNames).set(did, kept ?? savedNameForm(name)); }
+      else { renameUnknown = { did, name: savedNameForm(name) }; void loadContacts(); }
+      pendingFocus = { selector: MENU_BUTTON, scroll: null, ifLost: true };
+    }
+    redraw();
+  };
+
+  // The block confirm. It opens on Cancel, and Escape or Cancel returns focus
+  // to the menu button. A block is one write; Check again only reads.
+  /** @param {string} did */
+  const askBlock = (did) => {
+    menuOpen = false; renaming = null; blockFor = did; blockIssue = null;
+    pendingFocus = { selector: '[data-block-cancel]', scroll: null };
+  };
+  const cancelBlock = () => {
+    if (blockBusy) return;
+    blockFor = null; blockIssue = null;
+    pendingFocus = { selector: MENU_BUTTON, scroll: null };
+  };
+  /** @param {string} did @param {'done'|'failed'|'unknown'} outcome */
+  const settleBlock = (did, outcome) => {
+    if (outcome === 'done') {
+      blockedChanged = blockedReads;
+      applyBlocked(new Set([...blockedDids, did]));
+      blockFor = null; blockIssue = null;
+      // why: Back would return to an app of theirs, and their apps left Discover.
+      if (route.page === 'maker' && route.did === did) makerFrom = null;
+      pendingFocus = { selector: '.disc-blocked', scroll: null };
+    } else {
+      blockIssue = outcome;
+      // why no ifLost: while it ran, focus could only rest on the dialog.
+      pendingFocus = { selector: outcome === 'unknown' ? '[data-block-check]' : '[data-block-confirm]', scroll: null };
+    }
+  };
+  // why the dialog takes focus: every control in it goes off while a block or
+  // a check runs, and focus must not fall to the page behind the modal.
+  const holdBlockFocus = () => { pendingFocus = { selector: '.disc-block', scroll: null }; };
+  /** @param {string} did */
+  const blockMaker = async (did) => {
+    if (blockBusy || blockFor !== did) return;
+    blockBusy = true; blockIssue = null;
+    holdBlockFocus();
+    redraw();
+    /** @type {'done'|'failed'|'unknown'} */ let outcome = 'unknown';
+    try { outcome = effectOutcome(await attrs.send({ type: 'dweb/peer-block', did })); } catch { /* unknown */ }
+    blockBusy = false;
+    if (dead) return;
+    settleBlock(did, outcome);
+    redraw();
+  };
+  // why a read that starts after the block reply: the stored list is the
+  // receipt. It names the maker, or the block did not happen.
+  /** @param {string} did */
+  const checkBlock = async (did) => {
+    if (blockBusy || blockFor !== did) return;
+    blockBusy = true;
+    holdBlockFocus();
+    redraw();
+    await blockedInFlight;
+    const read = await loadBlocked();
+    blockBusy = false;
+    if (dead) return;
+    if (read) settleBlock(did, blockedDids.has(did) ? 'done' : 'failed');
+    else pendingFocus = { selector: '[data-block-check]', scroll: null };
+    redraw();
   };
   // why: Show more goes away after the last batch, and the new tiles start
   // where it stood.
@@ -1020,7 +1185,9 @@ export const DiscoverSection = (initialVnode) => {
     };
   };
 
-  const offlineApps = () => libraryPeerApps(records, heardCache);
+  // why the Library's apps of a blocked maker too: they stay in the Library
+  // (and in Your apps), but leave Discover with the rest of their apps.
+  const offlineApps = () => withoutBlocked(libraryPeerApps(records, heardCache), blockedDids);
 
   /** @param {DwebApp[]} list @param {boolean} offline */
   const ordered = (list, offline) => {
@@ -1328,7 +1495,9 @@ export const DiscoverSection = (initialVnode) => {
     // why the Library first while offline: the offline root shows only what
     // the Library holds, and a card heard before may name a newer version.
     const sources = net?.kind === 'offline' ? [offlineApps(), apps] : [apps, offlineApps()];
-    const app = sources.flat().find(a => a.dwapp_id === key) ?? (pageApp?.dwapp_id === key ? pageApp : null);
+    // why the page it opened with too: a blocked maker's apps leave Discover, an open page with them.
+    const app = sources.flat().find(a => a.dwapp_id === key)
+      ?? (pageApp?.dwapp_id === key ? withoutBlocked([pageApp], blockedDids)[0] : null);
     if (!app) { route = { page: 'root' }; return null; }
     const f = facts(app);
     const state = pageState({
@@ -1346,7 +1515,7 @@ export const DiscoverSection = (initialVnode) => {
     const offline = net?.kind === 'offline';
     // why the Library decides the word: Try again updates when it holds another version.
     const action = f.localId ? 'update' : 'install';
-    const failure = state === 'failed' && isFailure(f.state) ? failureHint(/** @type {string} */ (f.state)) : null;
+    const failure = state === 'failed' && isFailure(f.state) ? failureHint(/** @type {string} */ (f.state), action) : null;
     /** @type {ButtonProps|null} */ let primary = null;
     if (state === 'review') {
       primary = { label: 'Install and share', disabled: !app.uri || !localReady || offline, onclick: () => { void install(app); } };
@@ -1482,10 +1651,28 @@ export const DiscoverSection = (initialVnode) => {
     // each with Open, and a card heard before may name a version to fetch.
     const offline = net?.kind === 'offline';
     const made = (offline ? offlineApps() : apps).filter(app => app.publisher === did);
+    const maker = { name, key: shortKey(did) };
+    const isBlocked = blockedDids.has(did);
+    const menu = makerMenu({ did, myDid, saved: !!name, blocked: isBlocked });
+    const form = renaming?.did === did ? renaming : null;
     return m('.disc-home.disc-view.disc-page', { key: `maker:${did}` }, [
       backLink({ onclick: goBack, label: makerFrom?.name ?? 'Discover' }),
-      makerHead({ title, letter: letterOf(title), tone: toneOf(did), saved: !!name }),
-      m('.disc-section.disc-section--tight', [
+      makerHead({
+        title, letter: letterOf(title), tone: toneOf(did), saved: !!name,
+        menu: makerMenuView({
+          maker, open: menuOpen, rename: menu.rename, block: menu.block,
+          onToggle: () => { menuOpen = !menuOpen; }, onClose: closeMenu,
+          onRename: () => startRename(did), onBlock: () => askBlock(did),
+        }),
+      }),
+      form ? renameForm({
+        value: form.value, busy: form.busy, failed: form.failed, canSave: !!form.value.trim() && form.value.trim() !== (name ?? ''),
+        oninput: (value) => { form.value = value; }, onSave: () => { void saveName(did); }, onCancel: cancelRename,
+      }) : null,
+      // why only until a read shows the name: then peerd knows it was saved.
+      renameUnknown?.did === did && contactNames.get(did) !== renameUnknown.name
+        ? m('p.type-body-sm', { role: 'status' }, 'peerd is not sure the name was saved. Check Contacts before you try again.') : null,
+      isBlocked ? blockedLine({ maker }) : m('.disc-section.disc-section--tight', [
         m('.type-label-strong', ['Apps from ', name ? m('bdi', name) : m('bdi.type-code.disc-maker-key', title)]),
         // why a line: a share link's maker often has no app that peers share.
         made.length ? m('ul.disc-app-list', made.slice(0, makerLimit).map(app => appRow(appTileProps(app, offline, true))))
@@ -1493,6 +1680,10 @@ export const DiscoverSection = (initialVnode) => {
       ]),
       made.length > makerLimit ? showMore(() => { focusTile(made[makerLimit]); makerLimit += EXPLORE_WINDOW; }) : null,
       techView([{ label: 'Made by', value: did, code: true, copy: copyButton(`maker:${did}:did`, did) }]),
+      blockFor === did ? blockDialog({
+        maker, busy: blockBusy, issue: blockIssue,
+        onConfirm: () => { void blockMaker(did); }, onCancel: cancelBlock, onCheck: () => { void checkBlock(did); },
+      }) : null,
     ]);
   };
 
