@@ -283,7 +283,8 @@ export const HOME_SETTINGS_STATES = [
         if (lock?.ok !== true) throw new Error('Vault lock failed');
         locked = true;
         await evalIn(page, `globalThis.__memoryProofEditor.closest('.memory-card').querySelector('.memory-card-actions button').click()`);
-        const refusal = await waitFor(() => evalIn(page, `globalThis.__homeSettingsProof.messages.find((entry) => entry.type === 'memory/write' && entry.reply)`), { budgetMs: 10_000 });
+        // why the painted message too: Mithril renders the reply on its next animation frame.
+        const refusal = await waitFor(() => evalIn(page, `globalThis.__memoryProofEditor.closest('.memory-card').querySelector('.key-msg:not(:empty)') && globalThis.__homeSettingsProof.messages.find((entry) => entry.type === 'memory/write' && entry.reply)`), { budgetMs: 10_000 });
         const view = await evalIn(page, `({
           draft: globalThis.__memoryProofEditor?.value,
           sameEditor: globalThis.__memoryProofEditor === document.querySelector('textarea.memory-editor'),
