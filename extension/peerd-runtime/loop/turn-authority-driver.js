@@ -523,6 +523,9 @@ const runAgentTurn = async (/** @type {any} */ input) => {
         costTracker.maybeHalt(ev);
         continue;
       }
+      // why: settle the spend refusal before folding or broadcasting its stop,
+      // so the UI and Goal driver observe the same terminal reason.
+      if (ev.type === 'stop' && overSpendLimit) ev.stopReason = 'aborted';
       // Capture the final stop reason for the return value BEFORE the panel
       // guard (the switch's 'stop' case is panel-only). 'aborted' here = Stop /
       // steer / a spend-limit halt: an outer goal loop must not re-drive it.
@@ -611,7 +614,8 @@ const runAgentTurn = async (/** @type {any} */ input) => {
           break;
       }
     }
-    if (overSpendLimit && costTracker.maybeHalt({ sessionId })) lastStopReason = 'aborted';
+    // why: abort only after the controller finishes settling its known refusal.
+    if (overSpendLimit) costTracker.maybeHalt({ sessionId });
   } catch (e) {
     // Loop-level failure: typed errors get clean labels; anything else
     // surfaces as a generic provider error message.

@@ -407,6 +407,9 @@ describe('spend admission through the real controller', () => {
       expect(refusedSnapshot).toEqual({ calls: 0, cost: 3 });
       expect(fixture.broadcasts.filter((event) => event.type === 'turn/spend-limit-reached')).toHaveLength(1);
       expect(outcome).toMatchObject({ ok: true, stopReason: 'aborted' });
+      expect(fixture.broadcasts.filter((event) => event.type === 'turn/stop')).toContainEqual(
+        expect.objectContaining({ stopReason: 'aborted' }),
+      );
       await queued;
       expect(fixture.modelCalls()).toBe(1);
       expect(fixture.signals[0]!.aborted).toBe(true);
