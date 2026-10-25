@@ -835,23 +835,31 @@ export async function launchPeerd({
         (entry) => entry.targetId !== created.id && entry.url === panelUrl,
       ) ?? null;
     };
+    let lastActionTargetId = null;
     const openNativePanelTarget = async (budgetMs) => {
       const { targetInfos: actionTargets = [] } = await browserConn.send('Target.getTargets', {
         filter: [{ type: 'tab', exclude: false }, { exclude: false }],
       });
       const actionTabs = actionTargets.filter(
         (entry) => entry.type === 'tab' && entry.url === 'about:blank',
-      );
+      ).sort((a, b) => Number(b.targetId === lastActionTargetId) - Number(a.targetId === lastActionTargetId));
       if (actionTabs.length === 0) {
         throw new Error(`Chrome did not expose an action tab target: ${JSON.stringify(actionTargets)}`);
       }
       for (const actionTarget of actionTabs) {
         await browserConn.send('Target.activateTarget', { targetId: actionTarget.targetId }).catch(() => {});
-        await browserConn.send('Extensions.triggerAction', {
-          id: sw.id, targetId: actionTarget.targetId,
-        });
+        try {
+          await browserConn.send('Extensions.triggerAction', {
+            id: sw.id, targetId: actionTarget.targetId,
+          });
+        } catch (error) {
+          // why: recently retired pages can still appear as about:blank tab
+          // targets without a toolbar host. No action ran; try a live tab.
+          if (/^(?:Extensions\.triggerAction: )?cannot retrieve host for the provided id$/.test(String(error?.message ?? error))) continue;
+          throw error;
+        }
         const target = await waitFor(findNativePanelTarget, { budgetMs, pollMs: 25 });
-        if (target) return target;
+        if (target) { lastActionTargetId = actionTarget.targetId; return target; }
       }
       return null;
     };
