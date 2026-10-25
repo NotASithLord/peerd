@@ -74,6 +74,32 @@ const clickAndSyncRedraw = (page, selector) => evalIn(page, `(async () => {
   return true;
 })()`, true);
 
+// Layout checks for the vault gate states. why checks: the visual lane only
+// reports, so a check is the gate. On the merge base a failed check is a
+// note, because that render only supplies the "before" picture.
+const checkGateLayout = (rec, name, pass, detail) => {
+  if (process.env.PEERD_VISUAL_BASE_RENDER === '1' && !pass) rec.observe(`merge-base: ${name}`, detail);
+  else rec.check(name, pass, JSON.stringify(detail));
+};
+const gateBox = (page) => evalIn(page, `(() => {
+  const rect = document.querySelector('.gate-card').getBoundingClientRect();
+  return { left: rect.left, top: rect.top, width: rect.width, height: rect.height, vw: innerWidth, vh: innerHeight };
+})()`);
+// One readable column, centered, in the upper third of the tab.
+const inGateColumn = (box) => box.width <= 440 && Math.abs(box.left + box.width / 2 - box.vw / 2) <= 1
+  && box.top >= box.vh * 0.15 && box.top <= box.vh / 3;
+// why read the styles: the visual lane hides the code stream, so no capture
+// shows it if it runs under the gate text again. The gate covers the stream
+// with a border image in the page color (sidepanel/styles.css).
+const gateBackdrop = (page) => evalIn(page, `(() => {
+  const card = document.querySelector('.gate-card');
+  if (!card) return null;
+  const style = getComputedStyle(card);
+  const color = getComputedStyle(document.body).backgroundColor;
+  return { image: style.borderImageSource, slice: style.borderImageSlice, color,
+    covers: style.borderImageSource.includes(color) && style.borderImageSlice.includes('fill') };
+})()`);
+
 // why: these scenarios model a user who already made a network choice. Keep
 // the choice local to their fixtures; fresh-profile consent oracles stay untouched.
 const chooseFixtureNetwork = async (ctx, enabled) => {
@@ -607,7 +633,183 @@ export const STATES = [
   {
     name: 'initial-screen', kind: 'visual', phase: 'pre-unlock',
     responder: null,
-    async run(ctx, rec) { await rec.visual('initial-screen'); },
+    async run(ctx, rec) {
+      const backdrop = await waitFor(() => gateBackdrop(ctx.page), { budgetMs: 10_000, pollMs: 50 });
+      checkGateLayout(rec, 'the code stream stays off the gate text', !!backdrop?.covers, backdrop);
+      await rec.visual('initial-screen');
+    },
+  },
+
+  // --- visual (WIDE): the first-run vault gate on a cold Home tab -----------
+  // A cold Home tab gets the gate straight from the vault shell, laid out over
+  // the whole tab, so the panel capture above does not cover it. Pre-unlock:
+  // the gate shows its first-run choices only before a vault exists.
+  {
+    name: 'home-first-run-gate', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'home/home.html', { ready: '.gate-card' });
+      try {
+        // why wait for the label: the capability probe runs after the worker
+        // answers and can change the copy. Capture only its settled form.
+        const settled = await waitFor(() => evalIn(page, `(() => {
+          const button = document.querySelector('.gate-card button:not(.secondary):not(.linklike)');
+          const label = button && !button.disabled ? button.textContent : '';
+          return label && !/^Preparing|^Create vault with passkey$/.test(label) ? label : null;
+        })()`), { budgetMs: 15_000, pollMs: 50 });
+        rec.check('a cold Home tab shows the settled first-run vault gate', !!settled, String(settled));
+        const box = await gateBox(page);
+        checkGateLayout(rec, 'the gate is one centered column in the upper third of the tab', inGateColumn(box), box);
+        const stream = await waitFor(() => evalIn(page, `(() => {
+          const canvas = document.querySelector('canvas.code-stream');
+          return canvas && { mask: getComputedStyle(canvas).maskImage };
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        const backdrop = await gateBackdrop(page);
+        checkGateLayout(rec, 'the code stream stays off the gate text',
+          !!stream && stream.mask !== 'none' && !!backdrop?.covers, { ...stream, ...backdrop });
+        await rec.visualPage('home-first-run-gate', page);
+        // why a short tab: there, a space that shrinks to fit the content moved
+        // the column when the form or an error showed. A fixed 22vh space
+        // pushed the form off the tab. The capture above is too tall to show
+        // this. The two passphrases differ, so the form writes nothing.
+        await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 650, deviceScaleFactor: 1, mobile: false });
+        const boxes = [await waitFor(async () => {
+          const next = await gateBox(page);
+          return next.vh === 650 ? next : null;
+        }, { budgetMs: 5_000, pollMs: 50 })];
+        const boxWhen = (selector) => waitFor(async () => (await evalIn(page,
+          `!!document.querySelector(${JSON.stringify(selector)})`)) && gateBox(page), { budgetMs: 5_000, pollMs: 50 });
+        await clickAndSyncRedraw(page, '.gate-card button.linklike');
+        boxes.push(await boxWhen('#pass2'));
+        await evalIn(page, `(() => {
+          for (const [index, id] of ['pass', 'pass2'].entries()) {
+            const input = document.getElementById(id);
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'passphrase-' + index);
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          return true;
+        })()`);
+        await clickAndSyncRedraw(page, '.gate-card form button[type="submit"]');
+        boxes.push(await boxWhen('.gate-msg'));
+        const mismatch = boxes[2];
+        checkGateLayout(rec, 'on a short tab the gate keeps one place when its content changes',
+          boxes.every((box) => box && Math.abs(box.top - boxes[0].top) <= 1), boxes);
+        checkGateLayout(rec, 'on a short tab the passphrase form with an error fits',
+          !!mismatch && mismatch.top + mismatch.height <= mismatch.vh, mismatch);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  // --- visual (WIDE): an onboarding question step on Home -------------------
+  // Home shows each setup step in .options-gate (home.js). The question steps
+  // have the shortest lines, so they show if the column keeps one width from
+  // step to step. Render only: the real OnboardingGate in the real Home page
+  // and stylesheets, with replies that write nothing.
+  {
+    name: 'home-onboarding-question', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'home/home.html', { ready: '.gate-card' });
+      try {
+        await evalIn(page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { OnboardingGate } = await import('/sidepanel/components/onboarding-view.js');
+          const state = {
+            vault: { initialized: true, locked: false },
+            profile: { onboardingComplete: false, peerName: 'peerd' },
+            settings: { dwebChoiceMade: true },
+          };
+          window.__onboardingSends = [];
+          const send = async (message) => {
+            window.__onboardingSends.push(message.type);
+            return message.type === 'provider/status' ? { ok: true, providers: [] } : { ok: false };
+          };
+          m.mount(document.getElementById('app'), { view: () =>
+            m('.options-gate', m(OnboardingGate, { state, send, reconcileState: async () => {} })) });
+        })()`, true);
+        await waitFor(() => evalIn(page, `!!document.querySelector('.onboarding-skip')`), { budgetMs: 5_000, pollMs: 50 });
+        await clickAndSyncRedraw(page, '.onboarding-skip');
+        await waitFor(() => evalIn(page, `!!document.querySelector('.peer-name-input')`), { budgetMs: 5_000, pollMs: 50 });
+        await clickAndSyncRedraw(page, '.onboarding-actions button:not(.onboarding-skip)');
+        const step = await waitFor(() => evalIn(page, `(() => {
+          const card = document.querySelector('.options-gate .onboarding-card');
+          return document.querySelector('#onb-call') && card ? {
+            question: document.querySelector('.onb-ask')?.textContent,
+            sends: window.__onboardingSends,
+            width: card.getBoundingClientRect().width,
+            vw: innerWidth,
+          } : null;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the first question step renders in the Home gate and writes nothing',
+          step?.question === 'What should I call you?'
+            && step.sends.every((type) => type === 'provider/status'), JSON.stringify(step));
+        checkGateLayout(rec, 'the question step keeps the full gate column width',
+          !!step && step.width === Math.min(420, step.vw - 32), step);
+        await rec.visualPage('home-onboarding-question', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  // --- visual (WIDE): the vault gate after a lock on an open Home tab -------
+  // An open Home tab shows this gate in .options-gate (home.js), not through
+  // the vault shell, so the cold-tab state above does not cover it. Render
+  // only: an idle-lock snapshot, with replies that write nothing.
+  {
+    name: 'home-locked-gate', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'home/home.html', { ready: '.gate-card' });
+      try {
+        await evalIn(page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { VaultGate } = await import('/sidepanel/components/vault-gate.js');
+          const state = { hydrated: true, vault: { initialized: true, locked: true, unlockedAt: 0,
+            prfEnrolled: false, hasRecovery: false, lockReason: 'idle' } };
+          m.mount(document.getElementById('app'), { view: () =>
+            m('.options-gate', m(VaultGate, { state, send: async () => ({ ok: false }) })) });
+        })()`, true);
+        const box = await gateBox(page);
+        checkGateLayout(rec, 'the locked gate is one centered column in the upper third of the tab',
+          inGateColumn(box), box);
+        await rec.visualPage('home-locked-gate', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  // --- visual (WIDE): the vault gate error line on Home ---------------------
+  // No other state shows the gate's message line (a dot and a sentence).
+  // Render only: the locked snapshot above, and a reply that writes nothing.
+  // why this error: its message wraps in the column, and the dot must lead
+  // the first line.
+  {
+    name: 'home-gate-error', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'home/home.html', { ready: '.gate-card' });
+      try {
+        await evalIn(page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { VaultGate } = await import('/sidepanel/components/vault-gate.js');
+          const state = { hydrated: true, vault: { initialized: true, locked: true, unlockedAt: 0,
+            prfEnrolled: false, hasRecovery: false, lockReason: 'idle' } };
+          const send = async () => ({ ok: false, error: 'vault-authority-channel-lost' });
+          m.mount(document.getElementById('app'), { view: () =>
+            m('.options-gate', m(VaultGate, { state, send })) });
+          const input = document.getElementById('pass');
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'passphrase-0');
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`, true);
+        await clickAndSyncRedraw(page, '.gate-card form button[type="submit"]');
+        const message = await waitFor(() => evalIn(page, `(async () => {
+          const { default: m } = await import('/vendor/mithril/mithril.js');
+          m.redraw.sync();
+          return document.querySelector('.gate-msg')?.textContent ?? null;
+        })()`, true), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the Home gate shows its error line', /restarted before it could confirm/.test(String(message)),
+          String(message));
+        await rec.visualPage('home-gate-error', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
   },
 
   // --- functional: one full happy-path turn ----------------------------------

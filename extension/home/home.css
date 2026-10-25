@@ -684,8 +684,44 @@
 /* The vault gate (locked / set-up / loading) sits in the UPPER THIRD of the
    tall full-tab page rather than dead-center — the wordmark + unlock read
    better high (owner direction). Scoped to home: home.css loads after
-   options.css and only on this page, so the options page gate is untouched. */
-.options-gate { align-items: flex-start; padding-top: 22vh; }
+   options.css and only on this page, so the options page gate is untouched.
+   why the space above the gate uses only the tab height: when the space
+   shrank to fit the content, the column moved on a short tab each time an
+   error or a step changed its height. 640px is the height of the tallest
+   gate state (the passphrase form with the no-PRF note), plus the 40px below
+   it and some room. So on a tab shorter than about 820px, the space is less
+   than 22vh, and that state still fits. */
+#app { --gate-top: clamp(24px, 100vh - 640px, 22vh); }
+.options-gate { align-items: flex-start; padding-top: var(--gate-top); }
+/* One readable column for each Home gate: the vault gate and every
+   onboarding step get the width of .options-gate-card. why a set width: a
+   centered flex child without one shrinks to its longest line, so the
+   onboarding card changed width from step to step. */
+.options-gate > .gate-card,
+.options-gate > .onboarding-view { width: min(420px, 100%); }
+/* A cold Home tab (first run, or a new tab while locked) has no .options-gate:
+   the vault shell (sidepanel/vault-shell.js) mounts the gate straight into
+   #app. Give it the same column and the same upper-third place. */
+#app > .gate-card { width: min(420px, 100% - 32px); margin: var(--gate-top) auto 40px; }
+/* The first-run passkey buttons. The panel keeps them 300px wide
+   (sidepanel/styles.css). why wider here: in the 420px column, the security
+   key label broke onto two lines at 300px. */
+.auth-actions:not(.auth-actions--row) { width: min(100%, 360px); }
+/* The boot shell ("Starting secure vault…", "Opening peerd…") shows before
+   and after the gate. why at the gate's height: in the center of the tab,
+   the wordmark jumped down and back up. 74px is the lock chip (42px) and its
+   margins (8px + 24px) above the gate's wordmark. */
+#app > .boot-shell { align-content: start; padding-top: calc(var(--gate-top) + 74px); }
+/* The code stream behind the gate is full-bleed (sidepanel/styles.css). Here
+   the gate is a centered column, so clear a band around it: the stream stays
+   on both sides and never runs under the text. why a mask: it fades only the
+   glyphs, so the edge of the band never shows. */
+.code-stream {
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(50% - 330px), transparent calc(50% - 250px),
+    transparent calc(50% + 250px), #000 calc(50% + 330px));
+          mask-image: linear-gradient(90deg, #000 calc(50% - 330px), transparent calc(50% - 250px),
+    transparent calc(50% + 250px), #000 calc(50% + 330px));
+}
 
 /* "Chat is in the side panel · Bring it here" — shown when the panel owns chat
    (single-homed), so home (now showing tools) has an obvious way back. */

@@ -381,7 +381,11 @@ html, body, #app {
 /* Vault-gate hero brand block: wordmark + version + tagline as one centered
  * column. The version sits small and mono right under the wordmark; the
  * tagline reads as the brand promise. The generous bottom margin is the
- * breathing room between the brand and the action buttons below. */
+ * breathing room between the brand and the action buttons below.
+ * why 24 / 12 / 16px between the parts: the version is a caption of the
+ * wordmark, so it gets the smallest gap. The lock chip and the tagline are
+ * separate items, so they get more. At 8px the version looked crowded
+ * under the 52px blocks. */
 .vault-brand {
   display: flex;
   flex-direction: column;
@@ -396,7 +400,7 @@ html, body, #app {
   justify-content: center;
   width: 42px;
   height: 42px;
-  margin-bottom: 26px;
+  margin-bottom: 24px;
   border: 1px solid var(--border);
   border-radius: var(--r3);
   background: var(--elev);
@@ -404,14 +408,14 @@ html, body, #app {
 }
 .vault-lockmark .ic { display: block; }
 .brand-version {
-  margin-top: 8px;
+  margin-top: 12px;
   font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 0.04em;
   color: var(--fg-muted);
 }
 .brand-tagline {
-  margin-top: 19px;
+  margin-top: 16px;
   font-size: 13px;
   color: var(--fg-muted);
 }
@@ -729,7 +733,26 @@ html, body, #app {
   pointer-events: none;
   opacity: 0.29;
 }
-.gate-card { text-align: center; position: relative; z-index: 1; }
+/* why a backdrop in the page color: the stream is full-bleed, so in the
+ * panel its glyphs ran under the gate text. The border-image outset paints
+ * past the box: 14px (the panel gutter) at the top and sides, and a 48px
+ * fade below. It changes no layout and adds no scroll. A blurred box-shadow
+ * left faint bands around the column in the dark theme. */
+.gate-card {
+  text-align: center;
+  position: relative;
+  z-index: 1;
+  border-image: linear-gradient(var(--bg) calc(100% - 48px), transparent) fill 0 / 0 / 14px 14px 48px;
+}
+/* Forced colors keep the authored --bg in a border image, so the backdrop
+ * shows as a block on the system background. There, text has its own
+ * backplate. */
+@media (forced-colors: active) { .gate-card { border-image: none; } }
+/* The cold vault shell (vault-shell.js) mounts the gate straight into #app.
+ * When the app has loaded, the gate sits in .body, which gives it a 14px
+ * gutter. Give the cold mount the same gutter, so a new panel and a locked
+ * panel show the same screen. */
+#app > .gate-card { margin: 14px; }
 .gate-card .input-row { text-align: left; }
 .gate-card .input-row input { text-align: left; }
 /* §5c: the wordmark's colorize is the front door's ONE accent moment - every
@@ -742,17 +765,15 @@ html, body, #app {
 }
 /* §5d/§5f: the gate's message line - a dot + sentence. Neutral voice for
  * conditions; red is reserved for a WRONG ANSWER (mismatch, wrong
- * passphrase). The marked field carries the same severity on its border. */
+ * passphrase). The marked field carries the same severity on its border.
+ * why an inline dot: a long message wraps, and the dot must lead its first
+ * line. As a flex item, it stood apart, beside the whole paragraph. */
 .gate-msg {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  justify-content: center;
   font-size: 12px;
   margin: 8px 0 0;
   color: var(--fg-muted);
 }
-.gate-msg-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex: 0 0 auto; }
+.gate-msg-dot { display: inline-block; width: 5px; height: 5px; margin-right: 6px; border-radius: 50%; background: currentColor; vertical-align: middle; }
 .gate-msg.is-wrong { color: var(--danger); }
 .gate-card .input-row input.is-error { border-color: var(--danger); }
 /* §5d: the passphrase floor, announced before it can be violated. A
