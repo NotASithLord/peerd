@@ -6847,6 +6847,7 @@ export const STATES = [
         if (!await waitFor(() => evalIn(child.page, `location.href === 'about:blank'`))) throw new Error('panel document did not close');
         release();
         if (!await waitFor(() => child.modelCallCount() === limit * 2, { budgetMs: 60_000, pollMs: 80 })) throw new Error('closed Goal did not reach its real turn limit');
+        const completedModelCalls = child.modelCallCount();
         await sleep(500);
         await child.page.send('Page.navigate', { url: panelUrl });
         await reloadReadyPanel(child, { expectedSessionId: otherId });
@@ -6912,7 +6913,9 @@ export const STATES = [
         await reloadReadyPanel(child, { expectedSessionId: goalId });
         const restarted = process.env.PEERD_VISUAL_BASE_RENDER === '1' ? await readReason()
           : await waitFor(async () => { const value = await readReason(); return value?.notices.length === 1 ? value : null; });
-        rec.check('worker restart preserves chat ownership without another model call', newWorker.targetId !== oldWorker.targetId && child.modelCallCount() === limit);
+        rec.check('worker restart preserves chat ownership without another model call',
+          newWorker.targetId !== oldWorker.targetId && child.modelCallCount() === completedModelCalls,
+          JSON.stringify({ completedModelCalls, afterRestartModelCalls: child.modelCallCount() }));
         if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Goal end after worker restart', restarted);
         else rec.check('worker restart replays the durable reason once', restarted?.note?.id === returned?.note?.id && restarted?.notices.length === 1);
         await rec.visualPage('goal-ended-recovery', child.page);
