@@ -72,6 +72,9 @@ export const showConsentBar = ({ appName, detail, kind, approveLabel }, { armDel
   bar.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') { event.preventDefault(); deny.click(); return; }
     if (event.key !== 'Tab') return;
+    // why: while approval is disarmed, Deny is the only focusable control.
+    // Shift-Tab must not escape the modal into the trusted parent's toolbar.
+    if (allow.disabled) { event.preventDefault(); deny.focus(); return; }
     if (event.shiftKey && document.activeElement === allow) { event.preventDefault(); deny.focus(); }
     else if (!event.shiftKey && document.activeElement === deny) { event.preventDefault(); allow.focus(); }
   });

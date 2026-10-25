@@ -62,6 +62,13 @@ describe('App consent bar', () => {
     const answer = showConsentBar(request, { armDelayMs: 10_000 });
     const { bar, deny } = openBar();
     expect(document.activeElement).toBe(deny);
+    // The only enabled control must trap both Tab directions while arming.
+    for (const shiftKey of [false, true]) {
+      const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
+      deny.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(deny);
+    }
     deny.click();
     expect(await answer).toBe(false);
     expect(document.body.contains(bar)).toBe(false);
