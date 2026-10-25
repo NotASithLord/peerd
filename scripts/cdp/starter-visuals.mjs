@@ -7,11 +7,12 @@ import { evalIn, waitFor, openExtPage, openWidePage } from './e2e-harness.mjs';
 // its own. why a file probe: the one-flow Discover (a start list, tiles and a
 // page per app) ships home/discover-pages.js; an older tree stacks sections.
 // why a content probe for phase 2: it adds no file of its own, and the share
-// dialog is its first new view piece. `mine`: the page of the user's own app.
-// `added`: a starter fixture that answers an add.
+// dialog is its first new view piece. `says`: The app says it is the next.
+// `mine`: the page of the user's own app. `added`: a starter fixture that
+// answers an add.
 export const discoverSurface = () => {
   if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') {
-    return { base: false, flow: true, phase2: true, mine: true, added: true, tree: null };
+    return { base: false, flow: true, phase2: true, says: true, mine: true, added: true, tree: null };
   }
   const tree = process.argv.find(arg => arg.startsWith('--extension='))?.slice('--extension='.length);
   if (!tree) throw new Error('base visual render requires an explicit extension tree');
@@ -20,7 +21,8 @@ export const discoverSurface = () => {
   const source = flow ? readFileSync(pages, 'utf8') : '';
   const starters = join(tree, 'tests/fixtures/starters.js');
   return {
-    base: true, flow, phase2: source.includes('export const shareDialog'), mine: source.includes('You made this app.'),
+    base: true, flow, phase2: source.includes('export const shareDialog'), says: source.includes('export const saysItSection'),
+    mine: source.includes('You made this app.'),
     added: existsSync(starters) && readFileSync(starters, 'utf8').includes("=== 'added'"), tree,
   };
 };
@@ -130,9 +132,10 @@ const keptState = (mode, narrow) => ({
 // 2a screens the merge base never drew: [mode, explore.html frame, ready,
 // the only effects the frame may send, options]. The fixture answers reads
 // plus the one effect its frame draws, so anything else throws there.
-// `phase2`: a screen the phase-1 tree does not draw; `mine`: one a tree
-// without the own-app line does not draw; `narrow`: also at 320px;
-// `narrowCheck`: a [name, check] that holds at 320px only.
+// `phase2`: a screen the phase-1 tree does not draw; `says`: one a tree
+// without The app says it does not draw; `mine`: one a tree without the
+// own-app line does not draw; `narrow`: also at 320px; `narrowCheck`: a
+// [name, check] that holds at 320px only.
 const FLOW_FRAMES = [
   ['share-link', 'share-off', `${byTree('Turn on the peer network first.', 'Join the peer network first.')}
     && document.querySelector('.disc-start-form input')?.value.startsWith('dwapp://')
@@ -190,17 +193,26 @@ const FLOW_FRAMES = [
       const tops = new Set([...document.querySelectorAll('.disc-yours-item')].map(item => Math.round(item.getBoundingClientRect().top)));
       return !!list && tops.size === 1 && list.scrollWidth > list.clientWidth;
     })()`] }],
+  // The app says it: an app peerd only heard about, a share link it checked
+  // (every fact, the strongest last), and an installed version that asks for none.
+  ['says-unknown', 'says-unknown', `${focused('.disc-back')} && ${has('Not known yet. peerd reads this from the app itself when it checks it.')}`,
+    [], { says: true }],
+  ['says-checked', 'says-checked', `${focused('.disc-back')} && document.querySelectorAll('.disc-says li').length === 3
+    && document.querySelector('.disc-says li:last-child')?.classList.contains('is-strong') && ${has('checked when peerd looked at it.')}`,
+  ['dweb/base/inspect-address'], { says: true, narrow: true }],
+  ['says-nothing', 'says-nothing', `${focused('.disc-back')} && ${has('It does not use the peer network and has no instructions for peerd.')}`,
+    [], { says: true }],
   // The user's own app, made and shared from their Library: What to know says
   // they made it, never that an install checked it against its maker.
   ['mine', 'mine', `${focused('.disc-back')} && ${has('You made this app.')} && !${has('peerd checked')}`, [], { mine: true }],
 ];
 
-const frameState = ([mode, frame, ready, effects, { phase2 = false, mine = false, narrowCheck = null } = {}],
+const frameState = ([mode, frame, ready, effects, { phase2 = false, says = false, mine = false, narrowCheck = null } = {}],
   narrow = false) => ({
   name: `discovery-${mode}${narrow ? '-narrow' : ''}`, kind:'visual', phase:'post-unlock', responder:null,
   async run(ctx, rec) {
     const surface = discoverSurface();
-    if (!surface.flow || (phase2 && !surface.phase2) || (mine && !surface.mine)) {
+    if (!surface.flow || (phase2 && !surface.phase2) || (says && !surface.says) || (mine && !surface.mine)) {
       rec.observe('merge-base surface', { present:false, reason:'this Discover screen was introduced on this branch' });
       return;
     }

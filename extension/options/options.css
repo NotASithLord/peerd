@@ -534,6 +534,11 @@ button.linklike.disc-app-maker { padding: 0; font-size: 13px; text-align: left; 
 .disc-safety-icon { flex: none; width: 32px; height: 32px; border-radius: 50%; background: var(--elev2); color: var(--text); display: flex; align-items: center; justify-content: center; }
 .disc-safety-text { padding-top: 6px; min-width: 0; overflow-wrap: anywhere; }
 .disc-chip--strong { align-self: flex-start; margin-top: 4px; padding: 3px 10px; border: 1px solid var(--border-strong); border-radius: 999px; }
+/* The app says it: what the app asks of peerd, as chips that wrap. */
+.disc-says h3, .disc-says p { margin: 0; }
+.disc-says-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.disc-says-chips li { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; color: var(--text); }
+.disc-says-chips li.is-strong { border-color: var(--border-strong); font-weight: 600; }
 
 button.linklike.disc-tech-toggle { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; align-self: flex-start; padding: 6px 0; }
 .disc-chevron { display: inline-flex; transition: transform 120ms ease; }

@@ -9,6 +9,7 @@ import { matchesWords, searchWords } from './explore-order.js';
 
 /** @typedef {{ dwapp_id?: string, uri?: string, name?: string, slug?: string, seq?: number, publisher?: string, from?: string, version_id?: string, description?: string, size?: number, includes_wasm?: boolean|null, runtimeCompatibility?: {status:string,message:string} }} DwebApp */
 /** @typedef {{action:'install'|'update', versionId:string|null, seq:number|null, uri:string|null}} PendingTarget */
+/** What an app's own peerd.json asks of peerd (see verifiedDeclared). @typedef {{dweb:boolean, instructions:boolean, observeAct:boolean}} Declared */
 /** @typedef {{appId?:string, notice?:string, failure?:string}} LinkOutcome */
 /**
  * Effect custody that must outlive one mount of the section: the page says
@@ -20,7 +21,8 @@ import { matchesWords, searchWords } from './explore-order.js';
  * reads as they start. `running` keeps each target across a remount.
  * `committed` holds each committed install or update with that
  * count at its commit, so a read that started earlier cannot bring back the
- * version the update replaced. `commonsAdded` holds it at a confirmed add,
+ * version the update replaced; its `declared` is the reply record's (see
+ * verifiedDeclared). `commonsAdded` holds it at a confirmed add,
  * so only a read that started later can say Commons was deleted since.
  * @typedef {{
  *   busy: Record<string, string>,
@@ -31,7 +33,7 @@ import { matchesWords, searchWords } from './explore-order.js';
  *   conflicts: Map<string, {token:number, versionId:string|null}>,
  *   commons: 'adding'|'unknown'|null,
  *   link: {address:string, outcome:Promise<LinkOutcome>}|null,
- *   committed: Map<string, {appId:string, version_id:string|null, seq:number, read:number, uri?:string}>,
+ *   committed: Map<string, {appId:string, version_id:string|null, seq:number, read:number, uri?:string, declared?:unknown}>,
  *   reads: number,
  *   commonsAdded: number|null,
  * }} DiscoverEffects
@@ -264,6 +266,53 @@ export const installSteps = (state) => STEPS.map((step, i) => {
   const stepState = STEP_STATES[state][i];
   return { title: step.title, sub: i === 0 && stepState !== 'current' ? null : step.sub, state: stepState };
 });
+
+/** @type {ReadonlyArray<[keyof Declared, string]>} */
+const SAYS = Object.freeze([
+  ['dweb', 'Uses the peer network'],
+  ['instructions', 'Comes with instructions for peerd'],
+  ['observeAct', 'Lets peerd see and use it'],
+]);
+
+/**
+ * What peerd read from an app's own files, only for the version `version`
+ * names: the host binds it to the hash it checked. A value for another
+ * version, or of any other shape, is not known.
+ * @param {unknown} value a share-link summary's or a Library record's `declared`
+ * @param {unknown} version the version the page shows
+ * @returns {Declared|null}
+ */
+export const verifiedDeclared = (value, version) => {
+  const flags = /** @type {Record<string, unknown>|null} */ (value && typeof value === 'object' ? value : null);
+  if (!flags || typeof version !== 'string' || !version || flags.hash !== version
+      || SAYS.some(([key]) => typeof flags[key] !== 'boolean')) return null;
+  return { dweb: flags.dweb === true, instructions: flags.instructions === true, observeAct: flags.observeAct === true };
+};
+
+/**
+ * "The app says it". `checked` names where peerd read the app's own files: a
+ * share link it looked at, or the version the Library holds. Unchecked, the
+ * page says how peerd finds out, never what an app or a peer claims. Checked
+ * with nothing recorded (installed before peerd kept it), no section: "Not
+ * known yet" would contradict "peerd checked" in What to know.
+ * why strong: the agent can then see and use the app, the furthest reach.
+ * why the note says when: an edit on this device can change the files after
+ * the check, so the facts belong to that check.
+ * @param {{declared:Declared|null, checked:'link'|'installed'|null, action?:'install'|'update'}} input
+ * @returns {{kind:'unknown'|'nothing'|'checked', chips:{text:string, strong:boolean}[], line:string|null, note:string|null}|null}
+ */
+export const saysIt = ({ declared, checked, action = 'install' }) => {
+  if (!checked) {
+    return { kind: 'unknown', chips: [], note: null,
+      line: `Not known yet. peerd reads this from the app itself when it checks it. Paste its link or ${action} it, and peerd checks every file first.` };
+  }
+  if (!declared) return null;
+  const chips = SAYS.filter(([key]) => declared[key]).map(([key, text]) => ({ text, strong: key === 'observeAct' }));
+  const note = `From the app’s own files, checked when peerd ${checked === 'link' ? 'looked at it' : 'installed it'}.`;
+  return chips.length
+    ? { kind: 'checked', chips, line: null, note }
+    : { kind: 'nothing', chips, line: 'It does not use the peer network and has no instructions for peerd.', note };
+};
 
 /**
  * Pending and unknown apps stay visible under every pill: unknown is not absent.

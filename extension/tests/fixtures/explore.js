@@ -40,8 +40,10 @@ let notesInstalled = false;
 // More Library apps than the Your apps row shows, each added a day apart.
 const MORE = ['Budget board', 'Reading list', 'Trip planner', 'Chess clock', 'Recipe box', 'Habit tracker', 'Photo frame']
   .map((name, i) => ({ id: `local-more-${i}`, name, createdAt: Date.UTC(2026, 9, 20 - i) }));
+// What the host records when it installs a version: here, a version that asks for nothing.
+const asksNothing = { hash: orbit.version_id, dweb: false, instructions: false, observeAct: false };
 const library = () => frame === 'offline-empty' ? [] : [
-  record('local-orbit', orbit),
+  record('local-orbit', orbit, frame === 'says-nothing' ? { hash: orbit.version_id, declared: asksNothing } : {}),
   ...['conflict', 'tiles', 'update', 'update-cant-run', 'update-failed', 'update-unknown'].includes(frame)
     ? [record('local-notes', notes, { version_id: 'local-notes-v1', seq: 1 })] : [],
   ...notesInstalled ? [record('local-notes', notes)] : [],
@@ -79,8 +81,10 @@ const send = async message => {
   if (message.type === 'dweb/base/update-app' && frame === 'update-failed') return EFFECTS.failed();
   if (message.type === 'dweb/base/update-app' && frame === 'update-unknown') return EFFECTS.unknown();
   if (message.type === 'dweb/open-commons' && frame === 'commons-unknown') return EFFECTS.unknown();
-  if (message.type === 'dweb/base/inspect-address' && frame === 'maker-empty') {
-    return {ok:true,summary:{...immutableAppRoot(loneLink),name:'Trail map',decodedBytes:2048,fileCount:1,entryFile:'index.html',containsWasm:false}};
+  if (message.type === 'dweb/base/inspect-address' && ['maker-empty', 'says-checked'].includes(frame)) {
+    const target = immutableAppRoot(loneLink);
+    return {ok:true,summary:{...target,name:'Trail map',decodedBytes:2048,fileCount:1,entryFile:'index.html',containsWasm:false,
+      declared:{hash:target.hash,dweb:true,instructions:true,observeAct:true}}};
   }
   throw new Error('Visual fixture has no mutation authority');
 };
@@ -99,6 +103,7 @@ const STEPS = {
   maker: [['.disc-app-maker', 'Made by Ana, someone you know']],
   'maker-empty': [['button', 'Paste link'], ['.disc-start-form input', null, loneLink],
     ['.disc-start-form button', 'Check link'], ['.disc-app-maker', null]],
+  'says-checked': [['button', 'Paste link'], ['.disc-start-form input', null, loneLink], ['.disc-start-form button', 'Check link']],
   'commons-unknown': [['.disc-pill', 'Comes with peerd'], ['.disc-tile-action', 'Add and open Commons']],
   share: [['[data-share-open]', 'Share']],
   'share-off': [['button', 'Paste link'], ['.disc-start-form input', null, formatDwappUri({ did: notes.publisher, hash: notes.version_id })]],
@@ -108,7 +113,7 @@ const OPEN_KEYS = /** @type {Record<string, string>} */ ({
   'open-unknown': notes.dwapp_id,
   unknown: notes.dwapp_id, maker: notes.dwapp_id, 'cant-run': garden.dwapp_id, update: notes.dwapp_id, share: notes.dwapp_id,
   'update-cant-run': notes.dwapp_id, 'update-failed': notes.dwapp_id, 'update-unknown': notes.dwapp_id,
-  mine: own.dwapp_id,
+  'says-unknown': notes.dwapp_id, 'says-nothing': orbit.dwapp_id, mine: own.dwapp_id,
 });
 /** @type {string|null} */ let openKey = OPEN_KEYS[frame] ?? null;
 

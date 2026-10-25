@@ -14,6 +14,7 @@ import { installSteps } from './discover-model.js';
 /** @typedef {import('./discover-model.js').InstallState} InstallState */
 /** @typedef {import('./discover-model.js').StepState} StepState */
 /** @typedef {import('./discover-model.js').Pill} Pill */
+/** @typedef {NonNullable<ReturnType<typeof import('./discover-model.js').saysIt>>} SaysIt */
 /** @typedef {{name:string|null, key:string}} Maker */
 /** @typedef {{kind:'status', text:string}|{kind:'update'|'open'|'review'}} TileAction */
 /** @typedef {{label:string, onclick:()=>void, disabled?:boolean}} ButtonProps */
@@ -372,6 +373,19 @@ export const safetyLines = ({ maker, checked, action = 'install', mine = false }
     safetyRow('globe', 'You can remove it from your Library at any time.'),
   ]);
 };
+
+const SAYS_TITLE = 'disc-says-title';
+/**
+ * "The app says it", under What to know: chips for what the app's own files
+ * ask of peerd, or one line. saysIt in discover-model.js picks every word.
+ * @param {SaysIt} props
+ */
+export const saysItSection = ({ kind, chips, line, note }) => m('section.disc-section.disc-says', { 'aria-labelledby': SAYS_TITLE }, [
+  m('h3.type-label-strong', { id: SAYS_TITLE }, 'The app says it'),
+  chips.length ? m('ul.disc-says-chips', chips.map(chip => m('li.type-small', { class: chip.strong ? 'is-strong' : '' }, chip.text))) : null,
+  line ? m(kind === 'unknown' ? 'p.type-body-sm.disc-footnote' : 'p.type-body-sm', line) : null,
+  note ? m('p.type-small.disc-footnote', note) : null,
+]);
 
 /**
  * `footnote` qualifies the facts; `note` reports a Copy failure.

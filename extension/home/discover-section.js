@@ -25,12 +25,12 @@ import { exploreOrder, EXPLORE_WINDOW, nextSuggestion, suggestionKey } from './e
 import {
   bytesLabel, createEffects, FAILED, failureHint, isFailure, kbLabel, keptCards, letterOf, libraryPeerApps, libraryStatus,
   matchQuery, networkState, noSuggestionNote, pageState, pillFilter, appCountLabel, peerCountLabel, rootView, savedContactNames,
-  shareLinkError, shortKey, tileAction, toneOf, UNKNOWN, unknownLines, updateOffer, wasmLabel, yourApps,
+  saysIt, shareLinkError, shortKey, tileAction, toneOf, UNKNOWN, unknownLines, updateOffer, verifiedDeclared, wasmLabel, yourApps,
 } from './discover-model.js';
 import {
   actionView, appHead, appRow, backLink, cantRunPanel, conflictPanel, emptyState, installPanel, keyedParts, makerHead,
-  makerMeta, noteBox, pills, refreshButton, safetyLines, searchInput, secondaryButton, shareDialog, shareRow, startRow,
-  statusRow, techDetails, tile, tileButton, updatePanel, yourAppsRow,
+  makerMeta, noteBox, pills, refreshButton, safetyLines, saysItSection, searchInput, secondaryButton, shareDialog, shareRow,
+  startRow, statusRow, techDetails, tile, tileButton, updatePanel, yourAppsRow,
 } from './discover-pages.js';
 
 /** @typedef {import('../options/sections/reset-row.js').Send} Send */
@@ -43,8 +43,8 @@ import {
 /** @typedef {import('./discover-pages.js').ButtonProps} ButtonProps */
 /** @typedef {{page:'root'}|{page:'app', key:string}|{page:'link'}|{page:'maker', did:string}} Route */
 /** @typedef {ReturnType<typeof immutableAppRoot>} LinkTarget */
-/** @typedef {LinkTarget & {name:string|null, decodedBytes?:number, containsWasm?:boolean, runtimeCompatibility?:{status:string,message:string}}} LinkSummary */
-/** @typedef {{id:string, name?:string, dweb?:{uri?:string, dwapp_id?:string, version_id?:string|null, seq?:number, seed?:string, hash?:string, publisher?:string}}} LibraryRecord */
+/** @typedef {LinkTarget & {name:string|null, decodedBytes?:number, containsWasm?:boolean, runtimeCompatibility?:{status:string,message:string}, declared?:unknown}} LinkSummary */
+/** @typedef {{id:string, name?:string, dweb?:{uri?:string, dwapp_id?:string, version_id?:string|null, seq?:number, seed?:string, hash?:string, publisher?:string, declared?:unknown}}} LibraryRecord */
 /**
  * @typedef {{
  *   send: Send,
@@ -492,7 +492,10 @@ export const DiscoverSection = (initialVnode) => {
         fresh.add(id);
         if (r.warning === 'audit-write-failed') notices[id] = `Installed, but ${AUDIT_FAILED}`;
         installedId[id] = r.app?.id ?? r.appId ?? null;
-        if (installedId[id]) committed.set(id, { appId: installedId[id], version_id: app.version_id ?? null, seq: app.seq ?? 0, read: effects.reads, uri: app.uri });
+        if (installedId[id]) {
+          committed.set(id, { appId: installedId[id], version_id: app.version_id ?? null, seq: app.seq ?? 0, read: effects.reads, uri: app.uri,
+            declared: r.app?.dweb?.declared });
+        }
         announceInstalled(/** @type {string} */ (installedId[id]));
         if (route.page === 'app' && route.key === id) pendingFocus = { selector: '.disc-panel .disc-installed', scroll: null, ifLost: true };
         void reloadLocal();
@@ -531,7 +534,8 @@ export const DiscoverSection = (initialVnode) => {
         conflicts.delete(id);
         // why: until a Library read that starts after this commit lands, the
         // updated version is the one installed, whatever an older read says.
-        committed.set(id, { appId, version_id: app.version_id ?? null, seq: app.seq ?? 0, read: effects.reads, uri: app.uri });
+        committed.set(id, { appId, version_id: app.version_id ?? null, seq: app.seq ?? 0, read: effects.reads, uri: app.uri,
+          declared: r.app?.dweb?.declared });
         const warnings = new Set(Array.isArray(r.warnings) ? r.warnings : []);
         if (r.warning) warnings.add(r.warning);
         const warningMessages = [];
@@ -972,6 +976,14 @@ export const DiscoverSection = (initialVnode) => {
     return !!id && (unconfirmed.has(id) || !!notices[id] || liveConflict(app) !== undefined
       || ['installing', 'updating'].includes(busy[id]));
   };
+  // why the commit first: until a Library read that starts after an install
+  // or update lands, its reply is the record of the version installed.
+  /** @param {DwebApp} app @param {string} localId */
+  const installedDeclared = (app, localId) => {
+    const commit = committed.get(app.dwapp_id ?? '');
+    return verifiedDeclared(commit?.appId === localId ? commit.declared
+      : records.find(record => record.id === localId)?.dweb?.declared, app.version_id);
+  };
   /** @param {string|undefined} did */
   const makerOf = (did) => typeof did === 'string' ? { name: contactNames.get(did) ?? null, key: shortKey(did) } : null;
   /** @param {DwebApp} app */
@@ -1375,8 +1387,10 @@ export const DiscoverSection = (initialVnode) => {
     const tone = toneOf(f.id);
     // why checked only for the version the Library holds: peerd checked
     // every file of it when it installed it. A card heard from peers is only
-    // what they said.
+    // what they said, so it never fills The app says it, whatever it claims.
+    // An app the user made here has no facts recorded, so it gets no section.
     const checked = f.localId && f.sameVersion ? 'installed' : null;
+    const says = saysIt({ declared: checked && f.localId ? installedDeclared(app, f.localId) : null, checked, action });
     return m('.disc-home.disc-view.disc-page', { key: `app:${key}` }, [
       backLink({ onclick: goBack }),
       appHead({
@@ -1387,7 +1401,7 @@ export const DiscoverSection = (initialVnode) => {
       }),
       panel,
       state === 'cant-run' || state === 'conflict' || offer === 'update-cant-run' ? null
-        : safetyLines({ maker, checked, action, mine: f.mine }),
+        : [safetyLines({ maker, checked, action, mine: f.mine }), says ? saysItSection(says) : null],
       techView(appFacts(app, failure?.runtime ?? null), typeof app.includes_wasm === 'boolean' ? WASM_HINT : null),
       shareFor === f.id && address ? shareView(f.id, { name, letter: letterOf(name), tone, address, maker }) : null,
     ]);
@@ -1430,6 +1444,13 @@ export const DiscoverSection = (initialVnode) => {
     list.push({ label: 'Runtime', value: failure?.runtime ?? linkPreview?.runtimeCompatibility?.message ?? 'Runtime requirements not specified.' });
     const tone = toneOf(card?.dwapp_id ?? target.uri);
     const maker = makerOf(target.publisher);
+    // why the link's own check first: it read this exact version's files. A
+    // page restored after a reload has only the Library's record of them.
+    const fromLink = verifiedDeclared(linkPreview?.declared, target.hash);
+    const says = saysIt(fromLink ? { declared: fromLink, checked: 'link' } : {
+      declared: localId ? verifiedDeclared(records.find(record => record.id === localId)?.dweb?.declared, target.hash) : null,
+      checked: 'installed',
+    });
     return m('.disc-home.disc-view.disc-page', { key: 'link' }, [
       backLink({ onclick: goBack }),
       appHead({
@@ -1447,7 +1468,7 @@ export const DiscoverSection = (initialVnode) => {
         primary, sharing: state === 'review' ? SHARING : null, onLibrary: toLibrary,
       }),
       // why checked: the page opens only after peerd checked every file of the link.
-      state === 'cant-run' ? null : safetyLines({ maker, checked: 'link' }),
+      state === 'cant-run' ? null : [safetyLines({ maker, checked: 'link' }), says ? saysItSection(says) : null],
       techView(list),
       shareFor === 'link' ? shareView('link', { name, letter: letterOf(name), tone, address: target.address, maker }) : null,
     ]);

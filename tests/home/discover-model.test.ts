@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import {
   appCountLabel, bytesLabel, createEffects, FAILED, failureHint, installSteps, isFailure, kbLabel, keptCards, letterOf,
   libraryPeerApps, libraryStatus, matchQuery, networkState, noSuggestionNote, pageState, peerCountLabel, pillFilter, rootView,
-  savedContactNames, shareLinkError, shortKey, tileAction, toneOf, TONES, UNKNOWN, unknownLines, updateOffer, wasmLabel, yourApps,
+  savedContactNames, saysIt, shareLinkError, shortKey, tileAction, toneOf, TONES, UNKNOWN, unknownLines, updateOffer,
+  verifiedDeclared, wasmLabel, yourApps,
 } from '../../extension/home/discover-model.js';
 import type { DwebApp } from '../../extension/home/discover-model.js';
 import { encodeDidKey } from '../../extension/shared/address/did.js';
@@ -254,6 +255,59 @@ describe('tile and page states', () => {
     expect(two.committed.size).toBe(0);
     expect(two.reads).toBe(0);
     expect(two.commonsAdded).toBe(null);
+  });
+});
+
+describe('the app says it', () => {
+  const version = 'a'.repeat(64);
+  const flags = { hash: version, dweb: true, instructions: false, observeAct: true };
+  const NOT_KNOWN = 'Not known yet. peerd reads this from the app itself when it checks it.';
+
+  test('only facts a host bound to the version on the page count, in their exact shape', () => {
+    expect(verifiedDeclared(flags, version)).toEqual({ dweb: true, instructions: false, observeAct: true });
+    // No hash field rides along: the facts are three booleans.
+    expect(Object.keys(verifiedDeclared({ ...flags, extra: 'text' }, version) ?? {})).toEqual(['dweb', 'instructions', 'observeAct']);
+    const unknown: [unknown, unknown][] = [
+      [flags, 'b'.repeat(64)], [flags, undefined], [flags, ''], [{ ...flags, hash: undefined }, undefined],
+      [{ hash: version, dweb: true, instructions: false }, version], [{ ...flags, observeAct: 'yes' }, version],
+      [null, version], ['flags', version], [[true, true, true], version],
+    ];
+    for (const [value, page] of unknown) expect(verifiedDeclared(value, page)).toBe(null);
+  });
+
+  test('unchecked: how peerd finds out, never a claim, in the words of the page action', () => {
+    for (const declared of [null, { dweb: true, instructions: true, observeAct: true }]) {
+      expect(saysIt({ declared, checked: null })).toEqual({
+        kind: 'unknown', chips: [], note: null,
+        line: `${NOT_KNOWN} Paste its link or install it, and peerd checks every file first.`,
+      });
+    }
+    expect(saysIt({ declared: null, checked: null, action: 'update' })?.line)
+      .toBe(`${NOT_KNOWN} Paste its link or update it, and peerd checks every file first.`);
+  });
+
+  test('checked: a chip per fact, the agent one strong; none says so; nothing recorded is no section', () => {
+    expect(saysIt({ declared: { dweb: true, instructions: true, observeAct: true }, checked: 'link' })).toEqual({
+      kind: 'checked', line: null,
+      chips: [
+        { text: 'Uses the peer network', strong: false },
+        { text: 'Comes with instructions for peerd', strong: false },
+        { text: 'Lets peerd see and use it', strong: true },
+      ],
+      note: 'From the app’s own files, checked when peerd looked at it.',
+    });
+    expect(saysIt({ declared: { dweb: false, instructions: true, observeAct: false }, checked: 'installed' })).toMatchObject({
+      chips: [{ text: 'Comes with instructions for peerd', strong: false }],
+      note: 'From the app’s own files, checked when peerd installed it.',
+    });
+    // Nothing to show still says when peerd read it: an edit on this device can change the files later.
+    expect(saysIt({ declared: { dweb: false, instructions: false, observeAct: false }, checked: 'installed' })).toEqual({
+      kind: 'nothing', chips: [], note: 'From the app’s own files, checked when peerd installed it.',
+      line: 'It does not use the peer network and has no instructions for peerd.',
+    });
+    expect(saysIt({ declared: { dweb: false, instructions: false, observeAct: false }, checked: 'link' })?.note)
+      .toBe('From the app’s own files, checked when peerd looked at it.');
+    for (const checked of ['link', 'installed'] as const) expect(saysIt({ declared: null, checked })).toBe(null);
   });
 });
 

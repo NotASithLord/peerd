@@ -1053,7 +1053,7 @@ describe('home.discover app page', () => {
       expect([...panel(view.root).querySelectorAll('.disc-step-title')].map(node => text(node))).toEqual(['Look at it', 'Install', 'Open']);
       expect(text(el(view.root, '.disc-app-size'))).toBe('48 KB');
       // Before the install, What to know says what peerd will check; the sharing line sits under the button.
-      // It is a section labelled by its heading.
+      // It is a section labelled by its heading, as The app says it is.
       const know = el(view.root, 'section.disc-safety');
       expect(text(el(know, 'h3'))).toBe('What to know');
       expect(el(know, 'h3').id).toBe(know.getAttribute('aria-labelledby') ?? '');
@@ -1179,6 +1179,7 @@ describe('home.discover app page', () => {
       expect(labels()).toEqual(['Try again', 'Open']);
       // The page updates, so every line under the panel says update too.
       expect(text(el(view.root, '.disc-safety-text'))).toContain('When you update it, peerd checks that every file is exactly what its maker shared.');
+      expect(text(el(view.root, '.disc-says'))).toContain('Paste its link or update it, and peerd checks every file first.');
       expect(text(panel(view.root))).toContain('Another version of this app is in your Library. Open runs the version you have.');
       await click(view.root, 'Open');
       expect(host.writes().at(-1)).toEqual({ type: 'apps/open', appId: 'local-upd' });
@@ -1793,7 +1794,7 @@ describe('home.discover app page', () => {
   });
 
   it('the user made the app: What to know says so, and never that an install checked it against its maker', async () => {
-    // Made here and shared from the Library, so no install checked it.
+    // Made here and shared, so the Library record has no facts from an install.
     const mine = card('mine', 'My app', SELF);
     const host = fakeHost({ heard: [mine], library: [local('local-mine', mine, { local: true })] });
     const view = mount({ send: host.send });
@@ -1803,6 +1804,7 @@ describe('home.discover app page', () => {
       expect(text(panel(view.root))).toContain('In your Library.');
       expect(text(el(view.root, '.disc-safety-text'))).toBe('You made this app. Other people get the files you share from your Library.');
       expect(text(el(view.root, '.disc-safety')).includes('peerd checked')).toBe(false);
+      expect(view.root.querySelector('.disc-says')).toBe(null);
       expect(host.writes().length).toBe(0);
     } finally { view.close(); }
   });
@@ -1843,6 +1845,166 @@ describe('home.discover app page', () => {
       expect(facts(view.root).find(([label]) => label === 'Runtime')?.[1]).toBe('Unsupported App runtime target: wasi.');
       expect(host.writes().length).toBe(0);
     } finally { view.close(); }
+  });
+});
+
+describe('home.discover the app says it', () => {
+  const NOT_KNOWN = 'Not known yet. peerd reads this from the app itself when it checks it. Paste its link or install it, and peerd checks every file first.';
+  const ALL = { dweb: true, instructions: true, observeAct: true };
+  /** What a host records after it checked the files of the version `hash` names.
+   * @param {string|undefined} hash @param {Partial<typeof ALL>} [flags] */
+  const declared = (hash, flags = {}) => ({ hash, dweb: false, instructions: false, observeAct: false, ...flags });
+  /** @param {ParentNode} root */
+  const says = (root) => root.querySelector('.disc-says');
+  /** @param {ParentNode} root */
+  const chips = (root) => [...root.querySelectorAll('.disc-says li')].map(node => [text(node), node.classList.contains('is-strong')]);
+
+  it('heard only: Not known yet, whatever the card or the Library row of another version claims; opening sends nothing', async () => {
+    // A card is only what peers say, so a flag on it never becomes a chip.
+    const heard = Object.assign(card('a', 'Expense splitter', ANA), { declared: declared('a-v1', ALL) });
+    const newer = card('trip', 'Trip planner', BOB, { version_id: 'trip-v2', seq: 2 });
+    const host = fakeHost({ heard: [heard, newer], library: [
+      local('local-trip', newer, { version_id: 'trip-v1', seq: 1, hash: 'trip-v1', declared: declared('trip-v1', ALL) }),
+    ] });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      const calls = host.calls.length;
+      await openTile(view.root, 'a');
+      expect(text(el(view.root, '.disc-says h3'))).toBe('The app says it');
+      expect(text(el(view.root, '.disc-says p'))).toBe(NOT_KNOWN);
+      expect(chips(view.root)).toEqual([]);
+      // In the order the frame draws: What to know, then The app says it, then Technical details.
+      expect(el(view.root, '.disc-safety').nextElementSibling).toBe(says(view.root));
+      expect(says(view.root)?.nextElementSibling?.querySelector('.disc-tech-toggle')).toBeTruthy();
+      // The Library's facts name the version it holds, never the new one on offer.
+      await click(view.root, 'Discover');
+      await openTile(view.root, 'trip');
+      expect(text(panel(view.root))).toContain('Update ready');
+      expect(text(el(view.root, '.disc-says p'))).toBe(NOT_KNOWN.replace('install it', 'update it'));
+      expect(chips(view.root)).toEqual([]);
+      // Neither page sent anything to find out: no check, no download.
+      expect(host.calls.length).toBe(calls);
+    } finally { view.close(); }
+  });
+
+  it('installed: the facts peerd read when it installed this version, the strongest last; none recorded, no section', async () => {
+    const app = card('a', 'Expense splitter', ANA);
+    const plain = card('b', 'Reading list', BOB);
+    const kept = card('c', 'Chess clock', CARL);
+    const older = card('d', 'Recipe box', CARL);
+    const host = fakeHost({ heard: [app, plain, kept, older], library: [
+      local('local-a', app, { hash: app.version_id, declared: declared(app.version_id, ALL) }),
+      local('local-b', plain, { hash: plain.version_id, declared: declared(plain.version_id) }),
+      // Kept from the version it was first installed at, so it names no version on screen.
+      local('local-c', kept, { hash: kept.version_id, declared: declared('c-v0', ALL) }),
+      // Installed before peerd kept the facts.
+      local('local-d', older, { hash: older.version_id }),
+    ] });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      const calls = host.calls.length;
+      await openTile(view.root, 'a');
+      expect(chips(view.root)).toEqual([
+        ['Uses the peer network', false], ['Comes with instructions for peerd', false], ['Lets peerd see and use it', true],
+      ]);
+      expect(text(el(view.root, '.disc-says .disc-footnote'))).toBe('From the app’s own files, checked when peerd installed it.');
+      await click(view.root, 'Discover');
+      await openTile(view.root, 'b');
+      expect(chips(view.root)).toEqual([]);
+      expect(text(el(view.root, '.disc-says p'))).toBe('It does not use the peer network and has no instructions for peerd.');
+      // The facts belong to the install: an edit on this device can change the files later.
+      expect(text(el(view.root, '.disc-says .disc-footnote'))).toBe('From the app’s own files, checked when peerd installed it.');
+      // What to know says peerd checked it, so no "Not known yet" sits under it.
+      for (const key of ['c', 'd']) {
+        await click(view.root, 'Discover');
+        await openTile(view.root, key);
+        expect(text(el(view.root, '.disc-safety'))).toContain('When you installed it, peerd checked that it was exactly the app');
+        expect(says(view.root)).toBe(null);
+      }
+      expect(host.calls.length).toBe(calls);
+    } finally { view.close(); }
+  });
+
+  it('just installed: the install reply names the facts before a Library read lands', async () => {
+    const app = card('a', 'Expense splitter', ANA);
+    const row = local('local-a', app, { hash: app.version_id, declared: declared(app.version_id, { dweb: true }) });
+    const read = deferred();
+    let hold = false;
+    const host = fakeHost({ heard: [app] }, {
+      'dweb/base/install': () => { hold = true; return { ok: true, app: row }; },
+      'apps/list': () => hold ? read.promise : { ok: true, apps: [] },
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'a');
+      expect(text(el(view.root, '.disc-says p'))).toBe(NOT_KNOWN);
+      await press(view.root, 'Install and share');
+      expect(text(panel(view.root))).toContain('is now in your Library.');
+      expect(chips(view.root)).toEqual([['Uses the peer network', false]]);
+      read.resolve({ ok: true, apps: [row] }); await settle();
+      expect(chips(view.root)).toEqual([['Uses the peer network', false]]);
+      expect(host.writes().map(call => call.type)).toEqual(['dweb/base/install']);
+    } finally { read.resolve({ ok: false }); view.close(); }
+  });
+
+  it('share link: the facts from the link check, only for the version the link names', async () => {
+    const [first, second] = ['a', 'b'].map(c => formatDwappUri({ did: ANA, hash: c.repeat(64) }));
+    /** @param {string} link @param {unknown} flags */
+    const inspected = (link, flags) => ({ ok: true, summary: {
+      ...immutableAppRoot(link), name: 'Signed app', decodedBytes: 3, fileCount: 1, entryFile: 'index.html', containsWasm: false, declared: flags,
+    } });
+    /** @type {unknown[]} */ const replies = [
+      inspected(first, declared('a'.repeat(64), { dweb: true, observeAct: true })),
+      inspected(second, declared('b'.repeat(64))),
+      inspected(first, declared('b'.repeat(64), ALL)),
+      inspected(first, null),
+    ];
+    const host = fakeHost({}, { 'dweb/base/inspect-address': () => replies.shift() });
+    const view = mount({ send: host.send });
+    /** @param {string} link */
+    const check = async (link) => {
+      await click(view.root, 'Paste link');
+      enterLink(view.root, link);
+      await click(view.root, 'Check link');
+    };
+    try {
+      await settle();
+      await check(first);
+      expect(chips(view.root)).toEqual([['Uses the peer network', false], ['Lets peerd see and use it', true]]);
+      expect(text(el(view.root, '.disc-says .disc-footnote'))).toBe('From the app’s own files, checked when peerd looked at it.');
+      await click(view.root, 'Discover');
+      await check(second);
+      expect(text(el(view.root, '.disc-says p'))).toBe('It does not use the peer network and has no instructions for peerd.');
+      // Facts for another version, or none the check could read: no section under "peerd checked".
+      for (let i = 0; i < 2; i++) {
+        await click(view.root, 'Discover');
+        await check(first);
+        expect(text(el(view.root, '.disc-safety'))).toContain('peerd checked that this is exactly the app');
+        expect(says(view.root)).toBe(null);
+      }
+      expect(host.writes().map(call => call.type)).toEqual(Array.from({ length: 4 }, () => 'dweb/base/inspect-address'));
+    } finally { view.close(); sessionStorage.removeItem(KEY); }
+  });
+
+  it('a share-link page restored after a reload takes the facts from the Library record of that version', async () => {
+    const address = formatDwappUri({ did: ANA, hash: 'a'.repeat(64) });
+    const target = immutableAppRoot(address);
+    sessionStorage.setItem(KEY, address);
+    const host = fakeHost({ library: [{ id: 'app-link', dweb: {
+      uri: target.uri, hash: target.hash, publisher: target.publisher, declared: declared(target.hash, { instructions: true }),
+    } }] });
+    const view = mount({ send: host.send }, { keepReceipt: true });
+    try {
+      await settle();
+      await click(view.root, 'Check again');
+      expect(button(panel(view.root), 'Open')?.disabled).toBe(false);
+      expect(chips(view.root)).toEqual([['Comes with instructions for peerd', false]]);
+      expect(text(el(view.root, '.disc-says .disc-footnote'))).toBe('From the app’s own files, checked when peerd installed it.');
+      expect(host.writes()).toEqual([]);
+    } finally { view.close(); sessionStorage.removeItem(KEY); }
   });
 });
 

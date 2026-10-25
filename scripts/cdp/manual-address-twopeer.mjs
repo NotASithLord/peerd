@@ -230,6 +230,11 @@ try {
   const inspection = await evaluate(ctx.page, `document.querySelector('.disc-page').textContent`);
   check('inspection binds exact signer hash and decoded size', inspection.includes(published.publisher) && inspection.includes(published.hash) && inspection.includes(`${published.decodedBytes} bytes`), inspection);
   check('inspection does not install a user or peer catalog record', JSON.stringify(userApps((await call({ type: 'apps/list' })).apps)) === JSON.stringify(baselineIds));
+  // The bundle has no peerd.json, so an install gets the dwapp default: the peer network, nothing more.
+  const says = await evaluate(ctx.page, `(() => { const says = document.querySelector('.disc-page .disc-says');
+    return says && { chips: [...says.querySelectorAll('li')].map(chip => chip.textContent), text: says.textContent }; })()`);
+  check('The app says it reads the verified files of the inspected link', JSON.stringify(says?.chips) === '["Uses the peer network"]'
+    && says.text.includes('checked when peerd looked at it.'), says);
   const query = () => invoke(publisher, 'function(did) { return window.manualPublisher.query(did); }', [receiver.did]);
   const before = await query(); evidence.beforeInstallContent = before;
   check('inspection does not seed bytes (explicit negative response)', before?.t === 'NOMANIFEST' && before.hash === published.hash, before);
@@ -240,6 +245,9 @@ try {
   const catalog = await call({ type: 'apps/list' });
   const installed = catalog.apps.filter(app => app.dweb?.uri === published.uri && app.dweb?.hash === published.hash && app.dweb?.publisher === published.publisher);
   check('one exact installed catalog record', installed.length === 1 && userApps(catalog.apps).length === baselineIds.length + 1, installed);
+  check('the install records what its verified files ask of peerd, bound to their hash',
+    JSON.stringify(installed[0].dweb?.declared) === JSON.stringify({ hash: published.hash, dweb: true, instructions: false, observeAct: false }),
+    installed[0].dweb?.declared);
   evidence.installedAppId = installed[0].id;
   const after = await query();
   check('same content query positively observes installed seed', after?.t === 'MANIFEST' && after.hash === published.hash && after.manifest?.publisher === published.publisher, { type: after?.t, hash: after?.hash });

@@ -72,8 +72,10 @@ const renderShareLink = (mode) => `(async () => {
     if (message.type === 'bootstrap/ready') return { ok: true, featureLeases: { leases: { dweb: { status: 'active' } } } };
     if (message.type === 'dweb/distributed/info') return { ok: true, running: true, linkedCount: 1 };
     if (message.type !== 'dweb/base/inspect-address') throw new Error('unexpected fixture mutation');
+    // why declared: a link check also reports what the verified files ask of peerd.
     return { ok: true, summary: { ...target, name: 'Peer-hosted WASM notebook',
-      decodedBytes: 1200123, fileCount: 3, entryFile: 'index.html', containsWasm: true } };
+      decodedBytes: 1200123, fileCount: 3, entryFile: 'index.html', containsWasm: true,
+      declared: { hash: target.hash, dweb: true, instructions: false, observeAct: false } } };
   };
   const effects = createEffects();
   m.mount(root, { view: () => m(DiscoverSection, { send, enabled: ${mode !== 'off'}, effects }) });
