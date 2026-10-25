@@ -38,7 +38,7 @@ describe('denylist-store — load + recompute', () => {
     const kv = makeKv({ added: ['x.com'], disabled: ['b.com'] });
     const s = freshStore(kv);
     await s.load(['a.com', 'b.com']);
-    expect(s.patterns()).toEqual(['a.com', 'x.com', '*.x.com']);
+    expect(s.patterns()).toEqual(['a.com', 'x.com']);
   });
   test('overlay read failures propagate instead of dropping stored user policy', async () => {
     const kv = { get: async () => { throw new Error('idb'); }, set: async () => {} };
@@ -67,7 +67,7 @@ describe('denylist-store — add', () => {
     const r = await s.add('  Evil.COM ');
     expect(r).toEqual({ ok: true, pattern: 'evil.com', seed: false, patterns: ['evil.com', '*.evil.com'] });
     expect(s.patterns()).toEqual(['seed.com', 'evil.com', '*.evil.com']);
-    expect(kv._peek()).toEqual({ added: ['evil.com'], disabled: [] });
+    expect(kv._peek()).toEqual({ added: ['evil.com', '*.evil.com'], disabled: [] });
   });
   test('re-enabling a disabled seed pattern removes it from disabled', async () => {
     const kv = makeKv({ added: [], disabled: ['seed.com'] });
@@ -100,23 +100,43 @@ describe('denylist-store — add', () => {
     expect(s.patterns()).toEqual(['seed.com', 'blocked.com', '*.blocked.com']);
   });
 
-  test.each(['mybank.example', '*.mybank.example'])(
-    'removing %s removes its derived pair after a reload', async (removed) => {
-      const kv = makeKv({ added: ['mybank.example'], disabled: [] });
-      const s = freshStore(kv);
-      await s.load(['appleid.apple.com']);
-      for (const host of ['mybank.example', 'www.mybank.example', 'secure.mybank.example']) {
-        expect(matchesDenylist(host, s.patterns())).toBe(true);
-      }
-      for (const host of ['evilmybank.example', 'mybank.example.evil.test', 'x.appleid.apple.com']) {
-        expect(matchesDenylist(host, s.patterns())).toBe(false);
-      }
-      expect(s.overlay().added).toEqual(['mybank.example', '*.mybank.example']);
-      await s.remove(removed);
-      await s.load(['appleid.apple.com']);
-      expect(s.patterns()).toEqual(['appleid.apple.com']);
-    },
-  );
+  test('a host saved before the subdomain rule keeps only its saved rule', async () => {
+    const s = freshStore(makeKv({ added: ['mybank.example'], disabled: [] }));
+    await s.load([]);
+    expect(s.overlay().added).toEqual(['mybank.example']);
+    expect(matchesDenylist('mybank.example', s.patterns())).toBe(true);
+    expect(matchesDenylist('secure.mybank.example', s.patterns())).toBe(false);
+  });
+
+  test.each([
+    ['mybank.example', '*.mybank.example'],
+    ['*.mybank.example', 'mybank.example'],
+  ])('removing %s of a new pair keeps %s after a reload', async (removed, kept) => {
+    const kv = makeKv();
+    const s = freshStore(kv);
+    await s.load(['appleid.apple.com']);
+    await s.add('mybank.example');
+    for (const host of ['mybank.example', 'www.mybank.example', 'secure.mybank.example']) {
+      expect(matchesDenylist(host, s.patterns())).toBe(true);
+    }
+    for (const host of ['evilmybank.example', 'mybank.example.evil.test', 'x.appleid.apple.com']) {
+      expect(matchesDenylist(host, s.patterns())).toBe(false);
+    }
+    expect(await s.remove(removed)).toEqual({ ok: true, pattern: removed, seed: false, patterns: [removed] });
+    await s.load(['appleid.apple.com']);
+    expect(s.patterns()).toEqual(['appleid.apple.com', kept]);
+    expect(s.overlay().added).toEqual([kept]);
+  });
+
+  test('a host does not copy a built-in subdomain rule into the user rows', async () => {
+    const kv = makeKv();
+    const s = freshStore(kv);
+    await s.load(['*.okta.example']);
+    await s.add('okta.example');
+    expect(kv._peek()).toEqual({ added: ['okta.example'], disabled: [] });
+    expect(await s.remove('*.okta.example')).toMatchObject({ ok: true, seed: true, patterns: ['*.okta.example'] });
+    expect(s.patterns()).toEqual(['okta.example']);
+  });
 
   test('an explicit wildcard remains independent of a user host', async () => {
     const s = freshStore();
@@ -139,7 +159,7 @@ describe('denylist-store — add', () => {
     expect(matchesDenylist('secure.mybank.example', s.patterns())).toBe(true);
     expect(s.overlay().disabled).toEqual(['*.mybank.example']);
     await s.remove('*.mybank.example');
-    expect(s.patterns()).toEqual([]);
+    expect(s.patterns()).toEqual(['mybank.example']);
     expect(s.overlay().disabled).toEqual(['*.mybank.example']);
   });
 });
@@ -150,7 +170,7 @@ describe('denylist-store — remove', () => {
     const s = freshStore(kv);
     await s.load(['a.com']);
     const r = await s.remove('x.com');
-    expect(r).toEqual({ ok: true, pattern: 'x.com', seed: false, patterns: ['x.com', '*.x.com'] });
+    expect(r).toEqual({ ok: true, pattern: 'x.com', seed: false, patterns: ['x.com'] });
     expect(s.patterns()).toEqual(['a.com']);
   });
   test('disables a seed pattern (masked, not deleted)', async () => {

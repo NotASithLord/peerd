@@ -26,22 +26,21 @@ export const makeDenylistStore = ({ kv, key, normalizePattern }) => {
   let user = { added: [], disabled: [] };
   /** @type {string[]} */ let rules = [];
 
-  // why: derived rules disappear with their host; explicit wildcards stay independent.
-  const added = () => [...new Set(user.added.flatMap((p) =>
-    p.startsWith('*.') || seed.includes(p) ? [p] : [p, `*.${p}`]))];
-  const refresh = () => { rules = [...new Set(seed.filter((p) => !user.disabled.includes(p)).concat(added()))]; };
+  const refresh = () => { rules = [...new Set(seed.filter((p) => !user.disabled.includes(p)).concat(user.added))]; };
 
   /** @type {Promise<any>} */ let tail = Promise.resolve();
   const edit = (/** @type {boolean} */ add, /** @type {unknown} */ pattern) => {
     const result = tail.then(async () => {
-      let p = normalizePattern(pattern);
+      const p = normalizePattern(pattern);
       if (!p) return { ok: false, error: 'invalid-pattern' };
-      if (!add && p.startsWith('*.') && !user.added.includes(p)
-          && user.added.includes(p.slice(2))) p = p.slice(2);
       const prior = user, before = rules;
       if (add) {
         if (user.disabled.includes(p)) user = { ...user, disabled: user.disabled.filter((x) => x !== p) };
-        else if (!seed.includes(p) && !user.added.includes(p)) user = { ...user, added: [...user.added, p] };
+        // why: only a new host gets its subdomain rule, stored as its own row.
+        else if (!seed.includes(p)) {
+          const pair = p.startsWith('*.') ? [p] : [p, `*.${p}`];
+          user = { ...user, added: [...user.added, ...pair.filter((x) => !rules.includes(x))] };
+        }
       } else if (user.added.includes(p)) {
         user = { ...user, added: user.added.filter((x) => x !== p) };
       } else if (seed.includes(p) && !user.disabled.includes(p)) {
@@ -63,7 +62,7 @@ export const makeDenylistStore = ({ kv, key, normalizePattern }) => {
 
   return {
     patterns: () => rules,
-    overlay: () => ({ added: added(), disabled: [...user.disabled] }),
+    overlay: () => ({ added: [...user.added], disabled: [...user.disabled] }),
 
     /** @param {string[]} patterns */
     async load(patterns) {

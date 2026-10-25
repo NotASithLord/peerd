@@ -181,7 +181,7 @@ test('Settings reads and edits the real policy stores with audit and network syn
     .toMatchObject({ ok: true, added: ['blocked.example', '*.blocked.example'] });
   expect(denylist.blocks('blocked.example')).toBe(true);
   expect(await invoke('denylist/remove', undefined, { pattern: 'blocked.example' }))
-    .toMatchObject({ ok: true, added: [] });
+    .toMatchObject({ ok: true, added: ['*.blocked.example'] });
   expect(denylist.blocks('bank.example')).toBe(true);
   expect(await invoke('learned/list')).toMatchObject({ ok: true, origins: [
     { host: 'account.example', reason: 'password-field' },

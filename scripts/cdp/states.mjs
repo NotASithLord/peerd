@@ -5537,7 +5537,9 @@ export const STATES = [
         rec.check('Options confirmed Remove deletes only the custom pattern', removed === true);
         if (!removed) throw new Error('Options denylist removal did not settle');
       } finally {
-        if (fixtureAttempted) await rpc(ctx.page, { type: 'denylist/remove', pattern }).catch(() => {});
+        for (const rule of fixtureAttempted ? [pattern, `*.${pattern}`] : []) {
+          await rpc(ctx.page, { type: 'denylist/remove', pattern: rule }).catch(() => {});
+        }
         try { page.close(); } catch { /* */ }
       }
     },
