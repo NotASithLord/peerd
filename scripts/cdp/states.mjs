@@ -114,6 +114,13 @@ const submitActorStopMessage = async (page, text) => {
   if (!ready || !await clickAndSyncRedraw(page, 'form.input-bar button.send-btn')) throw new Error('composer send is unavailable');
 };
 
+// why: a first send can stay behind as the fresh-chat draft. Remove only this
+// fixture's own texts so a later state starts with an empty composer.
+const clearActorStopDraft = (page, texts) => evalIn(page, `(() => {
+  'use strict';
+  if (${JSON.stringify(texts)}.includes(localStorage.getItem('peerd.draft.new'))) localStorage.removeItem('peerd.draft.new');
+})()`).catch(() => {});
+
 const SMOKE_TEXT = 'e2e-smoke-ok';
 const TRANSFER_EXPORT_VERSION = 2;
 const REQUIRE_SITE_CAPTURE_TAP = process.env.PEERD_REQUIRE_SITE_CAPTURE_TAP === '1';
@@ -2395,6 +2402,7 @@ export const STATES = [
         }
         for (const release of held) release();
         await setEmulatedTheme(ctx.page, 'light');
+        await clearActorStopDraft(ctx.page, ['Keep this chat idle.', 'Wait for this model reply.', 'Steer this pending reply.']);
       }
     },
   },
@@ -2460,7 +2468,10 @@ export const STATES = [
             replies[0].content.length < 2_000 && !replies[0].content.includes('stopped before it produced a reply'));
         }
         await rec.visual('actors-incomplete-reply');
-      } finally { await rpc(ctx.page, { type: 'agent/stop' }); }
+      } finally {
+        await rpc(ctx.page, { type: 'agent/stop' });
+        await clearActorStopDraft(ctx.page, ['Delegate one computation and preserve its terminal report.']);
+      }
     },
   },
   {
