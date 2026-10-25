@@ -75,7 +75,7 @@ export const makeVaultAuthorityClient = ({
       || typeof offscreenUrl !== 'string' || typeof workerUrl !== 'string'
       || timeoutMs <= 0) throw new TypeError('vault-authority-client-config-invalid');
 
-  /** @type {null|{channelId:string,port:MessagePort,worker:Worker|null,lease:any,ready:Promise<void>,close:()=>void}} */
+  /** @type {null|{channelId:string,port:MessagePort,worker:Worker|null,lease:any,ready:Promise<void>,rejectReady:(cause:unknown)=>void,close:()=>void}} */
   let active = null;
   /** @type {Map<string,{resolve:(value:any)=>void,reject:(cause:unknown)=>void,dispatched:boolean,method:string,timer:ReturnType<typeof setTimeout>}>} */
   const pending = new Map();
@@ -207,6 +207,11 @@ export const makeVaultAuthorityClient = ({
       connectingLease = null;
     }
     if (!prior) return;
+    // why: retirement can win before READY. No call is dispatched yet, and
+    // every waiter must fail closed now rather than wait for the boot deadline.
+    prior.rejectReady(new VaultAuthorityChannelError(
+      errorMessage(cause), 'vault-authority-channel-lost', true,
+    ));
     rejectPending(cause);
     try { prior.port.close(); } catch { /* closed */ }
     try { prior.worker?.terminate(); } catch { /* stopped */ }
@@ -252,9 +257,12 @@ export const makeVaultAuthorityClient = ({
         resolveReady = resolve;
         rejectReady = reject;
       });
-      /** @type {{channelId:string,port:MessagePort,worker:Worker|null,lease:any,ready:Promise<void>,close:()=>void}} */
+      // Retirement may occur while window-client discovery still awaits IO.
+      // Observe rejection immediately; awaiting ready below retains the error.
+      void ready.catch(() => {});
+      /** @type {{channelId:string,port:MessagePort,worker:Worker|null,lease:any,ready:Promise<void>,rejectReady:(cause:unknown)=>void,close:()=>void}} */
       const connection = {
-        channelId, port: port1, worker, lease, ready,
+        channelId, port: port1, worker, lease, ready, rejectReady,
         close: () => retire('vault authority channel closed', connection),
       };
       active = connection;

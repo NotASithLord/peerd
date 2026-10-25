@@ -3690,11 +3690,11 @@ export const STATES = [
   // Also covers the plan-of-record (todo_init/todo_check → the visible
   // TodoCard) and the sticky Goal toggle (lit "running" while the run drives,
   // not untoggled on send). The faked model plans, ticks one item, then ends
-  // the run — so the card renders 1/2 and the toggle reads running mid-flight.
+  // the run - so the card renders 1/2 and the toggle reads running mid-flight.
   {
     name: 'goal', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex) => {
-      if (callIndex === 0) return { delayMs: 200, sse: sseText('On it — planning the goal.') };
+      if (callIndex === 0) return { delayMs: 200, sse: sseText('On it - planning the goal.') };
       if (callIndex === 1) return { delayMs: 200, sse: sseToolCall('todo_init', { items: [
         { text: 'tidy the repo', validation: 'no stray files' },
         { text: 'verify the build', validation: 'tests pass' },
@@ -3707,7 +3707,7 @@ export const STATES = [
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'tidy the repo', goal: true });
       rec.check('goal run started', sent?.ok && sent.handled === 'goal', JSON.stringify(sent));
       const goalBarSeen = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.goal-bar')`), { budgetMs: 10_000, pollMs: 50 });
-      // The Goal toggle is the run's state light — it must read "running", not
+      // The Goal toggle is the run's state light - it must read "running", not
       // fall back to unlit, the instant the run is live (the fix for "did it
       // even start?"). Best-effort snapshot while the run drives.
       const toggleRunning = await waitFor(
@@ -3722,7 +3722,7 @@ export const STATES = [
         })()`),
         { budgetMs: 8_000, pollMs: 50 });
       // The plan-of-record card appears once todo_init lands and ticks to 1/2
-      // after todo_check — the visible checklist that answers "is it working?".
+      // after todo_check - the visible checklist that answers "is it working?".
       const todoSeen = await waitFor(
         () => evalIn(ctx.page, `/1\\/2/.test(document.querySelector('.todo-card .todo-card-meta')?.textContent || '')`),
         { budgetMs: 30_000, pollMs: 50 });
@@ -3758,9 +3758,9 @@ export const STATES = [
     name: 'personal-data', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
       if (callIndex === 0) return { sse: sseToolCall('script', { code: PDA_SCRIPT }) };
-      // call 1 carries the script tool result back — capture it for the assertion.
+      // call 1 carries the script tool result back - capture it for the assertion.
       if (callIndex === 1) pdaToolResultBody = (request && request.postData) || '';
-      return { sse: sseText('You spent $50.00 across 3 orders — computed on-device, nothing left your machine.') };
+      return { sse: sseText('You spent $50.00 across 3 orders - computed on-device, nothing left your machine.') };
     },
     async run(ctx, rec) {
       pdaToolResultBody = '';
@@ -3771,14 +3771,14 @@ export const STATES = [
       const calls = ctx.modelCallCount();
       rec.check('the agent ran the script tool loop (>=2 model calls)', calls >= 2, `model calls: ${calls}`);
       // the load-bearing proof: the sealed worker actually built + queried the
-      // OPFS index — the computed total/count only exist in the worker's result
+      // OPFS index - the computed total/count only exist in the worker's result
       // JSON, not in PDA_SCRIPT's source text or the code argument echoed back.
       // why parse, not substring-match the raw body: pdaToolResultBody is the
       // raw request postData, where the script result is a JSON string NESTED in
-      // the request JSON — so its quotes are escaped (\"total\":50) and a raw
+      // the request JSON - so its quotes are escaped (\"total\":50) and a raw
       // `"total":50` check never matches (this is why the check was red). Parse
       // the request, pull the tool-result message content (now unescaped), and
-      // assert the computed values live THERE — the load-bearing proof the
+      // assert the computed values live THERE - the load-bearing proof the
       // sealed worker built + queried the OPFS index (total/count exist only in
       // its result, not in PDA_SCRIPT's source or the echoed code arg).
       let pdaResult = '';
@@ -3787,7 +3787,7 @@ export const STATES = [
         pdaResult = (reqBody.messages || [])
           .map((m) => (typeof m.content === 'string' ? m.content : ''))
           .find((c) => c.includes('on-device OPFS index')) || '';
-      } catch { /* leave '' — the check fails with a clear detail */ }
+      } catch { /* leave '' - the check fails with a clear detail */ }
       rec.check('script REALLY computed on-device (computed total in tool result, not script source)',
         /"total"\s*:\s*50\b/.test(pdaResult) && /"count"\s*:\s*3\b/.test(pdaResult),
         `script tool result: ${pdaResult.slice(0, 200)}`);
@@ -3795,7 +3795,7 @@ export const STATES = [
     },
   },
 
-  // --- functional: HARVEST — the agent reads a real page, then indexes it ------
+  // --- functional: HARVEST - the agent reads a real page, then indexes it ------
   {
     name: 'harvest', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
@@ -3812,11 +3812,11 @@ export const STATES = [
           if (t === 0) return { sse: sseToolCall('page_code', {
             code: `const results = await Promise.all([page.goto(${JSON.stringify(`${harvestFixtureUrl}first`)}), page.goto(${JSON.stringify(harvestFixtureUrl)}), page.content()]); return results[2];`,
           }) };
-          return { sse: sseText('Order #1001 — Coffee Mug — $12.00; Order #1002 — Notebook — $8.50; Order #1003 — Pen Set — $15.00') };
+          return { sse: sseText('Order #1001 - Coffee Mug - $12.00; Order #1002 - Notebook - $8.50; Order #1003 - Pen Set - $15.00') };
         }
         if (t === 0) return { sse: sseToolCall('navigate', { url: harvestFixtureUrl }) };
         if (t === 1) return { sse: sseToolCall('read_page', {}) };
-        return { sse: sseText('Order #1001 — Coffee Mug — $12.00; Order #1002 — Notebook — $8.50; Order #1003 — Pen Set — $15.00') };
+        return { sse: sseText('Order #1001 - Coffee Mug - $12.00; Order #1002 - Notebook - $8.50; Order #1003 - Pen Set - $15.00') };
       }
       // ORCHESTRATOR: delegate the read to the web actor ONCE (it opens + reads the
       // page itself), end the turn (the ack says the reply lands later). When the

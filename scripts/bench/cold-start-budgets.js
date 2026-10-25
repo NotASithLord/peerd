@@ -126,11 +126,14 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
   offscreen: Object.freeze({ modules: 25, graphBytes: 200_000, entryBytes: 40_000 }),
 });
 
+// Vault bootstrap retirement now rejects pending readiness immediately. The
+// measured shared closure adds 556 source bytes and 141 packaged bytes per
+// worker target, with no module or timing-budget changes and no reserve.
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 413, graphBytes: 4_152_425 }),
-  target: Object.freeze({ modules: 416, graphBytes: 4_243_476 }),
+  shared: Object.freeze({ modules: 413, graphBytes: 4_152_981 }),
+  target: Object.freeze({ modules: 416, graphBytes: 4_244_032 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_251 }),
@@ -139,10 +142,10 @@ export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
 });
 export const FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Exact shared authority closure including synchronous session revocation.
-  modules: 90, graphBytes: 665_028, entryBytes: 239, directImports: 3,
+  modules: 90, graphBytes: 665_584, entryBytes: 239, directImports: 3,
 });
 export const PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  modules: 92, graphBytes: 672_659, entryBytes: 250, directImports: 2,
+  modules: 92, graphBytes: 673_215, entryBytes: 250, directImports: 2,
 });
 
 // The offscreen entry is a broker/supervisor, not a feature host. Its former
@@ -173,7 +176,7 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // Exact Settings/Home/Lab admission and chat-scoped integration metadata
   // repair existing leaves without new modules. Pin their measured closure
   // without reserve; Lab requests retain their narrow payload validators.
-  kernel: Object.freeze({ modules: 413, graphBytes: 4_152_425, entryBytes: 200, directImports: 2 }),
+  kernel: Object.freeze({ modules: 413, graphBytes: 4_152_981, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -205,7 +208,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // authored graph in the disposable, module-preserving release staging tree.
     // Pin the measured pacing/consent/revocation closure with no reserve.
     serviceWorker: Object.freeze({
-      modules: 410, graphBytes: 2_102_930, entryBytes: 173,
+      modules: 410, graphBytes: 2_103_071, entryBytes: 173,
       inputSha256: 'e69cc813f7801a64f199549879049b6e0f226e61d1824b2ba4365281842131fe',
     }),
     // One shared read-only authority schema/provenance validator rejects
@@ -221,7 +224,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     offscreen: Object.freeze({ modules: 7, graphBytes: 21_997, entryBytes: 13_293 }),
   }),
   firefox: Object.freeze({
-    serviceWorker: Object.freeze({ modules: 90, graphBytes: 421_176, entryBytes: 210 }),
+    serviceWorker: Object.freeze({ modules: 90, graphBytes: 421_317, entryBytes: 210 }),
     sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
     home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
   }),
@@ -241,7 +244,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
       // revocation through the turn relay) add thin handlers to an existing
       // module and no module. Remeasured with no reserve.
       serviceWorker: Object.freeze({
-        modules: 416, graphBytes: 2_223_170, entryBytes: 207,
+        modules: 416, graphBytes: 2_223_311, entryBytes: 207,
         inputSha256: '16c7ebee73d6029e090e7f9ddd919d7f43c1e607f64e649c9561e7470f674b96',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),
@@ -251,7 +254,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
     // Firefox has no dweb host yet, but Preview still carries its distinct
     // generated channel policy bytes.
     firefox: Object.freeze({
-      serviceWorker: Object.freeze({ modules: 92, graphBytes: 426_599, entryBytes: 81 }),
+      serviceWorker: Object.freeze({ modules: 92, graphBytes: 426_740, entryBytes: 81 }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
     }),

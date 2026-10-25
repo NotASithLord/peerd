@@ -54,6 +54,44 @@ const makeStorage = () => {
 };
 
 describe('sealed vault authority channel', () => {
+  test('retirement rejects an unfinished bootstrap before its deadline', async () => {
+    const storage = makeStorage();
+    let offered!: () => void;
+    const offer = new Promise<void>((resolve) => { offered = resolve; });
+    let calls = 0;
+    let remotePort: MessagePort | undefined;
+    const client = makeVaultAuthorityClient({
+      offscreen: true, offscreenUrl, workerUrl,
+      kv: storage.kv, idb: storage.idb, sessionCache: storage.sessionCache,
+      timeoutMs: 1000,
+      withHost: async (run) => run(vaultLease),
+      listWindowClients: async () => [{ url: offscreenUrl,
+        postMessage: (_offer: any, ports: MessagePort[]) => {
+          remotePort = ports[0];
+          remotePort.onmessage = () => { calls += 1; };
+          remotePort.start();
+          offered();
+        },
+      }],
+    });
+    const pending = client.status().then(() => 'resolved', (error) => error);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await offer;
+      client.close();
+      const result = await Promise.race([pending, new Promise((resolve) => {
+        timer = setTimeout(() => resolve('still waiting for bootstrap'), 50);
+      })]);
+      expect(result).toMatchObject({ code: 'vault-authority-channel-lost', outcomeKnown: true });
+      expect(calls).toBe(0);
+    } finally {
+      clearTimeout(timer);
+      client.close();
+      remotePort?.close();
+      await pending;
+    }
+  });
+
   test('locked snapshots remain available after retirement without acquiring another host', async () => {
     const storage = makeStorage();
     let acquisitions = 0;
