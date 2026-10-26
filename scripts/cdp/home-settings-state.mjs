@@ -168,8 +168,14 @@ export const HOME_SETTINGS_STATES = [
           Number.isInteger(panelBefore.windowId) && ownedHomes.every((home) => Number.isInteger(home.tabId) && Number.isInteger(home.windowId))
           && new Set([panelBefore.windowId, ...ownedHomes.map((home) => home.windowId)]).size === 3
           && new Set(ownedHomes.map((home) => home.tabId)).size === 2, JSON.stringify({ panelBefore, ownedHomes }));
-        const bothReady = await waitFor(async () => await evalIn(page, `!!document.querySelector('[data-home-view="network"]')`)
-          && await evalIn(other, `!!document.querySelector('[data-home-view="network"]') && !!document.querySelector('.peer-network-status, .disc-status')`), { budgetMs: 15_000 });
+        // A healthy Discover looking view has no status row until a peer is
+        // connected. The enabled rail plus mounted non-opt-in view is the
+        // positive readiness witness; peer availability is not this test.
+        const enabledDiscover = `!!document.querySelector('[data-home-view="network"]')
+          && !!document.querySelector('.peer-network-status, .disc-view:not(.disc-start-view)')
+          && !document.querySelector('[data-network-choice="enable"]')`;
+        const bothReady = await waitFor(async () => await evalIn(page, enabledDiscover)
+          && await evalIn(other, enabledDiscover), { budgetMs: 15_000 });
         if (!bothReady) throw new Error('Both real Home pages did not receive the enabled state');
         await observeRequests(other);
         await observeRequests(ctx.page);
