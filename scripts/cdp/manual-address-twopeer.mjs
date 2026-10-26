@@ -17,14 +17,14 @@ import { GIT_FIXTURE_TLS_KEY, GIT_FIXTURE_TLS_CERT, GIT_FIXTURE_SPKI_SHA256_BASE
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const wasmExecution = process.env.P2P_WASM_EXECUTION === '1';
 const randomDiscovery = process.env.P2P_RANDOM_DISCOVERY === '1';
-if (randomDiscovery && !wasmExecution) throw new Error('Random discovery qualification requires WASM execution');
-const output = join(repo, randomDiscovery ? 'artifacts/random-wasm-twopeer' : wasmExecution ? 'artifacts/discovered-wasm-twopeer' : 'artifacts/manual-address-twopeer');
+const output = join(repo, randomDiscovery ? (wasmExecution ? 'artifacts/random-wasm-twopeer' : 'artifacts/random-js-twopeer') : wasmExecution ? 'artifacts/discovered-wasm-twopeer' : 'artifacts/manual-address-twopeer');
 mkdirSync(output, { recursive: true });
 const temp = mkdtempSync(join(tmpdir(), 'peerd-manual-address-'));
 const sockets = new Set(), servers = [], checks = [];
 let ctx, publisher, signaling, stage = 'starting', failed = false, tunnels = 0;
-const evidence = { randomDiscovery, scope: wasmExecution
+const evidence = { randomDiscovery, appRuntime: wasmExecution ? 'wasm' : 'javascript', scope: wasmExecution
   ? 'Actual packaged Preview discovery, signed binary transfer, installation and WASM execution in the opaque App runner over native loopback WebRTC. Public WAN and standalone WASI remain separate gates.'
+  : randomDiscovery ? 'Actual packaged Preview catalog, Surprise me, signed JS transfer, installation and JavaScript execution in the opaque App runner over native loopback WebRTC. Public WAN remains separate.'
   : 'Actual packaged Preview Home, custody routes, storage and native loopback WebRTC. Open acceptance proves navigation to the installed App tab; iframe execution and public WAN are separate gates.' };
 const report = () => writeFileSync(join(output, 'result.json'), JSON.stringify({ ok: !failed && stage === 'complete', stage, checks, evidence }, null, 2));
 const check = (name, ok, detail) => { checks.push({ name, ok: !!ok, detail }); report(); if (!ok) throw new Error(name); };
@@ -203,11 +203,11 @@ try {
     // (module (func (export "answer") (result i32) i32.const 42))
     const wasm = Uint8Array.from([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,10,1,6,97,110,115,119,101,114,0,0,10,6,1,4,0,65,42,11]);
     const html = '<!doctype html><title>Manual address acceptance</title><h1>Explicit Open executed this App</h1>'
-      + (${wasmExecution} ? '<script>(async () => { const bytes = peerd.assets.bytes("answer.wasm"); const {instance} = await WebAssembly.instantiate(bytes); parent.postMessage({peerdWasmAcceptance: {answer: instance.exports.answer(), bytes: Array.from(bytes), extensionApi: typeof globalThis.chrome?.runtime}}, "*"); })();</script>' : '');
+      + (${wasmExecution} ? '<script>(async () => { const bytes = peerd.assets.bytes("answer.wasm"); const {instance} = await WebAssembly.instantiate(bytes); parent.postMessage({peerdWasmAcceptance: {answer: instance.exports.answer(), bytes: Array.from(bytes), extensionApi: typeof globalThis.chrome?.runtime}}, "*"); })();</script>' : ${randomDiscovery} ? '<script>parent.postMessage({peerdWasmAcceptance: {answer: [20,22].reduce((sum,n) => sum+n,0), bytes: null, extensionApi: typeof globalThis.chrome?.runtime}}, "*");</script>' : '');
     const files = { 'index.html': html, ...(${wasmExecution} ? { 'answer.wasm': wasm } : {}) };
     const app = await base.publishApp({ name: 'Manual address acceptance', entry: 'index.html', files });
     const catalog = ${randomDiscovery} ? await base.publishMeta({ slug: 'native-wasm', name: 'Manual address acceptance',
-      description: 'A peer-shared WebAssembly answer.', head: { version_id: app.hash, content_addr: app.uri, size: app.packedBytes, includes_wasm: true } }) : null;
+      description: ${wasmExecution} ? 'A peer-shared WebAssembly answer.' : 'A peer-shared JavaScript answer.', head: { version_id: app.hash, content_addr: app.uri, size: app.packedBytes, includes_wasm: ${wasmExecution} } }) : null;
     window.manualPublisher = { base, room, app, query: async did => {
       const client = createChannelClient(room.mesh.contentChannel(did), 5000);
       try { return await client.manifest(app.hash); } finally { client.close(); }
@@ -237,7 +237,7 @@ try {
   if (randomDiscovery) {
     await until('signed App reaches receiver catalog', async () => {
       const heard = await call({ type: 'dweb/base/heard' });
-      return heard?.apps?.some(app => app.dwapp_id === published.dwappId && app.version_id === published.hash && app.includes_wasm === true);
+      return heard?.apps?.some(app => app.dwapp_id === published.dwappId && app.version_id === published.hash && app.includes_wasm === wasmExecution);
     });
     await until('catalog tile and Surprise me ready', () => evalIn(ctx.page, `[...document.querySelectorAll('.disc-tile-open')].some(b => b.textContent.trim() === 'Manual address acceptance') && [...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Surprise me' && !b.disabled)`));
     await click('Surprise me');
@@ -251,7 +251,7 @@ try {
   const inspection = await evaluate(ctx.page, `document.querySelector('.disc-page').textContent`);
   if (randomDiscovery) check('catalog review binds the received signer and version', inspection.includes(published.publisher) && inspection.includes(published.hash), inspection);
   else check('inspection binds exact signer hash and decoded size', inspection.includes(published.publisher) && inspection.includes(published.hash) && inspection.includes(`${published.decodedBytes} bytes`), inspection);
-  if (randomDiscovery) check('Surprise me opens the received WASM App', inspection.includes('Manual address acceptance') && inspection.includes('WebAssembly'), inspection);
+  if (randomDiscovery) check(`Surprise me opens the received ${wasmExecution ? 'WASM' : 'JavaScript'} App`, inspection.includes('Manual address acceptance') && inspection.includes(wasmExecution ? 'WebAssembly' : 'JavaScript'), inspection);
   check('inspection does not install a user or peer catalog record', JSON.stringify(userApps((await call({ type: 'apps/list' })).apps)) === JSON.stringify(baselineIds));
   // The bundle has no peerd.json, so an install gets the dwapp default: the peer network, nothing more.
   const says = await evaluate(ctx.page, `(() => { const says = document.querySelector('.disc-page .disc-says');
@@ -288,7 +288,7 @@ try {
   await click('Open', '.disc-page .disc-panel');
   const opened = await until('explicit Open creates App tab', async () => { const tabs = await appTabs(); return tabs.length === baselineTabs.length + 1 ? tabs : null; });
   check('explicit Open targets installed App', opened.some(tab => tab.url.includes(installed[0].id)), opened.map(tab => tab.url));
-  if (wasmExecution) {
+  if (wasmExecution || randomDiscovery) {
     const target = opened.find(tab => tab.url.includes(installed[0].id));
     const appPage = await attach(target.webSocketDebuggerUrl);
     try {
@@ -305,16 +305,16 @@ try {
       ` });
       await until('installed App document ready', () => evalIn(appPage, 'document.readyState === "complete"').catch(() => false));
       await appPage.send('Page.reload');
-      const receipt = await until('installed WASM executes in opaque runner',
+      const receipt = await until('installed App executes in opaque runner',
         () => evalIn(appPage, 'globalThis.__wasmAcceptance ?? null').catch(() => null));
-      check('peer WASM bytes execute only in the opaque installed App runner', receipt.answer === 42
+      check(wasmExecution ? 'peer WASM bytes execute only in the opaque installed App runner' : 'peer JavaScript executes only in the opaque installed App runner', receipt.answer === 42
         && JSON.stringify(receipt.bytes) === JSON.stringify(published.wasmBytes)
         && receipt.origin === 'null' && receipt.extensionApi === 'undefined'
         // The host deliberately removes allow-scripts after runner readiness:
         // the active document can execute; a replacement document cannot.
         && typeof receipt.sandbox === 'string' && !receipt.sandbox.split(/\s+/).includes('allow-scripts')
         && !receipt.sandbox.split(/\s+/).includes('allow-same-origin'), receipt);
-      evidence.wasmExecution = receipt;
+      evidence[wasmExecution ? 'wasmExecution' : 'javascriptExecution'] = receipt;
     } finally { appPage.close(); }
   }
   check('packaged product bytes unchanged', (await digestTree(tree)).sha256 === originalDigest.sha256);
