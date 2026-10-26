@@ -16,7 +16,11 @@
 //
 // Usage:
 //   PEERD_BENCH_KEY=sk-ant-... bun scripts/cdp/run-om2w.mjs --model=claude-opus-4-8 --offset=0 --count=5
-// Flags: --provider (anthropic|openrouter), --model, --offset, --count (shard),
+//   bun scripts/cdp/run-om2w.mjs --provider=ollama --model=qwen3.5:2b-q4_K_M --runner-model=peerd-local-browser --ollama-host=http://127.0.0.1:11434 --run=local-model --actor-surface=tools
+// Local inference needs no API key; the optional upstream WebJudge still does.
+// Flags: --provider (anthropic|openrouter|ollama), --model, --offset, --count (shard),
+//   --runner-model=<id> (optional web actor model pin within the selected provider),
+//   --ollama-host=<http(s)-origin> (Ollama or an explicitly selected compatible endpoint),
 //   --run=<name> (output subdir; default the dataset revision), --show-tabs,
 //   --budget-min (default 90), --task-timeout-min (default 5),
 //   --recycle-every=<N> (relaunch Chrome every N tasks + after any timeout to
@@ -28,8 +32,9 @@
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { launchPeerd, openExtPage, rpc, evalIn, waitFor, log, PASSPHRASE, sseText, sseToolCall } from './e2e-harness.mjs';
+import { launchPeerd, unlockAndReady, openExtPage, rpc, evalIn, waitFor, log, sseText, sseToolCall } from './e2e-harness.mjs';
 import { buildResult, validateResult, shotName } from './om2w/result-builder.mjs';
+import { resolveOm2wProviderConfig, configureOm2wProvider, launchOm2wBrowser } from './om2w/provider-config.mjs';
 import { startWebFixtureServer } from './fixtures/web-suite.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -56,10 +61,19 @@ const TASK_TIMEOUT_MS = Number(flag('task-timeout-min', 5)) * 60_000;
 // both and scored side by side.
 const ACTOR_SURFACE = flag('actor-surface', false) ? String(flag('actor-surface', '')) : '';
 if (ACTOR_SURFACE && ACTOR_SURFACE !== 'tools' && ACTOR_SURFACE !== 'code') { console.error("[om2w] --actor-surface must be 'tools' or 'code'"); process.exit(2); }
-const KEY = process.env.PEERD_BENCH_KEY || process.env.ANTHROPIC_API_KEY || process.env.OPENROUTER_API_KEY || '';
+let providerConfig;
+try {
+  providerConfig = resolveOm2wProviderConfig({
+    provider: PROVIDER, model: MODEL, smoke: SMOKE, env: process.env,
+    runnerModel: flag('runner-model', false) ? String(flag('runner-model', '')) : '',
+    ollamaHost: flag('ollama-host', false) ? String(flag('ollama-host', '')) : '',
+  });
+} catch (error) {
+  console.error(`[om2w] ${error.message}`);
+  process.exit(2);
+}
 
 if (!SMOKE && !existsSync(DATA)) { console.error(`[om2w] no tasks at ${DATA} — run: HF_TOKEN=... bun scripts/cdp/om2w/fetch-tasks.mjs`); process.exit(2); }
-if (!SMOKE && !KEY) { console.error('[om2w] no provider key — set PEERD_BENCH_KEY (or ANTHROPIC_API_KEY / OPENROUTER_API_KEY).'); process.exit(2); }
 
 const { revision, tasks: ALL } = SMOKE
   ? { revision: 'smoke000', tasks: [] }   // real tasks are synthesized after the fixture starts
@@ -126,22 +140,9 @@ async function main() {
   // clears it. Recycling on a cadence keeps every task running against a clean
   // browser instead of a degrading one.
   async function bringUp() {
-    const c = await launchPeerd(modelResponder ? { modelResponder } : {});
-    const vault = await rpc(c.page, { type: 'vault/initialize', passphrase: PASSPHRASE });
-    if (!vault?.ok) throw new Error(`vault/initialize failed: ${JSON.stringify(vault)}`);
-    await rpc(c.page, { type: 'onboarding/complete', peerName: 'peerd', facts: null });
-    if (SMOKE) {
-      // The surface applies to the smoke too — the code-arm smoke is the $0
-      // proof of the page/op recording path, which needs the setting live.
-      await rpc(c.page, { type: 'settings/update', patch: { providerName: 'ollama', ...(ACTOR_SURFACE ? { webActorActionSurface: ACTOR_SURFACE } : {}) } });
-    } else {
-      const set = await rpc(c.page, { type: 'provider/setKey', provider: PROVIDER, plaintext: KEY });
-      if (!set?.ok) throw new Error(`provider/setKey failed: ${JSON.stringify(set)}`);
-      const patch = { providerName: PROVIDER };
-      if (MODEL) patch.providerModel = MODEL;
-      if (ACTOR_SURFACE) patch.webActorActionSurface = ACTOR_SURFACE;
-      await rpc(c.page, { type: 'settings/update', patch });
-    }
+    const c = await launchOm2wBrowser(launchPeerd, { smoke: SMOKE, modelResponder });
+    await unlockAndReady(c.page, { provider: PROVIDER, model: MODEL });
+    await configureOm2wProvider((message) => rpc(c.page, message), providerConfig, ACTOR_SURFACE);
     const page = await openExtPage(c, 'eval/runner.html');
     if (SHOW_TABS) await evalIn(page, `(() => { const el = document.getElementById('showtabs'); if (el) el.checked = true; })()`);
     if (!await waitFor(() => evalIn(page, `!!(window.__peerdEval && window.__peerdEval.ready)`), { budgetMs: 30_000 })) {
@@ -158,7 +159,9 @@ async function main() {
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms)),
   ]);
-  const BRINGUP_DEADLINE_MS = 120_000;
+  // The vault alone has a 120s production-Argon2 budget in unlockAndReady.
+  // Keep room for browser startup and the eval page before the outer deadline.
+  const BRINGUP_DEADLINE_MS = 180_000;
 
   let ctx = null;
   let evalPage = null;

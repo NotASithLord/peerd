@@ -1326,6 +1326,14 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       })),
     };
   };
+  const configuredWebActorTarget = (/** @type {any} */ owner) => {
+    const setting = deps.settingsStore.get().runnerModel;
+    // why: an explicit runner pin is already a user-owned setting. With no pin,
+    // preserve this chat's model; the cold authority projection has no proof of
+    // a loaded local runner. Cached weights alone must not switch providers.
+    const pinned = typeof setting === 'string' ? setting.trim() : '';
+    return { provider: owner.provider, model: pinned || owner.model };
+  };
   const mintActor = async (/** @type {any} */ entry, /** @type {any} */ record,
     /** @type {string} */ ownerSessionId, /** @type {Record<string,any>} */ options = {}) => {
     const owner = await live.shared.sessions.get(ownerSessionId);
@@ -1354,9 +1362,12 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         ...(entry[1] === 'web' ? { backing: record.backing ?? 'tab' } : {}),
       }, { signal: options.signal })).digest;
     }
+    const target = entry[1] === 'web' && record.backing !== 'api'
+      ? configuredWebActorTarget(owner)
+      : { provider: owner.provider, model: owner.model };
     const created = await live.shared.sessions.create({
       kind: 'actor', parentSessionId: ownerSessionId,
-      provider: owner.provider, model: owner.model,
+      provider: target.provider, model: target.model,
       permissionMode: permission.mode, confirmActions: permission.confirmActions,
       depth: (owner.depth ?? 0) + 1,
       actorType: entry[1], instanceId: record.id,
@@ -1408,6 +1419,12 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         || backing !== undefined && (actor.backing ?? 'tab') !== backing) return false;
     const owner = await live.shared.sessions.get(ownerSessionId).catch(() => null);
     if (!owner || owner.archivedAt) return false;
+    if (actorType === 'web' && backing !== 'api') {
+      // why: a previously bound tab otherwise keeps the old model indefinitely,
+      // making a changed runner setting (and an eval A/B) silently ineffective.
+      const target = configuredWebActorTarget(owner);
+      if (actor.provider !== target.provider || actor.model !== target.model) return false;
+    }
     return actor.ownerSemanticPostureDigest === (await deriveActorOwnerPosture(owner, {
       actorType, backing,
       ...(actor.actorSurface ? { actorSurface: actor.actorSurface } : {}),

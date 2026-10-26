@@ -1720,6 +1720,58 @@ describe('kernel turn authority adapter', () => {
     ]);
   });
 
+  test('web actor runner pins reach the actual actor job and changing or clearing one remints the binding', async () => {
+    const jobs: any[] = [];
+    const h = await harness(async (job) => {
+      jobs.push(structuredClone(job));
+      return { ok: true, started: true, newMessages: [{
+        role: 'assistant', content: 'inspected', id: `runner-${jobs.length}`, when: 2_000 + jobs.length,
+      }] };
+    });
+    h.settings.runnerModel = '  claude-haiku-4-5  ';
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    const send = (id: string) => ctx.messageActor({
+      to: '9', message: 'inspect', senderSessionId: h.root.sessionId,
+      toolUseId: id, awaitReply: true,
+    });
+    expect(await send('runner-initial')).toMatchObject({ ok: true });
+    expect(jobs[0]).toMatchObject({ provider: h.root.provider, model: 'claude-haiku-4-5' });
+    expect((await h.sessions.get(h.root.sessionId))?.model).toBe(h.root.model);
+    const initialActor = jobs[0].actorSessionId;
+
+    h.settings.runnerModel = 'claude-opus-4-8';
+    expect(await send('runner-changed')).toMatchObject({ ok: true });
+    expect(jobs[1]).toMatchObject({ provider: h.root.provider, model: 'claude-opus-4-8' });
+    expect(jobs[1].actorSessionId).not.toBe(initialActor);
+    expect((await h.sessions.get(initialActor))?.archivedAt).toBeTruthy();
+
+    h.settings.runnerModel = '';
+    expect(await send('runner-cleared')).toMatchObject({ ok: true });
+    expect(jobs[2]).toMatchObject({ provider: h.root.provider, model: h.root.model });
+    expect(jobs[2].actorSessionId).not.toBe(jobs[1].actorSessionId);
+    expect(h.tabs.get(9)?.url).toBe('https://example.com/work');
+  });
+
+  test('web actor runner pins do not change API or engine actor models', async () => {
+    const jobs: any[] = [];
+    const h = await harness(async (job) => {
+      jobs.push(structuredClone(job));
+      return { ok: true, started: true, newMessages: [{
+        role: 'assistant', content: 'inspected', id: `runner-scope-${jobs.length}`, when: 2_000 + jobs.length,
+      }] };
+    });
+    h.settings.runnerModel = 'browser-only-model';
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    for (const to of ['https://api.example', 'vm-1', 'notebook-1', 'pod-1']) {
+      expect(await ctx.messageActor({
+        to, message: 'inspect', senderSessionId: h.root.sessionId,
+        toolUseId: `runner-scope-${to}`, awaitReply: true,
+      })).toMatchObject({ ok: true });
+    }
+    expect(jobs).toHaveLength(4);
+    for (const job of jobs) expect(job).toMatchObject({ provider: h.root.provider, model: h.root.model });
+  });
+
   test('remints every bound actor when its owner model-surface posture changes', async () => {
     const jobs: any[] = [];
     let h: Awaited<ReturnType<typeof harness>>;
