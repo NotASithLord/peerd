@@ -3579,8 +3579,21 @@ export const STATES = [
         const page = await openWidePage(fresh, 'options/options.html#!/transfer', { ready: '#exppass2' });
         try {
           await page.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: destination });
+          // Observe only result codes from the real private channel. Never
+          // retain the passphrase, exported payload, secrets or identity capsule.
           await evalIn(page, `(() => {
             'use strict';
+            globalThis.__backupReplyCodes = [];
+            navigator.serviceWorker.addEventListener('message', event => {
+              if (!event.isTrusted || event.data?.type !== 'private-transfer/channel' || event.ports.length !== 1) return;
+              event.ports[0].addEventListener('message', response => {
+                const data = response.data;
+                if (data?.type !== 'private-transfer/response') return;
+                const code = data.reply?.error ?? data.error;
+                globalThis.__backupReplyCodes.push({ transportOk: data.ok === true, ok: data.reply?.ok === true,
+                  error: typeof code === 'string' && /^[a-z0-9-]{1,100}$/.test(code) ? code : code == null ? null : 'non-code-error' });
+              });
+            });
             for (const id of ['exppass', 'exppass2']) {
               const input = document.getElementById(id); input.value = ${JSON.stringify(PASSPHRASE)};
               input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -3604,7 +3617,7 @@ export const STATES = [
             inspected = await privateTransferRpc(page, { type: 'transfer/inspectImport', payload });
             if (inspected?.ok !== true) throw new Error(`backup ${mode} could not inspect its actual download`);
           }
-          rec.observe(`settled backup receipt ${mode}`, { status, files: await readdir(destination),
+          rec.observe(`settled backup receipt ${mode}`, { status, codes: await evalIn(page, 'globalThis.__backupReplyCodes'), files: await readdir(destination),
             format: payload?.format ?? null, summary: inspected?.summary ?? null });
           await observer.barrier();
           const events = evidence.events.slice(start.events);
@@ -3623,7 +3636,8 @@ export const STATES = [
               && files.length === 0 && status.text.includes('Turn it on in Settings > Decentralized web')
               && status.text.includes('Nothing was downloaded'));
           } else {
-            rec.check(`${mode} downloads an inspectable real backup`, status.success && payload.format === 'peerd-export');
+            rec.check(`${mode} downloads an inspectable real backup`, status.success && payload?.format === 'peerd-export');
+            if (!status.success || inspected?.ok !== true) throw new Error(`backup ${mode} refused; see settled backup receipt for result codes`);
             rec.check(`${mode} includes only the expected identity`, expectedDid
               ? identity?.did === expectedDid && typeof identity.capsule === 'string' && identity.capsule.length > 0
                 && inspected.summary?.hasIdentityRecord === true && inspected.summary.identityDid === expectedDid
