@@ -80,10 +80,13 @@ export const createBaseNetwork = async ({
   const providerAttempts = new Map();
   // The injected dialer must honor cancellation by closing pending transports.
   // Production propagates it through the room dial and HELLO admission fence.
-  /** @template T @param {(signal: AbortSignal) => Promise<T>} run @param {string} [hash] */
-  const withNetworkBudget = async (run, hash) => {
+  /** @template T @param {(signal: AbortSignal) => Promise<T>} run @param {string} [hash] @param {AbortSignal} [parentSignal] */
+  const withNetworkBudget = async (run, hash, parentSignal) => {
     if (closed) throw new Error('base network closed');
+    parentSignal?.throwIfAborted();
     const ac = new AbortController();
+    const cancel = () => ac.abort(parentSignal?.reason);
+    parentSignal?.addEventListener('abort', cancel, { once: true });
     operations.add(ac);
     if (hash) {
       if (!providerAttempts.has(hash)) providerAttempts.set(hash, new Set());
@@ -93,6 +96,7 @@ export const createBaseNetwork = async ({
     try { return await run(ac.signal); }
     finally {
       clearTimeout(timer);
+      parentSignal?.removeEventListener('abort', cancel);
       operations.delete(ac);
       if (hash) {
         const attempts = providerAttempts.get(hash);
@@ -354,8 +358,9 @@ export const createBaseNetwork = async ({
 
   // Fetch only on request. Prefer the named publisher while qualifying other
   // linked seeders concurrently; unrelated neighbors never delay useful chunks.
-  /** @param {string} uri @param {{ timeoutMs?: number, onProgress?: (p: any) => void, expectedRuntime?: {value:unknown} }} [opts] */
-  const fetchAllowedApp = async (uri, { timeoutMs = 15_000, onProgress, expectedRuntime } = {}) => {
+  /** @param {string} uri @param {{ timeoutMs?: number, onProgress?: (p: any) => void, signal?: AbortSignal, expectedRuntime?: {value:unknown} }} [opts] */
+  const fetchAllowedApp = async (uri, { timeoutMs = 15_000, onProgress, signal: callerSignal, expectedRuntime } = {}) => {
+    callerSignal?.throwIfAborted();
     /** @param {string} did */
     const channelFor = (did) => isBlocked(did) ? null : node.mesh.contentChannel(did);
     const acceptManifest = (/** @type {any} */ manifest) => {
@@ -418,8 +423,8 @@ export const createBaseNetwork = async ({
     const isAllowed = (/** @type {string} */ did) => !closed && !isBlocked(did);
     const preferred = [...new Set([...(publisher ? [publisher] : []), ...linked])];
     if (linked.length) {
-      try { return await swarmFetch({ uri, providers: preferred, channelFor, timeoutMs, onProgress, isAllowed, acceptManifest }); }
-      catch (e) { if (e instanceof AppRuntimeError) throw e; dlog('base', `linked seeder fetch failed (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}); trying DHT providers (bounded)`); }
+      try { return await swarmFetch({ uri, providers: preferred, channelFor, timeoutMs, onProgress, signal: callerSignal, isAllowed, acceptManifest }); }
+      catch (e) { callerSignal?.throwIfAborted(); if (e instanceof AppRuntimeError) throw e; dlog('base', `linked seeder fetch failed (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}); trying DHT providers (bounded)`); }
     }
     // Retain the DHT responder as the signaling broker for each provider.
     // Bound both lookup and dialing; unavailable referrals must not hang an install.
@@ -432,28 +437,31 @@ export const createBaseNetwork = async ({
       signal.throwIfAborted();
       lookupCompleted = !queryFailed;
       return found;
-    }).catch(() => []);
+    }, undefined, callerSignal).catch(() => []);
+    callerSignal?.throwIfAborted();
     const candidates = contacts.filter((/** @type {any} */ contact) => contact.did !== identity.did && !isBlocked(contact.did)).slice(0, 8);
     let next = 0;
     const connectProvider = async () => {
-      while (next < candidates.length && !closed) {
+      while (next < candidates.length && !closed && !callerSignal?.aborted) {
         const contact = candidates[next++];
         if (node.mesh.hasLink(contact.did) || !dial) continue;
-        try { await withNetworkBudget((signal) => dial(contact, { signal })); }
+        try { await withNetworkBudget((signal) => dial(contact, { signal }), undefined, callerSignal); }
         catch { /* another provider may be reachable */ }
       }
     };
     await Promise.all(Array.from({ length: Math.min(3, candidates.length) }, connectProvider));
+    callerSignal?.throwIfAborted();
     if (closed) throw new Error('base network closed');
     const provided = candidates.map((/** @type {any} */ contact) => contact.did);
     const providers = [...new Set([...provided, ...linked])];
     if (!providers.length && lookupCompleted && !contacts.length) throw new NoAppProviderError(uri);
     if (!providers.length) throw new Error(`no peer is serving ${uri} right now — the peer may have dropped; try again`);
-    return swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress, isAllowed, acceptManifest });
+    return swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress, signal: callerSignal, isAllowed, acceptManifest });
   };
 
-  /** @param {string} uri @param {{timeoutMs?:number,onProgress?:(p:any)=>void,expectedRuntime?:{value:unknown}}} [options] */
+  /** @param {string} uri @param {{timeoutMs?:number,onProgress?:(p:any)=>void,signal?:AbortSignal,expectedRuntime?:{value:unknown}}} [options] */
   const fetchApp = async (uri, options) => {
+    options?.signal?.throwIfAborted();
     const { did, hash } = parsePeerdUri(uri);
     const generation = contributionGeneration;
     if (did && isBlocked(did)) throw new Error('publisher-user-blocked');
@@ -463,9 +471,12 @@ export const createBaseNetwork = async ({
     const address = formatPeerdUri({ did, hash });
     const ticket = retrievalHistory.begin(address);
     let result;
-    try { result = await fetchAllowedApp(uri, options); }
+    try {
+      result = await fetchAllowedApp(uri, options);
+      options?.signal?.throwIfAborted();
+    }
     catch (error) {
-      if (!closed && generation === contributionGeneration && error instanceof NoAppProviderError) {
+      if (!closed && !options?.signal?.aborted && generation === contributionGeneration && error instanceof NoAppProviderError) {
         retrievalHistory.miss(address, ticket);
       }
       throw error;
