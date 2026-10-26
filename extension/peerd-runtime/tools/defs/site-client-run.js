@@ -19,7 +19,7 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 import { clamp } from '/shared/util.js';
 import { pushValueBlock } from './value-block.js';
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { normalizeSiteOrigin } from '../../site-clients/core.js';
+import { normalizeSiteOrigin, normalizeSiteClientRun, siteClientEnvelope } from '../../site-clients/core.js';
 import { renderCodeOpTrace } from '../../actor/capability-manifest.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -30,12 +30,15 @@ export const siteClientRunTool = composeTool("site_client_run", {
   execute: async (args, ctx) => {
     const origin = normalizeSiteOrigin(args?.origin);
     if (!origin) return { ok: false, error: 'bad_origin: expected a public HTTP(S) site origin' };
-    if (typeof args?.code !== 'string' || !args.code.trim()) return { ok: false, error: 'code_required' };
+    try { normalizeSiteClientRun(args); }
+    catch { return { ok: false, error: 'site_client_run_invalid: use code OR operation+input+revision OR mode:validate+revision' }; }
     const timeoutMs = clamp(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1000, MAX_TIMEOUT_MS);
-    const authority = /** @type {{runStoredClient?:(origin:string,code:string,timeoutMs:number)=>Promise<{ok:boolean,result?:any,error?:string,outcomeKind?:string}>}|undefined} */ (
+    const authority = /** @type {{runStoredClient?:(origin:string,code:string|undefined,timeoutMs:number,options?:any)=>Promise<any>}|undefined} */ (
       /** @type {any} */ (ctx).siteClientAuthority);
     if (!authority?.runStoredClient) return { ok: false, error: 'site_client_run_unavailable' };
-    const executed = await authority.runStoredClient(origin, args.code, timeoutMs);
+    const options = Object.fromEntries(['mode', 'operation', 'input', 'revision']
+      .filter(key => args[key] !== undefined).map(key => [key, args[key]]));
+    const executed = await authority.runStoredClient(origin, args.code, timeoutMs, options);
     // why: the sealed stored client controls thrown exception text. Keep the
     // trusted failure class and recovery path, but never promote those bytes
     // into an unfenced model-facing error.
@@ -49,7 +52,15 @@ export const siteClientRunTool = composeTool("site_client_run", {
         content: 'The stored site client failed. Drive the page to verify the live behavior, then use site_client_write if the client is stale.',
       } : {}),
       ...(executed?.outcomeKind ? { outcomeKind: executed.outcomeKind } : {}),
+      ...Object.fromEntries(['performed', 'outcomeKnown', 'retryable', 'executionDispatched']
+        .filter(key => executed?.[key] !== undefined).map(key => [key, executed[key]])),
     };
+    if (executed.typedResult) return { ok: true,
+      content: wrapUntrusted({ origin: `site-client(${origin})`, tool: 'site_client_run',
+        body: siteClientEnvelope('site_client_result', executed.typedResult) }) };
+    if (executed.validationResult) return { ok: true,
+      content: wrapUntrusted({ origin: `site-client(${origin})`, tool: 'site_client_run',
+        body: siteClientEnvelope('site_client_validation', executed.validationResult) }) };
     return { ok: true, content: formatRunResult(origin, args.code, executed.result ?? {}) };
   },
 });

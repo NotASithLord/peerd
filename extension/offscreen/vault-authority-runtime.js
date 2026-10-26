@@ -49,7 +49,7 @@ const classifyError = (cause) => {
 
 /** @param {string} method @param {unknown} args */
 const normalizeArgs = (method, args) => {
-  if (['status', 'attemptResume', 'prfStatus', 'disablePrf', 'listSecretNames'].includes(method)) {
+  if (['status', 'touch', 'attemptResume', 'prfStatus', 'disablePrf', 'listSecretNames'].includes(method)) {
     return args == null ? [] : null;
   }
   if (method === 'setAutoLockMs' || method === 'boot') {

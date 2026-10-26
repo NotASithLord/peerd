@@ -61,6 +61,7 @@ describe('callLocalWebgpu', () => {
   test('Stop ends local generation without reporting successful usage', async () => {
     const controller = new AbortController();
     const modelEgress = makeModelEgress({ generateLocal: () => (async function* () {
+      yield '<tool_call>{"name":"snapshot","arguments":{}}</tool_call>';
       controller.abort();
     })() });
     const out = await collect(callLocalWebgpu({
@@ -86,7 +87,7 @@ describe('callLocalWebgpu', () => {
     const usage = out.find((e) => e.type === 'usage');
     expect(usage.usage.outputTokens).toBe(2);            // two streamer chunks
     expect(usage.usage.inputTokens).toBe(0);             // prefill is local + free
-    expect(out.at(-1)).toMatchObject({ type: 'message-stop' });
+    expect(out.at(-1)).toMatchObject({ type: 'message-stop', stopReason: 'tool_use' });
   });
 
   test('a cancelled host rejection ends with an aborted stop reason', async () => {
@@ -109,7 +110,7 @@ describe('callLocalWebgpu', () => {
       received = request;
       return streamOf(['ok']);
     } });
-    await collect(callLocalWebgpu({
+    const out = await collect(callLocalWebgpu({
       messages: [{
         role: 'user', content: 'tool result', actorDeliveryId: 'actor:private',
         actorReply: { actorDeliveryId: 'actor:private' },
@@ -121,6 +122,7 @@ describe('callLocalWebgpu', () => {
     expect(received.messages).toEqual([{ role: 'user', content: 'tool result' }]);
     expect(JSON.stringify(received)).not.toContain('actor:private');
     expect(received).toMatchObject({ providerId: 'local-webgpu', modelId: LOCAL_MODEL_ID });
+    expect(out.at(-1)).toEqual({ type: 'message-stop', stopReason: 'end_turn' });
   });
 });
 

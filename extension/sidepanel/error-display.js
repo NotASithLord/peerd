@@ -19,8 +19,8 @@
 export const mapError = (e) => {
   if (typeof e !== 'string' || e.length === 0) return 'Something went wrong.';
   if (e === 'provider-key-missing') return 'No API key yet — add one in Settings.';
-  if (e === 'unknown-provider') return 'No provider registered yet.';
-  if (e === 'session-not-found') return 'Session was reset mid-turn.';
+  if (e === 'unknown-provider') return 'The selected provider is unavailable. Choose another provider in Settings.';
+  if (e === 'session-not-found') return 'This chat is unavailable. Open another chat or start a new one.';
   if (e === 'actor-recovery-pending') return 'Actor recovery is still being recorded. Wait a moment, then send again.';
   if (e === 'spend-limit-reached') return 'Spend limit reached — the agent was halted. Raise the limit in Settings to continue.';
 
@@ -42,7 +42,9 @@ export const mapError = (e) => {
   }
   // Account/credit/quota limits often arrive as 400/403 with a message,
   // not 429 — catch them by content before the generic HTTP fallback.
-  if (has('credit balance', 'billing', 'quota', 'insufficient_quota', 'usage limit', 'plan limit')) {
+  // why no bare 'billing' / 'quota': transient throttles carry them too; this
+  // list follows HARD_LIMIT_NEEDLES in peerd-provider/error-classify.js.
+  if (has('credit balance', 'billing_not_active', 'billing hard limit', 'insufficient_quota', 'usage limit', 'plan limit')) {
     return "Provider account limit — out of credit or over a usage cap. Check your provider's billing, then retry.";
   }
   if (e.startsWith('provider-http-429') || has('http 429', 'rate_limit', 'rate limit')) {
@@ -52,7 +54,14 @@ export const mapError = (e) => {
     return 'Provider overloaded — try again in a moment.';
   }
   if (e.startsWith('provider-http-')) return `Provider returned an error (${e.slice('provider-http-'.length)}).`;
-  if (has('http 4', 'http 5')) return `Provider error — ${e}`;
+  // An unmatched 4xx/5xx names the status and a next step, never the raw
+  // body: provider JSON belongs to the inline line and the debug bundle.
+  const status = /\bhttp ([45]\d\d)\b/.exec(s)?.[1];
+  if (status) {
+    return status.startsWith('5')
+      ? `The provider had an error (HTTP ${status}). Try again in a moment.`
+      : `The provider rejected the request (HTTP ${status}). Try again, or pick another model.`;
+  }
   return e;
 };
 

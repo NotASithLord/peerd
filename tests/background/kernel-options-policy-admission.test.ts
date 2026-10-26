@@ -1,3 +1,4 @@
+import { makeLearnedOrigins } from '../../extension/peerd-runtime/actor/learned-origins.js';
 import { expect, test } from 'bun:test';
 import { createKernelSenderPolicy } from '../../extension/background/kernel-sender-policy.js';
 import {
@@ -174,14 +175,17 @@ test('Settings reads and edits the real policy stores with audit and network syn
     ...makeKernelDenylistRoutes({
       policy: denylist, auditLog, networkCustody: { sync: async () => { syncs += 1; } },
     }),
-    ...makeKernelLearnedOriginRoutes({ kv, auditLog }),
+    ...makeKernelLearnedOriginRoutes({ learnedOrigins: makeLearnedOrigins({
+      load: () => kv.get('learnedOrigins.v1'), save: (all) => kv.set('learnedOrigins.v1', all),
+      onForget: (hosts) => { for (const host of hosts) void auditLog.append({ type: 'origin_unlearned_sensitive', details: { host } }); },
+    }) }),
   });
   expect(await invoke('denylist/list')).toMatchObject({ ok: true, patterns: ['bank.example'] });
   expect(await invoke('denylist/add', undefined, { pattern: 'blocked.example' }))
-    .toMatchObject({ ok: true, added: ['blocked.example'] });
+    .toMatchObject({ ok: true, added: ['blocked.example', '*.blocked.example'] });
   expect(denylist.blocks('blocked.example')).toBe(true);
   expect(await invoke('denylist/remove', undefined, { pattern: 'blocked.example' }))
-    .toMatchObject({ ok: true, added: [] });
+    .toMatchObject({ ok: true, added: ['*.blocked.example'] });
   expect(denylist.blocks('bank.example')).toBe(true);
   expect(await invoke('learned/list')).toMatchObject({ ok: true, origins: [
     { host: 'account.example', reason: 'password-field' },

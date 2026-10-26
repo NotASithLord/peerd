@@ -305,24 +305,27 @@ const makeRebootHarness = ({ plan, timeoutMs = 40, readyProbeMs = 40, idleProbeM
 
 const OK_RUN = { ok: true, result: { stdout: 'ok\n', stderr: '', exitCode: 0, durationMs: 1 } };
 
-describe('vm-client — mid-call freeze (reactive reload)', () => {
+describe('vm-client - mid-call custody loss', () => {
   // now:()=>1 → idleMs tiny → the idle-reuse PROBE is skipped; these isolate the
-  // reactive channel-timeout backstop.
-  it('reloads a tab that goes dark mid-call, then retries the command', async () => {
+  // channel timeout without a replay of the dispatched command.
+  it('keeps a timed-out command unknown and does not reload or replay it', async () => {
     const h = makeRebootHarness({ plan: ['hang', OK_RUN], now: () => 1 });
-    const out = await h.client.run('echo hi', { vmId: 'vm-a' });
-    expect(out.stdout).toBe('ok\n');
-    expect(h.reloads).toEqual(['vm-a']);
-    expect(h.marked).toEqual(['vm-a']);     // reset readiness so ensureTab waits for re-boot
-    expect(h.sendCount()).toBe(2);          // original + one retry
+    const err = await h.client.run('echo hi', { vmId: 'vm-a' }).then(() => null, (e) => e);
+    expect(err?.message).toContain('timed out');
+    expect(err?.outcomeKnown === true).toBe(false);
+    expect(h.reloads).toEqual([]);
+    expect(h.sendCount()).toBe(1);
   });
 
-  it('gives a terminal error (no loop) when still unresponsive after the reload', async () => {
-    const h = makeRebootHarness({ plan: ['hang', 'hang'], now: () => 1 });
+  it('keeps a dead-shell refusal known without reload or replay', async () => {
+    const refusal = { ok: false, shellExited: true, error: 'VMNotReadyError: shell not ready' };
+    const h = makeRebootHarness({ plan: [refusal, refusal, OK_RUN], now: () => 1 });
     const err = await h.client.run('echo hi', { vmId: 'vm-a' }).then(() => null, (e) => e);
-    expect(err?.message).toContain('unresponsive');
-    expect(h.reloads).toEqual(['vm-a']);
-    expect(h.sendCount()).toBe(2);          // original + one retry, then stop — not a loop
+    expect(err?.outcomeKnown).toBe(true);
+    expect(err?.outcomeKind).toBe('pre-effect-failure');
+    expect(h.reloads).toEqual([]);
+    expect(h.marked).toEqual([]);
+    expect(h.sendCount()).toBe(1);
   });
 
   it('the liveness probe never reboots — isReady returns false on a wedged tab', async () => {
@@ -347,6 +350,17 @@ describe('vm-client — idle-reuse freeze gate', () => {
     expect(h.reloads).toEqual(['vm-a']);                   // recreated BEFORE the run
     expect(h.calls[1].message.type).toBe('vm/run');
     expect(h.sendCount()).toBe(2);
+  });
+
+  it('refuses an idle dead shell before reload or command dispatch', async () => {
+    const h = makeRebootHarness({ plan: [{ ...NOT_READY, shellExited: true }, OK_RUN], now: () => 50_000 });
+    const error = await h.client.run('echo hi', { vmId: 'vm-a' }).then(() => null, (cause) => cause);
+    expect(error?.outcomeKnown).toBe(true);
+    expect(error?.outcomeKind).toBe('pre-effect-failure');
+    expect(error?.retryable).toBe(false);
+    expect(h.calls.map((call) => call.message.type)).toEqual(['vm/is-ready']);
+    expect(h.reloads).toEqual([]);
+    expect(h.marked).toEqual([]);
   });
 
   it('probes but does NOT recreate when the idle tab is still alive', async () => {

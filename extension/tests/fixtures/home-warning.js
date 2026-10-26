@@ -76,7 +76,9 @@ const discoverSend = async (message) => {
   if (message.type === 'apps/list') {
     return { ok: true, apps: [installedApp(discoverId, discoverDwappId, 'Discover Notes', discoverVersion)] };
   }
-  if (message.type === 'dweb/base/status') return { ok: true, did: 'did:key:zFixtureUser' };
+  if (message.type === 'bootstrap/ready') return { ok: true, featureLeases: { leases: { dweb: { status: 'active' } } } };
+  if (message.type === 'dweb/distributed/info') return { ok: true, running: true, linkedCount: 2, did: 'did:key:zFixtureUser' };
+  if (message.type === 'contacts/list') return { ok: true, contacts: [] };
   if (message.type === 'dweb/base/heard') {
     return { ok: true, apps: [announcedApp(discoverDwappId, 'Discover Notes')] };
   }
@@ -95,7 +97,7 @@ const Fixture = {
     ]),
     m('section', { 'aria-labelledby': 'discover-warning-heading' }, [
       m('h1#discover-warning-heading', 'Discover'),
-      m(DiscoverSection, { send: discoverSend }),
+      m(DiscoverSection, { send: discoverSend, enabled: true }),
     ]),
   ]),
 };

@@ -607,7 +607,7 @@ describe('vault authority kernel boot and UI contract', () => {
         snapshot: () => { snapshotReads++; return cached; },
         status: async () => { statusReads++; throw new Error('retiring host must not be acquired'); },
       },
-      pushState: async () => { pushed++; },
+      pushState: async (authority?: unknown) => { expect(authority).toBe(cached); pushed++; },
     });
     await expect(routes['vault/lock']()).rejects.toBe(failure);
     expect(statusReads).toBe(0);

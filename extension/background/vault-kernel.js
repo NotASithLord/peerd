@@ -41,16 +41,15 @@ import {
   WrongPassphraseError,
 } from '/peerd-egress/kernel-storage.js';
 import { makeUiPorts } from './ui-ports.js';
+import { makeActorIsolationStateStore, readColdActorIsolation } from './actor-isolation-state.js';
+import { ACTOR_WORKER_PROTOCOL } from '/shared/actor-worker-protocol.js';
 import { createKernelBrowserNetworkRuntime } from './kernel-browser-network-authority.js';
 import { createKernelControllerGateway } from './kernel-controller-gateway.js';
 import {
   makeSerializedDnrSessionRules,
   makeStartupPopupNetworkGuard,
 } from './startup-popup-network-guard.js';
-import {
-  makeKernelLearnedOriginRoutes,
-  makeSettingsStore,
-} from './settings-store.js';
+import { makeSettingsStore } from './settings-store.js';
 import {
   createKernelDenylistPolicy,
   makeKernelDenylistRoutes,
@@ -140,6 +139,8 @@ let kernelReadyAt = null;
 const runtimeId = browser.runtime.id;
 const kernelManifest = /** @type {any} */ (browser.runtime.getManifest());
 const kernelFirefox = BROWSER === 'firefox';
+const actorHost = kernelFirefox ? 'background-page-worker' : 'offscreen-document-worker';
+const actorIsolationState = makeActorIsolationStateStore({ storage: browser.storage.local, protocol: ACTOR_WORKER_PROTOCOL });
 const makeFirefoxGuard = /** @type {any} */ (
   globalThis)[Symbol.for('peerd.kernel.firefox-addon.v1')];
 if (kernelFirefox !== !!makeFirefoxGuard) {
@@ -466,7 +467,8 @@ const stateSnapshot = async (authority = lockLifecycle.state() && vault.isLocked
   let session = {
     sessionId: null, messages: [], cost: null,
     permission: { mode: 'act', confirmActions: false },
-    provider: null, customSystemPrompt: null, toolManifest: null,
+    provider: null, customSystemPrompt: null, toolManifest: null, goalStopNote: null,
+    title: null, todos: null,
   };
   let profile = null;
   let currentSession = null;
@@ -485,6 +487,13 @@ const stateSnapshot = async (authority = lockLifecycle.state() && vault.isLocked
       provider: currentSession?.provider ?? null,
       customSystemPrompt: currentSession?.customSystemPrompt ?? null,
       toolManifest: currentSession?.toolManifest ?? null,
+      goalStopNote: currentSession?.goalStopNote ?? null,
+      // why title + todos: home's chat header reads session.title and the
+      // TodoCard reads session.todos off this snapshot, and the reducer
+      // replaces the whole session on every 'state' push, so a field missing
+      // here is a field lost on the next push.
+      title: currentSession?.title ?? null,
+      todos: currentSession?.todos ?? null,
     };
     const durableProfile = await kernelProfile.reconcile();
     profile = {
@@ -501,18 +510,17 @@ const stateSnapshot = async (authority = lockLifecycle.state() && vault.isLocked
     ? LOCKED_PROVIDER_AUTHORITY_VIEW
     : await providerProjection.peek(currentSession, false)
       ?? pendingProviderView(settings, currentSession);
+  const coldActorIsolation = controllerRelays() ? null : await readColdActorIsolation(actorIsolationState, actorHost);
   return buildVaultKernelState({
     kernel: generation.identity, status: authority, ...authority, autoLockMs,
     generation: projectionGeneration,
-    actorHost: kernelFirefox ? 'background-page-worker' : 'offscreen-document-worker',
+    actorHost,
     runtimeCapabilities, lockCleanup: lockLifecycle.state(),
     settings: { ...settings, dwebChoiceMade: typeof settingsStore.stored().dwebEnabled === 'boolean' },
     session, ...providerView, profile,
     actorProjection,
-    // why: once the demand plane is live, its actor host is the authority for
-    // isolation health. Retaining the cold-shell placeholder would tell users
-    // actor work is paused even while dedicated workers are actively running.
-    actorIsolation: controllerRelays()?.getActorIsolation?.() ?? null,
+    // why: re-read the live owner after storage IO so its newer health wins.
+    actorIsolation: controllerRelays()?.getActorIsolation?.() ?? coldActorIsolation,
   });
 };
 
@@ -524,6 +532,9 @@ const pushState = async (authority) => {
   const pendingConfirm = confirmation.coordinator.getPendingForOwner(ownerSessionId);
   uiPorts.broadcast(generation.bind({ type: 'state', state }));
   if (pendingConfirm) uiPorts.broadcast({ type: 'confirm/request', prompt: pendingConfirm });
+  if (ownerSessionId) uiPorts.broadcast({ type: 'turn/streaming', sessionId: ownerSessionId,
+    streaming: controllerRelays()?.turnSlots?.isBusy(ownerSessionId) === true,
+    replay: true, projection: state.projection });
   return state;
 };
 
@@ -578,6 +589,17 @@ const recoveryCustody = createKernelRecoveryCustody({
   },
 });
 
+
+// why: a worker wake must resume interrupted work without loading every chat.
+void kernelReady.then(async () => {
+  if (vault.isLocked() || !settingsStore.get().autoResumeInterruptedTurns) return;
+  const sessionId = await sessionCache.sessionGet('currentSessionId');
+  const last = typeof sessionId === 'string' ? (await kernelSessions.get(sessionId))?.messages?.at(-1) : null;
+  if (last?.role === 'assistant' && (last.streaming === true
+      || last.stopReason === 'incomplete' || last.stopReason === 'tool_use' && last.toolUses?.length)
+      || last?.role === 'user' && last.toolResults?.length) await recoveryCustody.resume(sessionId);
+}).catch((error) => console.warn('[kernel] interrupted turn recovery failed', error));
+
 const vaultRoutes = makeVaultKernelRoutes({
   ready: kernelReady,
   deps: {
@@ -595,10 +617,7 @@ const vaultRoutes = makeVaultKernelRoutes({
         throw new Error('kernel-keyed-origin-hydration-failed');
       }
       await featureHost.vaultUnlocked();
-      const currentSessionId = await sessionCache.sessionGet('currentSessionId');
-      await recoveryCustody.resume(
-        typeof currentSessionId === 'string' ? currentSessionId : null,
-      );
+      await recoveryCustody.resume(await sessionCache.sessionGet('currentSessionId'));
     },
     onLocked: lockFeatureHost,
     beforeUnlock: () => lockLifecycle.state()
@@ -1025,7 +1044,6 @@ const routes = {
   'repository/kernel-fetch': async () => ({
     ok: false, error: 'repository-private-channel-required', outcomeKnown: true,
   }),
-  ...makeKernelLearnedOriginRoutes({ kv, auditLog }),
   'sidepanel/close': closeKernelPanel,
   ...indexedVaultRoutes,
   ...confirmation.routes,

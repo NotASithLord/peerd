@@ -10,7 +10,7 @@ export const ActorIsolationBanner = {
   /** @param {{ state: { retrying?: boolean, retryFailed?: boolean, retryRequested?: boolean, recoveryAnnounced?: boolean, recoveryDismissed?: boolean }, attrs: { capability?: { status?: string, reason?: string|null, retryable?: boolean }, send: Send } }} vnode */
   view(vnode) {
     const { capability, send } = vnode.attrs;
-    if (!capability) return null;
+    if (!capability || capability.status === 'not-started') return null;
     if (capability.status === 'available') {
       if (!vnode.state.retryRequested || vnode.state.recoveryDismissed) return null;
       const focusRecovery = (/** @type {{ dom: HTMLElement }} */ recoveryVnode) => {

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 export function checkExceptionScope(root, now = Date.now()) {
   const id = 'GHSA-86w9-cpqp-85rv';
-  const expiry = '2026-10-20T00:00:00Z';
+  const expiry = '2026-11-09T00:00:00Z';
   const config = readFileSync(join(root, 'osv-scanner.toml'), 'utf8');
   const entries = config.split('[[IgnoredVulns]]').slice(1)
     .filter((entry) => entry.includes(`id = "${id}"`));

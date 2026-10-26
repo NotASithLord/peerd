@@ -242,7 +242,7 @@ export const VaultSection = {
       (prfEnrolled && !hasRecovery) ? m('p.hint',
         'Your passkey is the only way into this vault. Set a recovery passphrase below as a backup.') : null,
       ui.prfError   ? m('p.error', ui.prfError) : null,
-      ui.prfMessage ? m('p', { style: 'color: var(--ok);' }, ui.prfMessage) : null,
+      ui.prfMessage ? m('p', { style: 'color: var(--ok-ink);' }, ui.prfMessage) : null,
 
       m('.settings-divider'),
       m('h3', 'Recovery passphrase'),
@@ -277,7 +277,7 @@ export const VaultSection = {
             ui.recoveryBusy ? '…' : hasRecovery ? 'Update recovery passphrase' : 'Set recovery passphrase'),
         ]),
         ui.recoveryError   ? m('p.error', ui.recoveryError) : null,
-        ui.recoveryMessage ? m('p', { style: 'color: var(--ok);' }, ui.recoveryMessage) : null,
+        ui.recoveryMessage ? m('p', { style: 'color: var(--ok-ink);' }, ui.recoveryMessage) : null,
       ]),
 
       m('.settings-divider'),

@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, test } from 'bun:test';
 import { createKernelTurnAuthorityAdapter } from '../../extension/background/kernel-turn-authority-adapter.js';
+import { makeLearnedOrigins } from '../../extension/peerd-runtime/actor/learned-origins.js';
 import { createOriginPacingStore } from '../../extension/peerd-runtime/pacing/origin-pacing-store.js';
 import { createAuthorityEffectScheduler } from '../../extension/background/authority-effect-scheduler.js';
 import { createPageToolAuthority } from '../../extension/background/page-tool-authority.js';
@@ -14,6 +15,7 @@ import {
 } from '../../extension/background/kernel-turn-authority-adapter.js';
 import { createSessionStore, makeTurnSlots } from '../../extension/peerd-runtime/kernel-custody.js';
 import { buildAppManifest } from '../../extension/peerd-engine/app-manifest.js';
+import { VMBootFailedError } from '../../extension/peerd-engine/background.js';
 import { createContextSnapshots } from '../../extension/shared/model-context-snapshot.js';
 import { createScriptRunRegistry } from '../../extension/background/script-runs.js';
 import { projectControllerToolSurface } from '../../extension/peerd-runtime/controller-tool-projection.js';
@@ -21,6 +23,9 @@ import { planToolsCommand } from '../../extension/peerd-runtime/tools/manifest-c
 import { canonicalActorOwnerPosture } from '../../extension/background/app-actor-policy.js';
 import { sha256Hex } from '../../extension/shared/util.js';
 import { makeSessionRoutes } from '../../extension/background/routes/sessions.js';
+import { createKernelSessionReader } from '../../extension/background/vault-kernel-core.js';
+import { makeKernelLearnedOriginRoutes } from '../../extension/background/settings-store.js';
+import { makeGoalRunner } from '../../extension/peerd-runtime/loop/goal-runner.js';
 import { composeTurn } from '../../extension/offscreen/controller-compose-runtime.js';
 import { browserProbeResult, TEST_DOCUMENT_ID } from '../helpers/browser-scripting.ts';
 import { ABORT_STOP } from '../../extension/peerd-runtime/loop/turn-slots.js';
@@ -142,8 +147,10 @@ const harness = async (
     onTabRead?: (tabId: number) => Promise<void>|void,
     listSecretNames?: () => Promise<string[]>,
     getSecret?: (name: string) => Promise<string>,
+    resolveProviderSelection?: () => Promise<any>,
   } = {},
 ) => {
+  let providerSelections = 0;
   const toolProjections: any[] = [];
   const audits: any[] = [];
   const idb = memoryStore();
@@ -381,7 +388,7 @@ const harness = async (
       set: async (key: string, value: any) => { kvState.set(key, structuredClone(value)); },
     },
     sessionCache: options.sessionCache ?? {
-      sessionGet: async (key: string) => cache.get(key) ?? null,
+      sessionGet: async (key: string) => cache.get(key),
       sessionSet: async (key: string, value: any) => { cache.set(key, structuredClone(value)); },
     },
     canWrite: () => {}, ready: Promise.resolve(),
@@ -426,9 +433,12 @@ const harness = async (
     },
     providerProjection: { bumpRevision: () => { providerRevision += 1; } },
     providerEgress: {},
-    resolveProviderSelection: async () => ({
-      ok: true, selected: 'anthropic::claude-sonnet-4-6',
-    }),
+    resolveProviderSelection: async () => {
+      providerSelections += 1;
+      return options.resolveProviderSelection
+        ? options.resolveProviderSelection()
+        : { ok: true, selected: 'anthropic::claude-sonnet-4-6' };
+    },
     siteCapture: {
       has: (tabId: number) => tabId === 9,
       cancel: async (value: any) => { siteCaptureEvents.push(['cancel', value]); },
@@ -449,6 +459,10 @@ const harness = async (
     },
   };
   dependencies.originPacing = options.originPacing ?? createOriginPacingStore({ kv: dependencies.kv });
+  dependencies.learnedOrigins = makeLearnedOrigins({
+    load: () => dependencies.kv.get('learnedOrigins.v1'),
+    save: (all) => dependencies.kv.set('learnedOrigins.v1', all),
+  });
   const factories = createKernelTurnAuthorityAdapter(dependencies);
   const shared: any = {
     sessions,
@@ -464,7 +478,7 @@ const harness = async (
   };
   const runtime = await factories.makeActorRuntime(shared);
   return {
-    factories, runtime, shared, root, durableApiActor, sessions, engine, browser, tabs,
+    factories, runtime, shared, root, durableApiActor, sessions, engine, browser, tabs, idb,
     broadcasts, storageState, kvState, cache, settings, notifications, panelBehavior,
     siteCaptureEvents, providerRevision: () => providerRevision,
     sourceProjections,
@@ -474,6 +488,8 @@ const harness = async (
     appNetworkAdmissions,
     destroyedRepositories,
     actorConfig: () => actorConfig,
+    providerSelections: () => providerSelections,
+    learnedOrigins: dependencies.learnedOrigins,
   };
 };
 
@@ -506,6 +522,43 @@ const dependencies = () => ({
 });
 
 describe('kernel turn authority adapter', () => {
+  test('a fresh composer binds the usable provider only when no explicit provider exists', async () => {
+    const h = await harness();
+    const before = h.providerSelections();
+    const chosen = await h.factories.buildToolContext({ sessionId: null });
+    expect(chosen.provider).toMatchObject({ name: 'anthropic', model: 'claude-sonnet-4-6' });
+    expect(h.providerSelections()).toBe(before);
+    h.settings.providerName = ''; h.settings.providerModel = '';
+    const fresh = await h.factories.buildToolContext({ sessionId: null });
+    expect(fresh.provider).toMatchObject({ name: 'anthropic', model: 'claude-sonnet-4-6' });
+    expect(h.settings.providerName).toBe('anthropic');
+    expect(h.providerSelections()).toBe(before + 1);
+  });
+
+  test('only the tracked VM tab can report a boot failure', async () => {
+    const h = await harness();
+    const tracker = h.engine.vmTabTracker;
+    const drop = tracker.onTabFailed;
+    const failures: unknown[] = [];
+    tracker.onTabFailed = (id: string, error?: unknown) => { failures.push(error); return drop(id); };
+    const route = h.runtime.relays.engineRoutes['vm/tab-failed'];
+    tracker.onTabReady('vm-1', 21);
+    for (const [message, sender] of [
+      [{ vmId: 'vm-1' }, { tab: { id: 22, url: 'vm://vm-1' } }],
+      [{ vmId: 'vm-1' }, { tab: { id: 21, url: 'vm://other' } }],
+      [{ vmId: 'missing' }, { tab: { id: 21, url: 'vm://missing' } }],
+      [{ vmId: 'vm-1' }, {}],
+    ]) {
+      expect(await route(message, sender)).toBe(false);
+      expect(tracker.getTabId('vm-1')).toBe(21);
+    }
+    expect(await route({ vmId: 'vm-1' }, { tab: { id: 21, url: 'vm://vm-1' } })).toBe(false);
+    expect(tracker.getTabId('vm-1')).toBeNull();
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toBeInstanceOf(VMBootFailedError);
+    expect(await h.engine.vmRegistry.get('vm-1')).not.toBeNull();
+  });
+
   const actorRoster = async (
     h: Awaited<ReturnType<typeof harness>>, sessionId: string, secretReadCount: () => number,
   ) => {
@@ -672,6 +725,19 @@ describe('kernel turn authority adapter', () => {
       outcomeKnown: false,
       error: 'model says safe to retry',
     })).toEqual({ outcomeKnown: false, performed: true });
+  });
+
+  test('the revocation a Home block runs retires the remembered A2A consent, as dweb_block does', async () => {
+    const cache = new Map<string, unknown>([['a2aApprovedDids', ['did:key:alice', 'did:key:bob']]]);
+    const h = await harness(undefined, {
+      dweb: true,
+      sessionCache: {
+        sessionGet: async (key) => cache.get(key) ?? null,
+        sessionSet: async (key, value) => { cache.set(key, structuredClone(value)); },
+      },
+    });
+    await h.runtime.relays.revokeDwebPeer('did:key:alice');
+    expect(cache.get('a2aApprovedDids')).toEqual(['did:key:bob']);
   });
 
   test('the parentless dweb daemon keeps only its fixed stored permission', async () => {
@@ -841,6 +907,124 @@ describe('kernel turn authority adapter', () => {
       'buildToolContext', 'composeAuthority', 'goalMaxIterations', 'makeActorRuntime', 'makeDriver',
       'makeDriverDeps', 'makeGoals', 'makeRouteDeps',
     ]);
+  });
+
+  test('terminal Goal reasons stay in their own durable session and clear before new work', async () => {
+    const h = await harness();
+    const other = await h.sessions.create({ provider: 'anthropic', model: h.root.model });
+    h.cache.set('currentSessionId', other.sessionId);
+    await h.runtime.relays.onGoalRunEnd(h.root.sessionId, { phase: 'capped', reason: null });
+    const cold = createKernelSessionReader(h.idb);
+    const note = (await cold.get(h.root.sessionId))?.goalStopNote;
+    expect(note?.text).toMatch(/^Goal run stopped after reaching the \d+-turn limit\.$/);
+    expect(note?.id).toBeString();
+    expect((await cold.get(other.sessionId))?.goalStopNote).toBeUndefined();
+    const routeDeps = h.factories.makeRouteDeps(h.shared);
+    await routeDeps.turn.clearGoalStopNote(h.root.sessionId);
+    expect((await cold.get(h.root.sessionId))?.goalStopNote).toBeNull();
+    await h.runtime.relays.onGoalRunEnd(h.root.sessionId, {
+      phase: 'halted', reason: 'an earlier action needs verification before autonomous work can continue',
+    });
+    expect((await cold.get(h.root.sessionId))?.goalStopNote?.text).toContain('needs verification');
+    h.runtime.relays.bindGoalRunner({ stop: async () => {}, isActive: () => false });
+    await h.runtime.relays.beforeGoalStart({ sessionId: h.root.sessionId });
+    expect((await cold.get(h.root.sessionId))?.goalStopNote).toBeNull();
+    await h.runtime.relays.onGoalRunEnd(h.root.sessionId, { phase: 'done', reason: null });
+    await h.runtime.relays.onGoalRunEnd(h.root.sessionId, { phase: 'halted', reason: null });
+    expect((await cold.get(h.root.sessionId))?.goalStopNote).toBeNull();
+  });
+
+  test('Settings removal changes the real classifier before and after later learning', async () => {
+    const h = await harness();
+    h.settings.devMode = true;
+    const routes = makeKernelLearnedOriginRoutes({ learnedOrigins: h.learnedOrigins });
+    const inspect = (origin: string, seedReason?: string) => h.runtime.relays.debugOriginLock({ origin, seedReason });
+    expect((await inspect('https://bank.example.com', 'password-field')).learned).toBe(true);
+    expect((await routes['learned/forget']({ host: 'bank.example.com' })).ok).toBe(true);
+    expect((await inspect('https://bank.example.com')).learned).toBe(false);
+    await inspect('https://mail.example.org', 'confirmed-write');
+    expect((await routes['learned/list']()).origins).toEqual([{ host: 'mail.example.org', reason: 'confirmed-write' }]);
+    await routes['learned/clear']();
+    expect((await inspect('https://mail.example.org')).learned).toBe(false);
+    await inspect('https://shop.example.net', 'password-field');
+    expect(h.kvState.get('learnedOrigins.v1')).toEqual({ 'shop.example.net': 'password-field' });
+  });
+
+  test.each(['throw', 'failed-result'])('a stopped old Goal cannot restore its reason after a user send: %s', async (mode) => {
+    const h = await harness();
+    let finish!: () => void;
+    let entered = false, ended = false;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const runner = makeGoalRunner({
+      runTurn: async () => { entered = true; await gate;
+        if (mode === 'throw') throw new Error('old turn failed after Stop');
+        return { ok: false };
+      },
+      onRunEnd: async (sessionId, info) => { await h.runtime.relays.onGoalRunEnd(sessionId, info); ended = true; },
+    });
+    await runner.start({ sessionId: h.root.sessionId, goal: 'old request' });
+    expect(entered).toBe(true);
+    await runner.stop(h.root.sessionId);
+    await h.factories.makeRouteDeps(h.shared).turn.clearGoalStopNote(h.root.sessionId);
+    finish();
+    for (let attempt = 0; !ended && attempt < 30; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ended).toBe(true);
+    expect((await h.sessions.get(h.root.sessionId))?.goalStopNote).toBeUndefined();
+  });
+
+  test.each([
+    { label: 'Plan', mode: 'plan', confirm: false, expected: { permissionMode: 'plan', confirmActions: false } },
+    { label: 'Act with confirmation', mode: 'act', confirm: true, expected: { permissionMode: 'act', confirmActions: true } },
+    { label: 'unset defaults', mode: undefined, confirm: undefined, expected: { permissionMode: 'act', confirmActions: false } },
+    { label: 'invalid null values', mode: null, confirm: null, expected: { permissionMode: 'plan', confirmActions: true } },
+    { label: 'invalid values', mode: 'invalid', confirm: 'off', expected: { permissionMode: 'plan', confirmActions: true } },
+  ])('lazy command owners persist $label before binding', async ({ mode, confirm, expected }) => {
+    const h = await harness();
+    const ensure = h.factories.makeRouteDeps(h.shared).turn.ensureSession;
+    for (const options of [{}, { exactFresh: true }]) {
+      h.cache.delete('currentSessionId');
+      h.cache.set('currentPermissionMode', mode);
+      h.cache.set('currentConfirmActions', confirm);
+      const id = await ensure(options);
+      expect(await h.sessions.get(id)).toMatchObject({ sessionId: id, ...expected });
+      expect(h.cache.get('currentSessionId')).toBe(id);
+      expect(h.cache.get('currentPermissionMode')).toBe(expected.permissionMode);
+      expect(h.cache.get('currentConfirmActions')).toBe(expected.confirmActions);
+    }
+  });
+
+  test('command creation reads the choice after provider selection settles', async () => {
+    const entered = Promise.withResolvers<void>();
+    const selection = Promise.withResolvers<any>();
+    const h = await harness(undefined, {
+      resolveProviderSelection: async () => { entered.resolve(); return selection.promise; },
+    });
+    h.cache.delete('currentSessionId');
+    h.cache.set('currentPermissionMode', 'act');
+    h.cache.set('currentConfirmActions', false);
+    const creating = h.factories.makeRouteDeps(h.shared).turn.ensureSession({ exactFresh: true });
+    await entered.promise;
+    h.cache.set('currentPermissionMode', 'plan');
+    h.cache.set('currentConfirmActions', true);
+    selection.resolve({ ok: true, selected: 'anthropic::claude-sonnet-4-6' });
+    const id = await creating;
+    expect(await h.sessions.get(id)).toMatchObject({ permissionMode: 'plan', confirmActions: true });
+    expect(h.cache.get('currentPermissionMode')).toBe('plan');
+    expect(h.cache.get('currentConfirmActions')).toBe(true);
+  });
+
+  test('an existing command owner keeps its durable permission', async () => {
+    const h = await harness();
+    await h.sessions.update(h.root.sessionId, { permissionMode: 'plan', confirmActions: true });
+    h.cache.set('currentPermissionMode', 'act');
+    h.cache.set('currentConfirmActions', false);
+    const ensure = h.factories.makeRouteDeps(h.shared).turn.ensureSession;
+    expect(await ensure()).toBe(h.root.sessionId);
+    expect(await h.sessions.get(h.root.sessionId)).toMatchObject({ permissionMode: 'plan', confirmActions: true });
+    const fresh = await ensure({ exactFresh: true });
+    expect(fresh).not.toBe(h.root.sessionId);
+    expect(await h.sessions.get(fresh)).toMatchObject({ permissionMode: 'act', confirmActions: false });
+    expect(await h.sessions.get(h.root.sessionId)).toMatchObject({ permissionMode: 'plan', confirmActions: true });
   });
 
   test('real system and tools handlers mutate only their exact bound session', async () => {
@@ -1720,6 +1904,58 @@ describe('kernel turn authority adapter', () => {
     ]);
   });
 
+  test('web actor runner pins reach the actual actor job and changing or clearing one remints the binding', async () => {
+    const jobs: any[] = [];
+    const h = await harness(async (job) => {
+      jobs.push(structuredClone(job));
+      return { ok: true, started: true, newMessages: [{
+        role: 'assistant', content: 'inspected', id: `runner-${jobs.length}`, when: 2_000 + jobs.length,
+      }] };
+    });
+    h.settings.runnerModel = '  claude-haiku-4-5  ';
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    const send = (id: string) => ctx.messageActor({
+      to: '9', message: 'inspect', senderSessionId: h.root.sessionId,
+      toolUseId: id, awaitReply: true,
+    });
+    expect(await send('runner-initial')).toMatchObject({ ok: true });
+    expect(jobs[0]).toMatchObject({ provider: h.root.provider, model: 'claude-haiku-4-5' });
+    expect((await h.sessions.get(h.root.sessionId))?.model).toBe(h.root.model);
+    const initialActor = jobs[0].actorSessionId;
+
+    h.settings.runnerModel = 'claude-opus-4-8';
+    expect(await send('runner-changed')).toMatchObject({ ok: true });
+    expect(jobs[1]).toMatchObject({ provider: h.root.provider, model: 'claude-opus-4-8' });
+    expect(jobs[1].actorSessionId).not.toBe(initialActor);
+    expect((await h.sessions.get(initialActor))?.archivedAt).toBeTruthy();
+
+    h.settings.runnerModel = '';
+    expect(await send('runner-cleared')).toMatchObject({ ok: true });
+    expect(jobs[2]).toMatchObject({ provider: h.root.provider, model: h.root.model });
+    expect(jobs[2].actorSessionId).not.toBe(jobs[1].actorSessionId);
+    expect(h.tabs.get(9)?.url).toBe('https://example.com/work');
+  });
+
+  test('web actor runner pins do not change API or engine actor models', async () => {
+    const jobs: any[] = [];
+    const h = await harness(async (job) => {
+      jobs.push(structuredClone(job));
+      return { ok: true, started: true, newMessages: [{
+        role: 'assistant', content: 'inspected', id: `runner-scope-${jobs.length}`, when: 2_000 + jobs.length,
+      }] };
+    });
+    h.settings.runnerModel = 'browser-only-model';
+    const ctx: any = await h.factories.buildToolContext({ sessionId: h.root.sessionId });
+    for (const to of ['https://api.example', 'vm-1', 'notebook-1', 'pod-1']) {
+      expect(await ctx.messageActor({
+        to, message: 'inspect', senderSessionId: h.root.sessionId,
+        toolUseId: `runner-scope-${to}`, awaitReply: true,
+      })).toMatchObject({ ok: true });
+    }
+    expect(jobs).toHaveLength(4);
+    for (const job of jobs) expect(job).toMatchObject({ provider: h.root.provider, model: h.root.model });
+  });
+
   test('remints every bound actor when its owner model-surface posture changes', async () => {
     const jobs: any[] = [];
     let h: Awaited<ReturnType<typeof harness>>;
@@ -1931,15 +2167,18 @@ describe('kernel turn authority adapter', () => {
     expect(h.storageState).toEqual({});
   });
 
-  test('restores actor isolation before the state broadcast reacquires controller ownership', async () => {
-    let pushStarted = false;
+  test('publishes settled actor health without blocking readiness or broadcasting inside retry', async () => {
+    let pushes = 0;
     const h = await harness(async (job) => job.probeOnly
       ? { ok: true, started: false, code: 'actor_worker_ready' }
       : { ok: false }, {
       pushState: async () => {
-        pushStarted = true;
+        pushes += 1;
+        return new Promise(() => {});
       },
     });
+    await h.factories.makeDriverDeps(h.shared).waitForActorIsolation();
+    expect(pushes).toBe(1);
     const routeDeps = h.factories.makeRouteDeps(h.shared);
 
     const result = await Promise.race([
@@ -1948,7 +2187,42 @@ describe('kernel turn authority adapter', () => {
     ]);
 
     expect(result).toMatchObject({ ok: true, capability: { status: 'available' } });
-    expect(pushStarted).toBe(false);
+    expect(pushes).toBe(1);
+  });
+
+  test.serial.each([
+    ['GET', 200, true], ['HEAD', 204, true], ['GET', 500, false],
+    ['POST', 200, false], ['OPTIONS', 200, false],
+  ] as const)('typed site read enforces %s/%i at the physical fetch edge', async (method, status, allowed) => {
+    const previousFetch = globalThis.fetch;
+    const origin = 'https://api.example.test';
+    let calls = 0;
+    try {
+      globalThis.fetch = (async () => { calls += 1; return new Response(status === 204 ? null : '{}', {
+        status, headers: { 'content-type': 'application/json' },
+      }); }) as any;
+      const h = await harness(undefined, { durableApiOrigin: origin });
+      const owner = h.durableApiActor!;
+      const runId = h.scriptRuns.mintRunId(owner.sessionId);
+      h.scriptRuns.register(runId, undefined, owner.sessionId, { site: true, siteReadOnly: true });
+      const result = await h.runtime.relays.relayRoutes['site-fetch/call']({
+        ownerSessionId: owner.sessionId, siteOrigin: origin, pathOrUrl: '/items', method,
+        headers: {}, runId, siteReadOnly: false,
+      }, {});
+      expect(result.ok).toBe(allowed);
+      expect(calls).toBe(method === 'GET' || method === 'HEAD' ? 1 : 0);
+      if (allowed) expect(h.scriptRuns.siteReadFailureFor(runId)).toBeNull();
+      else {
+        expect(h.scriptRuns.siteReadFailureFor(runId)).toBeTruthy();
+        // Even a later successful request cannot erase an earlier caught refusal.
+        globalThis.fetch = (async () => new Response('{}')) as any;
+        await h.runtime.relays.relayRoutes['site-fetch/call']({
+          ownerSessionId: owner.sessionId, siteOrigin: origin, pathOrUrl: '/items', method: 'GET', headers: {}, runId,
+        }, {});
+        expect(h.scriptRuns.siteReadFailureFor(runId)).toBeTruthy();
+      }
+      h.scriptRuns.release(runId);
+    } finally { globalThis.fetch = previousFetch; }
   });
 
   test.serial.each(['revoked', 'unchanged'])('a site-client write validates %s permission during its final landing proof', async (change) => {

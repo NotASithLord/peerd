@@ -40,13 +40,8 @@ export const LOCAL_MODEL_ID = DEFAULT_LOCAL_MODEL_ID;
  * value (the engine-ENFORCED window where the spec declares one) is the
  * bridge-not-wired fallback only.
  *
- * why a wired-but-failing bridge returns null instead of the static value:
- * the caller's controller-side context-window resolver caches a returned number for
- * the SW's lifetime as if it were live. Handing it the static value on a
- * TRANSIENT bridge failure would freeze it in place and stop the retry that
- * would have learned the engine's real answer; null leaves the miss uncached
- * so the next turn asks again, while the trim layer meanwhile uses the same
- * static table on its own (resolveContextWindow's fallback).
+ * why: a failed live read returns null so the next turn can retry.
+ * The trim layer uses its static table until the engine answers.
  *
  * @param {{ model?: string, modelEgress?: ModelEgress, signal?: AbortSignal }} args
  * @returns {Promise<number | null>}
@@ -176,6 +171,7 @@ export async function* callLocalWebgpu({
   tools, modelEgress, signal,
 }) {
   let outTokens = 0;
+  let emittedToolCall = false;
   try {
     // The local-model transport needs only role + content. Project that exact
     // shape before runtime messaging so host-only custody ids never cross a
@@ -198,7 +194,10 @@ export async function* callLocalWebgpu({
         yield tok;
       }
     })();
-    yield* parseLocalStream(tokenStream);
+    for await (const event of parseLocalStream(tokenStream)) {
+      if (event.type === 'tool-use-stop') emittedToolCall = true;
+      yield event;
+    }
   } catch (e) {
     if (!signal?.aborted) {
       // why: WebGPU can reject with a DOMException that is not an Error.
@@ -211,7 +210,8 @@ export async function* callLocalWebgpu({
   // eval scorecard's "runner tokens" split needs a number to stay honest about
   // where work went (output tokens only; prefill is local + free).
   if (!signal?.aborted) yield { type: 'usage', usage: { inputTokens: 0, outputTokens: outTokens, cacheReadTokens: 0, cacheWriteTokens: 0 } };
-  yield { type: 'message-stop', stopReason: signal?.aborted ? 'aborted' : 'end_turn' };
+  // why: the agent loop dispatches calls only when the adapter ends with tool_use.
+  yield { type: 'message-stop', stopReason: signal?.aborted ? 'aborted' : emittedToolCall ? 'tool_use' : 'end_turn' };
 }
 
 /**

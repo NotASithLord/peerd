@@ -515,7 +515,9 @@ jobs:
     # PINNED, not ubuntu-latest: `latest` migrates between images, and a
     # freetype/fontconfig bump would re-rasterize every glyph in every baseline.
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Both themes and the merge-base comparison now cover the combined area suites.
+    # This bounds total work; individual state deadlines and performance gates stay unchanged.
+    timeout-minutes: 30
     permissions:
       contents: write        # push before/after montages to the visual-diffs branch
       pull-requests: write   # inline-image diff comment; same-repo PRs only
@@ -560,7 +562,22 @@ jobs:
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
         id: render
-        run: bun run test:e2e:visual
+        run: |
+          set -o pipefail
+          bun run test:e2e:visual 2>&1 | tee "$RUNNER_TEMP/peerd-visual-head.log"
+
+      # why before comparison: a slow or cancelled merge-base render must not
+      # erase the head's failing checks, screenshots, or crash diagnostics.
+      - name: Preserve head render evidence before comparison
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: visual-head-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.ref_name }}-run${{ github.run_number }}.${{ github.run_attempt }}
+          path: |
+            scripts/cdp/artifacts/
+            ${{ runner.temp }}/peerd-visual-head.log
+          if-no-files-found: warn
+          retention-days: 14
 
       # The regression answer. Renders the SAME state definitions against the
       # merge-base extension build and diffs the pairs - see the header of
@@ -569,8 +586,9 @@ jobs:
       # continue-on-error, deliberately: a computed reference cannot tell an
       # intended redesign from a regression, so this REPORTS. The reviewer
       # decides, from the before/after images in the PR comment below.
+      # Cancelled heads retain uploaded evidence but must not delay their replacement.
       - name: Compare every screen against the merge base
-        if: always() && github.event_name == 'pull_request'
+        if: always() && !cancelled() && github.event_name == 'pull_request'
         continue-on-error: true
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
@@ -626,7 +644,7 @@ jobs:
       # result rather than an absence. STICKY by a hidden marker, so a branch
       # pushed ten times leaves one comment, not ten.
       - name: Publish before/after montages + inline PR comment
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        if: always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}

@@ -66,6 +66,7 @@ import { validateKernelStateProjection } from '/shared/kernel-state-contract.js'
  * @property {string} [customSystemPrompt]
  * @property {string} [toolManifest]
  * @property {import('/peerd-runtime/todo/core.js').TodoItem[]} [todos]  the goal run's plan-of-record (TodoCard)
+ * @property {{id:string,text:string,at:number}|null} [goalStopNote]
  */
 
 /**
@@ -102,11 +103,12 @@ import { validateKernelStateProjection } from '/shared/kernel-state-contract.js'
  * @property {{ turn: any, session: any, limitUsd: number, limitReached: boolean }} cost
  * @property {string|null|undefined} lastError
  * @property {boolean} streaming
+ * @property {{authorityEpoch:string,generation:number}|null} [projection]
  * @property {{ attempt: number|null, retryAfterMs: number|null }|null} rateLimit
  * @property {{ origin: string, untilMs: number, reason: string|null }|null} pacing
  *   a live per-origin pacing wait (#234). Cleared by every lifecycle message
  *   that means the wait is over, exactly like rateLimit.
- * @property {ReadonlyArray<{ id: number, text?: string, action?: any, sessionId?: string | null }>} notices
+ * @property {ReadonlyArray<{ id: number|string, text?: string, action?: any, sessionId?: string | null }>} notices
  * @property {any} agentTab
  * @property {ReadonlyArray<any>} agentTabEvents
  * @property {ReadonlyArray<{ id: string, sessionId: string|null, text: string, at: number }>} confirmEvents
@@ -143,6 +145,7 @@ import { validateKernelStateProjection } from '/shared/kernel-state-contract.js'
  *   attempt?: number,
  *   retryAfterMs?: number,
  *   streaming?: boolean,
+ *   projection?: {authorityEpoch:string,generation:number},
  *   parentToolUseId?: string,
  *   depth?: number,
  *   task?: string,
@@ -176,10 +179,8 @@ export const INITIAL_STATE = Object.freeze({
   // total; `cost.limitReached` flips true when the hard spend cap halts
   // the agent (cleared on the next user send). The meter reads these.
   cost: { turn: null, session: null, limitUsd: 0, limitReached: false },
-  // Inline turn-status. `streaming` is whether the CURRENTLY VIEWED
-  // chat's turn is in flight — live-toggled by turn/streaming pulses
-  // (session-guarded) and re-armed by every state push, which carries
-  // the per-session truth (turns keep running in background chats).
+  // why: streaming belongs to the viewed chat. State hydration replays
+  // its live pulse after the snapshot establishes that chat.
   // Live delegation feed for in-flight `script` runs, keyed by the script
   // call's toolUseId: [{ seq, method, to, goalPreview, phase, ms }]. Ephemeral
   // UI sugar — the durable record is the [DELEGATIONS] trace in the tool
@@ -919,17 +920,10 @@ export const reduceChat = (state, msg) => {
               ? msg.authorityReplacement !== true
               : incomingProjection.generation < priorProjection.generation)) return state;
       }
-      // Full snapshot. Replace, seeding the cost meter from the persisted
-      // session tally + the configured limit. (Voice-restore is the surface's
-      // job — see the module header.) why preserve pendingConfirm: confirm
-      // state is owned by the confirm/request|resolved channel, NOT the
-      // snapshot (it carries null) — folding ...msg.state must never wipe a
-      // live prompt a 'state' push races with (DESIGN-12). why rateLimit:null:
-      // the snapshot carries no rateLimit field, so without an explicit reset
-      // the previous chat's retry banner survives the fold and paints on the
-      // switched-to (idle) chat — a stale "⏳ Rate limited" control in the wrong
-      // conversation. A switched-to chat is never mid-retry from the previous
-      // one; an active retry in THIS chat re-asserts via the next pause/delta.
+      // why: snapshots restore cost but omit live confirmation and streaming.
+      // Preserve this chat's prompt and reset activity on a chat switch.
+      // A later pulse restores the selected turn. A new pause or delta
+      // restores an ephemeral retry notice.
       // why limitReached + the spend-limit lastError are SESSION-scoped (not
       // per-push): they are a halt state ("raise your limit to continue") that
       // must persist until the user acts. A 'state' push fires on a Plan/Act
@@ -983,9 +977,11 @@ export const reduceChat = (state, msg) => {
             asyncTasks: msg.state?.asyncTasks && !staleActorSnapshot
               ? msg.state.asyncTasks : state.asyncTasks,
           };
-      const notices = sessionChanged
+      let notices = sessionChanged
         ? state.notices.filter((notice) => !notice.sessionId || notice.sessionId === nextSessionId)
         : state.notices;
+      const goalNote = msg.state?.session?.goalStopNote;
+      if (state.session.goalStopNote?.id !== goalNote?.id) notices = notices.filter((note) => note.id !== state.session.goalStopNote?.id);
       // Confirm settles that happened while NO surface was open (timeout /
       // stop / closed panel) arrive only here, as snapshot notes - fold them
       // into the transcript lines, deduped against any live broadcasts seen.
@@ -1008,15 +1004,19 @@ export const reduceChat = (state, msg) => {
         : acceptsActorEpoch
           ? Math.max(state.actorProjectionRevision, incomingActorRevision ?? 0)
           : state.actorProjectionRevision;
-      return { ...state, ...msg.state, hydrated: true, ...pruneProjections, notices,
+      const next = { ...state, ...msg.state, hydrated: true, ...pruneProjections, notices,
         actorProjectionEpoch,
         actorProjectionRevision,
+        streaming: sessionChanged ? false : state.streaming,
         pendingConfirm: sessionChanged ? (msg.state?.pendingConfirm ?? null) : state.pendingConfirm,
         confirmEvents,
         lastError: keepSpendError ? 'spend-limit-reached' : null, rateLimit: null, pacing: null, cost: { ...state.cost,
         session: msg.state?.session?.cost ?? state.cost.session,
         limitUsd: msg.state?.settings?.spendLimitUsd ?? state.cost.limitUsd,
         limitReached: stillHalted } };
+      // why: cold hydration must show the saved reason without a controller wake.
+      return goalNote && (sessionChanged || state.session.goalStopNote?.id !== goalNote.id)
+        ? reduceChat(next, { type: 'turn/system-note', ...goalNote, sessionId: nextSessionId }) : next;
     }
     case 'turn/state':
       // Per-session guard: a turn streaming in a BACKGROUND chat must not snap
@@ -1027,10 +1027,18 @@ export const reduceChat = (state, msg) => {
       // state.session — but this LIVE push carries only sessionId+messages, so
       // without it the card wouldn't tick until the next full 'state' snapshot.
       // undefined on non-goal turns (the card self-hides), so it's harmless.
+      // why lastError stays: the loop yields its final 'state' snapshot right
+      // after 'error', so clearing here wiped the banner before it painted.
+      // The next send (turn/streaming) or a chat switch (state) clears it.
+      // why title too: the first user message titles the session inside the
+      // turn and no full 'state' push follows it, so this live fold is how the
+      // home header learns a new chat's title. A later push that omits the
+      // title keeps the known one.
       return { ...state, actors: reconcileActorTerminals(state.actors, msg.session.messages),
         session: { ...state.session,
         sessionId: msg.session.sessionId, messages: msg.session.messages,
-        todos: msg.session.todos }, lastError: null };
+        title: msg.session.title ?? state.session.title,
+        todos: msg.session.todos } };
     case 'turn/cost':
       if (state.session.sessionId && msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
       return { ...state, cost: { ...state.cost, turn: msg.turn, session: msg.session,
@@ -1063,11 +1071,15 @@ export const reduceChat = (state, msg) => {
         reason: typeof msg.reason === 'string' ? msg.reason : null,
       } };
     case 'turn/streaming':
+      if (msg.replay === true && (!state.projection || !msg.projection
+          || msg.projection.generation !== state.projection?.generation
+          || msg.projection.authorityEpoch !== state.projection?.authorityEpoch)) return state;
       // Per-session lifecycle pulse — a background turn must not flip the
       // viewed chat's composer/spinner.
       if (state.session.sessionId && msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
       return { ...state, streaming: !!msg.streaming, rateLimit: null, pacing: null,
-        cost: msg.streaming ? { ...state.cost, turn: null, limitReached: false } : state.cost };
+        lastError: msg.streaming ? null : state.lastError,
+        cost: msg.streaming && msg.replay !== true ? { ...state.cost, turn: null, limitReached: false } : state.cost };
     case 'turn/tool-use':
     case 'turn/tool-result':
       // Real-time complements; the session message array (turn/state) is the
@@ -1115,8 +1127,9 @@ export const reduceChat = (state, msg) => {
       // unscoped UI feedback visible, but never show a scoped note in a
       // different open chat.
       if (msg.sessionId && state.session.sessionId !== msg.sessionId) return state;
+      if (msg.id && state.notices.some((notice) => notice.id === msg.id)) return state;
       return { ...state, notices: [...state.notices,
-        { id: Date.now() + Math.random(), text: msg.text, action: msg.action ?? null,
+        { id: msg.id ?? Date.now() + Math.random(), text: msg.text, action: msg.action ?? null,
           sessionId: msg.sessionId ?? null }].slice(-3) };
     case 'agent/tab': {
       // The inline "peerd opened a tab" notice: minted the first time peerd OPENS

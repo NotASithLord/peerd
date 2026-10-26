@@ -449,3 +449,27 @@ describe('cold kernel provider/composer projection', () => {
     expect(projectCalls).toBe(10);
   });
 });
+
+describe('provider key test body', () => {
+  const testBody = async (provider: string) => {
+    let payload: any = null;
+    const context = { effects: { call: async (operation: string, value: any) => {
+      payload = { operation, ...value };
+      return { ok: true, outcomeKnown: true, value: { status: 200 } };
+    } } };
+    expect(await controllerLocalRoutes['provider/test']({ provider }, context)).toEqual({ ok: true });
+    return payload.nativeBody;
+  };
+
+  test('openai caps the reply with max_completion_tokens', async () => {
+    const body = await testBody('openai');
+    expect(body.max_completion_tokens).toBe(1);
+    expect('max_tokens' in body).toBe(false);
+  });
+
+  test.each(['anthropic', 'openrouter', 'glm'])('%s keeps max_tokens', async (provider) => {
+    const body = await testBody(provider);
+    expect(body.max_tokens).toBe(1);
+    expect('max_completion_tokens' in body).toBe(false);
+  });
+});

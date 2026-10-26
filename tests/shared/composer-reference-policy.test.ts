@@ -29,11 +29,16 @@ describe('composer reference policy', () => {
     const corpus = [
       'plain', '/review arg\nbody @file:a.md', ' @tab @tab:7',
       '@tab:abc @tab:0 @tab:-1 @tab:1.5', '@file:path.md, end',
-      '/x-y_2\n@file:a @tab:9', 'prefix/@tab:4 no-token',
+      '/x-y_2\n@file:a @tab:9', 'prefix/@tab:4 no-token', '@file:"docs/my notes.md" @tab:"5"',
     ];
     for (const source of corpus) {
       expect(parseRuntimeComposer(source)).toEqual(parseComposer(source));
     }
+  });
+  test('admits quoted file paths through the same grammar without quoted tab authority', () => {
+    expect(composerReferenceRequests('read @file:"docs/my notes.md" @tab:"5"', [])).toEqual([
+      { operation: 'turn.compose.read-file', payload: { path: 'docs/my notes.md' } },
+    ]);
   });
 
   test('measures ASCII and four-byte Unicode at exact UTF-8 boundaries', () => {

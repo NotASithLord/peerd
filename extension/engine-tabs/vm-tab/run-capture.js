@@ -130,7 +130,7 @@ export const parseRunCapture = (buf, marker) => {
   let stderrEnd = end.start;
   if (buf[stderrEnd - 1] === '\n') stderrEnd -= 1;
   if (buf[stderrEnd - 1] === '\r') stderrEnd -= 1;
-  const clean = (/** @type {string} */ s) => s.replace(/\r/g, '');
+  const clean = (/** @type {string} */ s) => s.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r/g, '');
   return {
     exitCode: exit.exitCode,
     stdout: clean(buf.slice(stdoutStart, exit.startIdx)),

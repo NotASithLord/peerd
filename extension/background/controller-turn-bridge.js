@@ -2656,17 +2656,20 @@ export const makeControllerTurnBridge = ({
         }
         case 'turn.site-client.run': {
           const entry = siteClientExecutionEntry(
-            run, value, operation, ['origin', 'code', 'timeoutMs'],
+            run, value, operation, ['origin', 'timeoutMs'],
+            ['code', 'mode', 'clientOperation', 'input', 'revision'],
           );
           if (!entry) return failed('site-client run authority mismatch', true);
           return runDomainEffect(run, entry, operation, () =>
             entry.authority.runStoredClient(
               value.origin, value.code, value.timeoutMs,
+              Object.fromEntries(['mode', 'clientOperation', 'input', 'revision']
+                .filter(key => value[key] !== undefined).map(key => [key === 'clientOperation' ? 'operation' : key, value[key]])),
             ), HOST_EFFECT_OUTCOME.siteClientRun);
         }
         case 'turn.site-client.commit': {
           const entry = siteClientExecutionEntry(run, value, operation, ['origin'], [
-            'summary', 'endpoints', 'auth', 'deriver', 'body',
+            'summary', 'endpoints', 'auth', 'deriver', 'body', 'operations', 'validationCases',
           ]);
           if (!entry) return failed('site-client write authority mismatch', true);
           return runDomainEffect(run, entry, operation, () =>

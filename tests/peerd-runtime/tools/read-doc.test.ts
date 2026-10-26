@@ -7,6 +7,8 @@ import { getToolMetadata } from '../../../extension/peerd-runtime/semantic.js';
 import { readResultTool } from '../../../extension/peerd-runtime/tools/defs/read-result.js';
 import { isPrivateOrLocalHost } from '../../../extension/shared/private-network.js';
 import { MAX_SPILL_TEXT_CHARS } from '../../../extension/peerd-runtime/tools/result-store-policy.js';
+import { makeOffscreenDocClient } from '../../../extension/background/offscreen-doc-client.js';
+import { classifyFailure } from '../../../extension/peerd-runtime/observability/failure-classify.js';
 
 const pdfResult = {
   format: 'pdf',
@@ -44,6 +46,18 @@ const docContext = (context: any): any => ({
 });
 
 describe('read_doc as the one public document reader', () => {
+  test.each([
+    ['document_too_large', ['75 MiB', '40 MiB', 'smaller export']],
+    ['pdf_password_required', ['password-protected', 'unprotected copy']],
+  ] as const)('the client keeps %s as environment guidance', async (code, guidance) => {
+    const client = makeOffscreenDocClient({ ensureOffscreen: async () => {},
+      sendMessage: async () => ({ ok: false, error: code, detail: 'PRODUCER CONTROLLED' }) });
+    const result = await readDocTool.execute({ url: 'https://docs.example/report.pdf' }, docContext({ docOffscreenClient: client }));
+    expect(result).toMatchObject({ ok: false, error: code });
+    for (const part of guidance) expect(result.content).toContain(part);
+    expect(result.content).not.toContain('PRODUCER CONTROLLED');
+    expect(classifyFailure(`${code}: ${result.content}`).kind).toBe('environment');
+  });
   test('formats sniffed PDF output with page metadata and the read_doc fence', async () => {
     const calls: any[] = [];
     const result = await readDocTool.execute({

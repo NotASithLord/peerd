@@ -93,3 +93,46 @@ export const redrawForRuntimeMessage = (redraw, message) => {
   }
   redraw();
 };
+
+/**
+ * why: each modal must keep keyboard attention, including expanded sections.
+ * A closed menu can remove the opener. Do not restore focus to body.
+ * @param {string} titleId
+ * @param {() => void} onCancel
+ * @param {{ returnFocus?: HTMLElement | null }} state
+ */
+export const confirmationDialogAttrs = (titleId, onCancel, state) => {
+  /** @param {{ dom: Element }} vnode */
+  const oncreate = ({ dom }) => {
+    state.returnFocus = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+    const dialog = /** @type {HTMLElement} */ (dom);
+    const reject = /** @type {HTMLElement | null} */ (dialog.querySelector('[data-confirm-reject]'));
+    (reject ?? dialog).focus();
+  };
+  /** @param {KeyboardEvent} event */
+  const onkeydown = (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      onCancel();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const dialog = /** @type {HTMLElement} */ (event.currentTarget);
+    const controls = /** @type {HTMLElement[]} */ ([...dialog.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])')].filter((control) => control.checkVisibility()));
+    if (!controls.length) return;
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+  return {
+    role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId,
+    tabindex: -1, oncreate, onkeydown,
+    onremove: () => state.returnFocus?.focus(),
+  };
+};

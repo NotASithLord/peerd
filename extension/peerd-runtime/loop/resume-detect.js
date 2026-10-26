@@ -74,15 +74,13 @@ const NOT_RESUMABLE = Object.freeze({ resumable: false });
  */
 export const detectInterruptedTurn = (session) => {
   const messages = session?.messages;
-  if (!Array.isArray(messages) || messages.length === 0) return NOT_RESUMABLE;
-  const last = messages[messages.length - 1];
+  const last = Array.isArray(messages) ? messages.at(-1) : null;
   if (!last) return NOT_RESUMABLE;
 
   if (last.role === 'assistant') {
     // User-initiated stop wins over every interruption signal: never
     // auto-resume what the user deliberately ended.
-    if (last.stopReason === 'aborted') return NOT_RESUMABLE;
-    if (/** @type {{outcomeKnown?:boolean}} */ (last).outcomeKnown === false) {
+    if (last.stopReason === 'aborted' || /** @type {{outcomeKnown?:boolean}} */ (last).outcomeKnown === false) {
       return NOT_RESUMABLE;
     }
     if (last.streaming === true) return resumable('stream-interrupted', last);
@@ -96,14 +94,16 @@ export const detectInterruptedTurn = (session) => {
     // failed resume mints a new markerId). Transient overload/credit faults
     // are instead handled in-turn by provider failover, not here.
     if (last.stopReason === 'tool_use'
-        && Array.isArray(last.toolUses) && last.toolUses.length > 0) {
+        && Array.isArray(last.toolUses) && last.toolUses.length) {
       return resumable('tools-pending', last);
     }
-    return NOT_RESUMABLE;
   }
 
   if (last.role === 'user'
-      && Array.isArray(last.toolResults) && last.toolResults.length > 0) {
+      && Array.isArray(last.toolResults) && last.toolResults.length) {
+    // why: Stop can arrive after results are saved and abort the prior assistant.
+    const prior = messages?.at(-2);
+    if (prior?.role === 'assistant' && prior.stopReason === 'aborted') return NOT_RESUMABLE;
     if (last.toolResults.some((result) => result?.outcomeKnown === false)) {
       return NOT_RESUMABLE;
     }
@@ -120,7 +120,7 @@ const resumable = (reason, marker) => ({
   reason,
   // Fall back to a stable synthetic marker if a legacy message lacks an id,
   // so the shell's dedupe key is always a string.
-  markerId: typeof marker.id === 'string' && marker.id ? marker.id : `${reason}:nomarkerid`,
+  markerId: (typeof marker.id === 'string' && marker.id) || `${reason}:nomarkerid`,
 });
 
 // The synthetic user nudge that drives the continuation. Kept terse and

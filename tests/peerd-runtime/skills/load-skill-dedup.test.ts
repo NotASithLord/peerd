@@ -23,6 +23,20 @@ const ctxFor = (session: any) => ({
 } as any);
 
 describe('load_skill dedup', () => {
+  test('a retained continuation page cannot hide a trimmed first page', async () => {
+    const first = await loadSkillTool.execute({ name: 'writer' }, ctxFor({ sessionId: 'paged', messageCount: 0, trimCovered: 0 }));
+    const continuation = await loadSkillTool.execute({ name: 'writer', offset: 3 }, ctxFor({ sessionId: 'paged', messageCount: 1, trimCovered: 0 }));
+    const messages = [first, continuation].map((result: any) => ({ role: 'user', toolResults: [{ ...result, meta: { toolName: 'load_skill' } }] }));
+    const reloaded = await loadSkillTool.execute({ name: 'writer' }, ctxFor({ sessionId: 'paged', messageCount: 3, trimCovered: 1, messages }));
+    expect((reloaded as any).content).toContain(BODY);
+  });
+  test('a saved legacy elision does not count as an available skill body', async () => {
+    const result = await loadSkillTool.execute({ name: 'writer' }, ctxFor({ sessionId: 'legacy', messageCount: 2, trimCovered: 0,
+      messages: [{ role: 'user', toolResults: [{ meta: { toolName: 'load_skill' },
+        content: '<skill name="writer">head\n<… 12000 chars elided …>\ntail</skill>' }] }],
+    }));
+    expect((result as any).content).toContain(BODY);
+  });
   test('injects the full body the first time, a pointer the second (still in context)', async () => {
     const first = await loadSkillTool.execute({ name: 'writer' }, ctxFor({ sessionId: 's1', messageCount: 4, trimCovered: 0 }));
     expect(first.ok).toBe(true);

@@ -212,6 +212,14 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
       const scope = scopes.get(sessionId);
       if (scope?.detached) throw scope.reason;
       lifetime.signal.throwIfAborted();
+      // Invalidate before native dispatch, including a command that never replies.
+      if (scope && ['Runtime.runIfWaitingForDebugger', 'Debugger.resume', 'Debugger.disable'].includes(method)) {
+        scope.startupHeld = false;
+      }
+      if (method === 'Target.detachFromTarget') {
+        const detachedScope = scopes.get(params.sessionId);
+        if (detachedScope) detachedScope.startupHeld = false;
+      }
       return nativeSend(method, params, sessionId);
     }, undefined, signal);
   const sessions = new Map();
@@ -238,7 +246,10 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
     if (scope.detached) return;
     scope.detached = true; revision++;
     retirements.set(sessionId, scope);
-    if (!scope.ready && !closing) failed(new Error(`Unobserved target detached: ${scope.target.targetId}`));
+    // A second Fetch debugger session can retain the retired target's agent.
+    // Release our own session only; the barrier still requires targetDestroyed.
+    ctx.releaseAuxiliaryFetchTarget?.(scope.target.targetId);
+    if (!scope.ready && !scope.startupHeld && !closing) failed(new Error(`Unobserved target detached: ${scope.target.targetId}`));
     // Preserve already-queued protocol rejections before cancelling this target's waits.
     const cancelling = new Promise(resolve => setTimeout(resolve, 0)).then(() => scope.controller.abort(scope.reason));
     installing.add(cancelling);
@@ -258,6 +269,8 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
     const destroyedWait = new Promise(resolve => { destroyedReady = resolve; });
     scopes.set(sessionId, { controller, signal: AbortSignal.any([lifetime.signal, controller.signal]),
       reason: new ObserverDetachedError(sessionId), target: targetInfo, ready: false, detached: false,
+      startupHeld: ctx.ownsWorkerStartupPause === true && waitingForDebugger === true
+        && targetInfo.type === 'worker',
       destroyed: false, destroyedReady, destroyedWait, excluded: false });
     revision++;
     owners.set(targetInfo.targetId, sessionId);
@@ -377,6 +390,11 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
         await new Promise(resolve => setTimeout(resolve, 0));
         lifetime.abort(cancelled);
         await diagnostic('observer installation drain', () => Promise.allSettled([...installing]), 5_000);
+        requireResult(evidence.observerErrors.length === 0, `Observer failed: ${evidence.observerErrors.join('\n')}`);
+        for (const scope of retirements.values()) {
+          requireResult(scope.ready || (scope.startupHeld && scope.destroyed),
+            `Unobserved target retired: ${scope.target.targetId}`);
+        }
         await diagnostic('observer stop auto-attach', () => nativeSend('Target.setAutoAttach',
           { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }), 5_000);
         requireResult(evidence.observerErrors.length === 0, `Observer failed: ${evidence.observerErrors.join('\n')}`);
@@ -414,10 +432,28 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
             checkActive();
             requireResult(evidence.observerErrors.length === 0, `Observer failed: ${evidence.observerErrors.join('\n')}`);
             for (const [sessionId, scope] of [...retirements]) {
-              requireResult(scope.ready, `Unobserved target retired: ${scope.target.targetId}`);
-              await activeDiagnostic(`target destruction target=${scope.target.targetId}`, () => scope.destroyedWait, 3_000, signal);
+              // A worker destroyed before we ever released its exclusive startup
+              // hold has no application execution to drain. Detach alone is not proof.
+              requireResult(scope.ready || scope.startupHeld, `Unobserved target retired: ${scope.target.targetId}`);
+              try {
+                await activeDiagnostic(`target destruction target=${scope.target.targetId}`, () => scope.destroyedWait, 3_000, signal);
+              } catch (error) {
+                checkActive();
+                const probes = await Promise.allSettled([
+                  connection.send('Target.getTargets', { filter: [{}] }, undefined, signal),
+                  connection.send('Target.getTargetInfo', { targetId: scope.target.targetId }, undefined, signal),
+                ]);
+                evidence.retirementDiagnostics ??= [];
+                evidence.retirementDiagnostics.push({ sessionId, target: scope.target,
+                  ready: scope.ready, detached: scope.detached, destroyed: scope.destroyed,
+                  probes: probes.map((probe, index) => ({ method: index ? 'Target.getTargetInfo' : 'Target.getTargets',
+                    ...(probe.status === 'fulfilled' ? { result: probe.value } : { error: String(probe.reason) }) })) });
+                persist();
+                throw error;
+              }
               checkActive();
-              lifecycle({ method: 'observer.retirementConfirmed', sessionId, targetId: scope.target.targetId });
+              lifecycle({ method: 'observer.retirementConfirmed', sessionId, targetId: scope.target.targetId,
+                ...(scope.ready ? {} : { proof: 'destroyed-before-startup-release' }) });
               retirements.delete(sessionId); scopes.delete(sessionId);
             }
             let changed = false;

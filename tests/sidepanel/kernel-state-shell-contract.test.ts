@@ -51,6 +51,19 @@ const projected = (generation = 1, authorityEpoch = 'kernel-epoch-0001') => ({
 });
 
 describe('cold shell state contract', () => {
+  test('adopts only a neutral not-started actor capability with an exact host', () => {
+    for (const host of ['background-page-worker', 'offscreen-document-worker']) {
+      const capability = { status: 'not-started', host, reason: null, retryable: false };
+      const state = { ...projected(), capabilities: { actorExecution: capability } };
+      expect(normalizeColdStateSnapshot(state)).toEqual(state);
+      for (const invalid of [{ host: null }, { reason: 'stored failure' }, { retryable: true }]) {
+        expect(normalizeColdStateSnapshot({
+          ...state, capabilities: { actorExecution: { ...capability, ...invalid } },
+        })).toBeNull();
+      }
+    }
+  });
+
   test('network consent projection must be a boolean before the shell can adopt it', () => {
     for (const choice of [true, false]) {
       const state = { ...projected(), settings: { ...settings, dwebChoiceMade: choice } };

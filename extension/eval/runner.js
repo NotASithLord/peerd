@@ -157,10 +157,8 @@ port.onMessage.addListener((/** @type {any} */ msg) => {
       turn.actorStates.set(msg.parentToolUseId, msg);
       bumpSettle(); break;
     case 'turn/error': turn.error = msg.error; bumpSettle(); break;
-    // streaming:true = the orchestrator (or a wake) is producing output → keep
-    // waiting. streaming:false = it went idle → START the settle countdown (a
-    // later actor reply-wake will bump it again and push the finish back).
-    case 'turn/streaming': turn.started = true; bumpSettle(); break;
+    // why: a hydration replay must not start an eval turn or extend its wait.
+    case 'turn/streaming': if (msg.replay !== true) { turn.started = true; bumpSettle(); } break;
     // Local-model download progress (broadcast by the SW while Gemma loads).
     case 'local-model/progress': handleDlProgress(msg.progress || {}); break;
     default: break;

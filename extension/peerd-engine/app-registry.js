@@ -39,6 +39,7 @@ const STORAGE_KEY = 'apps.v1';
  *   release_file_kinds?: Record<string, 'text' | 'binary'>,
  *   published_hashes?: string[],
  *   forked_from?: { publisher?: string | null, dwapp_id?: string | null, version_id?: string | null },
+ *   declared?: { hash: string, dweb: boolean, instructions: boolean, observeAct: boolean } | null,
  * }} AppDwebMeta
  */
 

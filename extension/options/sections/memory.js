@@ -30,6 +30,7 @@ export const MemoryView = {
     vnode.state.memNote = null;       // { ok, text } banner for memory actions
     vnode.state.memBusy = false;
     vnode.state.memUncertain = false;
+    vnode.state.refocus = false;      // the Delete all trigger takes focus back when it returns
     vnode.state.autoMemoryBusy = false;
     vnode.state.autoMemoryUncertain = false;
     MemoryView.refresh(vnode);
@@ -84,6 +85,7 @@ export const MemoryView = {
      */
     const act = async (msg, okText) => {
       if (ui.memBusy || ui.memUncertain) return;
+      const wipeDrafts = msg.type === 'memory/deleteAll' ? new Map(drafts) : null;
       ui.memBusy = true; ui.memNote = null; m.redraw();
       try {
         let r;
@@ -96,6 +98,14 @@ export const MemoryView = {
           : { ok: false, text: mutationFailureCopy(r, {
               action: 'changing memory', fallback: 'The memory change could not be completed.',
             }) };
+        // why refocus clears too: a wipe removes the trigger, and a stale flag
+        // would make it take focus the next time a doc brings it back.
+        if (r?.ok && wipeDrafts) {
+          for (const [id, draft] of wipeDrafts) {
+            if (drafts.get(id) === draft) drafts.delete(id);
+          }
+          ui.refocus = false;
+        }
         if (r?.ok || unknown) {
           const receipt = await reload();
           onSuggestionsChanged?.();
@@ -110,6 +120,13 @@ export const MemoryView = {
         m.redraw();
       }
     };
+
+    // why oncreate AND onupdate: Yes/No remove the focused button, so the
+    // trigger claims focus back when it returns. After Yes it returns disabled
+    // while the wipe runs, and a disabled button cannot take focus, so it
+    // takes it on the update that re-enables it.
+    /** @param {{ dom: HTMLButtonElement }} v */
+    const refocus = (v) => { if (ui.refocus && !v.dom.disabled) { ui.refocus = false; v.dom.focus(); } };
 
     const docs = ui.memoryDocs;
     const hasUserDoc = Array.isArray(docs) && docs.some((/** @type {MemoryDoc} */ d) => d.kind === 'user');
@@ -165,18 +182,41 @@ export const MemoryView = {
             'Created a user note — edit it below.'),
         }, 'New user note'),
         m('.spacer'),
-        (Array.isArray(docs) && docs.length > 0) ? m('button.linkish.danger-text', {
-          disabled: ui.memBusy || ui.memUncertain,
-          onclick: () => {
-            if (ui.memConfirmWipe) {
-              act({ type: 'memory/deleteAll' }, 'All memory deleted.');
-              ui.memConfirmWipe = false;
-            } else { ui.memConfirmWipe = true; m.redraw(); }
-          },
-        }, ui.memConfirmWipe ? 'Click again to delete ALL' : 'Delete all') : null,
+        // why a separate Yes: the old "click again" step re-armed the SAME
+        // button, so the second click of a double-click wiped every doc with
+        // no undo. The question and its buttons render where the trigger
+        // was, so a repeat click lands on text, like the per-doc strip.
+        !(Array.isArray(docs) && docs.length > 0) ? null : ui.memConfirmWipe
+          ? m('span.memory-confirm', [
+              m('span.muted', { style: 'font-size:12px;' },
+                `Delete all memory (${docs.length} scope${docs.length === 1 ? '' : 's'})?`),
+              m('button.linkish.danger-text', {
+                disabled: ui.memBusy || ui.memUncertain,
+                onclick: () => { ui.memConfirmWipe = false; ui.refocus = true; act({ type: 'memory/deleteAll' }, 'All memory deleted.'); },
+              }, 'Yes'),
+              m('button.linkish', {
+                disabled: ui.memBusy || ui.memUncertain,
+                // why focus lands on No: the strip replaced the focused
+                // trigger, and a stray Enter must cancel, never wipe.
+                oncreate: (/** @type {{ dom: HTMLButtonElement }} */ v) => v.dom.focus(),
+                onclick: () => { ui.memConfirmWipe = false; ui.refocus = true; },
+              }, 'No'),
+            ])
+          : m('button.linkish.danger-text', {
+              disabled: ui.memBusy || ui.memUncertain,
+              oncreate: refocus,
+              onupdate: refocus,
+              onclick: () => { ui.memConfirmWipe = true; },
+            }, 'Delete all'),
       ]),
 
-      ui.memNote ? m(`p.key-msg${ui.memNote.ok ? '.ok' : '.err'}`, ui.memNote.text) : null,
+      // why always mounted + role=status: a live region announces changes
+      // inside a region that already exists; a line inserted with its text
+      // is announced unreliably. Empty it costs no pixels (.key-msg:empty).
+      m('p.key-msg', {
+        role: 'status',
+        class: ui.memNote ? (ui.memNote.ok ? 'ok' : 'err') : '',
+      }, ui.memNote ? ui.memNote.text : null),
 
       docs === null
         ? m('p.muted', 'Loading…')
@@ -275,16 +315,47 @@ const scopeLabel = (d) => {
   return `${d.kind}${d.subpath ? ` · ${d.subpath}` : ''}`;
 };
 
+// Drafts outlive the card. The options shell mounts one section at a
+// time, so a nav click (or a vault lock) unmounts every card, and a draft
+// kept only in component state was gone with no warning. Keyed by doc id
+// (the scope id, stable across writes) with the body the draft started
+// from, so a stash is never saved over a newer write unseen.
+// why entry identity: a reply from an old card must not drop a new card's edit.
+/** @type {Map<string, { base: string, draft: string }>} */
+const drafts = new Map();
+
+/** @param {MemoryDoc} doc @param {string} draft */
+const stashDraft = (doc, draft) => {
+  if (!doc.id) return;
+  if (draft === (doc.body ?? '')) drafts.delete(doc.id);
+  else drafts.set(doc.id, { base: drafts.get(doc.id)?.base ?? doc.body ?? '', draft });
+};
+/** @param {MemoryDoc} doc */
+const dropDraft = (doc) => { if (doc.id) drafts.delete(doc.id); };
+
+// why: drafts do not survive tab close. Browserless imports have no window.
+if (typeof window !== 'undefined') window.addEventListener('beforeunload', (event) => {
+  if (drafts.size === 0) return;
+  event.preventDefault();
+  event.returnValue = '';
+});
+
 // One editable AGENTS.md doc. Keyed by doc.id so the instance (and its
 // in-progress draft) survives list refreshes; after a save the parent
 // re-fetches and doc.body matches the draft, so it reads as not-dirty.
 const MemoryDocCard = {
   /** @param {{ state: any, attrs: { doc: MemoryDoc } }} vnode */
   oninit(vnode) {
-    vnode.state.draft = vnode.attrs.doc.body ?? '';
+    const { doc } = vnode.attrs;
+    const stash = doc.id ? drafts.get(doc.id) : undefined;
+    vnode.state.draft = stash?.draft ?? doc.body ?? '';
     vnode.state.busy = false;
     vnode.state.uncertain = false;
-    vnode.state.msg = null;
+    // why the notice: a draft restored over a doc that changed meanwhile (an
+    // approved suggestion, an agent write) would replace that change on Save.
+    vnode.state.msg = stash && stash.base !== (doc.body ?? '')
+      ? { ok: false, text: 'This memory changed while your draft was open. Save replaces the newer text; Revert discards your draft.' }
+      : null;
     vnode.state.confirmDelete = false;
   },
   /** @param {{ attrs: { doc: MemoryDoc, send: Send, onChanged?: () => any }, state: any }} vnode */
@@ -297,6 +368,7 @@ const MemoryDocCard = {
 
     const save = async () => {
       if (ui.busy || ui.uncertain || !dirty) return;
+      const draft = drafts.get(doc.id ?? '');
       ui.busy = true; ui.msg = null; m.redraw();
       try {
         let r;
@@ -304,6 +376,7 @@ const MemoryDocCard = {
         catch { r = { ok: false, outcomeKnown: false }; }
         const unknown = r?.outcomeKnown === false;
         ui.uncertain = unknown;
+        if (r?.ok && drafts.get(doc.id ?? '') === draft) dropDraft(doc);
         ui.msg = r?.ok
           ? { ok: true, text: 'Saved.' }
           : { ok: false, text: mutationFailureCopy(r, {
@@ -325,6 +398,7 @@ const MemoryDocCard = {
 
     const del = async () => {
       if (ui.busy || ui.uncertain) return;
+      const draft = drafts.get(doc.id ?? '');
       ui.busy = true; ui.msg = null; m.redraw();
       try {
         let r;
@@ -332,6 +406,7 @@ const MemoryDocCard = {
         catch { r = { ok: false, outcomeKnown: false }; }
         const unknown = r?.outcomeKnown === false;
         ui.uncertain = unknown;
+        if (r?.ok && drafts.get(doc.id ?? '') === draft) dropDraft(doc);
         if (r?.ok || unknown) {
           const receipt = await onChanged?.();
           if (r?.ok) ui.uncertain = false;
@@ -362,11 +437,15 @@ const MemoryDocCard = {
       m('textarea.memory-editor', {
         value: ui.draft,
         spellcheck: false,
+        'aria-label': `${scopeLabel(doc)} memory`,
         // why: grow with content but cap so a long doc doesn't take over
         // the whole pane — the textarea scrolls past the cap.
         rows: Math.min(24, Math.max(5, lines + 1)),
         disabled: ui.busy || ui.uncertain,
-        oninput: (/** @type {{ target: HTMLTextAreaElement }} */ e) => { ui.draft = e.target.value; },
+        oninput: (/** @type {{ target: HTMLTextAreaElement }} */ e) => {
+          ui.draft = e.target.value;
+          stashDraft(doc, ui.draft);
+        },
       }),
       over ? m('p.memory-warn',
         `Over the ${ALWAYS_LOADED_LINE_BUDGET}-line always-loaded budget — trim it, or the loader truncates this scope.`) : null,
@@ -374,7 +453,7 @@ const MemoryDocCard = {
         m('button', { disabled: ui.busy || ui.uncertain || !dirty, onclick: save }, ui.busy ? '…' : 'Save'),
         dirty ? m('button.secondary', {
           disabled: ui.busy || ui.uncertain,
-          onclick: () => { ui.draft = doc.body ?? ''; ui.msg = null; },
+          onclick: () => { ui.draft = doc.body ?? ''; ui.msg = null; dropDraft(doc); },
         }, 'Revert') : null,
         m('.spacer'),
         ui.confirmDelete
@@ -385,7 +464,10 @@ const MemoryDocCard = {
             ])
           : m('button.linkish.danger-text', { disabled: ui.busy || ui.uncertain, onclick: () => { ui.confirmDelete = true; } }, 'Delete'),
       ]),
-      ui.msg ? m(`p.key-msg${ui.msg.ok ? '.ok' : '.err'}`, ui.msg.text) : null,
+      m('p.key-msg', {
+        role: 'status',
+        class: ui.msg ? (ui.msg.ok ? 'ok' : 'err') : '',
+      }, ui.msg ? ui.msg.text : null),
     ]);
   },
 };

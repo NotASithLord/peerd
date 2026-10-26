@@ -53,25 +53,39 @@ const until = (name, probe, ms = 30_000) => bounded(name, async () => {
   if (!result) throw new Error(`${name}: condition not reached`);
   return result;
 }, ms + 1000);
-const click = text => invoke(ctx.page, `function(text) {
-  const button = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === text && !b.disabled);
+// `within` scopes the match: the Discover app page reuses words such as
+// "Discover" (its back link) and "Open" that also appear on the rail and tiles.
+const click = (text, within = null) => invoke(ctx.page, `function(text, within) {
+  const scope = within ? document.querySelector(within) : document;
+  const button = scope && [...scope.querySelectorAll('button')].find(b => b.textContent.trim() === text && !b.disabled);
   if (!button) throw new Error('missing enabled button: ' + text);
   button.click();
   // Each caller awaits its actual outcome. Open can hide Home and suspend RAF.
   return true;
-}`, [text]);
+}`, [text, within]);
 const appTabs = () => bounded(stage, async () => (await (await fetch(`http://127.0.0.1:${ctx.port}/json/list`)).json())
   .filter(target => target.type === 'page' && target.url.startsWith(`chrome-extension://${ctx.sw.id}/engine-tabs/app-tab/`)));
 const screenshot = name => bounded(`capture ${name}`, async () => writeFileSync(join(output, `${name}.png`), await capturePage(ctx.page)));
 const screenshotReceipt = async name => {
   await evalIn(ctx.page, `(()=>{
-    const section = document.querySelector('section[aria-label="App address"]');
-    if (!section) throw new Error('App address receipt missing before capture');
-    section.scrollIntoView({block:'start',behavior:'instant'});
-    const rect = section.getBoundingClientRect();
-    if (rect.top < 0 || rect.bottom > innerHeight || rect.left < 0 || rect.right > innerWidth) throw new Error('App address receipt does not fit capture viewport');
+    const page = document.querySelector('.disc-page');
+    const panel = page?.querySelector('.disc-panel');
+    if (!panel) throw new Error('Share link page missing before capture');
+    page.scrollIntoView({block:'start',behavior:'instant'});
+    const rect = panel.getBoundingClientRect();
+    if (rect.top < 0 || rect.bottom > innerHeight || rect.left < 0 || rect.right > innerWidth) throw new Error('Share link panel does not fit capture viewport');
   })()`);
   await screenshot(name);
+};
+// The share row opens in place from "Paste link"; typing goes through the real input handler.
+const enterLink = async address => {
+  await until('Paste link available', () => evalIn(ctx.page, `[...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Paste link' && !b.disabled)`));
+  await click('Paste link');
+  await until('share link input visible', () => evalIn(ctx.page, `!!document.querySelector('input[aria-label="Share link"]')`));
+  await invoke(ctx.page, `function(address) { const input = document.querySelector('input[aria-label="Share link"]'); input.value = address; input.dispatchEvent(new Event('input', { bubbles: true })); }`, [address]);
+  // Input updates Mithril state immediately, but the disabled button changes on
+  // the next redraw. Await the actual control, not a guessed frame or delay.
+  await until('Check link enabled for entered link', () => invoke(ctx.page, `function(address) { return document.querySelector('input[aria-label="Share link"]').value === address && !document.querySelector('.disc-page') && [...document.querySelectorAll('.disc-start-form button')].some(b => b.textContent === 'Check link' && !b.disabled); }`, [address]));
 };
 
 // Keep the original failed phase/error: diagnostics must never become a retry
@@ -157,7 +171,7 @@ try {
       return true;
     })()`);
   }
-  await click('Enable peer network');
+  await click('Turn on');
   const receiver = await until('actual offscreen network active', async () => { const r = await rpc(ctx.page, { type: 'dweb/distributed/info' }); evidence.lastNetworkInfo = r; evidence.rendezvousTunnels = tunnels; return r?.running && r.did && r.rendezvous === 'up' ? r : null; });
   if (process.env.P2P_ACTIVATION_RACE === '1') {
     evidence.activationDemand = await evaluate(ctx.page, `(() => {
@@ -208,40 +222,47 @@ try {
   // before typing; its requestAnimationFrame-driven UI must be visible too.
   await bounded('foreground Home for user input', () => ctx.page.send('Page.bringToFront'));
   await until('Home visible for user input', () => evalIn(ctx.page, `document.visibilityState === 'visible'`));
-  await until('manual input visible', () => evalIn(ctx.page, `!!document.querySelector('input[aria-label="App address"]')`));
-  await invoke(ctx.page, `function(address) { const input = document.querySelector('input[aria-label="App address"]'); input.value = address; input.dispatchEvent(new Event('input', { bubbles: true })); }`, [published.address]);
-  // Input updates Mithril state immediately, but the disabled button changes on
-  // the next redraw. Await the actual control, not a guessed frame or delay.
-  await until('Inspect enabled for entered address', () => invoke(ctx.page, `function(address) { return document.querySelector('input[aria-label="App address"]').value === address && [...document.querySelectorAll('button')].some(b => b.textContent === 'Inspect App' && !b.disabled); }`, [published.address]));
-  await click('Inspect App');
-  await until('verified inspection rendered', () => evalIn(ctx.page, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Install and share' && !b.disabled)`));
-  const inspection = await evaluate(ctx.page, `document.querySelector('section[aria-label="App address"]').textContent`);
-  check('inspection binds exact signer hash and decoded size', inspection.includes(published.publisher) && inspection.includes(published.hash) && inspection.includes(`${published.decodedBytes} bytes in 1 file`), inspection);
+  await enterLink(published.address);
+  await click('Check link', '.disc-start-form');
+  await until('verified inspection rendered', () => evalIn(ctx.page, `[...document.querySelectorAll('.disc-page .disc-panel button')].some(b => b.textContent === 'Install and share' && !b.disabled)`));
+  await click('Technical details', '.disc-page');
+  await until('Technical details open', () => evalIn(ctx.page, `document.querySelector('.disc-page .disc-tech-toggle')?.getAttribute('aria-expanded') === 'true'`));
+  const inspection = await evaluate(ctx.page, `document.querySelector('.disc-page').textContent`);
+  check('inspection binds exact signer hash and decoded size', inspection.includes(published.publisher) && inspection.includes(published.hash) && inspection.includes(`${published.decodedBytes} bytes`), inspection);
   check('inspection does not install a user or peer catalog record', JSON.stringify(userApps((await call({ type: 'apps/list' })).apps)) === JSON.stringify(baselineIds));
+  // The bundle has no peerd.json, so an install gets the dwapp default: the peer network, nothing more.
+  const says = await evaluate(ctx.page, `(() => { const says = document.querySelector('.disc-page .disc-says');
+    return says && { chips: [...says.querySelectorAll('li')].map(chip => chip.textContent), text: says.textContent }; })()`);
+  check('The app says it reads the verified files of the inspected link', JSON.stringify(says?.chips) === '["Uses the peer network"]'
+    && says.text.includes('checked when peerd looked at it.'), says);
   const query = () => invoke(publisher, 'function(did) { return window.manualPublisher.query(did); }', [receiver.did]);
   const before = await query(); evidence.beforeInstallContent = before;
   check('inspection does not seed bytes (explicit negative response)', before?.t === 'NOMANIFEST' && before.hash === published.hash, before);
   check('inspection does not execute an App', (await appTabs()).length === baselineTabs.length);
   await screenshotReceipt('inspected');
-  await click('Install and share');
-  await until('install receipt rendered', () => evalIn(ctx.page, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Open installed App' && !b.disabled)`));
+  await click('Install and share', '.disc-page .disc-panel');
+  await until('install receipt rendered', () => evalIn(ctx.page, `[...document.querySelectorAll('.disc-page .disc-panel button')].some(b => b.textContent === 'Open' && !b.disabled)`));
   const catalog = await call({ type: 'apps/list' });
   const installed = catalog.apps.filter(app => app.dweb?.uri === published.uri && app.dweb?.hash === published.hash && app.dweb?.publisher === published.publisher);
   check('one exact installed catalog record', installed.length === 1 && userApps(catalog.apps).length === baselineIds.length + 1, installed);
+  check('the install records what its verified files ask of peerd, bound to their hash',
+    JSON.stringify(installed[0].dweb?.declared) === JSON.stringify({ hash: published.hash, dweb: true, instructions: false, observeAct: false }),
+    installed[0].dweb?.declared);
   evidence.installedAppId = installed[0].id;
   const after = await query();
   check('same content query positively observes installed seed', after?.t === 'MANIFEST' && after.hash === published.hash && after.manifest?.publisher === published.publisher, { type: after?.t, hash: after?.hash });
   check('Install and share does not execute', (await appTabs()).length === baselineTabs.length);
-  // Re-entering the exact address clears the previous receipt through the real
-  // input handler, so the next Open cannot be satisfied by stale installed DOM.
-  await invoke(ctx.page, `function(address) { const input = document.querySelector('input[aria-label="App address"]'); input.value = address; input.dispatchEvent(new Event('input', { bubbles: true })); }`, [published.address]);
-  await until('previous inspection cleared', () => evalIn(ctx.page, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Inspect App' && !b.disabled) && ![...document.querySelectorAll('button')].some(b => b.textContent === 'Open installed App' || b.textContent === 'Install and share')`));
-  await click('Inspect App');
-  await until('reinspection preserves Open', () => evalIn(ctx.page, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Open installed App' && !b.disabled) && ![...document.querySelectorAll('button')].some(b => b.textContent === 'Install and share')`));
+  // Back, then re-entering the exact link clears the previous receipt through
+  // the real input handler, so the next Open cannot be satisfied by stale DOM.
+  await click('Discover', '.disc-page');
+  await until('previous inspection cleared', () => evalIn(ctx.page, `!document.querySelector('.disc-page')`));
+  await enterLink(published.address);
+  await click('Check link', '.disc-start-form');
+  await until('reinspection preserves Open', () => evalIn(ctx.page, `[...document.querySelectorAll('.disc-page .disc-panel button')].some(b => b.textContent === 'Open' && !b.disabled) && ![...document.querySelectorAll('.disc-page button')].some(b => b.textContent === 'Install and share')`));
   check('reinspection creates no duplicate', (await call({ type: 'apps/list' })).apps.filter(app => app.dweb?.uri === published.uri).length === 1);
   check('no execution before explicit Open', (await appTabs()).length === baselineTabs.length);
   await screenshotReceipt('installed-before-open');
-  await click('Open installed App');
+  await click('Open', '.disc-page .disc-panel');
   const opened = await until('explicit Open creates App tab', async () => { const tabs = await appTabs(); return tabs.length === baselineTabs.length + 1 ? tabs : null; });
   check('explicit Open targets installed App', opened.some(tab => tab.url.includes(installed[0].id)), opened.map(tab => tab.url));
   check('packaged product bytes unchanged', (await digestTree(tree)).sha256 === originalDigest.sha256);
@@ -276,10 +297,10 @@ try {
       return { complete: true };
     });
     await failureDiagnostic('failureDom', () => evalIn(ctx.page, `(() => {
-      const section = document.querySelector('section[aria-label="App address"]');
+      const section = document.querySelector('.disc-home');
       return { visibility: document.visibilityState, focused: document.hasFocus(), readyState: document.readyState,
-        inputCount: document.querySelectorAll('input[aria-label="App address"]').length,
-        inputs: [...document.querySelectorAll('input[aria-label="App address"]')].slice(0, 3).map(input => ({ value: input.value.slice(0, 4096), disabled: input.disabled })),
+        inputCount: document.querySelectorAll('input[aria-label="Share link"]').length,
+        inputs: [...document.querySelectorAll('input[aria-label="Share link"]')].slice(0, 3).map(input => ({ value: input.value.slice(0, 4096), disabled: input.disabled })),
         buttons: [...(section || document).querySelectorAll('button')].slice(0, 24).map(button => ({ text: button.textContent.slice(0, 120), disabled: button.disabled })),
         sectionText: section?.textContent.slice(0, 3000) ?? null };
     })()`));

@@ -75,7 +75,7 @@ export const makeVaultAuthorityClient = ({
       || typeof offscreenUrl !== 'string' || typeof workerUrl !== 'string'
       || timeoutMs <= 0) throw new TypeError('vault-authority-client-config-invalid');
 
-  /** @type {null|{channelId:string,port:MessagePort,worker:Worker|null,lease:any,ready:Promise<void>,close:()=>void}} */
+  /** @type {null|{channelId:string,port:MessagePort,worker:Worker|null,lease:any,ready:Promise<void>,rejectReady:(cause:unknown)=>void,close:()=>void}} */
   let active = null;
   /** @type {Map<string,{resolve:(value:any)=>void,reject:(cause:unknown)=>void,dispatched:boolean,method:string,timer:ReturnType<typeof setTimeout>}>} */
   const pending = new Map();
@@ -96,6 +96,7 @@ export const makeVaultAuthorityClient = ({
     unlockedAt: 0,
     lockReason: /** @type {'idle'|'manual'|null} */ (null),
   };
+  const snapshot = () => Object.freeze({ ...cached });
   // why: advisory status can lag a lock or key mutation behind worker/storage
   // IO. Prepared network headers need a synchronous, host-only revocation
   // fence that cannot become valid again after unlock or host replacement.
@@ -126,7 +127,7 @@ export const makeVaultAuthorityClient = ({
   };
 
   const methodTimeoutMs = (/** @type {string} */ method) => Math.min(timeoutMs,
-    ['status', 'prfStatus', 'getSecret', 'listSecretNames'].includes(method)
+    /^(status|touch|prfStatus|getSecret|listSecretNames)$/.test(method)
       ? 15_000
       : ['boot', 'attemptResume'].includes(method)
         ? 30_000
@@ -144,8 +145,8 @@ export const makeVaultAuthorityClient = ({
     pending.clear();
   };
 
-  /** @param {string} code @param {string} message */
-  const mappedError = (code, message) => {
+  /** @param {string} code @param {string} [message] */
+  const mappedError = (code, message = code) => {
     const Type = errorTypes[code];
     return Type ? new Type(message) : new VaultAuthorityChannelError(message, code, true);
   };
@@ -206,6 +207,11 @@ export const makeVaultAuthorityClient = ({
       connectingLease = null;
     }
     if (!prior) return;
+    // why: retirement can win before READY. No call is dispatched yet, and
+    // every waiter must fail closed now rather than wait for the boot deadline.
+    prior.rejectReady(new VaultAuthorityChannelError(
+      errorMessage(cause), 'vault-authority-channel-lost', true,
+    ));
     rejectPending(cause);
     try { prior.port.close(); } catch { /* closed */ }
     try { prior.worker?.terminate(); } catch { /* stopped */ }
@@ -251,9 +257,12 @@ export const makeVaultAuthorityClient = ({
         resolveReady = resolve;
         rejectReady = reject;
       });
-      /** @type {{channelId:string,port:MessagePort,worker:Worker|null,lease:any,ready:Promise<void>,close:()=>void}} */
+      // Retirement may occur while window-client discovery still awaits IO.
+      // Observe rejection immediately; awaiting ready below retains the error.
+      void ready.catch(() => {});
+      /** @type {{channelId:string,port:MessagePort,worker:Worker|null,lease:any,ready:Promise<void>,rejectReady:(cause:unknown)=>void,close:()=>void}} */
       const connection = {
-        channelId, port: port1, worker, lease, ready,
+        channelId, port: port1, worker, lease, ready, rejectReady,
         close: () => retire('vault authority channel closed', connection),
       };
       active = connection;
@@ -426,7 +435,7 @@ export const makeVaultAuthorityClient = ({
 
   const refreshStatus = async () => {
     cached = { ...cached, ...(await call('status')) };
-    return Object.freeze({ ...cached });
+    return snapshot();
   };
   const invokeAndRefresh = async (/** @type {string} */ method, /** @type {unknown} */ args) => {
     try {
@@ -443,16 +452,16 @@ export const makeVaultAuthorityClient = ({
   };
   const attemptResume = async () => {
     const value = await call('attemptResume');
-    return value?.authorityStatus ? value.result === true : value === true;
+    return (value?.authorityStatus ? value.result : value) === true;
   };
   const boot = async (/** @type {number} */ interval) => {
     if (!Number.isFinite(interval) || interval < 0) {
-      throw mappedError('vault-authority-arguments-invalid', 'vault-authority-arguments-invalid');
+      throw mappedError('vault-authority-arguments-invalid');
     }
     autoLockMs = interval;
     const value = await call('boot', interval);
     return value?.authorityStatus
-      ? { ...value.result, status: Object.freeze({ ...cached }) }
+      ? { ...value.result, status: snapshot() }
       : value;
   };
   const subscribe = (/** @type {(event:any)=>void} */ listener) => {
@@ -462,7 +471,8 @@ export const makeVaultAuthorityClient = ({
 
   return Object.freeze({
     status: refreshStatus,
-    snapshot: () => Object.freeze({ ...cached }),
+    snapshot,
+    touch: () => { if (active && captureRequestAuthority()()) dispatch(active, 'touch', null).catch(() => {}); },
     boot,
     initialize: (/** @type {string} */ passphrase) => invokeAndRefresh('initialize', passphrase),
     initializeWithPrfOnly: (/** @type {any} */ value) => invokeAndRefresh('initializeWithPrfOnly', value),
@@ -485,7 +495,7 @@ export const makeVaultAuthorityClient = ({
     attemptResume,
     setAutoLockMs: async (/** @type {number} */ value) => {
       if (!Number.isFinite(value) || value < 0) {
-        throw mappedError('vault-authority-arguments-invalid', 'vault-authority-arguments-invalid');
+        throw mappedError('vault-authority-arguments-invalid');
       }
       autoLockMs = value;
       if (active || connecting) await invokeAndRefresh('setAutoLockMs', value);

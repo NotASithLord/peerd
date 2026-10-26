@@ -28,7 +28,7 @@ export const createKernelDenylistPolicy = ({
   });
   /** @type {Promise<{ok:boolean,error?:string}>|null} */ let loading = null;
   /** @type {Record<string, string[]>} */ let categories = {};
-  let available = false;
+  let loaded = false;
   const ready = () => {
     loading ??= (async () => {
       try {
@@ -44,10 +44,10 @@ export const createKernelDenylistPolicy = ({
             .map(([name, value]) => [name, /** @type {unknown[]} */ (value)
               .filter((item) => typeof item === 'string')]),
         ));
-        available = true;
+        loaded = true;
         return Object.freeze({ ok: true });
       } catch (cause) {
-        available = false;
+        loaded = false;
         return Object.freeze({
           ok: false,
           error: cause instanceof Error ? cause.message : String(cause),
@@ -56,7 +56,7 @@ export const createKernelDenylistPolicy = ({
     })();
     return loading;
   };
-  const blocks = (/** @type {string} */ hostname) => !available
+  const blocks = (/** @type {string} */ hostname) => !loaded
     || matchesDenylist(hostname, store.patterns());
   const snapshot = async () => {
     const status = await ready();
@@ -65,27 +65,23 @@ export const createKernelDenylistPolicy = ({
     return Object.freeze({
       ok: true,
       patterns: Object.freeze([...store.patterns()]),
-      added: Object.freeze([...overlay.added]),
-      disabled: Object.freeze([...overlay.disabled]),
+      added: Object.freeze(overlay.added),
+      disabled: Object.freeze(overlay.disabled),
       categories,
     });
   };
+  const edit = (/** @type {'add'|'remove'} */ method) => async (/** @type {unknown} */ pattern) => {
+    const status = await ready();
+    return status.ok ? store[method](pattern) : status;
+  };
   return Object.freeze({
     ready,
-    isReady: () => available,
+    isReady: () => loaded,
     blocks,
     patterns: store.patterns,
     snapshot,
-    add: async (/** @type {unknown} */ pattern) => {
-      const status = await ready();
-      if (!status.ok) return status;
-      return store.add(pattern);
-    },
-    remove: async (/** @type {unknown} */ pattern) => {
-      const status = await ready();
-      if (!status.ok) return status;
-      return store.remove(pattern);
-    },
+    add: edit('add'),
+    remove: edit('remove'),
   });
 };
 
@@ -96,15 +92,17 @@ export const createKernelDenylistPolicy = ({
  * @param {{append:(entry:{type:string,details?:Record<string,any>})=>Promise<any>}} deps.auditLog
  */
 export const makeKernelDenylistRoutes = ({ policy, networkCustody, auditLog }) => {
-  const edit = (/** @type {'add'|'remove'} */ operation, /** @type {string} */ auditType) =>
+  const edit = (/** @type {'add'|'remove'} */ method, /** @type {string} */ type) =>
     async (/** @type {{pattern?:unknown}} */ { pattern } = {}) => {
-      const result = await policy[operation](pattern);
+      const result = await policy[method](pattern);
       if (!result.ok) return result;
       void networkCustody.sync();
+      const snapshot = await policy.snapshot();
       auditLog.append({
-        type: auditType, details: { pattern: result.pattern, seed: result.seed },
+        type, details: { pattern: result.pattern, seed: result.seed,
+          patterns: result.patterns },
       }).catch(() => {});
-      return policy.snapshot();
+      return snapshot;
     };
   return Object.freeze({
     'denylist/add': edit('add', 'denylist_added'),

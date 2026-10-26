@@ -49,7 +49,7 @@ export const assertVaultKernelGraph = (paths) => {
   // why: the native host shares a pure actor wire contract, not its Worker
   // implementation. Authority adapters named controller-turn are native too.
   const forbidden = paths.filter((path) =>
-    (path.startsWith('offscreen/') && path !== 'offscreen/actor-worker-protocol.js')
+    path.startsWith('offscreen/')
     || path.endsWith('/agent-loop.js'));
   if (forbidden.length > 0) {
     throw new Error(`vault kernel graph crossed semantic host boundary: ${forbidden.join(', ')}`);

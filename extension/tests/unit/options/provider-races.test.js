@@ -15,6 +15,29 @@ const settle = async () => {
 };
 
 describe('provider settings request ordering', () => {
+  it('keeps a cold actor neutral but retains the hint for actual and unknown failures', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const state = {
+      providers: { current: 'anthropic', hasKey: true, model: 'claude' },
+      settings: { providerName: 'anthropic', providerModel: 'claude' },
+      capabilities: { actorExecution: { status: 'not-started' }, localWebGpuHost: { status: 'unsupported' } },
+    };
+    const send = async (/** @type {any} */ message) => message.type === 'provider/status'
+      ? { ok: true, providers: [{ name: 'anthropic', label: 'Anthropic', defaultModel: 'claude', hasKey: true }] }
+      : { ok: true, options: [] };
+    m.mount(root, { view: () => m(ProvidersSection, { state, send }) });
+    try {
+      await settle();
+      for (const status of ['not-started', 'available', 'temporarily_unavailable', 'unsupported', 'unknown']) {
+        state.capabilities.actorExecution.status = status;
+        m.redraw.sync();
+        const hint = root.querySelector('#runner-model-status');
+        expect(!!hint).toBe(!['not-started', 'available'].includes(status));
+        if (status === 'temporarily_unavailable') expect(hint?.textContent).toContain('Actor work is paused.');
+      }
+    } finally { m.mount(root, null); root.remove(); }
+  });
   it('shows Retry when the initial provider status request fails', async () => {
     const root = document.createElement('div');
     document.body.appendChild(root);
@@ -476,6 +499,192 @@ describe('provider settings request ordering', () => {
       expect(saves[1]).toEqual(saves[0]);
       expect(statusCalls).toBe(2);
       expect(root.textContent).toContain('Key saved');
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
+  // why: the kernel admits one provider/test at a time (kernel-feature-policy
+  // gives the route concurrent: 1) and refuses a second call with a retryable
+  // feature-route-concurrency-exhausted. The stub models that gate, so the
+  // post-save auto-test proves it does not race a keyless daemon re-probe.
+  it('auto-tests a saved key without spending the test slot on a daemon re-probe', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const state = {
+      providers: { current: 'anthropic', hasKey: false, model: 'claude' },
+      settings: { providerName: '', providerModel: '' },
+      capabilities: { localWebGpuHost: { status: 'unsupported' } },
+    };
+    let hasKey = false;
+    let probes = 0;
+    let inFlight = 0;
+    /** @type {string[]} */ const tested = [];
+    const send = async (/** @type {any} */ msg) => {
+      if (msg.type === 'provider/status') return { ok: true, providers: [
+        { name: 'anthropic', label: 'Anthropic', defaultModel: 'claude', hasKey, keyless: false },
+        { name: 'ollama', label: 'Ollama', defaultModel: 'qwen3:8b', hasKey: true, keyless: true, liveModels: true },
+      ] };
+      if (msg.type === 'provider/setKey') { hasKey = true; return { ok: true }; }
+      if (msg.type === 'provider/test') {
+        if (inFlight > 0) {
+          return { ok: false, code: 'feature-route-concurrency-exhausted', retryable: true, outcomeKnown: true };
+        }
+        tested.push(msg.provider);
+        if (msg.provider !== 'ollama') return { ok: true };
+        // The mount probe answers at once; a later re-probe stays in flight.
+        probes += 1;
+        if (probes === 1) return { ok: false, error: 'unreachable' };
+        inFlight += 1;
+        return new Promise(() => {});
+      }
+      if (msg.type === 'models/options') return { ok: true, options: [] };
+      return { ok: false };
+    };
+    m.mount(root, { view: () => m(ProvidersSection, { state, send }) });
+    try {
+      await settle();
+      expect(tested).toEqual(['ollama']);
+      const input = root.querySelector('.provider-card-form input');
+      if (!(input instanceof HTMLInputElement)) throw new Error('key input missing');
+      input.value = 'sk-ant-abcdefgh';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      root.querySelector('.provider-card-form')?.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await settle(); await settle();
+      expect(tested).toContain('anthropic');
+      expect(root.textContent).toContain('the key works');
+      expect(root.textContent?.includes('reach the provider')).toBe(false);
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
+  it('names a busy provider test slot instead of a reachability failure', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const state = {
+      providers: { current: 'anthropic', hasKey: true, model: 'claude' },
+      settings: { providerName: 'anthropic', providerModel: '' },
+      capabilities: { localWebGpuHost: { status: 'unsupported' } },
+    };
+    const send = async (/** @type {any} */ msg) => {
+      if (msg.type === 'provider/status') return { ok: true, providers: [
+        { name: 'anthropic', label: 'Anthropic', defaultModel: 'claude', hasKey: true, keyless: false },
+      ] };
+      if (msg.type === 'provider/test') {
+        return { ok: false, code: 'feature-route-concurrency-exhausted', retryable: true, outcomeKnown: true };
+      }
+      if (msg.type === 'models/options') return { ok: true, options: [] };
+      return { ok: false };
+    };
+    m.mount(root, { view: () => m(ProvidersSection, { state, send }) });
+    try {
+      await settle();
+      const testButton = Array.from(root.querySelectorAll('button')).find((button) => button.textContent === 'Test');
+      if (!(testButton instanceof HTMLButtonElement)) throw new Error('Test button missing');
+      testButton.click();
+      await settle();
+      expect(root.textContent).toContain('Another provider check is running. Test again in a moment.');
+      expect(root.textContent?.includes('reach the provider')).toBe(false);
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
+  // why: the test route reports an answered request as http-<status>. Only a
+  // transport failure may read as "could not reach"; an answer names its status.
+  it('names the provider answer status instead of a reachability failure', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const state = {
+      providers: { current: 'anthropic', hasKey: true, model: 'claude' },
+      settings: { providerName: 'anthropic', providerModel: '' },
+      capabilities: { localWebGpuHost: { status: 'unsupported' } },
+    };
+    let error = '';
+    const send = async (/** @type {any} */ msg) => {
+      if (msg.type === 'provider/status') return { ok: true, providers: [
+        { name: 'anthropic', label: 'Anthropic', defaultModel: 'claude', hasKey: true, keyless: false },
+      ] };
+      if (msg.type === 'provider/test') return { ok: false, error };
+      if (msg.type === 'models/options') return { ok: true, options: [] };
+      return { ok: false };
+    };
+    const clickTest = async () => {
+      const testButton = Array.from(root.querySelectorAll('button')).find((button) => button.textContent === 'Test');
+      if (!(testButton instanceof HTMLButtonElement)) throw new Error(`Test button missing before ${error}`);
+      testButton.click();
+      await settle();
+    };
+    m.mount(root, { view: () => m(ProvidersSection, { state, send }) });
+    try {
+      await settle();
+      const answers = [
+        ['http-429', 'The provider refused the request (429). Check your plan, credit or rate limit, then test again.'],
+        ['http-402', 'The provider refused the request (402).'],
+        ['http-403', 'The provider refused this key (403). Check its permissions and model access.'],
+        ['http-529', 'The provider is having problems (529). Try again later.'],
+        ['http-400', 'The provider rejected the test request (400). Check your account on the provider’s site, then test again.'],
+      ];
+      for (const [code, text] of answers) {
+        error = code;
+        await clickTest();
+        expect(root.textContent).toContain(text);
+        expect(root.textContent?.includes('reach the provider')).toBe(false);
+      }
+      error = 'model-egress-connect-failed';
+      await clickTest();
+      expect(root.textContent).toContain('Couldn’t reach the provider.');
+    } finally {
+      m.mount(root, null);
+      root.remove();
+    }
+  });
+
+  // why: OpenRouter's catalog is public (200 for any key), so only the one-token
+  // provider/test can tell a rejected key apart from a working one.
+  it('verifies an OpenRouter key with the provider test after a save', async () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const state = {
+      providers: { current: 'openrouter', hasKey: false, model: 'openrouter/auto' },
+      settings: { providerName: '', providerModel: '', openrouterModels: [] },
+      capabilities: { localWebGpuHost: { status: 'unsupported' } },
+    };
+    let hasKey = false;
+    /** @type {string[]} */ const tested = [];
+    const send = async (/** @type {any} */ msg) => {
+      if (msg.type === 'provider/status') return { ok: true, providers: [
+        { name: 'openrouter', label: 'OpenRouter', defaultModel: 'openrouter/auto', hasKey, keyless: false },
+      ] };
+      if (msg.type === 'provider/setKey') { hasKey = true; return { ok: true }; }
+      if (msg.type === 'provider/test') { tested.push(msg.provider); return { ok: false, error: 'invalid-key' }; }
+      if (msg.type === 'openrouter/models') {
+        return { ok: true, models: [{ model: 'z-ai/glm-5.1', label: 'GLM 5.1' }], popular: ['z-ai/glm-5.1'] };
+      }
+      if (msg.type === 'models/options') return { ok: true, options: [] };
+      return { ok: false };
+    };
+    m.mount(root, { view: () => m(ProvidersSection, { state, send }) });
+    try {
+      await settle();
+      const input = root.querySelector('.provider-card-form input');
+      if (!(input instanceof HTMLInputElement)) throw new Error('key input missing');
+      input.value = 'sk-or-v1-abcdefgh';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      root.querySelector('.provider-card-form')?.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await settle(); await settle();
+      expect(tested).toEqual(['openrouter']);
+      expect(root.textContent).toContain('Provider rejected the key (401). Double-check it.');
+      expect(root.textContent?.includes('Verifying key')).toBe(false);
+      expect(root.textContent).toContain('available on OpenRouter');
     } finally {
       m.mount(root, null);
       root.remove();

@@ -134,6 +134,7 @@ describe('ModeSelector (Plan/Act + confirm toggle)', () => {
     try {
       const confirm = /** @type {HTMLButtonElement} */ (need(root, '.planact-confirm'));
       expect(confirm.textContent).toBe('Confirm: on');
+      expect(confirm.title).toBe('Confirm actions: ON - asks when required. Reads and quick compute can run without asking.');
       expect(confirm.getAttribute('aria-pressed')).toBe('true');
       expect(confirm.disabled).toBe(false);
       confirm.click();

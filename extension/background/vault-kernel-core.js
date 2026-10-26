@@ -191,8 +191,7 @@ export const buildVaultKernelState = ({
     capabilities: {
       ...runtimeCapabilities,
       actorExecution: actorIsolation ?? {
-        status: 'temporarily_unavailable', host: actorHost,
-        reason: 'controller-not-ready', retryable: true,
+        status: 'not-started', host: actorHost, reason: null, retryable: false,
       },
     },
     settings: { ...settings, vaultAutoLockMs: autoLockMs },
@@ -370,7 +369,7 @@ export const makeVaultKernelRoutes = ({ ready, deps }) => {
  * rejects after partial storage work. Failed lock uses cached authority to
  * avoid reacquiring its retiring host. Reconciliation preserves the route error.
  *
- * @param {{routes:Record<string,(message?:any)=>Promise<any>>,posture:any,vault:any,pushState:()=>any}} input
+ * @param {{routes:Record<string,(message?:any)=>Promise<any>>,posture:any,vault:any,pushState:(authority?:any)=>any}} input
  */
 export const makeIndexedVaultRoutes = ({ routes, posture, vault, pushState }) =>
   Object.freeze(Object.fromEntries(Object.entries(routes).map(([name, handler]) => [
@@ -391,9 +390,13 @@ export const makeIndexedVaultRoutes = ({ routes, posture, vault, pushState }) =>
         }
         return result;
       } catch (cause) {
-        try { await posture.write(name === 'vault/lock' ? vault.snapshot() : await vault.status()); }
+        let authority;
+        try {
+          authority = name === 'vault/lock' ? vault.snapshot() : await vault.status();
+          await posture.write(authority);
+        }
         catch (error) { console.error('[kernel] vault posture reconciliation failed', error); }
-        try { await Promise.resolve(pushState()); }
+        try { await Promise.resolve(pushState(name === 'vault/lock' && authority?.locked ? authority : undefined)); }
         catch (error) { console.error('[kernel] vault state reconciliation failed', error); }
         throw cause;
       }

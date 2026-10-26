@@ -60,7 +60,7 @@ import {
 import { AGENT_PROGRAM, isExecutionDescription } from '/shared/execution-protocol.js';
 import { originOf } from '/shared/url-origin.js';
 import { createActorModelEgress } from './actor-model-egress.js';
-import { ACTOR_WORKER_PROTOCOL } from './actor-worker-protocol.js';
+import { ACTOR_WORKER_PROTOCOL } from '/shared/actor-worker-protocol.js';
 import { nestedActorProgramCallId } from '/shared/actor-channel-protocol.js';
 import { normalizeSemanticToolFailure } from '/shared/semantic-tool-failure.js';
 
@@ -1038,9 +1038,10 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           const siteClientAuthority = Object.freeze({
             readStoredClient: (/** @type {string} */ origin) =>
               request('site-client-read-request', { origin }),
-            runStoredClient: (/** @type {string} */ origin, /** @type {string} */ code,
-              /** @type {number} */ timeoutMs) =>
-              request('site-client-run-request', { origin, code, timeoutMs }),
+            runStoredClient: (/** @type {string} */ origin, /** @type {string|undefined} */ code,
+              /** @type {number} */ timeoutMs, /** @type {any} */ runOptions = {}) =>
+              request('site-client-run-request', { origin, ...(code === undefined ? {} : { code }), timeoutMs,
+                ...Object.fromEntries(Object.entries(runOptions).map(([key, value]) => [key === 'operation' ? 'clientOperation' : key, value])) }),
             commitConfirmedClient: (/** @type {string} */ origin) =>
               request('site-client-commit-request', {
                 origin,
@@ -1051,6 +1052,8 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
                 ...(call.args?.auth !== undefined ? { auth: call.args.auth } : {}),
                 ...(call.args?.deriver !== undefined ? { deriver: call.args.deriver } : {}),
                 ...(typeof call.args?.body === 'string' ? { body: call.args.body } : {}),
+                  ...(call.args?.operations !== undefined ? { operations: call.args.operations } : {}),
+                  ...(call.args?.validationCases !== undefined ? { validationCases: call.args.validationCases } : {}),
               }),
             startOwnedCapture: () => request('site-client-capture-start-request'),
             stopOwnedCapture: () => request('site-client-capture-stop-request'),

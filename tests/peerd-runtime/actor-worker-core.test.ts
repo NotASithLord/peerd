@@ -1,5 +1,6 @@
 // Pure core of an offscreen BOUND-actor loop.
 import { describe, test, expect } from 'bun:test';
+import { runUserTurn } from '../../extension/peerd-runtime/loop/agent-loop.js';
 import { runActorLoop, makeInMemorySessions, makeActorSummaryFence } from '../../extension/peerd-runtime/actor/actor-worker-core.js';
 
 describe('runActorLoop', () => {
@@ -58,6 +59,56 @@ describe('runActorLoop', () => {
     expect(out.finalText).toBe('');
     expect(out.error).toBe('vm-wedged');
   });
+
+  test.each(['', 'The command starts now.'])(
+    'keeps the real unknown tool transcript after a thrown turn with preamble %j',
+    async (preamble) => {
+      const command = "printf x >> '/home/user/counter'; exit 3";
+      const input = { cmd: command, timeoutMs: 30_000 };
+      const sessions = makeInMemorySessions({ sessionId: 'act-1', messages: [
+        { id: 'prior', role: 'assistant', content: 'PRIOR REPLY' },
+      ] });
+      let models = 0;
+      const dispatches: any[] = [];
+      const out = await runActorLoop({
+        runUserTurn, sessions, getSystemPrompt: () => 'S', tools: [],
+        callModel: async function* () {
+          models += 1;
+          if (preamble) yield { type: 'text-delta', text: preamble };
+          yield { type: 'tool-use-start', id: 'append-exit', name: 'vm_boot' };
+          yield { type: 'tool-use-delta', id: 'append-exit', partialJson: JSON.stringify(input) };
+          yield { type: 'tool-use-stop', id: 'append-exit' };
+          yield { type: 'message-stop', stopReason: 'tool_use' };
+        },
+        toolDispatch: async (call: any) => {
+          dispatches.push(call);
+          return { ok: false, error: 'The host outcome is unknown.', outcomeKnown: false, retryable: false };
+        },
+      }, { sessionId: 'act-1', userText: 'Run the exact command.' });
+      expect(models).toBe(1);
+      expect(dispatches).toEqual([{ id: 'append-exit', name: 'vm_boot', args: input }]);
+      expect(out.error).toContain('unknown');
+      expect(out.stopReason).toBe('error');
+      expect(out.newMessages.some((message) => message.id === 'prior')).toBe(false);
+      expect(out.newMessages.flatMap((message) => message.toolUses ?? [])).toEqual([
+        { id: 'append-exit', name: 'vm_boot', input },
+      ]);
+      expect(out.newMessages.flatMap((message) => message.toolResults ?? [])).toEqual([
+        expect.objectContaining({ tool_use_id: 'append-exit', is_error: true, outcomeKnown: false, retryable: false }),
+      ]);
+    },
+  );
+
+  test.each([new TypeError('ordinary failure'), new DOMException('Stopped', 'AbortError')])(
+    'rethrows %s without changing its identity', async (failure) => {
+      const sessions = makeInMemorySessions({ sessionId: 'act-1' });
+      await expect(runActorLoop({
+        runUserTurn: async function* () { throw failure; }, sessions,
+        callModel: async function* () {}, toolDispatch: async () => ({}),
+        getSystemPrompt: () => 'S', tools: [],
+      }, { sessionId: 'act-1', userText: 'Run.' })).rejects.toBe(failure);
+    },
+  );
 
   // The unification: a REASONING actor is a tool-less actor. runActorLoop with
   // tools:[] and a loop that never dispatches drives it exactly like the old

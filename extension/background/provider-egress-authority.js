@@ -12,6 +12,7 @@ import {
 import {
   cancelBestEffort, readBoundedResponseBytes, ResponseTooLargeError,
 } from '/shared/abort.js';
+import { withDeadline } from '/shared/cold-util.js';
 
 const ALLOWED_RESPONSE_HEADERS = Object.freeze([
   'content-type', 'retry-after', 'anthropic-ratelimit-input-tokens-reset',
@@ -113,17 +114,19 @@ const responseProjection = (response) => ({
 /**
  * @param {Object} deps
  * @param {(resource:string|URL|Request,init?:RequestInit)=>Promise<Response>} deps.safeFetch
- * @param {{getSecret:(name:string)=>Promise<string|null>}} deps.vault
+ * @param {{getSecret:(name:string)=>Promise<string|null>,touch?:()=>void,captureRequestAuthority?:()=>()=>boolean}} deps.vault
  * @param {{get:()=>Record<string,any>}} deps.settingsStore
  * @param {{open:(request:any,owner:object,signal?:AbortSignal)=>Promise<string>,
  *   read:(streamId:string,owner:object)=>Promise<any>,
  *   cancel:(streamId:string,owner:object)=>Promise<void>,
  *   closeOwner:(owner:object)=>Promise<void>,activeStreams?:()=>number}} [deps.localModelAuthority]
  * @param {()=>string} [deps.newId]
+ * @param {()=>number} [deps.now]
+ * @param {number} [deps.probeTimeoutMs]
  */
 export const createProviderEgressAuthority = ({
   safeFetch, vault, settingsStore, localModelAuthority,
-  newId = () => crypto.randomUUID(),
+  newId = () => crypto.randomUUID(), now = Date.now, probeTimeoutMs = 10_000,
 }) => {
   if (typeof safeFetch !== 'function' || typeof vault?.getSecret !== 'function'
       || typeof settingsStore?.get !== 'function') {
@@ -137,6 +140,8 @@ export const createProviderEgressAuthority = ({
   const pendingByOwner = new Map();
   /** @type {WeakSet<object>} */
   const retiredOwners = new WeakSet();
+  /** @type {{until:number,current:()=>boolean,reply:any}|null} */
+  let catalog = null;
   const closeStream = (/** @type {string} */ streamId) => {
     const entry = streams.get(streamId);
     if (!entry) return;
@@ -245,6 +250,7 @@ export const createProviderEgressAuthority = ({
       releaseOwnerOperation(operation);
       return knownFailure('model-egress-credential-missing');
     }
+    vault.touch?.();
     const { abort, unlink } = operation;
     let response;
     const connectTimer = setTimeout(() => abort.abort('model-egress-connect-timeout'), policy.connectMs);
@@ -371,6 +377,7 @@ export const createProviderEgressAuthority = ({
     if (retiredOwners.has(grant.owner) || grant.signal?.aborted) {
       return knownFailure('local-model-generation-aborted');
     }
+    vault.touch?.();
     try {
       const streamId = await localModelAuthority.open({
         messages: value.messages,
@@ -448,59 +455,50 @@ export const createProviderEgressAuthority = ({
     if (!url) return { ok: true, outcomeKnown: true, value: null };
     const operation = beginOwnerOperation(grant.owner, grant.signal);
     if (!operation) return knownFailure('model-egress-aborted');
-    let credential = null;
-    try { credential = await credentialFor(policy); }
-    catch {
-      releaseOwnerOperation(operation);
-      return knownFailure('model-egress-credential-unavailable');
-    }
-    if (!ownerOperationLive(operation)) {
-      releaseOwnerOperation(operation);
-      return knownFailure('model-egress-aborted');
-    }
-    const headers = providerEgressHeaders(policy, credential);
-    if (!headers && policy.credential) {
-      releaseOwnerOperation(operation);
-      return knownFailure('model-egress-credential-missing');
-    }
-    const requestHeaders = headers ?? {};
-    const init = kind === 'context' && providerId === 'ollama'
-      ? { method: 'POST', headers: requestHeaders,
-        body: JSON.stringify({ model: modelId }), signal: operation.abort.signal }
-      : { method: 'GET', headers: requestHeaders, signal: operation.abort.signal };
-    let response;
-    try { response = await safeFetch(url, init); }
-    catch {
-      const aborted = !ownerOperationLive(operation);
-      releaseOwnerOperation(operation);
-      // why: metadata reads cannot start inference or mutate a target. Their
-      // failure must leave the controller free to use its static model window.
-      return aborted ? knownFailure('model-egress-aborted') : knownFailure('model-egress-probe-failed');
-    }
-    if (!ownerOperationLive(operation)) {
-      cancelBestEffort(response.body, 'model-egress-owner-retired');
-      releaseOwnerOperation(operation);
-      return knownFailure('model-egress-aborted');
-    }
-    const limit = Math.min(policy.responseBytes, 4 * 1024 * 1024);
-    let bytes;
+    let phase = 'credential';
     try {
-      bytes = await readBoundedResponseBytes(response, limit, {
-        signal: operation.abort.signal,
+      // why: a new worker has no cache. Keep one bounded catalog in the host,
+      // but never let it outlive its vault credentials or bypass an owner grant.
+      if (providerId === 'openrouter' && catalog && catalog.until > now() && catalog.current()) return structuredClone(catalog.reply);
+      const current = vault.captureRequestAuthority?.() ?? (() => false);
+      return await withDeadline(async () => {
+        const credential = await credentialFor(policy);
+        if (!ownerOperationLive(operation)) return knownFailure('model-egress-aborted');
+        const headers = providerEgressHeaders(policy, credential);
+        if (!headers && policy.credential) return knownFailure('model-egress-credential-missing');
+        phase = 'connect';
+        const response = await safeFetch(url, kind === 'context' && providerId === 'ollama'
+          ? { method: 'POST', headers: headers ?? {}, body: JSON.stringify({ model: modelId }), signal: operation.abort.signal }
+          : { method: 'GET', headers: headers ?? {}, signal: operation.abort.signal });
+        if (!ownerOperationLive(operation)) {
+          cancelBestEffort(response.body, 'model-egress-owner-retired');
+          return knownFailure('model-egress-aborted');
+        }
+        phase = 'read';
+        const bytes = await readBoundedResponseBytes(response, Math.min(policy.responseBytes, 4 * 1024 * 1024), {
+          signal: operation.abort.signal,
+        });
+        if (!ownerOperationLive(operation)) return knownFailure('model-egress-aborted');
+        const reply = { ok: true, outcomeKnown: true, value: { ...responseProjection(response), body: bytes } };
+        if (providerId === 'openrouter' && response.ok && current()) {
+          try {
+            if (Array.isArray(JSON.parse(new TextDecoder().decode(bytes))?.data)) {
+              catalog = { until: now() + 5 * 60_000, current, reply: structuredClone(reply) };
+            }
+          } catch { /* a malformed catalog must retry on the next read */ }
+        }
+        return reply;
+      }, probeTimeoutMs, () => {
+        operation.abort.abort('model-egress-probe-timeout');
+        return new DOMException('Model metadata read timed out.', 'TimeoutError');
       });
     } catch (cause) {
-      const aborted = !ownerOperationLive(operation);
-      releaseOwnerOperation(operation);
-      return aborted ? knownFailure('model-egress-aborted')
-        : cause instanceof ResponseTooLargeError
-          ? knownFailure('model-egress-probe-response-too-large')
-        : knownFailure('model-egress-probe-read-failed');
-    }
-    releaseOwnerOperation(operation);
-    return {
-      ok: true, outcomeKnown: true,
-      value: { ...responseProjection(response), body: bytes },
-    };
+      // why: metadata failure must leave the static window available.
+      return knownFailure(!ownerOperationLive(operation) && operation.abort.signal.reason !== 'model-egress-probe-timeout'
+        ? 'model-egress-aborted' : phase === 'credential' ? 'model-egress-credential-unavailable'
+        : cause instanceof ResponseTooLargeError ? 'model-egress-probe-response-too-large'
+          : phase === 'read' ? 'model-egress-probe-read-failed' : 'model-egress-probe-failed');
+    } finally { releaseOwnerOperation(operation); }
   };
 
   return Object.freeze({

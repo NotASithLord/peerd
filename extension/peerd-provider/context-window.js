@@ -46,6 +46,7 @@ export const DEFAULT_CONTEXT_WINDOW = 128_000;
 //                 Sonnet 4/4.5, which peerd neither ships nor opts into.)
 //                 The live Models API value (resolveContextWindow's `live`)
 //                 is authoritative and overrides this snapshot.
+//   OpenAI      - platform.openai.com/docs/models (GPT-5.x: input cap)
 //   OpenRouter  — openrouter.ai/models (context_length)
 //   Ollama      — model cards; the EFFECTIVE window is the user's num_ctx,
 //                 so these are nominal maxima — a live value wins.
@@ -71,6 +72,21 @@ export const DEFAULT_CONTEXT_WINDOWS = Object.freeze({
   'anthropic/claude-haiku-4.5':         200_000,
   'google/gemini-2.0-flash':          1_048_576,
   'meta-llama/llama-3.3-70b-instruct':  131_072,
+
+  // ---- OpenAI (native adapter; bare model ids) ----
+  // Source: platform.openai.com/docs/models. Dated snapshots and ids without a
+  // confident public number stay unknown.
+  'gpt-4o':         128_000,
+  'gpt-4o-mini':    128_000,
+  'o4-mini':        200_000,
+  'gpt-4.1':      1_047_576,
+  'gpt-4.1-mini': 1_047_576,
+  // why: the INPUT cap, not the 400K total. The API refuses input above 272K,
+  // and a 400K entry would put the trim trigger at 300K, past that cap, while
+  // a known window also turns off the message-count backstop.
+  'gpt-5':          272_000,
+  'gpt-5-mini':     272_000,
+  'gpt-5.1':        272_000,
 
   // ---- Z.ai GLM (native adapter; bare model ids) ----
   // Source: docs.z.ai/guides/llm/glm-5.2 — GLM-5.2 ships a 1M lossless context;

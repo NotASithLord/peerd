@@ -236,6 +236,9 @@ export { describeLandingStop, landingStopCard, originPhrase } from './actor/orig
 // the two-tier store, and the capture digester. See site-clients/index.js.
 export {
   normalizeSiteOrigin, validateDossier, buildClientWriteProposal,
+  normalizeSiteClientRun, normalizeSiteClientContracts, validateSiteClientValue,
+  normalizeSiteClientSchema, canonicalSiteClientJson,
+  siteClientValidatedOperations, siteClientContractStatus, siteClientEnvelope,
   stalenessHeader, fenceDossier, buildMintInjection, resolveSiteUrl, stampRecord,
   createSiteClientStore, digestCapture, redactHeaders, shapeSketch,
 } from './site-clients/index.js';

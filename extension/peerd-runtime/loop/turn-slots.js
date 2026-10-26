@@ -52,7 +52,7 @@ export const ABORT_STEER = 'peerd:steer';
  *   advanceQueue: (sessionId: string) => void,
  *   generation: (sessionId: string) => number,
  * }}
- * @param {{ onAbort?: (sessionId: string) => void, forceReleaseMs?: number }} [deps]
+ * @param {{ onAbort?: (sessionId: string) => void, onIdle?: (sessionId: string) => void, forceReleaseMs?: number }} [deps]
  *   onAbort fires whenever a session's turn is aborted (a steer-live supersede
  *   or Stop). The SW wires it to confirmCoordinator.declineSession, so a turn
  *   parked on ctx.confirm() is unblocked (declined) instead of left stranded
@@ -60,7 +60,7 @@ export const ABORT_STEER = 'peerd:steer';
  *   no-op (tests / orchestrators that don't need it).
  *   forceReleaseMs overrides the abort watchdog delay (tests).
  */
-export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
+export const makeTurnSlots = ({ onAbort, onIdle, forceReleaseMs = 15_000 } = {}) => {
   /** @type {Map<string, AbortController>} */
   const slots = new Map();
   /** @type {Map<string, {controller:AbortController,text:string}>} */
@@ -109,6 +109,7 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
         slots.delete(sessionId);
         if (activities.get(sessionId)?.controller === controller) activities.delete(sessionId);
         drainIdle(sessionId);
+        if (!slots.has(sessionId)) onIdle?.(sessionId);
       }
     }, forceReleaseMs);
   };
@@ -135,6 +136,8 @@ export const makeTurnSlots = ({ onAbort, forceReleaseMs = 15_000 } = {}) => {
           slots.delete(sessionId);
           if (activities.get(sessionId)?.controller === controller) activities.delete(sessionId);
           drainIdle(sessionId);
+          // why: a passive actor receipt can release a slot without running the driver.
+          if (!slots.has(sessionId)) onIdle?.(sessionId);
         }
       },
     };

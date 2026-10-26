@@ -128,7 +128,7 @@ export const makeKernelComposerRoutes = ({
     'commands/list': async () => ({ ok: true, commands: await commands.list() }),
     'composer/files': async () => {
       if (vault.isLocked()) return { ok: true, files: [] };
-      try { return { ok: true, files: await appFiles.list() }; }
+      try { return { ok: true, files: (await appFiles.list()).map((path) => path.replace(/^\/+/, '')) }; }
       catch { return { ok: true, files: [] }; }
     },
     'composer/tabs': async () => {

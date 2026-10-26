@@ -25,6 +25,7 @@ const transferDeps = (authorization: symbol, over: any = {}) => {
       importAll: async () => { effects.push('memory'); },
     },
     settingsStore: {
+      get: () => ({ dwebEnabled: false }),
       stored: () => ({ theme: 'dark' }),
       update: async () => { effects.push('settings'); },
     },

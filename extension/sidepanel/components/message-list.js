@@ -67,6 +67,39 @@ const actorOutcomeUnknownFailure = (_text) =>
 /** @typedef {{ toolUse: ToolUse, toolResult: ToolResult|null }} PairedTool */
 
 /**
+ * The resting label of a tool_use that never got a result on a finished turn.
+ * @typedef {'cancelled'|'outcome unknown'|'not run'} SettledLabel
+ */
+
+/**
+ * How a tool_use with NO result rests once its turn is over, or null while
+ * the turn can still produce the result. why stopReason 'tool_use' with no
+ * error stays live: the loop saves the assistant message as streaming:false +
+ * 'tool_use' BEFORE it dispatches, and a SW restart resumes such a turn
+ * (resume-detect 'tools-pending'); only an error ends it. why 'outcome
+ * unknown' is not 'cancelled': Stop cannot prove that a tool which was
+ * already running also stopped (outcomeKnown false), so only an aborted
+ * turn may claim 'cancelled'. Every other end (max_tokens, end_turn, an
+ * error) simply never ran the call.
+ * @param {ChatMessage} message
+ * @returns {SettledLabel|null}
+ */
+const settledLabel = (message) => {
+  if (message.stopReason === 'aborted') return 'cancelled';
+  const over = !!message.error
+    || (!message.streaming && !!message.stopReason && message.stopReason !== 'tool_use');
+  if (!over) return null;
+  return message.outcomeKnown === false ? 'outcome unknown' : 'not run';
+};
+
+/** The expanded body of a settled tool_use, per label. */
+const SETTLED_NOTES = Object.freeze({
+  'cancelled': 'Cancelled. The turn was stopped before this tool ran.',
+  'outcome unknown': 'Outcome unknown. The turn was stopped while this tool ran. Check the session before retrying.',
+  'not run': 'Not run. The turn ended before this tool ran.',
+});
+
+/**
  * An inline "peerd opened a tab" notice event.
  * @typedef {Object} TabEvent
  * @property {string} key
@@ -97,12 +130,14 @@ const actorOutcomeUnknownFailure = (_text) =>
  * @property {string} [sessionId]
  * @property {((msg: Record<string, any>) => Promise<any>)} [send]
  * @property {boolean} [busy]
+ * @property {boolean} [streaming]
+ * @property {number} [followSequence]
  * @property {boolean} [announceOnMount]
  * @property {Map<string|undefined, Set<string>>} [seenRecoveryIdsBySession]
  */
 
-// Keep following only while the user stays near the live edge. Record this on
-// scroll because a large redraw can move the edge before onupdate measures it.
+// why local intent: follow again on a local send. Keep other surfaces still.
+// Read the edge on scroll, before a redraw can change it.
 const NEAR_BOTTOM_PX = 150;
 /** @param {HTMLElement} el */
 const nearBottom = (el) => el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
@@ -259,6 +294,50 @@ const scheduleRecoveryAnnouncementClear = (state) => {
   }, 1_000);
 };
 
+// What a screen reader hears when the viewed chat's turn settles: one polite
+// line per turn, never per token. The reply's opening text, or that it
+// failed (the error banner's alert carries the mapped copy, so it is not
+// repeated here). A stopped turn stays quiet.
+const TURN_PREVIEW_CHARS = 150;
+const BLOCK_TAGS = new Set(['P', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'PRE', 'BLOCKQUOTE', 'TR', 'BR']);
+
+/** @param {string} markdown */
+const replyPreview = (markdown) => {
+  const doc = new DOMParser().parseFromString(renderMarkdown(markdown), 'text/html');
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+  /** @type {string[]} */
+  const parts = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    parts.push(node.nodeType === Node.TEXT_NODE ? (node.nodeValue ?? '')
+      : BLOCK_TAGS.has(node.nodeName) ? ' ' : '');
+  }
+  const text = parts.join('').replace(/\s+/g, ' ').trim();
+  return text.length > TURN_PREVIEW_CHARS ? `${text.slice(0, TURN_PREVIEW_CHARS).trimEnd()}…` : text;
+};
+
+/** @param {ChatMessage[]|undefined} messages @param {string|undefined} peerName */
+const settledTurnAnnouncement = (messages, peerName) => {
+  const last = [...(messages ?? [])].reverse().find((message) => message.role === 'assistant');
+  if (!last || last.stopReason === 'aborted') return '';
+  const who = peerName || 'peerd';
+  if (last.error) return `${who} could not reply.`;
+  const preview = typeof last.content === 'string' ? replyPreview(last.content) : '';
+  return preview ? `${who} replied: ${preview}` : '';
+};
+
+/** @param {any} state @param {string} announcement */
+const replaceTurnAnnouncement = (state, announcement) => {
+  clearTimeout(state.turnAnnouncementTimer);
+  state.turnAnnouncement = announcement;
+  // why clear: a live region speaks only on change, so an identical next
+  // announcement would stay silent unless the text is emptied in between.
+  state.turnAnnouncementTimer = announcement ? setTimeout(() => {
+    state.turnAnnouncement = '';
+    state.turnAnnouncementTimer = null;
+    m.redraw();
+  }, 3_000) : null;
+};
+
 export const MessageList = {
   /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
   oninit(vnode) {
@@ -284,12 +363,20 @@ export const MessageList = {
       .map((event) => [event.key, event.protected !== false]));
     vnode.state.recoveryAnnouncement = fresh.map((receipt) => receipt.announcement).join(' ');
     vnode.state.recoveryAnnouncementTimer = null;
+    vnode.state.wasStreaming = !!vnode.attrs.streaming;
+    vnode.state.turnAnnouncement = '';
+    vnode.state.turnAnnouncementTimer = null;
   },
-  /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
-  onbeforeupdate(vnode) {
+  /** @param {{ attrs: TranscriptArgs, state: any }} vnode @param {{ attrs: TranscriptArgs }} old */
+  onbeforeupdate(vnode, old) {
+    if (vnode.attrs.followSequence !== old.attrs.followSequence || vnode.state.sessionId !== vnode.attrs.sessionId) vnode.state.followBottom = true;
+    // why clear on start: a second identical reply can finish before the
+    // timeout. A chat switch must also drop the prior chat's announcement.
+    if (vnode.state.sessionId !== vnode.attrs.sessionId || (!vnode.state.wasStreaming && vnode.attrs.streaming)) {
+      replaceTurnAnnouncement(vnode.state, '');
+    }
     if (vnode.state.sessionId !== vnode.attrs.sessionId) {
       vnode.state.sessionId = vnode.attrs.sessionId;
-      vnode.state.followBottom = true;
       const receipts = recoveryReceipts(vnode.attrs.messages);
       const existing = vnode.state.seenRecoveryIdsBySession.get(vnode.attrs.sessionId);
       const fresh = existing
@@ -304,6 +391,8 @@ export const MessageList = {
       replaceRecoveryAnnouncement(vnode.state, fresh
         .map((receipt) => receipt.announcement)
         .join(' '));
+      // A switched-to chat's idle state is history, not a settle.
+      vnode.state.wasStreaming = !!vnode.attrs.streaming;
       return true;
     }
     const seen = vnode.state.seenRecoveryIdsBySession.get(vnode.attrs.sessionId) ?? new Set();
@@ -318,6 +407,11 @@ export const MessageList = {
         ...tabAnnouncements,
       ].join(' '));
     }
+    if (vnode.state.wasStreaming && !vnode.attrs.streaming) {
+      const settled = settledTurnAnnouncement(vnode.attrs.messages, vnode.attrs.peerName);
+      if (settled) replaceTurnAnnouncement(vnode.state, settled);
+    }
+    vnode.state.wasStreaming = !!vnode.attrs.streaming;
     return true;
   },
   // Initial mount: jump to the bottom so existing-session render starts
@@ -335,6 +429,7 @@ export const MessageList = {
   /** @param {{ state: any }} vnode */
   onremove(vnode) {
     if (vnode.state.recoveryAnnouncementTimer) clearTimeout(vnode.state.recoveryAnnouncementTimer);
+    clearTimeout(vnode.state.turnAnnouncementTimer);
   },
 
   /** @param {{ attrs: TranscriptArgs, state: any }} vnode */
@@ -354,6 +449,12 @@ export const MessageList = {
             role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true',
           }, state.recoveryAnnouncement)
         : null,
+      // Always mounted and empty between turns: many screen readers skip a
+      // live region that is inserted with its text already in it. No role,
+      // so transcript history never reads as a status.
+      m('span.sr-only.message-list-turn-announcement', {
+        'aria-live': 'polite', 'aria-atomic': 'true',
+      }, state.turnAnnouncement),
     ]),
 };
 
@@ -486,7 +587,7 @@ const UserMessage = {
                 m('span.attachment-chip-size', formatBytes(a.size)),
               ])))
           : null,
-        renderText(message.content),
+        m(MessageText, { content: message.content }),
         message.error ? m('.error-line', message.error) : null,
       ]),
     ]);
@@ -572,7 +673,7 @@ const ActorReplyMessage = {
         aborted ? ' · cancelled'
           : failed ? ` · ${outcomeUnknown ? 'Outcome unknown' : notRun ? 'Not run' : 'failed'}` : '',
       ]),
-      m('.bubble', renderText(stripUntrustedFences(displayBody))),
+      m('.bubble', m(MessageText, { content: stripUntrustedFences(displayBody) })),
       ]);
   },
 };
@@ -617,7 +718,7 @@ const AssistantMessage = {
         ? m('.thinking-solo', m(ThinkingSpinner))
         : hasText
           ? m('.bubble', [
-              renderText(message.content, { markdown: true }),
+              m(MessageText, { content: message.content, markdown: true }),
               message.error ? m('.error-line', message.error) : null,
             ])
           // why: a turn can FAIL before any token streams (e.g. an Anthropic
@@ -657,9 +758,9 @@ const AssistantMessage = {
               key: toolUse.id,
               toolUse,
               toolResult,
-              // an aborted turn never produced this tool's result — render it
-              // 'cancelled', not a perpetual 'running…' (see ToolCall).
-              interrupted: message.stopReason === 'aborted',
+              // a finished turn never produced this tool's result: render it
+              // settled, not a perpetual 'running…' (see settledLabel + ToolCall).
+              interrupted: settledLabel(message),
               liveStream: vmStreams?.[toolUse.id] ?? null,
               spawned,
               actors,
@@ -744,11 +845,12 @@ const TaskFeedback = {
 // A single div — the gradient, mask, and spin are CSS-only and disabled under
 // prefers-reduced-motion.
 //
-// attrs.sm → a smaller variant for inline use (the Reasoning header).
+// attrs.sm → a smaller variant for inline use (the Reasoning header). A span
+// there, because the header is a button and allows only phrasing content.
 const ThinkingSpinner = {
   /** @param {{ attrs?: { sm?: boolean } }} vnode */
   view: ({ attrs }) =>
-    m(`.peerd-spinner${attrs && attrs.sm ? '.peerd-spinner--sm' : ''}`,
+    m(attrs && attrs.sm ? 'span.peerd-spinner.peerd-spinner--sm' : '.peerd-spinner',
       { role: 'status', 'aria-label': 'Working…' }),
 };
 
@@ -773,10 +875,14 @@ const Reasoning = {
     const thinkingNow = streaming && !hasText;
     const expanded = ui.userToggled ? ui.expanded : thinkingNow;
     return m(`.reasoning${thinkingNow ? '.reasoning-active' : ''}`, [
-      m('.reasoning-header', {
+      // A native button like the tool-call headers: Tab reaches it, Enter
+      // and Space toggle it, and aria-expanded carries its state.
+      m('button.reasoning-header', {
+        type: 'button',
+        'aria-expanded': String(expanded),
         onclick: () => { ui.userToggled = true; ui.expanded = !expanded; },
       }, [
-        m('span.disclosure', expanded ? '▼' : '▶'),
+        m('span.disclosure', { 'aria-hidden': 'true' }, expanded ? '▼' : '▶'),
         m('span.reasoning-label', 'Reasoning'),
         thinkingNow ? m(ThinkingSpinner, { sm: true }) : null,
       ]),
@@ -789,25 +895,24 @@ const Reasoning = {
 // (renderMarkdown is injection-safe — see shared/markdown.js); user text
 // stays literal so what the human typed shows verbatim.
 //
-// why: NO keys on the returned vnodes. They get flattened into the
-// parent fragment (.bubble), which also contains unkeyed siblings (muted
-// streaming dot, error line). Mithril forbids mixing keyed + unkeyed
-// children inside one fragment; these never reorder, so positional
-// identity is fine.
-/**
- * @param {string|undefined} content
- * @param {{ markdown?: boolean }} [opts]
- */
-const renderText = (content, { markdown = false } = {}) => {
-  if (typeof content !== 'string' || content.length === 0) return null;
-  if (markdown) {
-    // m.trust is safe here: renderMarkdown HTML-escapes all input and
-    // only emits a fixed, known tag set.
-    return m('.md', m.trust(renderMarkdown(content)));
-  }
-  return content.split('\n').map((line) =>
-    m('div', line || m.trust('&nbsp;'))
-  );
+// why: each text component keeps one position inside its bubble.
+// Its parent uses unkeyed siblings. Its own children also stay unkeyed.
+// State pushes can replace message objects without changing their text.
+// Compare the content string so each component retains only its current render.
+/** @typedef {{ attrs: { content?: string, markdown?: boolean } }} MessageTextVnode */
+const MessageText = {
+  // why: snapshots replace message objects, but each text node keeps its format.
+  /** @param {MessageTextVnode} vnode @param {MessageTextVnode} old */
+  onbeforeupdate: (vnode, old) => vnode.attrs.content !== old.attrs.content,
+  // m.trust is safe here: renderMarkdown HTML-escapes all input and
+  // only emits a fixed, known tag set.
+  /** @param {MessageTextVnode} vnode */
+  view: ({ attrs: { content, markdown = false } }) =>
+    typeof content !== 'string' || content.length === 0 ? null
+      : markdown ? m('.md', m.trust(renderMarkdown(content)))
+        : content.split('\n').map((line) =>
+            m('div', line || m.trust('&nbsp;'))
+          ),
 };
 
 // ─── Tool call card ──────────────────────────────────────────────────────
@@ -828,7 +933,7 @@ const ToolCall = {
    * @param {{
    *   attrs: {
    *     toolUse: ToolUse, toolResult: ToolResult|null,
-   *     interrupted?: boolean,
+   *     interrupted?: SettledLabel|null,
    *     liveStream?: { stdout: string, stderr: string }|null,
    *     spawned?: TranscriptArgs['spawned'],
    *     actors?: Record<string, any>,
@@ -855,6 +960,8 @@ const ToolCall = {
     // spend-limit / steer) is NOT still running — without this it shows
     // "running…" with a pulsing dot forever, and persists that way across a
     // reload. 'cancelled' gives the card a terminal, honest resting state.
+    // The label (`interrupted`) says HOW the call settled: cancelled, outcome
+    // unknown or not run; 'cancelled' is the shared resting status underneath.
     const status = toolResult
       ? (toolResult.is_error ? 'failed' : 'ok')
       : (interrupted ? 'cancelled' : 'pending');
@@ -881,7 +988,7 @@ const ToolCall = {
       }, [
         m('span.disclosure', ui.expanded ? '▼' : '▶'),
         m(`span.tool-status-dot.dot-${status}`,
-          { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? 'cancelled' : 'ok' }),
+          { title: status === 'failed' ? 'failed' : status === 'pending' ? 'running' : status === 'cancelled' ? (interrupted ?? 'cancelled') : 'ok' }),
         m('span.tool-name', toolUse.name),
         m('span.tool-args', argsSummary(toolUse.input)),
         policyStatus
@@ -896,7 +1003,7 @@ const ToolCall = {
           : null,
         m('.spacer'),
         status === 'pending' ? m('span.tool-pending', 'running…')
-          : status === 'cancelled' ? m('span.tool-cancelled', 'cancelled')
+          : status === 'cancelled' ? m('span.tool-cancelled', interrupted ?? 'cancelled')
           : meta ? m('span.tool-duration', `${meta.durationMs}ms`) : null,
       ]),
       // why: a vm_boot can take many seconds to finish (pip install,
@@ -953,7 +1060,7 @@ const ToolCall = {
         m('.tool-result', [
           toolResult
             ? m('pre.tool-result-content', formatResultContent(toolResult))
-            : m('p.muted', interrupted ? 'Cancelled — the turn was stopped before this tool ran.' : 'Result pending…'),
+            : m('p.muted', interrupted ? SETTLED_NOTES[interrupted] : 'Result pending…'),
         ]),
       ]) : null,
     ]);
@@ -969,7 +1076,7 @@ const ToolCall = {
 // MAX_NESTED_DEPTH visually; deeper runs are still inspectable.
 /**
  * @param {{
- *   toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: boolean,
+ *   toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: SettledLabel|null,
  *   spawned?: TranscriptArgs['spawned'], actors?: Record<string, any>,
  *   loadActor?: (sessionId: string, retry?: boolean) => void,
  *   peerName?: string, depth: number, ui: ToolCallState,
@@ -985,7 +1092,7 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
   const task = childSession?.task ?? toolUse.input?.task ?? '';
   const tooDeep = depth + 1 > MAX_NESTED_DEPTH;
   const terminalLabel = status === 'pending' ? 'running…'
-    : status === 'cancelled' ? 'cancelled'
+    : status === 'cancelled' ? (interrupted ?? 'cancelled')
     : status === 'failed' ? (outcomeUnknown ? 'Outcome unknown' : 'failed')
     : 'done';
 
@@ -1040,7 +1147,7 @@ const renderSpawnedCard = ({ toolUse, toolResult, interrupted, spawned, actors, 
 // by this tool_use id). The tool RESULT is just the async "delivered" ack, so the
 // card's live state (streaming / error / cost) — not the result — drives the chip.
 /**
- * @param {{ toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: boolean,
+ * @param {{ toolUse: ToolUse, toolResult: ToolResult|null, interrupted?: SettledLabel|null,
  *   actors?: Record<string, any>, spawned?: TranscriptArgs['spawned'],
  *   loadActor?: (sessionId: string) => void, peerName?: string, depth: number, ui: ToolCallState }} a
  */
@@ -1099,7 +1206,7 @@ const renderActorCard = ({ toolUse, toolResult, interrupted, actors, spawned, lo
   const completedAwait = !card && !!toolResult && toolResult.is_error !== true
     && toolUse.input?.await === true && !handedOff;
   const terminalLabel = status === 'pending' ? 'working…'
-    : status === 'cancelled' ? 'cancelled'
+    : status === 'cancelled' ? ((card || toolResult) ? 'cancelled' : (interrupted ?? 'cancelled'))
     : status === 'failed' ? (outcomeUnknown ? 'Outcome unknown' : notRun ? 'Not run' : 'failed')
     : handedOff ? 'handed off'
     : acceptedAsync ? 'accepted'

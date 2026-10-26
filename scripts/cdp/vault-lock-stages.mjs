@@ -16,7 +16,7 @@ export const LOCK_STAGES = [
   ['background/feature-lease-runtime.js', 'await closeHostIfIdleUnsafe();\n    return Object.freeze({ results, retirements });', 'host-close'],
   ['background/feature-lease-runtime.js', 'return Object.freeze({ results, retirements });', 'host-cleanup-settled'],
   ['background/routes/vault.js', "await auditLog.append({ type: 'vault_locked' })", 'audit-wait'],
-  ['background/routes/vault.js', 'await Promise.resolve(pushState())', 'state-publish-wait'],
+  ['background/routes/vault.js', 'await Promise.resolve(pushState(', 'state-publish-wait'],
   ['background/routes/vault.js', 'if (failure) throw failure;', 'route-settled'],
 ];
 

@@ -224,3 +224,105 @@ describe('options runtime capability controls', () => {
     }
   });
 });
+
+for (const closing of ['Cancel', 'Escape', 'backdrop']) {
+  describe(`options download dialog focus: ${closing}`, () => {
+    it('keeps Voice opt-in unchanged and restores its real trigger', async () => {
+      const root = document.createElement('div');
+      document.body.appendChild(root);
+      /** @type {any[]} */
+      const sent = [];
+      let enables = 0;
+      const voiceManager = {
+        subscribe: (/** @type {(state:any)=>void} */ listener) => { listener({ status: 'idle' }); return () => {}; },
+        getState: () => ({ status: 'idle' }),
+        enable: async () => { enables += 1; },
+      };
+      m.mount(root, { view: () => m(VoiceSection, {
+        state: {
+          settings: { voiceEnabled: false, voiceEngine: 'auto' },
+          capabilities: { moonshineVoiceHost: { status: 'available' }, pdfOcr: { status: 'unsupported' } },
+        },
+        voiceManager,
+        send: async (/** @type {any} */ message) => { sent.push(message); return { ok: true }; },
+      }) });
+      try {
+        const trigger = /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')]
+          .find((button) => button.textContent === 'Upgrade to on-device (Moonshine)'));
+        trigger.focus(); trigger.click();
+        await settle();
+        const dialog = /** @type {HTMLElement} */ (root.querySelector('.peerd-modal'));
+        const cancel = /** @type {HTMLButtonElement} */ (dialog.querySelector('button.secondary'));
+        const approve = /** @type {HTMLButtonElement} */ (dialog.querySelector('button:not(.secondary)'));
+        const link = /** @type {HTMLAnchorElement} */ (dialog.querySelector('a'));
+        expect(dialog.getAttribute('aria-modal')).toBe('true');
+        expect(dialog.getAttribute('aria-labelledby')).toBe('voice-confirm-title');
+        expect(root.querySelector('#voice-confirm-title')?.textContent).toBe('Download on-device voice model?');
+        expect(document.activeElement).toBe(cancel);
+        expect(approve.disabled).toBe(false);
+        link.focus();
+        link.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+        expect(document.activeElement).toBe(approve);
+        approve.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+        expect(document.activeElement).toBe(link);
+        m.redraw.sync();
+        if (closing === 'Escape') dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        else if (closing === 'Cancel') cancel.click();
+        else /** @type {HTMLElement} */ (root.querySelector('.peerd-modal-backdrop')).click();
+        await settle();
+        expect(root.querySelector('.peerd-modal')).toBe(null);
+        expect(document.activeElement).toBe(trigger);
+        expect(enables).toBe(0);
+        expect(sent).toEqual([]);
+      } finally { m.mount(root, null); root.remove(); }
+    });
+
+    it('tests the dormant OCR dialog without enabling its unpinned download', async () => {
+      const root = document.createElement('div');
+      const prior = document.createElement('button');
+      document.body.append(prior, root);
+      /** @type {any} */
+      let ui;
+      /** @type {any[]} */
+      const sent = [];
+      m.mount(root, { view: () => m(OcrSection, {
+        state: { capabilities: { pdfOcr: { status: 'available' } } },
+        send: async (/** @type {any} */ message) => { sent.push(message); return { ok: true }; },
+        oninit: (/** @type {any} */ vnode) => { ui = vnode.state; },
+      }) });
+      try {
+        await settle();
+        const trigger = /** @type {HTMLButtonElement} */ (root.querySelector('button'));
+        expect(trigger.disabled).toBe(true);
+        expect(trigger.textContent).toBe('OCR not available in this build yet');
+        // why: the shipped trigger is disabled. Render its existing state branch
+        // without changing integrity values, the store or the download guard.
+        prior.focus(); ui.confirmOpen = true; m.redraw.sync();
+        const dialog = /** @type {HTMLElement} */ (root.querySelector('.peerd-modal'));
+        const cancel = /** @type {HTMLButtonElement} */ (dialog.querySelector('button.secondary'));
+        const approve = /** @type {HTMLButtonElement} */ (dialog.querySelector('button:not(.secondary)'));
+        expect(dialog.getAttribute('aria-modal')).toBe('true');
+        expect(dialog.getAttribute('aria-labelledby')).toBe('ocr-confirm-title');
+        expect(root.querySelector('#ocr-confirm-title')?.textContent).toBe('Download on-device OCR engine?');
+        expect(approve.disabled).toBe(true);
+        expect(trigger.disabled).toBe(true);
+        expect(document.activeElement).toBe(cancel);
+        for (const shiftKey of [false, true]) {
+          const tab = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
+          cancel.dispatchEvent(tab);
+          expect(tab.defaultPrevented).toBe(true);
+          expect(document.activeElement).toBe(cancel);
+        }
+        m.redraw.sync();
+        if (closing === 'Escape') dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        else if (closing === 'Cancel') cancel.click();
+        else /** @type {HTMLElement} */ (root.querySelector('.peerd-modal-backdrop')).click();
+        await settle();
+        expect(root.querySelector('.peerd-modal')).toBe(null);
+        expect(document.activeElement).toBe(prior);
+        expect(trigger.disabled).toBe(true);
+        expect(sent).toEqual([]);
+      } finally { m.mount(root, null); root.remove(); prior.remove(); }
+    });
+  });
+}

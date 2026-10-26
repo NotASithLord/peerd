@@ -405,7 +405,7 @@ export const BehaviorSection = {
       resetRow(send, [
         'frontDoorView',
         'reasoningEnabled', 'reasoningEffort', 'confirmWebWrites', 'schemaValidatedReplies',
-        'advancedAutomationEnabled', 'devMode',
+        'advancedAutomationEnabled', 'devMode', 'webActorActionSurface',
         'autoResumeInterruptedTurns', 'autoUpdateEnabled',
         'providerFailoverEnabled', 'providerFallbacks',
         'prewalkEnabled', 'enginePrewalkEnabled', 'prewalkExecutorModel',

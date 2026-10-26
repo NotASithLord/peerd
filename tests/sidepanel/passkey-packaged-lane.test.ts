@@ -201,7 +201,7 @@ describe('packaged first-install passkey lane', () => {
     expect(lane).toContain('collectPostRunDigests');
     expect(harness).toContain('process.hrtime.bigint()');
     expect(harness).toContain("page.send('ServiceWorker.stopWorker'");
-    expect(harness).toContain("row?.runningStatus === 'stopped'");
+    expect(harness).toContain("row.runningStatus === 'stopped'");
     expect(harness).not.toContain("browserConn.send('Target.closeTarget'");
     expect(harness).toContain("Target.setDiscoverTargets");
     expect(harness).toContain("Extensions.triggerAction");

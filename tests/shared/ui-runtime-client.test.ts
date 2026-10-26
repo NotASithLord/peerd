@@ -18,11 +18,12 @@ describe('bounded UI runtime client', () => {
       'memory/export', 'memory/suggestions', 'local-model/catalog', 'local-model/probe',
       'session/debugBundle', 'session/contextSnapshots', 'import/inspect', 'app/get-meta',
       'vault/prfStatus', 'pod/get-meta', 'vm/get-meta', 'transfer/inspectImport',
-      'export/artifact',
+      'export/artifact', 'dweb/blocked-peers',
     ]) {
       expect(uiMessageIsRead(type)).toBe(true);
     }
-    for (const type of ['agent/send', 'contacts/set', 'apps/repository/push', 'dweb/base/install']) {
+    for (const type of ['agent/send', 'contacts/set', 'apps/repository/push', 'dweb/base/install',
+      'dweb/peer-block', 'dweb/peer-unblock']) {
       expect(uiMessageIsRead(type)).toBe(false);
     }
   });

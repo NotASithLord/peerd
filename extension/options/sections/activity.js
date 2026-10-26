@@ -14,6 +14,7 @@ import m from '/vendor/mithril/mithril.js';
 // Map audit event types to a short label + a severity class for the dot.
 /** @type {Record<string, { label: string, level: string }>} */
 const EVENT_META = {
+  web_fetch:                 { label: 'web request',           level: 'info' },
   egress_denied:              { label: 'egress denied',         level: 'warn' },
   denylist_hit:               { label: 'denylist hit',          level: 'warn' },
   denylist_added:             { label: 'denylist pattern added', level: 'ok' },
@@ -83,6 +84,7 @@ const EVENT_META = {
 /** The exact host receipt decides authority severity; operation labels are
  * presentation only and never an allowlist. @param {AuditEntry} entry */
 export const activityEventMeta = (entry) => {
+  if (entry.type === 'web_fetch' && entry.details?.outcome === 'unknown') return { ...EVENT_META.web_fetch, level: 'warn' };
   if (entry.details?.semantic === true) {
     if (entry.details.outcomeKnown === false || entry.details.outcome === 'unknown') {
       return { label: 'semantic call outcome unverified', level: 'danger' };
@@ -190,6 +192,7 @@ const detailLine = (entry) => {
   // A learned host is the content of its row. `origin` remains for older audit
   // entries and for exact-origin events such as actor stops.
   if (d.host) bits.push(d.host);
+  if (d.method) bits.push(d.method);
   if (d.origin) bits.push(d.origin);
   if (d.reason) bits.push(d.reason);
   if (d.provider) bits.push(d.provider);
@@ -222,6 +225,13 @@ const detailLine = (entry) => {
   return bits.join(' · ');
 };
 
+// why a cap: the log keeps up to 20,000 rows (audit retention) and that many
+// DOM rows lag the page. The filter still runs over every loaded row.
+const MAX_ROWS = 500;
+
+/** @param {{ actLevel: string, actQuery: string }} ui */
+const hasFilter = (ui) => ui.actLevel !== 'all' || ui.actQuery.trim() !== '';
+
 export const ActivityView = {
   /** @param {{ state: any, attrs: { send: Send } }} vnode */
   oninit(vnode) {
@@ -230,30 +240,61 @@ export const ActivityView = {
     vnode.state.actLevel = 'all';     // severity filter: all|warn|ok|info
     vnode.state.actQuery = '';        // free-text filter
     vnode.state.error = null;
+    vnode.state.loading = false;
+    vnode.state.fetchedAll = false;   // the loaded rows came from a whole-log fetch
     ActivityView.refresh(vnode);
   },
 
-  /** @param {{ state: any, attrs: { send: Send } }} vnode */
-  refresh(vnode) {
-    vnode.attrs.send({ type: 'audit/list' }).then((/** @type {any} */ r) => {
-      if (r?.ok) { vnode.state.entries = r.entries; vnode.state.total = r.total; }
+  /** @param {{ state: any, attrs: { send: Send } }} vnode @param {number} [limit] */
+  refresh(vnode, limit) {
+    vnode.state.loading = true;
+    vnode.attrs.send({ type: 'audit/list', ...(limit ? { limit } : {}) }).then((/** @type {any} */ r) => {
+      if (r?.ok) { vnode.state.entries = r.entries; vnode.state.total = r.total; vnode.state.fetchedAll = Boolean(limit); }
       else { vnode.state.error = r?.error ?? 'failed to load log'; }
+      vnode.state.loading = false;
+      if (r?.ok) ActivityView.loadWholeLog(vnode);
       m.redraw();
     }).catch((/** @type {unknown} */ e) => {
       vnode.state.error = /** @type {{ message?: string }} */ (e)?.message ?? 'failed to load log';
+      vnode.state.loading = false;
       m.redraw();
     });
+  },
+
+  // why: the route returns the newest 500 rows by default, and a filter over
+  // that window alone made an older event read as "never happened". The first
+  // filter over a cut-off window fetches the whole log once; later filter
+  // flips stay instant over the loaded rows.
+  //
+  // why a flag and not a row count: an agent run writes audit rows between a
+  // reply and the next keystroke, so "fewer rows than the total" is the normal
+  // state while peerd works, and comparing counts refetched the whole log
+  // (about 8 MB at the retention cap) on every keystroke. Rows that land after
+  // the fetch show in the header's "Newest N of M"; Refresh pulls them in.
+  /** @param {{ state: any, attrs: { send: Send } }} vnode */
+  loadWholeLog(vnode) {
+    const ui = vnode.state;
+    if (ui.loading || ui.fetchedAll || !Array.isArray(ui.entries) || ui.entries.length >= ui.total) return;
+    if (!hasFilter(ui)) return;
+    // why: new events can make the previous total too small before this read.
+    ActivityView.refresh(vnode, Number.MAX_SAFE_INTEGER);
   },
 
   /** @param {{ state: any, attrs: { send: Send } }} vnode */
   view(vnode) {
     const ui = vnode.state;
+    const windowed = Array.isArray(ui.entries) && ui.entries.length < ui.total;
 
     const header = m('div', { style: 'display:flex; align-items:center; gap:8px; margin:0 0 8px;' }, [
       m('p.muted', { style: 'margin:0; font-size:12px;' },
-        ui.total ? `${ui.total} recorded event${ui.total === 1 ? '' : 's'}` : ''),
+        !ui.total ? ''
+          : windowed ? `Newest ${ui.entries.length} of ${ui.total} recorded events`
+          : `${ui.total} recorded event${ui.total === 1 ? '' : 's'}`),
       m('.spacer', { style: 'flex:1;' }),
-      m('button.icon', { title: 'Refresh', onclick: () => ActivityView.refresh(vnode) }, '↻'),
+      m('button.icon', {
+        title: 'Refresh', 'aria-label': 'Refresh',
+        onclick: () => ActivityView.refresh(vnode, hasFilter(ui) ? Number.MAX_SAFE_INTEGER : undefined),
+      }, '↻'),
     ]);
 
     if (ui.error) return m('div', [header, m('p.error', ui.error)]);
@@ -281,7 +322,10 @@ export const ActivityView = {
         m('select.log-filter-level', {
           'aria-label': 'Filter by severity',
           value: ui.actLevel,
-          onchange: (/** @type {{ target: HTMLSelectElement }} */ e) => { ui.actLevel = e.target.value; },
+          onchange: (/** @type {{ target: HTMLSelectElement }} */ e) => {
+            ui.actLevel = e.target.value;
+            ActivityView.loadWholeLog(vnode);
+          },
         }, [
           m('option', { value: 'all' }, 'All events'),
           m('option', { value: 'warn' }, 'Issues (blocked / denied / failed)'),
@@ -293,12 +337,15 @@ export const ActivityView = {
           placeholder: 'Filter… (tool, origin, session)',
           'aria-label': 'Filter activity text',
           value: ui.actQuery,
-          oninput: (/** @type {{ target: HTMLInputElement }} */ e) => { ui.actQuery = e.target.value; },
+          oninput: (/** @type {{ target: HTMLInputElement }} */ e) => {
+            ui.actQuery = e.target.value;
+            ActivityView.loadWholeLog(vnode);
+          },
         }),
       ]),
       shown.length === 0
-        ? m('p.muted', 'Nothing matches the current filter.')
-        : m('.log-list', shown.map((/** @type {AuditEntry} */ e) => {
+        ? m('p.muted', ui.loading ? 'Loading older events…' : 'Nothing matches the current filter.')
+        : m('.log-list', shown.slice(0, MAX_ROWS).map((/** @type {AuditEntry} */ e) => {
             const meta = activityEventMeta(e);
             const detail = detailLine(e);
             return m('.log-row', { key: e.id }, [
@@ -312,6 +359,9 @@ export const ActivityView = {
               ]),
             ]);
           })),
+      shown.length > MAX_ROWS
+        ? m('p.muted', `Showing the newest ${MAX_ROWS} of ${shown.length}. Narrow the filter to see the rest.`)
+        : null,
     ]);
   },
 };

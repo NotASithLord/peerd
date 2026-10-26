@@ -19,7 +19,7 @@
 
 /** @param {{ actorOpLimit?: number, codeOpLimit?: number }} [options] */
 export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actorOpLimit } = {}) => {
-  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: Record<string, boolean>, operations: Set<string>, opCounts: Record<string, number>, providerCalls: number, providerOutputTokens: number }>} */
+  /** @type {Map<string, { controller: AbortController, onOuterAbort?: () => void, outer?: AbortSignalLike, ops: Array<Record<string, unknown>>, owner?: string, capabilities: Record<string, boolean>, operations: Set<string>, opCounts: Record<string, number>, providerCalls: number, providerOutputTokens: number, siteReadFailure?:string }>} */
   const runs = new Map();
   let seq = 0;
 
@@ -95,6 +95,15 @@ export const createScriptRunRegistry = ({ actorOpLimit = 50, codeOpLimit = actor
 
     /** The mirrored ops for a run (copy), [] when unknown. @param {string} runId */
     opsFor: (runId) => [...(runs.get(runId)?.ops ?? [])],
+
+    /** Denied reads stay sticky despite JS try/catch or trace eviction.
+     * @param {string} runId @param {string} code */
+    failSiteRead: (runId, code) => {
+      const entry = runs.get(runId);
+      if (entry?.capabilities.siteReadOnly === true) entry.siteReadFailure ??= code;
+    },
+    /** @param {string} runId */
+    siteReadFailureFor: (runId) => runs.get(runId)?.siteReadFailure ?? null,
 
     /** The run's abort signal for pending asks, or null when unregistered. @param {string} runId */
     signalFor: (runId) => runs.get(runId)?.controller.signal ?? null,

@@ -56,6 +56,8 @@ export const siteClientWriteTool = composeTool("site_client_write", {
           endpoints: Array.isArray(args?.endpoints) ? args.endpoints : (prior?.meta.endpoints ?? []),
           auth: args?.auth ?? prior?.meta.auth ?? 'unknown',
           deriver: args?.deriver ?? prior?.meta.deriver ?? 'probe',
+          operations: args?.operations !== undefined ? args.operations : prior?.meta.operations ?? [],
+          validationCases: args?.validationCases !== undefined ? args.validationCases : prior?.meta.validationCases ?? [],
         },
         body: typeof args?.body === 'string' ? args.body : (prior?.body ?? ''),
         prior,
@@ -85,6 +87,7 @@ export const siteClientWriteTool = composeTool("site_client_write", {
       ok: true,
       content: JSON.stringify({
         op: committed.op, origin: meta.origin,
+        revision: meta.revision,
         endpoints: meta.endpoints.length, sizeBytes: meta.sizeBytes,
       }, null, 2),
     };

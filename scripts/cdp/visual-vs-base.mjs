@@ -172,7 +172,9 @@ if (headAlreadyRendered) {
 
 // ── compare ──────────────────────────────────────────────────────────────────
 const rows = [];
-for (const state of visualStates) {
+// Include explicitly declared extra captures in the comparison and published gallery.
+for (const state of visualStates.flatMap((state) =>
+  [state.name, ...(state.visualVariants ?? [])].map((name) => ({ name })))) {
   for (const theme of THEMES) {
     const key = `${state.name}.${theme}`;
     const b = join(BASE_DIR, `${key}.png`);

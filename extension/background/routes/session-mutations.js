@@ -68,7 +68,7 @@ export const makeSessionMutationRoutes = (deps) => {
       }
       const previousId = await sessionCache.sessionGet('currentSessionId');
       await bindCurrentChat(sessionCache, session);
-      pushState();
+      await pushState();
       // #72: auto-resume — if THIS chat's last turn was reclaimed mid-flight
       // (SW eviction etc.), continue it now. Fire-and-forget; gated + deduped
       // inside the helper, so opening a normally-finished chat is a no-op.

@@ -162,9 +162,19 @@ describe('home.library', () => {
   it('favorites-only filter hides non-favorites', async () => {
     const { root, unmount } = await mountView(makeSend());
     try {
-      need(root, 'button[title="Show favorites only"]').click();
+      const filter = need(root, 'button[title="Show favorites only"]');
+      expect(filter.getAttribute('aria-label')).toBe('Show favorites only');
+      expect(filter.getAttribute('aria-pressed')).toBe('false');
+      filter.click();
       await flush();
       expect(names(root)).toEqual(['Snake Game']);
+      expect(filter.getAttribute('aria-label')).toBe('Show favorites only');
+      expect(filter.getAttribute('aria-pressed')).toBe('true');
+      expect(filter.getAttribute('title')).toBe('Show all apps');
+      filter.click();
+      await flush();
+      expect(names(root)).toEqual(['Snake Game', 'Calculator']);
+      expect(filter.getAttribute('aria-pressed')).toBe('false');
     } finally { unmount(); }
   });
 
@@ -172,6 +182,8 @@ describe('home.library', () => {
     const { root, unmount } = await mountView(makeSend());
     try {
       const trigger = need(root, '.library-kebab', HTMLButtonElement);
+      expect(trigger.getAttribute('aria-label')).toBe('More actions for Snake Game');
+      expect(trigger.title).toBe('More actions');
       trigger.focus();
       trigger.click();
       await flush();
@@ -191,8 +203,14 @@ describe('home.library', () => {
     const { root, unmount } = await mountView(send);
     try {
       // Calculator is not a favorite → its card star is titled "Favorite".
-      need(root, 'button[title="Favorite"]').click();
+      const star = need(root, 'button[title="Favorite"]');
+      expect(star.getAttribute('aria-label')).toBe('Favorite Calculator');
+      expect(star.getAttribute('aria-pressed')).toBe('false');
+      star.click();
       await flush();
+      expect(star.getAttribute('aria-label')).toBe('Favorite Calculator');
+      expect(star.getAttribute('aria-pressed')).toBe('true');
+      expect(star.getAttribute('title')).toBe('Unfavorite');
       expect(send.calls.find((c) => c.type === 'apps/favorite'))
         .toEqual({ type: 'apps/favorite', appId: 'app-1', favorite: true });
     } finally { unmount(); }
@@ -632,6 +650,10 @@ describe('home.library', () => {
       clickText(root, '.library-menu-item', 'Rename');
       await flush();
       const input = need(root, '.library-card input', HTMLInputElement);
+      // The field is named for assistive tech and opens with the whole name
+      // selected, so a new name typed at once replaces it.
+      expect(input.getAttribute('aria-label')).toBe('Rename Snake Game');
+      expect([input.selectionStart, input.selectionEnd]).toEqual([0, 'Snake Game'.length]);
       input.value = 'Renamed';
       input.dispatchEvent(new Event('input'));
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
@@ -639,6 +661,10 @@ describe('home.library', () => {
       expect(send.calls.find((c) => c.type === 'apps/rename'))
         .toEqual({ type: 'apps/rename', appId: 'app-2', name: 'Renamed' });
       expect(names(root)).toContain('Renamed');
+      // Enter hands focus back to the card's More actions button, as every
+      // other Library action does, instead of dropping it on the page body.
+      await focusSettles(focusedAction('more'));
+      expect(focusedAction('more')()).toBe(true);
     } finally { unmount(); }
   });
 
@@ -657,6 +683,8 @@ describe('home.library', () => {
       await flush();
       expect(send.calls.some((c) => c.type === 'apps/rename')).toBe(false);
       expect(names(root)).toContain('Snake Game');
+      await focusSettles(focusedAction('more'));
+      expect(focusedAction('more')()).toBe(true);
     } finally { unmount(); }
   });
 
@@ -746,7 +774,9 @@ describe('home.library', () => {
     const { root, unmount } = await mountView(send);
     try {
       expect(root.textContent).toContain('boom');
-      need(root, 'button[title="Refresh"]').click();
+      const refresh = need(root, 'button[title="Refresh"]');
+      expect(refresh.getAttribute('aria-label')).toBe('Refresh');
+      refresh.click();
       await flush();
       // Recovered: grid shows and the error cleared (refresh resets it).
       expect(names(root)).toEqual(['Snake Game', 'Calculator']);

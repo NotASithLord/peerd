@@ -14,7 +14,7 @@ import { ActorIsolationBanner } from './actor-isolation-banner.js';
 import { openOptions } from '/shared/open-options.js';
 import { openHome } from '/shared/open-home.js';
 import { CHANNEL } from '/shared/channel-config.js';
-import { settleUiEffect } from '/shared/ui-effects.js';
+import { confirmationDialogAttrs, settleUiEffect } from '/shared/ui-effects.js';
 
 /** @typedef {import('../chat-reducer.js').ChatState} ChatState */
 /** @typedef {(msg: object) => Promise<any>} Send */
@@ -261,7 +261,7 @@ const PlaceholderView = {
 // equality) — /init progress and the grant-debugger nudge must be visible
 // wherever the user is, not just the side panel.
 /**
- * @typedef {{ id: number, text?: string, action?: { kind?: string, label?: string, url?: string } | null }} Notice
+ * @typedef {{ id: number|string, text?: string, action?: { kind?: string, label?: string, url?: string } | null }} Notice
  */
 
 export const NoticeBar = {
@@ -352,52 +352,6 @@ const SITE_DERIVER_LABEL = Object.freeze({
 });
 
 /**
- * The confirmation is the authority boundary, so opening it must move keyboard
- * and screen-reader attention into the dialog and keep it there until answered.
- * @param {(answer: string) => void} answer
- * @param {{ returnFocus?: HTMLElement | null }} state
- */
-const confirmationDialogAttrs = (answer, state) => {
-  /** @param {{ dom: Element }} vnode */
-  const oncreate = ({ dom }) => {
-    state.returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const dialog = /** @type {HTMLElement} */ (dom);
-    const reject = /** @type {HTMLElement | null} */ (dialog.querySelector('[data-confirm-reject]'));
-    (reject ?? dialog).focus();
-  };
-  /** @param {KeyboardEvent} event */
-  const onkeydown = (event) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      answer('no');
-      return;
-    }
-    if (event.key !== 'Tab') return;
-    const dialog = /** @type {HTMLElement} */ (event.currentTarget);
-    const controls = /** @type {HTMLElement[]} */ ([...dialog.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]);
-    if (!controls.length) return;
-    const first = controls[0];
-    const last = controls[controls.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
-  return {
-    role: 'dialog',
-    'aria-modal': 'true',
-    'aria-labelledby': 'peerd-confirm-title',
-    tabindex: -1,
-    oncreate,
-    onkeydown,
-    onremove: () => state.returnFocus?.focus(),
-  };
-};
-
-/**
  * A pending confirmation prompt broadcast by the SW dispatcher.
  * @typedef {Object} ConfirmPrompt
  * @property {string} id
@@ -405,7 +359,7 @@ const confirmationDialogAttrs = (answer, state) => {
  * @property {{
  *   op: string, header?: string, addedLines?: number, removedLines?: number,
  *   body?: string, prevBody?: string, bodyBytesBefore?: number, bodyBytesAfter?: number,
- *   dossier?: { origin?: string, summary?: string, endpoints?: Array<{ method?: string, path?: string }>, auth?: string, deriver?: string },
+ *   dossier?: { origin?: string, summary?: string, endpoints?: Array<{ method?: string, path?: string }>, auth?: string, deriver?: string, operations?: Array<{name:string,readOnly:boolean}>, validationCases?: unknown[] },
  *   endpointDelta?: { added?: number, removed?: number },
  * }} [proposal]
  * @property {string} [actionClass]
@@ -519,7 +473,7 @@ export const ConfirmModal = {
       try { idpHost = new URL(idpOrigin).host; } catch { /* malformed means no approvable verified destination */ }
       const missingVerifiedDestination = prompt.method === 'sso' && prompt.verified === true && !idpHost;
       return m('.peerd-modal-backdrop', [
-        m('.peerd-modal.confirm-modal.login-modal', confirmationDialogAttrs(answer, dialogState), [
+        m('.peerd-modal.confirm-modal.login-modal', confirmationDialogAttrs('peerd-confirm-title', () => answer('no'), dialogState), [
           m('h3#peerd-confirm-title', 'Approve sign-in'),
           m('.login-hero', [
             m('.badge', icon('lock', 18)),
@@ -570,7 +524,7 @@ export const ConfirmModal = {
     const kind = (prompt.actionClass ? ACTION_CLASS_LABEL[prompt.actionClass] : undefined)
       ?? (prompt.sideEffect === 'mutate_external' ? 'a side-effecting' : 'a page');
     return m('.peerd-modal-backdrop', [
-      m('.peerd-modal.confirm-modal', confirmationDialogAttrs(answer, dialogState), [
+      m('.peerd-modal.confirm-modal', confirmationDialogAttrs('peerd-confirm-title', () => answer('no'), dialogState), [
         m('h3#peerd-confirm-title', isMemory ? 'Confirm memory write' : isSiteClient ? 'Confirm site client' : 'Confirm action'),
         isMemory
           ? [
@@ -607,6 +561,22 @@ export const ConfirmModal = {
                         ? p.dossier.endpoints.map((endpoint) => `${endpoint.method || '?'} ${endpoint.path || '?'}`).join('\n')
                         : '(no endpoints declared)'),
                   ]),
+                  p.dossier?.operations?.length
+                    ? m('.site-client-contracts', [
+                        m('strong', 'Reuse checks'),
+                        m('p', `${p.dossier.operations.length} named operation(s), ${p.dossier.validationCases?.length ?? 0} declared example(s). Read operations become reusable after their examples pass. These checks cover the declared examples, not every future result.`),
+                        m('details', [
+                          m('summary', 'Review inputs, outputs and expected results'),
+                          m('pre.confirm-summary', {
+                            style: 'max-height:240px; overflow:auto; white-space:pre-wrap;',
+                            'aria-label': 'Proposed site-client contracts',
+                          }, JSON.stringify({
+                            operations: p.dossier.operations,
+                            validationCases: p.dossier.validationCases ?? [],
+                          }, null, 2)),
+                        ]),
+                      ])
+                    : null,
                   p.op === 'update'
                     ? [
                         m('strong', 'Existing runnable JavaScript'),
