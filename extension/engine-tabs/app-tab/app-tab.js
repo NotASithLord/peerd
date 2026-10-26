@@ -556,7 +556,7 @@ const initializeRunnerChannel = () => {
     // This private port belongs to the trusted runner before App code loads.
     // Treat absence/malformed reports as no features, never optimistic support.
     runnerFeatures = Array.isArray(event.data.runtimeFeatures)
-      ? event.data.runtimeFeatures.filter((/** @type {unknown} */ feature) => feature === 'wasm-core') : [];
+      ? event.data.runtimeFeatures.filter((/** @type {unknown} */ feature) => feature === 'wasm-core' || feature === 'wasm-simd') : [];
     runnerPhase = 'ready';
     if (runnerWatchdog) { clearTimeout(runnerWatchdog); runnerWatchdog = null; }
     tryDeliver();

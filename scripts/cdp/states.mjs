@@ -1080,6 +1080,7 @@ export const STATES = [
     name: 'browser-network-floor', kind: 'functional', phase: 'post-unlock',
     responder: (_callIndex, request) => {
       const body = request?.postData ?? '';
+      const terminalMarker = `NETWORK-GUARD-SETTLED:${networkGuardActorTask}`;
       if (body.includes('<actor_agent>')) {
         if (networkGuardActorTurn > 0) {
           const results = toolResultsIn(body).join('\n');
@@ -1105,13 +1106,15 @@ export const STATES = [
                 : `await page.goto(${JSON.stringify(networkGuardFixtureUrl)}); return await page.content();`,
             }) };
           }
-          return { sse: sseText('The network guard controller is ready.') };
+          return { sse: sseText(terminalMarker) };
         }
         if (turn === 0) return { sse: sseToolCall('navigate', { url: networkGuardFixtureUrl }) };
         if (turn === 1) return { sse: sseToolCall('read_page', {}) };
-        return { sse: sseText('The network guard controller is ready.') };
+        return { sse: sseText(terminalMarker) };
       }
-      if (networkGuardActorReady) networkGuardWakeSettled = true;
+      // why: the main turn can finish while its actor is still running. Only
+      // the current task's terminal reply proves that reintegration has begun.
+      if (body.includes(terminalMarker)) networkGuardWakeSettled = true;
       if (!networkGuardDelegated) {
         networkGuardDelegated = true;
         return { sse: sseToolCall('message_actor', {
@@ -1401,8 +1404,9 @@ export const STATES = [
         });
         rec.check('the web actor loaded the public controller',
           actorReady === true, networkGuardActorResult.slice(0, 2000));
-        await waitFor(async () => networkGuardWakeSettled && !(await probe(ctx)).busy,
+        const controllerSettled = await waitFor(async () => networkGuardWakeSettled && !(await probe(ctx)).busy,
           { budgetMs: 15_000, pollMs: 50 });
+        if (!controllerSettled) throw new Error('network controller terminal reply did not settle');
         const tabs = await evalIn(ctx.page, `chrome.tabs.query({}).then((items) => items.map(({ id, url, openerTabId }) => ({ id, url, openerTabId })))`, true);
         const drivenTab = tabs.find((tab) => tab.url?.startsWith(networkGuardFixtureUrl));
         const networkGuardDiagnostics = typeof drivenTab?.id === 'number'
@@ -1464,8 +1468,9 @@ export const STATES = [
           const completed = await waitFor(() => networkGuardTrustedChildComplete, {
             budgetMs: 30_000, pollMs: 100,
           });
-          await waitFor(async () => networkGuardWakeSettled && !(await probe(ctx)).busy,
+          const reintegrated = await waitFor(async () => networkGuardWakeSettled && !(await probe(ctx)).busy,
             { budgetMs: 15_000, pollMs: 50 });
+          if (!reintegrated) throw new Error(`${label} child terminal reply did not settle before the next fixture task`);
           await sleep(800);
           const tabsAfter = await evalIn(ctx.page, `chrome.tabs.query({}).then((tabs) =>
             tabs.map(({ id, openerTabId, url, pendingUrl, status }) =>

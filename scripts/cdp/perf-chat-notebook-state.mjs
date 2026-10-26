@@ -1,4 +1,5 @@
 import { evalIn, rpc, waitFor, sseText, sseToolCall, sleep, openWidePage, attach, PANEL_METRICS, WIDE_METRICS, resetSession } from './e2e-harness.mjs';
+import { NOTEBOOK_PROBE_TIMEOUT_MS, withNotebookProbeDeadline } from './notebook-probe-deadline.mjs';
 
 const markdownCalls = async (page, witness) => {
   const realm = await evalIn(page, `({ href: location.href, timeOrigin: performance.timeOrigin })`);
@@ -148,12 +149,14 @@ export const PERF_CHAT_NOTEBOOK_STATES = [
         : sseText('NOTEBOOK-PERF-READY') }));
       let page;
       let tabId;
+      let targetId;
       try {
         const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create a Notebook named Output performance.' });
         if (sent?.ok !== true) throw new Error('The real Notebook creation turn was refused');
         const target = await waitFor(async () => (await targets()).find((item) =>
           !before.has(item.id) && item.url.includes('/engine-tabs/notebook-tab/index.html#')), { budgetMs: 30_000 });
         if (!target) throw new Error('The real Notebook did not open');
+        targetId = target.id;
         const id = new URL(target.url).hash.slice(1).split(/[?&]/)[0];
         page = await attach(target.webSocketDebuggerUrl); await page.send('Page.enable'); await page.send('Runtime.enable');
         await page.send('Emulation.setDeviceMetricsOverride', WIDE_METRICS);
@@ -163,21 +166,21 @@ export const PERF_CHAT_NOTEBOOK_STATES = [
         if (!settled) throw new Error('The real Notebook creation receipt did not settle');
         tabId = (await evalIn(ctx.swConn, 'chrome.tabs.query({})', true)).find((tab) => tab.url === target.url)?.id;
         if (!Number.isInteger(tabId)) throw new Error('The exact Notebook tab id is absent');
-        const run = async (lines) => {
-          await page.send('Performance.enable');
-          const beforeLayouts = await layoutCount(page);
+        const run = async (lines) => withNotebookProbeDeadline(async (step) => {
+          await step(() => page.send('Performance.enable'));
+          const beforeLayouts = await step(() => layoutCount(page));
           const code = `for (let index = 0; index < ${lines}; index += 1) console.log('PERF-LINE-' + index); peerd.self.display('DISPLAY-END'); return 'RETURN-END';`;
           const started = Date.now();
-          const result = await evalIn(ctx.swConn, `chrome.tabs.sendMessage(${tabId}, {
-            type: 'js/eval', notebookId: ${JSON.stringify(id)}, code: ${JSON.stringify(code)}, timeoutMs: 120000,
+          const result = await step(() => evalIn(ctx.swConn, `chrome.tabs.sendMessage(${tabId}, {
+            type: 'js/eval', notebookId: ${JSON.stringify(id)}, code: ${JSON.stringify(code)}, timeoutMs: ${NOTEBOOK_PROBE_TIMEOUT_MS},
           }).then((reply) => ({ ok: reply?.ok, error: reply?.result?.error, value: reply?.result?.value,
             count: reply?.result?.consoleOutput?.length, first: reply?.result?.consoleOutput?.[0],
-            last: reply?.result?.consoleOutput?.at(-1) }))`, true);
-          await sleep(100);
-          return { ...result, elapsedMs: Date.now() - started, layouts: (await layoutCount(page)) - beforeLayouts,
-            children: await evalIn(page, `document.getElementById('console-output').childElementCount`),
-            outputTail: await evalIn(page, `document.getElementById('console-output').textContent.slice(-300)`) };
-        };
+            last: reply?.result?.consoleOutput?.at(-1) }))`, true));
+          await step(() => sleep(100));
+          return { ...result, elapsedMs: Date.now() - started, layouts: (await step(() => layoutCount(page))) - beforeLayouts,
+            children: await step(() => evalIn(page, `document.getElementById('console-output').childElementCount`)),
+            outputTail: await step(() => evalIn(page, `document.getElementById('console-output').textContent.slice(-300)`)) };
+        });
         const repeated = [];
         for (let index = 0; index < 3; index += 1) repeated.push(await run(1_000));
         rec.check('repeated real Notebook runs retain their full raw result', repeated.every((result) =>
@@ -228,7 +231,10 @@ export const PERF_CHAT_NOTEBOOK_STATES = [
         rec.observe('remaining Notebook scope', { scrollUpDuringNewOutputChanged: false,
           actorLedgerCovered: false, longClientTimeoutCovered: false, children });
       } finally {
-        if (Number.isInteger(tabId)) await evalIn(ctx.swConn, `chrome.tabs.remove(${tabId})`, true).catch(() => {});
+        // why the browser endpoint: a saturated renderer cannot service its
+        // own cleanup. Bound teardown too, so a failed baseline stays reviewable.
+        if (targetId) await fetch(`http://127.0.0.1:${ctx.port}/json/close/${targetId}`,
+          { signal: AbortSignal.timeout(5_000) }).catch(() => {});
         try { page?.close(); } catch {}
       }
     },

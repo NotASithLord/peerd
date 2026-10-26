@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { checkExceptionScope } from '../../packaging/check-osv-exception.mjs';
 
 const lock = readFileSync(new URL('../../bun.lock', import.meta.url), 'utf8');
-const now = Date.parse('2026-10-21T00:00:00Z');
-const config = '[[IgnoredVulns]]\nid = "GHSA-86w9-cpqp-85rv"\nignoreUntil = 2026-10-28T00:00:00Z\n';
+const now = Date.parse('2026-10-26T00:00:00Z');
+const config = '[[IgnoredVulns]]\nid = "GHSA-86w9-cpqp-85rv"\nignoreUntil = 2026-11-09T00:00:00Z\n';
 let root: string;
 const put = (name: string, contents: string) => writeFileSync(join(root, name), contents);
 
@@ -22,11 +22,11 @@ afterEach(() => rmSync(root, { recursive: true, force: true }));
 describe('temporary node-forge exception boundary', () => {
   test('accepts reviewed graph only before expiry', () => {
     expect(() => checkExceptionScope(root, now)).not.toThrow();
-    expect(() => checkExceptionScope(root, Date.parse('2026-10-28T00:00:00Z'))).toThrow('expired');
+    expect(() => checkExceptionScope(root, Date.parse('2026-11-09T00:00:00Z'))).toThrow('expired');
   });
   test('allows removal of exception', () => {
     put('osv-scanner.toml', '');
-    expect(() => checkExceptionScope(root, Date.parse('2026-11-01'))).not.toThrow();
+    expect(() => checkExceptionScope(root, Date.parse('2026-11-10'))).not.toThrow();
   });
   test('rejects dependency version and integrity drift', () => {
     put('bun.lock', lock.replace('node-forge@1.4.0', 'node-forge@1.4.1'));
@@ -51,7 +51,7 @@ describe('temporary node-forge exception boundary', () => {
     }
   });
   test('requires review of expiry extension or changed exception formatting', () => {
-    put('osv-scanner.toml', config.replace('2026-10-28', '2026-10-29'));
+    put('osv-scanner.toml', config.replace('2026-11-09', '2026-11-10'));
     expect(() => checkExceptionScope(root, now)).toThrow('scope or expiry');
     put('osv-scanner.toml', config.replace('id = "GHSA-86w9-cpqp-85rv"', "id = 'GHSA-86w9-cpqp-85rv'"));
     expect(() => checkExceptionScope(root, now)).toThrow('scope or expiry');

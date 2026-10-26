@@ -695,7 +695,7 @@ describe('App runner binary assets', () => {
     expect(result.missing).toBe(null);
     expect(result.list).toEqual(['asset.bin', 'empty.wasm']);
     expect(result.exports).toEqual([]);
-    expect(result.runtimeFeatures).toEqual(['wasm-core']);
+    expect(result.runtimeFeatures).toEqual(['wasm-core', 'wasm-simd']);
   });
 });
 

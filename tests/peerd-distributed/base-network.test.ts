@@ -140,6 +140,57 @@ describe('base network — the always-on lobby + sub-protocols', () => {
 
 
 describe('provider reachability and leases', () => {
+  test('an unlinked newcomer fetches from a surviving seeder across publisher lease expiry', async () => {
+    let clock = 1000;
+    const publisher = await spawn('publisher', { now: () => clock });
+    const seeder = await spawn('seeder', { now: () => clock });
+    const index = await spawn('index', { now: () => clock });
+    const readers: Awaited<ReturnType<typeof spawn>>[] = [];
+    try {
+      await link(publisher, seeder);
+      await link(publisher, index);
+      await link(seeder, index);
+      const { uri } = await publisher.base.publishApp({
+        name: 'surviving seed', entry: 'index.html', files: { 'index.html': 'publisher-independent bytes' },
+      });
+      await publisher.base.announceProvider(uri);
+      const original = await seeder.base.fetchApp(uri, { timeoutMs: 500 });
+      await seeder.base.seedApp(original);
+      await seeder.base.announceProvider(uri);
+      publisher.base.close();
+      // why: exercise the signed provider store and renewal owner together,
+      // beyond multiple original leases, without a wall-clock hour-long test.
+      for (let round = 0; round < 6; round++) {
+        clock += 31 * 60_000;
+        await seeder.base.refreshProviders();
+        const providers = await index.base.findProviders(uri);
+        expect(providers).toContain(seeder.identity.did);
+        if (round > 0) expect(providers).not.toContain(publisher.identity.did);
+      }
+      const calls: any[] = [];
+      let reader: Awaited<ReturnType<typeof spawn>>;
+      reader = await spawn('newcomer', { now: () => clock, dial: async (contact: any) => {
+        calls.push(contact);
+        if (contact.did !== seeder.identity.did || contact.hints?.broker !== index.identity.did) return false;
+        await link(reader, seeder);
+        return true;
+      } });
+      readers.push(reader);
+      await link(reader, index);
+      // why: force provider discovery to carry the usable referral rather
+      // than accidentally finding the seeder through FIND_NODE routing.
+      index.base.node.dht.routingTable.remove(seeder.identity.did);
+      expect(reader.mesh.peers().some((peer: any) => peer.did === seeder.identity.did)).toBe(false);
+      const fetched = await reader.base.fetchApp(uri, { timeoutMs: 500 });
+      expect(fetched.manifest).toEqual(original.manifest);
+      expect(fetched.payload).toEqual(original.payload);
+      expect(calls.some(contact => contact.did === seeder.identity.did
+        && contact.hints?.broker === index.identity.did)).toBe(true);
+    } finally {
+      for (const peer of [publisher, seeder, index, ...readers]) peer.base.close();
+    }
+  });
+
   test('dials a discovered provider through the peer supplying its referral', async () => {
     const publisher = await spawn('publisher');
     const broker = await spawn('broker');
