@@ -8,7 +8,7 @@ const observeRequests = (page) => evalIn(page, `(async () => {
   const original = globalThis.__homeSettingsProofOriginal ??= browser.runtime.sendMessage.bind(browser.runtime);
   globalThis.__homeSettingsProof = { messages: [], armed: false, timeOrigin: performance.timeOrigin };
   browser.runtime.sendMessage = async (message, ...args) => {
-    const entry = { type: message?.type, body: message?.body, armed: globalThis.__homeSettingsProof.armed };
+    const entry = { type: message?.type, body: message?.body, patch: message?.patch, armed: globalThis.__homeSettingsProof.armed };
     globalThis.__homeSettingsProof.messages.push(entry);
     const reply = await original(message, ...args);
     entry.reply = reply;
@@ -152,15 +152,15 @@ export const HOME_SETTINGS_STATES = [
         if (!choice) throw new Error('The real network opt-in did not render');
         await observeRequests(page);
         await evalIn(page, `document.querySelector('[data-network-choice="enable"]').click()`);
-        const retry = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.peer-network-status button, .disc-status button')].some((button) => /^(?:Retry(?: connection)?|Try again)$/.test(button.textContent) && !button.disabled)`), { budgetMs: 30_000 });
-        if (!retry) throw new Error('The saved network choice did not expose its real Start route');
-        // why: enabling also starts the host. Retry connection is the shipped
-        // control for the same Start route after participation is saved; Discover
-        // labels that same action Try again.
-        await evalIn(page, `[...document.querySelectorAll('.peer-network-status button, .disc-status button')].find((button) => /^(?:Retry(?: connection)?|Try again)$/.test(button.textContent) && !button.disabled).click()`);
-        const started = await waitFor(() => evalIn(page, `globalThis.__homeSettingsProof.messages.find((entry) => entry.type === 'dweb/base/start' && entry.reply?.ok === true)`), { budgetMs: 30_000 });
-        rec.check('real opt-in and the Start route receive successful receipts', !!started, JSON.stringify(started));
-        if (!started) throw new Error('The real network Start did not settle');
+        const enabled = await waitFor(() => evalIn(page, `globalThis.__homeSettingsProof.messages.find((entry) => entry.type === 'settings/update' && entry.patch?.dwebEnabled === true && entry.reply?.ok === true)`), { budgetMs: 30_000 });
+        if (!enabled) throw new Error('The real network opt-in did not receive a successful receipt');
+        // Opt-in already starts the host. Discover offers Try again only when
+        // offline, so a healthy connection has no retry control to click.
+        // Exercise the real idempotent Start route after the actual UI opt-in.
+        const started = await rpc(page, { type: 'dweb/base/start' });
+        rec.check('real opt-in and the Start route receive successful receipts', enabled.reply?.ok === true
+          && started?.ok === true, JSON.stringify({ enabled, started }));
+        if (started?.ok !== true) throw new Error('The real network Start did not settle');
         other = await openWidePage(ctx, 'home/home.html#discover', { newWindow: true });
         await evalIn(other, visibilitySource);
         ownedHomes.push(await readWindow(other));
