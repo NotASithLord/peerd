@@ -4014,6 +4014,7 @@ export const STATES = [
   // --- visual: persisted runnable site-client confirmation -----------------
   {
     name: 'site-client-confirm', kind: 'visual', phase: 'post-unlock',
+    visualVariants: ['site-client-contract-details'],
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
       try {
