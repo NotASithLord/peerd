@@ -1055,6 +1055,7 @@ export async function launchPeerd({
   const context = {
     sw, swConn, page, port, profile, screenshot, extensionDir,
     releaseAuxiliaryFetchTarget: auxiliaryRetirement.release,
+    ownsWorkerStartupPause: interceptModel === false || resumeAuxiliaryWorkers === false,
     bootTimeline: Object.freeze({
       clock: 'host-monotonic-ms',
       launchStartedAt,

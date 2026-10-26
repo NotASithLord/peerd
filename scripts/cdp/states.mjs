@@ -7152,12 +7152,23 @@ export const STATES = [
   {
     name: 'busy-thinking', kind: 'visual', phase: 'post-unlock',
     // Hold before the first token so the pre-stream thinking state stays up;
-    // resetSession aborts the pending call before the next state.
+    // Stop and observe its terminal UI before handing the shared browser back.
     responder: () => ({ delayMs: 60_000, sse: sseText('…') }),
     async run(ctx, rec) {
-      await rpc(ctx.page, { type: 'agent/send', text: 'plan a fix for the failing test' });
-      await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar button.stop')`), { budgetMs: 10_000, pollMs: 50 });
-      await rec.visual('busy-thinking');
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'plan a fix for the failing test' });
+      if (sent?.ok !== true) throw new Error(`Busy fixture turn refused: ${JSON.stringify(sent)}`);
+      try {
+        if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar button.stop')`), { budgetMs: 10_000, pollMs: 50 })) {
+          throw new Error('Busy fixture did not reach its live turn');
+        }
+        await rec.visual('busy-thinking');
+      } finally {
+        const stopped = await rpc(ctx.page, { type: 'agent/stop' });
+        if (stopped?.ok !== true) throw new Error(`Busy fixture Stop refused: ${JSON.stringify(stopped)}`);
+        if (!await waitFor(async () => !(await probe(ctx)).busy, { budgetMs: 20_000, pollMs: 50 })) {
+          throw new Error('Busy fixture did not publish its terminal turn state');
+        }
+      }
     },
   },
 
@@ -7169,7 +7180,8 @@ export const STATES = [
       if (!before?.ok || !before.state?.settings) throw new Error('Context baseline read refused');
       try {
         if (!(await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true, autoMemoryEnabled: false } }))?.ok) throw new Error('Context dev mode refused');
-        if (!(await rpc(ctx.page, { type: 'agent/send', text: 'Capture this real model turn for the context inspector.' }))?.ok) throw new Error('Context fixture turn refused');
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Capture this real model turn for the context inspector.' });
+        if (sent?.ok !== true) throw new Error(`Context fixture turn refused: ${JSON.stringify(sent)}`);
         if (!await waitFor(() => evalIn(ctx.page, `document.querySelector('.message-assistant .bubble')?.textContent.trim() === 'CONTEXT-KEYBOARD-DONE' && !document.querySelector('form.input-bar button.stop')`))) throw new Error('Context turn did not settle');
         const current = await rpc(ctx.page, { type: 'state/get' });
         const snapshots = await rpc(ctx.page, { type: 'session/contextSnapshots', sessionId: current?.state?.session?.sessionId });

@@ -449,7 +449,7 @@ test('close fences an installation whose first native dispatch is still queued',
 });
 
 
-const retirementObserver = async (barrierBudgetMs = 30_000) => {
+const retirementObserver = async (barrierBudgetMs = 30_000, ownsWorkerStartupPause: boolean | undefined = true) => {
   const { observeHosts, createConsentDiagnostics } = await import('../../scripts/cdp/network-consent-cold.mjs');
   const listeners = new Set<any>();
   const released: string[] = [];
@@ -457,22 +457,26 @@ const retirementObserver = async (barrierBudgetMs = 30_000) => {
   const calls: { method: string; sessionId?: string; params: any }[] = [];
   const evidence: any = { phase: 'before-choice', events: [], observerErrors: [] };
   let onDrain: (sessionId: string) => any = () => ({});
+  let onCommand: (method: string, sessionId?: string) => any = () => undefined;
   let inventoryFails = false;
   const emit = (method: string, params: any, sessionId?: string) => {
     for (const listener of [...listeners]) listener(method, params, { sessionId });
   };
   const ready = (sessionId: string) => emit('Runtime.bindingCalled', { name: '__peerdConsentTransportObserved',
     payload: JSON.stringify({ kind: 'observer-ready', href: targets.get(sessionId).url }) }, sessionId);
-  const target = (sessionId: string) => {
-    const targetInfo = { targetId: sessionId, type: sessionId === 'home' ? 'page' : 'worker',
+  const target = (sessionId: string, waitingForDebugger = false, type = sessionId === 'home' ? 'page' : 'worker') => {
+    const targetInfo = { targetId: sessionId, type,
       url: `chrome-extension://fixture/${sessionId === 'home' ? 'home/home.html' : 'offscreen/controller-worker.js'}` };
     targets.set(sessionId, targetInfo);
-    emit('Target.attachedToTarget', { sessionId, targetInfo, waitingForDebugger: false });
+    emit('Target.attachedToTarget', { sessionId, targetInfo, waitingForDebugger });
   };
   const connection = {
     events: [], on: (listener: any) => listeners.add(listener), off: (listener: any) => listeners.delete(listener), close() {},
     async send(method: string, params: any = {}, sessionId?: string): Promise<any> {
       calls.push({ method, sessionId, params });
+      const command = onCommand(method, sessionId);
+      if (command !== undefined) return command;
+      if (method === 'Debugger.setInstrumentationBreakpoint') return { breakpointId: 'first-script' };
       if (method === 'Target.setAutoAttach' && params.autoAttach && !sessionId) target('home');
       if (method === 'Page.addScriptToEvaluateOnNewDocument') ready(sessionId!);
       if (method === 'Runtime.evaluate') {
@@ -491,12 +495,14 @@ const retirementObserver = async (barrierBudgetMs = 30_000) => {
   try {
     const diagnostic = createConsentDiagnostics(evidence, () => {}, 50);
     const observer = await observeHosts({ port: server.port, sw: { id: 'fixture' },
+      ownsWorkerStartupPause,
       releaseAuxiliaryFetchTarget: (targetId: string) => released.push(targetId) }, evidence,
       (...[label, operation, budget, signal]: Parameters<typeof diagnostic>) =>
         diagnostic(label, operation, label === 'observer stable barrier' ? barrierBudgetMs : budget, signal),
       () => {}, async () => connection);
     return { observer, evidence, calls, emit, target, targets, released,
       onDrain: (callback: typeof onDrain) => { onDrain = callback; },
+      onCommand: (callback: typeof onCommand) => { onCommand = callback; },
       failInventory: () => { inventoryFails = true; },
       retire(sessionId: string, destroyed = true) {
         emit('Target.detachedFromTarget', { sessionId, targetId: sessionId });
@@ -504,6 +510,52 @@ const retirementObserver = async (barrierBudgetMs = 30_000) => {
       } };
   } finally { server.stop(true); }
 };
+
+test('startup-held dedicated worker retirement requires exact native destruction', async () => {
+  const fixture = await retirementObserver();
+  fixture.onCommand((method, id) => id === 'held' && method === 'Runtime.enable' ? new Promise(() => {}) : undefined);
+  fixture.target('held', true);
+  fixture.retire('held');
+  await fixture.observer.barrier();
+  expect(fixture.calls.some(call => call.sessionId === 'held' && call.method === 'Runtime.runIfWaitingForDebugger')).toBe(false);
+  expect(fixture.evidence.lifecycle.some((entry: any) => entry.targetId === 'held'
+    && entry.proof === 'destroyed-before-startup-release')).toBe(true);
+  await fixture.observer.close();
+
+  const live = await retirementObserver();
+  live.onCommand((method, id) => id === 'held' && method === 'Runtime.enable' ? new Promise(() => {}) : undefined);
+  live.target('held', true); live.retire('held', false);
+  live.emit('Target.targetDestroyed', { targetId: 'unrelated' });
+  await expect(live.observer.barrier()).rejects.toThrow('target destruction target=held');
+  await expect(live.observer.close()).rejects.toThrow('Unobserved target retired: held');
+}, 5_000);
+
+test('pending startup resume irrevocably disqualifies unobserved retirement', async () => {
+  const fixture = await retirementObserver();
+  let dispatched!: () => void;
+  const dispatch = new Promise<void>(resolve => { dispatched = resolve; });
+  fixture.onCommand((method, id) => {
+    if (id === 'released' && method === 'Runtime.runIfWaitingForDebugger') {
+      dispatched(); return new Promise(() => {});
+    }
+  });
+  fixture.target('released', true); await dispatch;
+  fixture.retire('released');
+  await expect(fixture.observer.barrier()).rejects.toThrow('Unobserved target detached: released');
+  await expect(fixture.observer.close()).rejects.toThrow();
+});
+
+test('own detach and non-dedicated startup holds cannot authorize unobserved retirement', async () => {
+  for (const type of ['worker', 'shared_worker', 'service_worker', 'unknown-owner']) {
+    const fixture = await retirementObserver(30_000, type !== 'unknown-owner');
+    fixture.onCommand((method, id) => id === 'held' && method === 'Runtime.enable' ? new Promise(() => {}) : undefined);
+    fixture.target('held', true, type === 'unknown-owner' ? 'worker' : type);
+    if (type === 'worker') await fixture.observer.releaseWorker('held');
+    fixture.retire('held');
+    await expect(fixture.observer.barrier()).rejects.toThrow('Unobserved target detached: held');
+    await expect(fixture.observer.close()).rejects.toThrow();
+  }
+});
 
 test('a destroyed observed target cancels its drain and replacement must pass the reconciled barrier', async () => {
   const fixture = await retirementObserver();
