@@ -24,6 +24,7 @@
 
 import { verifyMeta, metaDwappId, metaWellFormed } from './meta.js';
 import { createLocalCounters } from '../local-counters.js';
+import { OUTGOING_LIMITS } from '../transport/outgoing.js';
 
 export const DISCOVERY = Object.freeze({ CH: 5, SUB: 0, SNAPSHOT: 1, ITEM: 2, UNSUB: 3 });
 // why: only explicitly negotiated discovery feeds may omit an immediate push.
@@ -226,15 +227,35 @@ export const createDiscovery = ({
   const sendSnapshot = async (did, request, subscription) => {
     if (!allowSnapshot(did, 'sent')) return;
     const paged = pagedRequest(request);
-    const page = paged ? library.page(request.after, Math.min(snapshotMax, request.limit)) : null;
-    const items = page?.items ?? library.list().slice(0, snapshotMax);
-    const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.SNAPSHOT, {
-      items,
-      ...(page ? { page: { id: request.id, after: request.after, next: page.next,
-        ...(subscription.bounded ? { dissemination: DISCOVERY_BOUNDED_PROFILE } : {}),
-      } } : {}),
-    });
-    if (!closed && subscribers.get(did) === subscription && !isBlocked(did)) await mesh.send(did, env);
+    let limit = paged ? Math.min(snapshotMax, request.limit) : snapshotMax;
+    const current = () => !closed && subscribers.get(did) === subscription && !isBlocked(did);
+    const frameLimit = () => Math.min(OUTGOING_LIMITS.frameBytes, OUTGOING_LIMITS.nativeBytes,
+      mesh.peers().find((/** @type {any} */ peer) => peer.did === did)?.channel?.maxFrameBytes?.() ?? Infinity);
+    // why: valid metadata can still exceed negotiated SCTP when packed by
+    // count alone. Recompute the cursor from each smaller page so no omitted
+    // cards are acknowledged. Measure the complete signed UTF-8 wire frame.
+    while (current()) {
+      const page = paged ? library.page(request.after, limit) : null;
+      const items = page?.items ?? library.list().slice(0, limit);
+      const env = await mesh.sign(DISCOVERY.CH, DISCOVERY.SNAPSHOT, {
+        items,
+        ...(page ? { page: { id: request.id, after: request.after, next: page.next,
+          ...(subscription.bounded ? { dissemination: DISCOVERY_BOUNDED_PROFILE } : {}),
+        } } : {}),
+      });
+      if (!current()) return;
+      if (new TextEncoder().encode(JSON.stringify(env)).byteLength <= frameLimit()) {
+        await mesh.send(did, env);
+        return;
+      }
+      // Each retry strictly shrinks the candidate. An unrepresentable single
+      // card must not be skipped or sent into the transport's link-failure path.
+      if (items.length < 2) {
+        audit?.('discovery_snapshot_frame_too_large', { did });
+        return;
+      }
+      limit = Math.ceil(items.length / 2);
+    }
   };
 
   const offEnvelope = mesh.onEnvelope(async (/** @type {{ env: any, via: string }} */ { env, via }) => {
