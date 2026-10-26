@@ -2,10 +2,12 @@
 
 ## Recommendation
 
-Build the first demo around a small decision model choosing from observed page
-actions, with a small local language model supplying field values and explaining
-results. Peerd should continue to own the browser, permissions, cancellation,
-and outcome evidence. Extend its existing site clients for repeated work.
+Build the first demo around **validated API operations first**, then a small
+decision model choosing from observed page actions. A small local language model
+supplies field values, selects and parameterizes reusable operations, and helps
+derive or repair a client. Peerd owns the browser, permissions, cancellation,
+and outcome evidence. A visual browser specialist is the next fallback to
+evaluate, not a capability obtained by changing the text helper's model name.
 
 The practical starting pair is **Decider-4B v3 Q4_K_M + Qwen3.5-2B Q4_K_M**.
 Their published downloads are approximately 2.7 GB and 1.9 GB respectively.
@@ -15,7 +17,7 @@ caches, and other applications also consume unified memory. See the
 [Decider checkpoint](https://huggingface.co/Mapika/decider-4b-GGUF) and
 [exact Qwen Ollama tag](https://ollama.com/library/qwen3.5:2b-q4_K_M).
 
-The strongest small browser-specific accuracy challenger found in this review
+The strongest browser-specific **decision-model** challenger found in this review
 is **AIMultiple's Kev-9B browser fine-tune**: 32/50 completed tasks versus 21/50
 for its paired stock run. Those were single attempts on an H100 with FP32
 reference kernels, an 8k input limit, and Jev's operation-and-target question
@@ -26,6 +28,15 @@ in the reviewed sources. The result does not transfer automatically to a new
 quantization or this prototype's joint-action question. Sources:
 [fine-tune](https://huggingface.co/AIMultiple/kev-9b-browser-ft),
 [Kev runtime](https://github.com/jaredpalmer/kev).
+
+Qwen is a general text/tool helper, not a browser-specialized model or a proven
+accuracy winner. For a small **visual** browser policy, the first integration
+candidate is [Fara1.5-4B](https://huggingface.co/microsoft/Fara1.5-4B): browser
+training, published task results, and actual MLX/GGUF conversions make it a
+practical candidate. [OpenWebRL-4B](https://github.com/OpenWebRL/OpenWebRL) is the
+quality challenger to include in a matched evaluation. Neither is wired into
+this prototype's DOM-only decision loop yet. Keep the measured baseline and
+these candidate paths distinct.
 
 This directory is an opt-in development experiment. Its scripts do not ship
 inside the extension. They make no cloud inference fallback and do not control
@@ -68,6 +79,8 @@ The review checked primary model cards, code, and benchmark artifacts on
 | [Jev ultrafast](https://github.com/browser-use/jev-ultrafast) | A decision model plus a text helper can reduce sequential text generation during control. | A reported 7.073-second flight flow is a narrow hosted-model experiment, with setup and verification outside the reported task timing. It is not Mac throughput or broad success evidence. |
 | [Clef-Flash MLX](https://huggingface.co/mlx-community/clef-flash-4bit) | A custom decision head can run in a local MLX server. Its card reports roughly 7.2 GB at a 4k input on a much larger M5 Max machine. | The remaining memory margin and latency on a 16 GB MacBook need measurement. Standard chat serving is not a substitute for the custom head. |
 | [Fara-1.5](https://arxiv.org/html/2606.20785v2) | A small visual browser model is a credible comparison: the paper reports 80.8% WebVoyager and 57.3% Online-Mind2Web. | Different harnesses and budgets prevent ranking it directly against AIM's table. The reported scores are not 4-bit Mac measurements, and Peerd needs an appropriate visual action surface. |
+| [Fara1.5 MLX 8-bit](https://huggingface.co/mlx-community/Fara1.5-4B-8bit) | The conversion reports a working vision path and about 6.15 GB peak memory on an M2 Pro with 32 GB, for small fidelity tests. [GGUF](https://huggingface.co/bartowski/Fara1.5-4B-GGUF) and [OptiQ mixed 4/8-bit](https://huggingface.co/mlx-community/Fara1.5-4B-OptiQ-4bit) also exist. | The card explicitly excludes end-to-end browser evaluation. Use an image-capable runtime; the text-only MLX path cannot establish browser capability. File sizes are not total memory. |
+| [OpenWebRL-4B](https://arxiv.org/html/2606.02031v2) | The visual RL model reports 67.0% Online-Mind2Web, 74.1% WebVoyager and 64.0% DeepShop with its own harness. Released weights make it a credible comparison. | No exact RL-checkpoint Mac quantization with browser evidence was established in this review. An available SFT quantization is a different model, and cross-paper results are not a paired ranking. |
 | [Decision Index](https://huggingface.co/datasets/multimodalart/decision-index-leaderboard) | Useful for locating candidate decision models and checking released artifacts. | Generic classification accuracy does not rank closed-loop browser reliability. |
 
 Keep offline Mind2Web, live Online-Mind2Web, screenshot grounding, WebArena,
@@ -84,19 +97,75 @@ Treat that as evidence for amortizing repeated interactions; include discovery,
 validation, repair, and elapsed time in Peerd's comparison. A first-run browser
 agent and a pre-built API are different starting conditions.
 
+## Pomerado and the reusable-client path
+
+[Pomerado](https://github.com/Pomerado/pomerado) turns a website task and example
+input into a parameterized program, checks it during creation, and exposes it
+as an MCP tool. Its bundled open-source local host normally executes native
+Playwright code. Ordinary invocation of a generated operation does not rerun
+the minter or Guardian model. Creation does use models; the current standard
+local configuration requires an OpenAI key. A repeat-run token comparison
+therefore omits meaningful first-use work.
+
+The [local host boundary](https://github.com/Pomerado/pomerado/blob/main/typescript/src/hosted-features.ts)
+explicitly excludes hosted HTTP recording/replay, automatic repair, saved login
+profiles and managed anti-bot handling. The core contains HTTP interfaces, but
+the bundled local host does not supply their transport. Reusable Playwright
+programs and Peerd's stored HTTP clients overlap in purpose while executing
+through different boundaries.
+
+Peerd already has capture, model-authored JavaScript client bodies, durable
+same-origin storage, confirmation before persistence, and a sealed execution
+worker with only origin-bound `site.fetch`. The useful addition is a clearer
+**derive → review → test → reuse → invalidate/repair** lifecycle, retaining
+Peerd's authenticated browser and capability controls. It is not necessary to
+replace the existing actor with a separate MCP browser owner.
+
+The implementation is in the site-client [core](../../extension/peerd-runtime/site-clients/core.js),
+[store](../../extension/peerd-runtime/site-clients/store.js), and
+[authority](../../extension/background/site-client-tool-authority.js). Optional
+named operations have input/output contracts and declared expected examples.
+Saving remains a reviewable draft. Explicit validation executes the declared
+read cases; successful promotion applies only to the exact executable and
+contract revision. Typed reuse checks input and output, and its GET/HEAD limit
+is enforced by the host, not by trusting a client-authored `readOnly` claim.
+An edit or failed contract check invalidates reuse. Legacy arbitrary-code runs
+remain available through their normal authority, but returning without an
+exception does not establish business correctness.
+
+The bridge's bounded recovery helper can inspect a blocked task, capture
+traffic, propose a client through the existing confirmation UI, and request
+validation. This path runs after a blocked or failed decision; it does not
+automatically learn a client after every successful task. Real small-model
+authoring quality still needs evaluation against held-out tasks.
+
+Declared examples are deterministic checks, not an independent general judge.
+Bad model-authored expectations can still be wrong; review them against observed
+page evidence and hold out task inputs during evaluation. The prototype's API
+fast path chooses only a validated named read operation and typed parameters;
+it never invents an executable snippet for that path. API failure falls back to
+browser evidence rather than silently retrying a possibly committed write.
+
+The capture fix preserves already-redacted numeric/boolean/array shapes rather
+than converting their type markers into strings a second time. Capture remains
+a document-bounded source of hints: it does not compile arbitrary POST/GraphQL
+payloads, automatically export standalone SDKs, or run background maintenance.
+Those are separate product work, as is a complete cross-site client catalog.
+
 ## How the prototype works
 
 ```mermaid
 flowchart TD
-  A["Peerd web actor"] --> B["Full page observation"]
-  B --> C["Local decision model"]
-  C --> D{"Selected operation"}
-  D -->|"Type"| E["Local text helper"]
-  D -->|"Click"| F["Fresh observation check"]
-  E --> F
-  F --> G["Existing Peerd tool and authority"]
-  G --> B
-  D -->|"Done"| H["Fixture or external outcome check"]
+  A["Goal and current origin"] --> B{"Validated API match?"}
+  B -->|"Yes"| C["Named operation and checked input"]
+  B -->|"No / stale"| D["Observed DOM action choices"]
+  C --> E["Peerd authority and execution"]
+  D --> F["Local decision model"]
+  F --> G["Text helper when needed"]
+  G --> H["Fresh observation check"]
+  H --> E
+  E --> I["Result evidence and next state"]
+  I --> B
 ```
 
 [decision-core.mjs](decision-core.mjs) accepts a complete canonical snapshot and
@@ -108,7 +177,8 @@ part of the page. This parser is deliberately conservative; it is not a complete
 semantic prompt-injection defense.
 
 [model-bridge.mjs](model-bridge.mjs) asks the decision server to select a choice.
-Only text-entry decisions call the field helper. The chosen action and text are
+Only text-entry decisions call the field-value helper; separate bounded helper
+requests handle API matching and client recovery. The chosen action and text are
 held until a second full snapshot agrees. The pending decision also belongs to
 one transcript and user goal; later instructions cannot release an old click.
 Reads become evidence for the next decision and are invalidated by subsequent
@@ -231,11 +301,15 @@ binary. The launcher does not install Chrome automatically; a regular branded
 Chrome installation is not an equivalent unpacked-extension test environment.
 
 The smoke runner launches real Chrome and the unpacked extension against owned
-fixture pages, with browser web security enabled. Its two scenarios exercise
-search/type/click/navigation and a DOM change during inference that moves refs
-and inserts a decoy. It checks final URL, visible DOM, and actual page event
-receipts independently of the model's terminal message. Its JSON report is
-written beneath the existing ignored CDP artifacts directory.
+fixture pages, with browser web security enabled. Its DOM scenarios exercise
+search/type/click/navigation and a change during inference that moves refs and
+inserts a decoy. Its API scenario captures a real request, saves a client through
+the rendered confirmation UI, validates declared examples, then starts a fresh
+goal with a held-out input. Independent server receipts and page state establish
+that reuse makes the expected request without a DOM action. The client author
+and API selector are scripted in this fixture. Final URL, visible DOM, and page
+events judge the DOM cases independently of the model's terminal message.
+The JSON report is written beneath the existing ignored CDP artifacts directory.
 
 The runner's evidence class is **scripted-model-real-browser**. Read `ok`, each
 check, errors, and navigation evidence in the report; the presence of the script
@@ -270,6 +344,10 @@ It tests the real decision policy inside the browser, while keeping the full
 two-model system and Mac performance as separate validation work.
 The recorded scripted and real-decision fixture outcomes, timings, and checks
 are preserved in [evidence/linux-browser-fixtures.json](evidence/linux-browser-fixtures.json).
+Real-decision mode excludes the API scenario because that scenario makes no
+decision-model call. The later scripted API reuse and production confirmation
+flow are recorded separately in
+[evidence/linux-api-contracts.json](evidence/linux-api-contracts.json).
 
 The corrected Online-Mind2Web driver can use a real keyless local endpoint.
 Use the flags documented in its source and the normal dataset preparation flow. Select the
@@ -295,10 +373,18 @@ use deterministic owned-task checks for a zero-API-cost demo.
    memory, swap, and all failed/time-limited runs. Show model/API spend separately
    from machine and elapsed-time costs. A faster failed run is not a win.
 
-The first quality upgrade should be an MLX 4-bit export of the Kev browser
-fine-tune with its specialized pointer head preserved. Export ahead of time so
-loading on the target machine does not require an oversized full-precision
-merge. Validate rank/numerical parity, then rerun browser tasks. The official
+Evaluate a browser-specialized visual fallback next, starting with Fara1.5-4B
+and including OpenWebRL-4B once its exact scored checkpoint has a usable local
+runtime. This needs screenshots, the model's trained action/prompt format,
+fresh target checks, and an explicitly evaluated coordinate-action surface.
+Changing the text helper's model string would not provide those capabilities.
+On a 16 GB machine, load the specialist on demand and release other model
+allocations as needed; do not assume all models can stay resident together.
+
+For the decision tier, an MLX 4-bit export of the Kev browser fine-tune remains
+a quality experiment. Preserve its specialized pointer head, export ahead of
+time to avoid an oversized full-precision merge on the target machine, then
+validate numerical/ranking parity and rerun browser tasks. The official
 [Kev model card](https://huggingface.co/jaredpalmer/kev-9b) describes an Apple
 MLX path, but its full-precision backbone alone exceeds this machine budget;
 the quantized path is engineering work, not a ready-made demo dependency.

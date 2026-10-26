@@ -526,7 +526,7 @@ describe('capability-derived actor profiles', () => {
     expect(pageOnly).toContain('reuse known endpoint shapes with page.fetch');
     expect(pageOnly).toContain('return { list: () => site.fetch("/api/items") }');
     expect(pageOnly).toContain('page.captureSite("start")');
-    expect(codeClientReference('page')).toContain('writeSiteClient(origin, {summary?, endpoints?, auth?, deriver?, body})');
+    expect(codeClientReference('page')).toContain('writeSiteClient(origin, {summary?, endpoints?, auth?, deriver?, operations?, validationCases?, body})');
     expect(codeClientReference('page')).toContain('captureSite("start"|"stop")');
 
     const full = actorBlock('web', 'tab', 'tab-1', 'code', false, ['page_code', 'site_client_run']);

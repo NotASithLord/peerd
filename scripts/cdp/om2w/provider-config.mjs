@@ -46,7 +46,7 @@ export const resolveOm2wProviderConfig = ({
   const keyName = KEY_ENV[/** @type {keyof typeof KEY_ENV} */ (provider)];
   const key = keyless ? '' : env.PEERD_BENCH_KEY || env[keyName] || '';
   if (!keyless && !key) {
-    throw new Error(`no ${provider} key — set PEERD_BENCH_KEY or ${keyName}, or use --provider=ollama for local inference`);
+    throw new Error(`no ${provider} key: set PEERD_BENCH_KEY or ${keyName}, or use --provider=ollama for local inference`);
   }
   return { provider, model, keyless, key, settingsPatch };
 };

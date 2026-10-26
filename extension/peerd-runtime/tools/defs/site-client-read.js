@@ -9,7 +9,8 @@ import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
 // re-enter as instructions. Web-actor-only, same tier as site_client_run.
 
 import { wrapUntrusted } from '../prompt-wrap.js';
-import { normalizeSiteOrigin, stalenessHeader } from '../../site-clients/core.js';
+import { normalizeSiteOrigin, stalenessHeader, siteClientEnvelope,
+  siteClientContractStatus, siteClientValidatedOperations } from '../../site-clients/core.js';
 
 /** @type {import('/shared/tool-types.js').Tool} */
 export const siteClientReadTool = composeTool("site_client_read", {
@@ -26,6 +27,11 @@ export const siteClientReadTool = composeTool("site_client_read", {
     };
     const record = read.record;
     if (!record) return { ok: false, error: `no_site_client: none stored for ${origin}` };
+    const contract = siteClientEnvelope('site_client_contract', {
+      schema: 1, origin, revision: record.meta.revision ?? null,
+      status: siteClientContractStatus(record.meta), operations: record.meta.operations ?? [],
+      validatedOperations: siteClientValidatedOperations(record.meta),
+    });
     const header = stalenessHeader(record.meta);
     const endpoints = record.meta.endpoints?.length
       ? record.meta.endpoints.map((/** @type {{method:string,path:string,note?:string}} */ e) =>
@@ -38,11 +44,12 @@ export const siteClientReadTool = composeTool("site_client_read", {
         `summary: ${record.meta.summary || '(none)'}`,
         `auth posture: ${record.meta.auth}`,
         'endpoints:', endpoints,
+        'declared validation cases:', JSON.stringify(record.meta.validationCases ?? []),
         '',
         '--- module source ---',
         record.body,
       ].join('\n'),
     });
-    return { ok: true, content: `${header}\n${fenced}` };
+    return { ok: true, content: `${contract}\n${header}\n${fenced}` };
   },
 });

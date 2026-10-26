@@ -8,7 +8,7 @@ export const MAX_DECISION_INPUT_CHARS = 12_000;
 /** @typedef {'CLICK'|'TYPE_TEXT'|'READ_PAGE'|'WAIT'|'DONE'|'BLOCKED'} Operation */
 /** @typedef {{operation: Operation, ref?: string}} DecisionAction */
 /** @typedef {{ref: string, role: string, name: string, description: string, disabled: boolean}} SnapshotElement */
-/** @typedef {{text: string, elements: readonly SnapshotElement[], fingerprintSource: string}} SnapshotObservation */
+/** @typedef {{text: string, origin: string, elements: readonly SnapshotElement[], fingerprintSource: string}} SnapshotObservation */
 
 export class DecisionProtocolError extends Error {
   /** @param {string} code @param {string} message */
@@ -122,6 +122,7 @@ export const parseSnapshot = (content) => {
   }
   return Object.freeze({
     text: body,
+    origin,
     elements: Object.freeze(elements),
     // why: timestamps change on each read; the shell needs comparable content.
     // This is input to a fingerprint, not an authorization token or a hash.

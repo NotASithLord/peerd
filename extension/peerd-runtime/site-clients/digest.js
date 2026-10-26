@@ -14,7 +14,7 @@
 // Response bodies contribute a SHAPE SKETCH (keys + types), never verbatim
 // payloads. A digest is structure, not data.
 
-import { REDACTED, SECRET_PARAM_RE, shapeSketch } from './shape-sketch.js';
+import { REDACTED, SECRET_PARAM_RE, shapeSketch, sanitizeShapeSketch } from './shape-sketch.js';
 
 // Headers that would carry a credential — dropped from every captured request AND
 // response before anything is summarized. Case-insensitive.
@@ -43,6 +43,7 @@ const SECRETISH_VALUE_RE = /^[A-Za-z0-9_\-.]{24,}$/;
  * @property {Record<string, string>} [reqHeaders]   request headers (pre-redaction ok; re-redacted here)
  * @property {unknown} [reqBody]  request body (object or string; shape-sketched, never stored verbatim)
  * @property {unknown} [resSample]  a SMALL response sample (object or string) for shape sketching
+ * @property {unknown} [resShape]  an already-redacted tap shape, validated without re-sketching its type markers
  */
 
 /**
@@ -163,8 +164,12 @@ export const digestCapture = (events, { origins, deriver = 'capture-tap' }) => {
       const qKeys = Object.keys(query);
       const bits = [];
       if (qKeys.length) bits.push(`query: ${qKeys.slice(0, 8).join(', ')}`);
-      if (ev.resSample !== undefined) {
-        try { bits.push(`→ ${JSON.stringify(shapeSketch(ev.resSample)).slice(0, 120)}`); } catch { /* skip */ }
+      if (ev.resShape !== undefined || ev.resSample !== undefined) {
+        // why: both live taps redact before storage. Re-sketching their markers
+        // would turn numbers/booleans into strings and change array counts.
+        const shape = ev.resShape !== undefined
+          ? sanitizeShapeSketch(ev.resShape) : shapeSketch(ev.resSample);
+        try { bits.push(`→ ${JSON.stringify(shape).slice(0, 120)}`); } catch { /* skip */ }
       }
       if (bits.length && !entry.note) entry.note = bits.join('; ').slice(0, 200);
       bucket.byKey.set(key, entry);

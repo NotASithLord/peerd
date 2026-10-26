@@ -2003,6 +2003,41 @@ describe('kernel turn authority adapter', () => {
     expect(pushStarted).toBe(false);
   });
 
+  test.serial.each([
+    ['GET', 200, true], ['HEAD', 204, true], ['GET', 500, false],
+    ['POST', 200, false], ['OPTIONS', 200, false],
+  ] as const)('typed site read enforces %s/%i at the physical fetch edge', async (method, status, allowed) => {
+    const previousFetch = globalThis.fetch;
+    const origin = 'https://api.example.test';
+    let calls = 0;
+    try {
+      globalThis.fetch = (async () => { calls += 1; return new Response(status === 204 ? null : '{}', {
+        status, headers: { 'content-type': 'application/json' },
+      }); }) as any;
+      const h = await harness(undefined, { durableApiOrigin: origin });
+      const owner = h.durableApiActor!;
+      const runId = h.scriptRuns.mintRunId(owner.sessionId);
+      h.scriptRuns.register(runId, undefined, owner.sessionId, { site: true, siteReadOnly: true });
+      const result = await h.runtime.relays.relayRoutes['site-fetch/call']({
+        ownerSessionId: owner.sessionId, siteOrigin: origin, pathOrUrl: '/items', method,
+        headers: {}, runId, siteReadOnly: false,
+      }, {});
+      expect(result.ok).toBe(allowed);
+      expect(calls).toBe(method === 'GET' || method === 'HEAD' ? 1 : 0);
+      if (allowed) expect(h.scriptRuns.siteReadFailureFor(runId)).toBeNull();
+      else {
+        expect(h.scriptRuns.siteReadFailureFor(runId)).toBeTruthy();
+        // Even a later successful request cannot erase an earlier caught refusal.
+        globalThis.fetch = (async () => new Response('{}')) as any;
+        await h.runtime.relays.relayRoutes['site-fetch/call']({
+          ownerSessionId: owner.sessionId, siteOrigin: origin, pathOrUrl: '/items', method: 'GET', headers: {}, runId,
+        }, {});
+        expect(h.scriptRuns.siteReadFailureFor(runId)).toBeTruthy();
+      }
+      h.scriptRuns.release(runId);
+    } finally { globalThis.fetch = previousFetch; }
+  });
+
   test.serial.each(['revoked', 'unchanged'])('a site-client write validates %s permission during its final landing proof', async (change) => {
     const previousFetch = globalThis.fetch;
     let waited = false;

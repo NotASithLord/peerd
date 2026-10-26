@@ -11,6 +11,14 @@
 
 export {
   normalizeSiteOrigin,
+  normalizeSiteClientRun,
+  normalizeSiteClientContracts,
+  validateSiteClientValue,
+  normalizeSiteClientSchema,
+  canonicalSiteClientJson,
+  siteClientValidatedOperations,
+  siteClientContractStatus,
+  siteClientEnvelope,
   validateDossier,
   normalizeEndpoints,
   validateClientBody,

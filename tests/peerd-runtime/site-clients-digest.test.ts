@@ -88,6 +88,24 @@ describe('inScope — same-origin only (analytics noise dropped)', () => {
 });
 
 describe('digestCapture — redacted inventory + inferred posture', () => {
+  test('live tap shapes retain numeric/boolean types and original array count', () => {
+    const resShape = shapeSketch({ total: 42, paid: false, items: [{ id: 3 }] });
+    const digest = digestCapture([
+      { method: 'GET', url: 'https://api.x.com/items', resShape },
+    ], { origins: ['https://api.x.com'] });
+    expect(digest.endpoints[0]?.note).toBe('→ {"total":"number","paid":"boolean","items":[{"id":"number"},"…×1"]}');
+  });
+
+  test('a forged page-side shape cannot pass raw payload leaves through', () => {
+    const digest = digestCapture([{
+      method: 'GET', url: 'https://api.x.com/items',
+      resShape: { name: 'Jane Doe', token: 'private-token', items: ['private-data', 'private-count'] },
+    }], { origins: ['https://api.x.com'] });
+    expect(digest.endpoints[0]?.note).toBe('→ {"name":"string","token":"<redacted>","items":["string","…"]}');
+    expect(JSON.stringify(digest)).not.toContain('private');
+    expect(JSON.stringify(digest)).not.toContain('Jane Doe');
+  });
+
   test('dedupes by templatized endpoint, infers bearer, never keeps credentials', () => {
     const events = [
       { method: 'GET', url: 'https://api.x.com/v1/charges/1', status: 200, reqHeaders: { Authorization: 'Bearer secret', Cookie: 'sid=abc' }, resSample: { id: 1, amount: 100 } },

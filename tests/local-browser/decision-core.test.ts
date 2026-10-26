@@ -40,7 +40,7 @@ describe('local browser full snapshot parser', () => {
     'a11y snapshot diff since last snapshot: 1 refs now\nno change since last snapshot',
     'a11y snapshot: 1 interactable refs (truncated; raise budget or focus a region)\n@e1 button "New"',
     'a11y snapshot: 1 interactable refs (node cap hit: page larger than the DOM-walk limit)\n@e1 button "New"',
-    'a11y snapshot: 1 interactable refs\n@e1 button "New"\n… [snapshot truncated at 100 chars — focus a smaller region or tab]',
+    'a11y snapshot: 1 interactable refs\n@e1 button "New"\n… [snapshot truncated at 100 chars: focus a smaller region or tab]',
     'a11y snapshot: 1 interactable refs\n+ @e1 button "New"',
     'a11y snapshot: 1 interactable refs\n~ @e1 button "New": old → new',
   ])('refuses incomplete or differential observations: %s', (content) => {

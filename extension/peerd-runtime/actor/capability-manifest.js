@@ -51,7 +51,7 @@ export const CODE_CLIENT_MANIFESTS = Object.freeze({
     readDocument: { op: 'readDocument', signature: 'readDocument(url?, options?)', effect: 'read', tool: 'read_doc', worker: "(url, options) => pageCall('readDocument', { url, options })" },
     readResult: { op: 'readResult', signature: 'readResult(key, options?)', effect: 'read', tool: 'read_result', worker: "(key, options) => pageCall('readResult', { key, options })" },
     readSiteClient: { op: 'readSiteClient', signature: 'readSiteClient(origin)', effect: 'read', tool: 'site_client_read', worker: "(origin) => pageCall('readSiteClient', { origin })" },
-    writeSiteClient: { op: 'writeSiteClient', signature: 'writeSiteClient(origin, {summary?, endpoints?, auth?, deriver?, body})', effect: 'write', tool: 'site_client_write', worker: "(origin, definition) => pageCall('writeSiteClient', { origin, definition })" },
+    writeSiteClient: { op: 'writeSiteClient', signature: 'writeSiteClient(origin, {summary?, endpoints?, auth?, deriver?, operations?, validationCases?, body})', effect: 'write', tool: 'site_client_write', worker: "(origin, definition) => pageCall('writeSiteClient', { origin, definition })" },
     captureSite: { op: 'captureSite', signature: 'captureSite("start"|"stop")', effect: 'read', tool: 'site_capture', worker: "(action) => pageCall('captureSite', { action })" },
     login: { op: 'login', signature: 'login(selectorOrRef, options?)', effect: 'write', tool: 'login', worker: "(target, options) => pageCall('login', { target, options })" },
   }),

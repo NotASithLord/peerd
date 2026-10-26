@@ -14,7 +14,7 @@
 // with fake-indexeddb, never imported here. MV3: IDB-backed (survives the 30s SW
 // death), never in-memory-only.
 
-import { stampRecord, validateDossier, validateClientBody } from './core.js';
+import { stampRecord, validateDossier, validateClientBody, siteClientValidatedOperations } from './core.js';
 
 const DB_NAME = 'peerd-site-clients';
 const DB_VERSION = 1;
@@ -28,12 +28,14 @@ const BODY_STORE = 'bodies';
  * @param {Object} [deps]
  * @param {IDBFactory} [deps.idbFactory]  defaults to globalThis.indexedDB
  * @param {() => number} [deps.now]        injected clock (deterministic tests)
+ * @param {() => string} [deps.makeRevision] host-generated opaque identity
  * @param {string} [deps.dbName]           DB name override — tests use a unique
  *   name per case for isolation; production always uses the default.
  */
 export const createSiteClientStore = (deps = {}) => {
   const idbFactory = deps.idbFactory ?? globalThis.indexedDB;
   const now = deps.now ?? Date.now;
+  const makeRevision = deps.makeRevision ?? (() => crypto.randomUUID());
   const dbName = deps.dbName ?? DB_NAME;
   /** @type {Promise<IDBDatabase> | null} */
   let openPromise = null;
@@ -65,18 +67,23 @@ export const createSiteClientStore = (deps = {}) => {
    * @template T
    * @param {string | string[]} stores @param {IDBTransactionMode} mode
    * @param {(t: IDBTransaction) => T | Promise<T>} fn
+   * @param {AbortSignal} [signal]
    * @returns {Promise<T>}
    */
-  const tx = async (stores, mode, fn) => {
+  const tx = async (stores, mode, fn, signal) => {
     const db = await openDb();
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(new DOMException('Stopped', 'AbortError')); return; }
       const t = db.transaction(stores, mode);
+      const stop = () => { try { t.abort(); } catch { /* already committed */ } };
+      const cleanup = () => signal?.removeEventListener('abort', stop);
+      signal?.addEventListener('abort', stop, { once: true });
       /** @type {T} */
       let result;
       Promise.resolve(fn(t)).then((r) => { result = r; }).catch(reject);
-      t.oncomplete = () => resolve(result);
-      t.onerror = () => reject(t.error ?? new Error('tx failed'));
-      t.onabort = () => reject(t.error ?? new Error('tx aborted'));
+      t.oncomplete = () => { cleanup(); resolve(result); };
+      t.onerror = () => { cleanup(); reject(t.error ?? new Error('tx failed')); };
+      t.onabort = () => { cleanup(); reject(t.error ?? new DOMException('Transaction aborted', 'AbortError')); };
     });
   };
 
@@ -98,18 +105,17 @@ export const createSiteClientStore = (deps = {}) => {
     put: async ({ dossier, body }) => {
       const validated = validateDossier(dossier);
       const validBody = validateClientBody(body);
-      // Read the prior meta AND body so stampRecord can tell a dossier-only patch
-      // (body unchanged → keep verification) from a fresh derivation (reset it).
-      const { prior, priorBody } = await tx([META_STORE, BODY_STORE], 'readonly', async (t) => ({
-        prior: /** @type {import('./core.js').SiteClientMeta | undefined} */ (await reqP(t.objectStore(META_STORE).get(validated.origin))) ?? null,
-        priorBody: /** @type {any} */ (await reqP(t.objectStore(BODY_STORE).get(validated.origin)))?.body ?? '',
-      }));
-      const { meta } = stampRecord({ dossier: validated, body: validBody, prior, priorBody, now: now() });
-      await tx([META_STORE, BODY_STORE], 'readwrite', (t) => {
+      // why: deriving the next revision and writing it share one transaction;
+      // concurrent validation/run bookkeeping cannot resurrect an older proof.
+      return tx([META_STORE, BODY_STORE], 'readwrite', async (t) => {
+        const prior = await reqP(t.objectStore(META_STORE).get(validated.origin)) ?? null;
+        const priorBody = (await reqP(t.objectStore(BODY_STORE).get(validated.origin)))?.body ?? '';
+        const { meta } = stampRecord({ dossier: validated, body: validBody, prior, priorBody,
+          now: now(), revision: makeRevision() });
         t.objectStore(META_STORE).put(meta);
         t.objectStore(BODY_STORE).put({ origin: meta.origin, body: validBody });
+        return meta;
       });
-      return meta;
     },
 
     /**
@@ -142,17 +148,74 @@ export const createSiteClientStore = (deps = {}) => {
 
     /**
      * Record the OUTCOME of a run against the client's staleness metadata: a
-     * success bumps lastVerifiedAt + clears the failure count; a failure
-     * increments it. No body change. Idempotent no-op if the origin is unknown.
-     * @param {string} origin @param {{ ok: boolean }} outcome
+     * success records execution only; a failure invalidates typed validation.
+     * A late outcome cannot change a replacement revision.
+     * @param {string} origin @param {{ ok: boolean, revision?:string, signal?:AbortSignal }} outcome
      * @returns {Promise<void>}
      */
-    recordRun: (origin, { ok }) => tx(META_STORE, 'readwrite', async (t) => {
+    recordRun: (origin, { ok, revision, signal }) => tx(META_STORE, 'readwrite', async (t) => {
       const store = t.objectStore(META_STORE);
       const meta = /** @type {import('./core.js').SiteClientMeta | undefined} */ (await reqP(store.get(origin)));
-      if (!meta) return;
-      if (ok) { meta.lastVerifiedAt = now(); meta.recentFailures = 0; }
-      else { meta.recentFailures = (meta.recentFailures ?? 0) + 1; }
+      if (!meta || revision !== undefined && (meta.revision ?? '') !== revision) return;
+      meta.lastRunAt = now();
+      meta.lastRunOk = ok;
+      if (ok) {
+        meta.recentFailures = 0;
+        if (!siteClientValidatedOperations(meta).length) meta.lastVerifiedAt = 0;
+      }
+      else {
+        meta.recentFailures = (meta.recentFailures ?? 0) + 1;
+        meta.lastVerifiedAt = 0;
+        meta.validation = { schema: 1, revision: meta.revision, status: 'failed', cases: [] };
+        delete meta.validationAttempt;
+      }
+      meta.updatedAt = now();
+      store.put(meta);
+    }, signal),
+
+    /** A new attempt invalidates prior proof and supersedes any older attempt.
+     * @param {string} origin @param {string} revision @param {AbortSignal} [signal] @returns {Promise<string|null>} */
+    beginValidation: (origin, revision, signal) => tx(META_STORE, 'readwrite', async (t) => {
+      const store = t.objectStore(META_STORE);
+      const meta = await reqP(store.get(origin));
+      if (!meta || meta.revision !== revision) return null;
+      const attempt = makeRevision();
+      meta.validationAttempt = attempt;
+      meta.lastVerifiedAt = 0;
+      meta.validation = { schema: 1, revision, status: 'pending', cases: [] };
+      meta.updatedAt = now();
+      store.put(meta);
+      return attempt;
+    }, signal),
+
+    /** Receipts are host-authored. Only the still-current attempt may promote.
+     * @param {string} origin
+     * @param {{revision:string,attempt:string,cases:Array<{index:number,operation:string,ok:boolean}>,signal?:AbortSignal}} outcome
+     * @returns {Promise<import('./core.js').SiteClientMeta|null>} */
+    recordValidation: (origin, { revision, attempt, cases, signal }) => tx(META_STORE, 'readwrite', async (t) => {
+      const store = t.objectStore(META_STORE);
+      const meta = await reqP(store.get(origin));
+      if (!meta || meta.revision !== revision || meta.validationAttempt !== attempt) return null;
+      meta.validation = { schema: 1, revision, attempt, status: 'validated', checkedAt: now(), cases };
+      const passed = siteClientValidatedOperations(meta).length > 0;
+      if (!passed) meta.validation.status = 'failed';
+      meta.lastVerifiedAt = passed ? now() : 0;
+      meta.recentFailures = passed ? 0 : (meta.recentFailures ?? 0) + 1;
+      meta.updatedAt = now();
+      delete meta.validationAttempt;
+      store.put(meta);
+      return meta;
+    }, signal),
+
+    /** Roll back only this attempt when final custody was lost during commit.
+     * A replacement or a newer validation attempt must remain untouched.
+     * @param {string} origin @param {{revision:string,attempt:string}} proof */
+    revokeValidation: (origin, { revision, attempt }) => tx(META_STORE, 'readwrite', async (t) => {
+      const store = t.objectStore(META_STORE);
+      const meta = await reqP(store.get(origin));
+      if (meta?.revision !== revision || meta.validation?.attempt !== attempt) return;
+      meta.validation = { ...meta.validation, status: 'failed', reason: 'authority_lost' };
+      meta.lastVerifiedAt = 0;
       meta.updatedAt = now();
       store.put(meta);
     }),

@@ -62,6 +62,11 @@ export { createSiteClientStore } from './site-clients/store.js';
 export {
   buildClientWriteProposal,
   normalizeSiteOrigin,
+  normalizeSiteClientRun,
+  normalizeSiteClientContracts,
+  validateSiteClientValue,
+  canonicalSiteClientJson,
+  siteClientValidatedOperations,
 } from './site-clients/core.js';
 export { createSkillStore } from './skills/store.js';
 export { isAddressableBrowserTab } from './tools/browser-automation-policy.js';

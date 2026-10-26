@@ -14,10 +14,8 @@
 // 75/25 head/tail split of the window budget.
 const HEAD_FRACTION = 0.75;
 
-// The ONE spill-cache entry cap, shared by every spill store (the SW's web
-// extract cache and the run cache) — a window onto recent oversized texts,
-// not an archive. Lives here so the twins can't silently drift apart.
-export const SPILL_CACHE_MAX_ENTRIES = 40;
+// Keep the semantic surface stable while the storage policy owns the limit.
+export { SPILL_CACHE_MAX_ENTRIES } from '../result-store-policy.js';
 
 // The ONE per-call paging slice size, shared by every offset/limit reader:
 // read_result AND the self-paging file reads (js_read_file /

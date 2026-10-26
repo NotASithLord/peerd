@@ -126,7 +126,7 @@ const startSiteClientFixture = async ({ value, onRead }) => {
   const server = createHttpsServer({
     cert: GIT_FIXTURE_TLS_CERT, key: GIT_FIXTURE_TLS_KEY,
   }, (request, response) => {
-    if (request.url === '/api/status') {
+    if (new URL(request.url ?? '/', 'https://fixture.test').pathname === '/api/status') {
       onRead();
       const origin = typeof request.headers.origin === 'string' && request.headers.origin
         ? request.headers.origin : '*';
@@ -173,6 +173,7 @@ const siteClientConfirmation = (page, budgetMs = 90_000) => waitFor(() => evalIn
     title: modal.querySelector('h3').textContent,
     code: modal.querySelector('[aria-label="Proposed site-client code"]')?.textContent,
     endpoints: modal.querySelector('[aria-label="Proposed site-client endpoints"]')?.textContent,
+    contracts: modal.querySelector('[aria-label="Proposed site-client contracts"]')?.textContent,
     buttons: [...modal.querySelectorAll('button')].map((button) => button.textContent.trim()),
   };
 })()`), { budgetMs, pollMs: 80 });
@@ -183,6 +184,15 @@ const approveSiteClient = (page) => evalIn(page, `(() => {
   button?.click();
   return !!button;
 })()`);
+
+// Code-mode returns the tool value as JSON inside the normal script fence.
+// Decode that value before inspecting the host envelope or capture evidence.
+const siteClientResultContent = (text) => {
+  const value = text.match(/\[VALUE\]\n([\s\S]*?)\n<\/untrusted_web_content>/);
+  if (!value) return text;
+  const decoded = JSON.parse(value[1]);
+  return typeof decoded === 'string' ? decoded : JSON.stringify(decoded);
+};
 
 // Transfer routes require the exact options-page channel. Keep the live E2E on
 // that production boundary instead of calling the generic dispatcher.
@@ -2945,12 +2955,23 @@ export const STATES = [
           }) }
           : { sse: sseToolCall('site_capture', { action: 'stop' }) };
         if (turn === 4) {
-          const deriver = body.includes('deriver: capture-cdp') ? 'capture-cdp' : 'capture-tap';
+          const capture = siteClientResultContent(siteClientVertical.actorResults[4] ?? '');
+          const deriver = capture.includes('deriver: capture-cdp') ? 'capture-cdp' : 'capture-tap';
           const definition = {
             summary: 'Read the live fixture status.',
             endpoints: [{ method: 'GET', path: '/api/status', note: 'Current status' }],
             auth: 'none', deriver,
-            body: 'return { status: async () => site.fetch("/api/status") };',
+            body: 'return { status: async ({ key }) => { const response = await site.fetch("/api/status?key=" + encodeURIComponent(key)); if (response.status !== 200) throw new Error("Status request failed"); return { status: response.status, value: response.json?.value, key }; } };',
+            operations: [{
+              name: 'status', description: 'Read the fixture status with a request key.', readOnly: true,
+              inputSchema: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'], additionalProperties: false },
+              outputSchema: { type: 'object', properties: {
+                status: { type: 'integer' }, value: { type: 'string' }, key: { type: 'string' },
+              }, required: ['status', 'value', 'key'], additionalProperties: false },
+            }],
+            validationCases: ['first', 'second'].map((key) => ({
+              operation: 'status', input: { key }, expected: { status: 200, value: 'live-42', key },
+            })),
           };
           return codeSurface
             ? { sse: sseToolCall('page_code', {
@@ -2965,10 +2986,16 @@ export const STATES = [
             code: `return await page.readSiteClient(${JSON.stringify(siteClientVerticalOrigin)});`,
           }) }
           : { sse: sseToolCall('site_client_read', { origin: siteClientVerticalOrigin }) };
-        if (turn === 6) return { sse: sseToolCall('site_client_run', {
-          origin: siteClientVerticalOrigin,
-          code: 'const response = await client.status(); return { status: response.status, value: response.json?.value };',
-        }) };
+        if (turn === 6 || turn === 7) {
+          const read = siteClientResultContent(siteClientVertical.actorResults[6] ?? '');
+          const envelope = read.match(/<site_client_contract>\s*([\s\S]*?)\s*<\/site_client_contract>/);
+          const revision = envelope ? JSON.parse(envelope[1]).revision : null;
+          if (!revision) throw new Error('The live read did not return a revision-bound contract');
+          return { sse: sseToolCall('site_client_run', {
+            origin: siteClientVerticalOrigin, revision,
+            ...(turn === 6 ? { mode: 'validate' } : { operation: 'status', input: { key: 'held-out' } }),
+          }) };
+        }
         return { sse: sseText('SITE-CLIENT-VERTICAL-DONE') };
       }
 
@@ -3019,6 +3046,14 @@ export const STATES = [
             && confirmation?.endpoints?.includes('GET /api/status')
             && confirmation?.buttons?.includes('Save client'),
           JSON.stringify(confirmation));
+        rec.check('the user can review exact contracts and both expected examples',
+          confirmation?.contracts?.includes('inputSchema')
+            && confirmation.contracts.includes('first') && confirmation.contracts.includes('second'),
+          confirmation?.contracts);
+        await rec.shot('contract-confirmation');
+        await evalIn(ctx.page, `document.querySelector('[aria-label="Proposed site-client contracts"]').closest('details').open = true`);
+        await rec.shot('contract-details');
+        await evalIn(ctx.page, `document.querySelector('[aria-label="Proposed site-client contracts"]').closest('details').open = false`);
 
         const callsAtConfirmation = siteClientVertical.actorCalls;
         await sleep(500);
@@ -3050,7 +3085,7 @@ export const STATES = [
             && refusalAudit?.details?.outcomeKnown === true
             && refusalAudit?.when < firstActorEffect?.when,
           JSON.stringify({ failure, refusalAudit, firstActorEffect }));
-        const actorEvidence = siteClientVertical.actorBodies.join('\n');
+        const actorEvidence = siteClientResultContent(siteClientVertical.actorResults[4] ?? '');
         rec.check('capture observed the real page request and returned its redacted dossier',
           actorEvidence.includes('/api/status')
             && (REQUIRE_SITE_CAPTURE_TAP
@@ -3060,16 +3095,17 @@ export const STATES = [
           actorEvidence.slice(-1200));
         rec.check('write settled, read returned the persisted client, and sealed run used it',
           /create/i.test(siteClientVertical.actorResults[5] ?? '')
-            && (siteClientVertical.actorResults[6] ?? '')
-              .includes('return { status: async () => site.fetch')
-            && (siteClientVertical.actorResults[7] ?? '').includes('live-42')
-            && siteClientVertical.apiReads >= 2,
+            && (siteClientVertical.actorResults[6] ?? '').includes('<site_client_contract>')
+            && (siteClientVertical.actorResults[7] ?? '').includes('validated')
+            && (siteClientVertical.actorResults[8] ?? '').includes('live-42')
+            && (siteClientVertical.actorResults[8] ?? '').includes('held-out')
+            && siteClientVertical.apiReads >= 4,
           JSON.stringify({
             apiReads: siteClientVertical.apiReads,
             actorResults: siteClientVertical.actorResults.slice(4),
           }));
         rec.check('the tab Web actor completed and its fenced reply reached the orchestrator',
-          siteClientVertical.actorCalls >= 8
+          siteClientVertical.actorCalls >= 9
             && siteClientVertical.replyBody.includes('SITE-CLIENT-VERTICAL-DONE')
             && siteClientVertical.replyBody.includes('you messaged has replied'),
           siteClientVertical.replyBody.slice(-900));

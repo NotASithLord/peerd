@@ -74,6 +74,7 @@ describe('site_client_run code-run custody', () => {
     expect(result).toEqual({
       ok: false,
       error: 'site_client_run_aborted: the turn was stopped before the run started',
+      performed: false, outcomeKnown: true, retryable: false,
       outcomeKind: 'pre-effect-failure',
     });
     expect(started).toBe(false);
@@ -110,6 +111,7 @@ describe('site_client_run code-run custody', () => {
     expect(await pending).toEqual({
       ok: false,
       error: 'site_client_run_aborted: the turn stopped while loading the client',
+      performed: false, outcomeKnown: true, retryable: false,
       outcomeKind: 'pre-effect-failure',
     });
     expect(registered).toBe(false);
@@ -148,6 +150,7 @@ describe('site_client_run code-run custody', () => {
     expect(await pending).toEqual({
       ok: false,
       error: 'site_client_run_aborted: the turn was stopped during the run',
+      performed: false, outcomeKnown: true, retryable: false,
       outcomeKind: 'pre-effect-failure',
     });
     expect(recordRuns).toBe(0);

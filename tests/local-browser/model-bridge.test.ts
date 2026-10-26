@@ -77,7 +77,7 @@ describe('local browser decision bridge', () => {
     const check = await respond(initial);
     const appended = append(initial, check, snapshot());
     appended.messages.push({ role: 'assistant', content: 'Unrelated later message' });
-    await expect(respond(appended)).rejects.toThrow('another transcript');
+    await expect(respond(appended)).rejects.toThrow('incomplete browser transcript');
   });
 
   test('text helper is called only for typing, and cannot inject Enter or submit', async () => {
@@ -123,7 +123,7 @@ describe('local browser decision bridge', () => {
     expect(requests[1].history.at(-1)).toMatchObject({ tool: 'read_page', result: 'Conductivity: 58 MS/m' });
     expect(final.content).toContain('58 MS/m');
     const click = { role: 'assistant', content: null, tool_calls: [{ id: 'c2', type: 'function', function: { name: 'click', arguments: '{"ref":"@e2"}' } }] };
-    const changed = append(withRead, click, 'clicked');
+    const changed = append(withRead, click, '<untrusted_web_content origin="https://example.org" tool="click" retrieved_at="2026-10-26T00:00:00.000Z">\n{"clicked":true}\n</untrusted_web_content>');
     const fresh = await respond(changed);
     await respond(append(changed, fresh, snapshot()));
     expect(requests.at(-1).history.some((entry: any) => entry.tool === 'read_page')).toBe(false);

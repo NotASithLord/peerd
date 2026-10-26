@@ -1353,7 +1353,9 @@ export const runActor = async (job, {
           await relayExactToolMessage(m, 'site-client-run-response', () =>
             sendToSW('site-client/run', {
               ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.site-client.run'),
-              origin: m.origin, code: m.code, timeoutMs: m.timeoutMs,
+              origin: m.origin, timeoutMs: m.timeoutMs,
+              ...Object.fromEntries(['code', 'mode', 'clientOperation', 'input', 'revision']
+                .filter(key => m[key] !== undefined).map(key => [key, m[key]])),
             }), { observeResult: true });
           return;
         }
@@ -1367,6 +1369,8 @@ export const runActor = async (job, {
               ...(m.auth !== undefined ? { auth: m.auth } : {}),
               ...(m.deriver !== undefined ? { deriver: m.deriver } : {}),
               ...(typeof m.body === 'string' ? { body: m.body } : {}),
+              ...(m.operations !== undefined ? { operations: m.operations } : {}),
+              ...(m.validationCases !== undefined ? { validationCases: m.validationCases } : {}),
             }), { observeResult: true });
           return;
         }

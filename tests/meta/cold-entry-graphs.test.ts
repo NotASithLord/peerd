@@ -215,6 +215,46 @@ describe('cold entry graphs', () => {
     expect(measured.modulesSet.has('peerd-runtime/contacts/aggregate.js')).toBe(true);
   });
 
+  test('Chrome custody proxies do not import the resident vault implementation', async () => {
+    for (const entry of [nativeKernelEntry, previewKernelEntry]) {
+      const measured = await nativeKernelStats(entry);
+      expect(measured.modulesSet.has('background/vault-authority-client.js')).toBe(true);
+      expect(measured.modulesSet.has('peerd-egress/kernel-storage.js')).toBe(true);
+      for (const file of [
+        'peerd-egress/vault/vault.js',
+        'peerd-egress/vault/keys.js',
+        'peerd-egress/vault/blob-migration.js',
+        'peerd-egress/vault/enroll-options.js',
+        'peerd-egress/vault/kdf.js',
+      ]) {
+        expect(measured.modulesSet.has(file), `${entry} imports resident vault owner ${file}`)
+          .toBe(false);
+      }
+    }
+    // why: removing an obsolete barrel edge must not remove the actual owner;
+    // the sealed worker still imports the same vault implementation.
+    const worker = await collectStaticModuleGraph(
+      EXTENSION_DIR, join(EXTENSION_DIR, 'offscreen/vault-authority-runtime.js'),
+    );
+    expect(worker.has(join(EXTENSION_DIR, 'peerd-egress/vault/vault.js'))).toBe(true);
+  });
+
+  test('Chrome spill storage does not import semantic text formatting', async () => {
+    for (const entry of [nativeKernelEntry, previewKernelEntry]) {
+      const measured = await nativeKernelStats(entry);
+      expect(measured.modulesSet.has('peerd-runtime/tools/result-store.js')).toBe(true);
+      expect(measured.modulesSet.has('peerd-runtime/tools/result-store-policy.js')).toBe(true);
+      expect(measured.modulesSet.has('peerd-runtime/tools/web/spill.js')).toBe(false);
+    }
+    // why: storage shares limits with actor tools, not their BM25 and paging
+    // presentation; the semantic read tool must retain its implementation.
+    const semantic = await collectStaticModuleGraph(
+      EXTENSION_DIR, join(EXTENSION_DIR, 'peerd-runtime/tools/defs/read-page.js'),
+    );
+    expect(semantic.has(join(EXTENSION_DIR, 'peerd-runtime/tools/web/spill.js'))).toBe(true);
+    expect(semantic.has(join(EXTENSION_DIR, 'peerd-runtime/tools/result-store-policy.js'))).toBe(true);
+  });
+
   test('demand runtimes do not inherit the composer policy family', async () => {
     for (const entry of [
       'background/kernel-semantic-runtime.js',

@@ -12,6 +12,7 @@ import {
   launchPeerd, unlockAndReady, resetSession, rpc, evalIn, waitFor,
 } from '../cdp/e2e-harness.mjs';
 import { BRIDGE_MODEL, createBrowserDecisionResponder, assistantSse, makeLocalClients } from './model-bridge.mjs';
+import { parseSiteClientContract } from './api-policy.mjs';
 import {
   GIT_FIXTURE_HOST, GIT_FIXTURE_TLS_CERT, GIT_FIXTURE_TLS_KEY, GIT_FIXTURE_SPKI_SHA256_BASE64,
 } from '../acceptance/git-smart-http-fixture.mjs';
@@ -27,11 +28,37 @@ const CASE_BUDGET_MS = realDecision ? 120_000 : 65_000;
 const CASES = [
   { name: 'search-navigation', mutate: false },
   { name: 'mutation-replan', mutate: true },
+  { name: 'api-reuse', mutate: false, api: true },
 ];
 const requestedCase = process.argv.find((arg) => arg.startsWith('--case='))?.slice(7);
 if (requestedCase && !CASES.some((row) => row.name === requestedCase)) {
   throw new Error(`Unknown smoke case: ${requestedCase}`);
 }
+if (realDecision && requestedCase === 'api-reuse') {
+  throw new Error('The API reuse fixture uses a scripted selector and makes no decision-model call; run it without --decision-origin.');
+}
+
+const API_ITEMS = Object.freeze({
+  copper: { id: 'CW-42', name: 'Copper widget', price: 12.5, available: true },
+  silver: { id: 'SW-19', name: 'Silver widget', price: 24, available: false },
+  gold: { id: 'GW-07', name: 'Gold widget', price: 48, available: true },
+});
+const apiClientDefinition = () => ({
+  summary: 'Look up a catalog item by its material.',
+  endpoints: [{ method: 'GET', path: '/api/items', note: 'query: material' }],
+  auth: 'none', deriver: 'capture-tap',
+  body: 'return { lookup: async ({ material }) => { const response = await site.fetch("/api/items?material=" + encodeURIComponent(material)); if (response.status !== 200) throw new Error("Catalog lookup failed"); return response.json; } };',
+  operations: [{
+    name: 'lookup', description: 'Read one catalog item by material.', readOnly: true,
+    inputSchema: { type: 'object', properties: { material: { type: 'string' } }, required: ['material'], additionalProperties: false },
+    outputSchema: { type: 'object', properties: {
+      id: { type: 'string' }, name: { type: 'string' }, price: { type: 'number' }, available: { type: 'boolean' },
+    }, required: ['id', 'name', 'price', 'available'], additionalProperties: false },
+  }],
+  validationCases: ['copper', 'silver'].map(material => ({
+    operation: 'lookup', input: { material }, expected: API_ITEMS[material],
+  })),
+});
 
 const report = {
   evidenceClass: EVIDENCE_CLASS,
@@ -85,12 +112,15 @@ const check = (row, name, pass, detail) => {
 // All fixture values are controlled by this file. The browser's own input,
 // submit and link events leave sessionStorage evidence across real navigation.
 const fixtureHtml = (url) => {
-  const name = CASES.some((row) => row.name === url.searchParams.get('case'))
-    ? url.searchParams.get('case') : 'search-navigation';
+  // Render the fixture's constant, never reflect the request's query bytes.
+  const name = CASES.find((row) => row.name === url.searchParams.get('case'))?.name
+    ?? 'search-navigation';
   const query = url.searchParams.get('q') === 'copper' ? 'copper' : '';
   const mutation = url.searchParams.get('mutation') === '1' ? '1' : '0';
   let content;
-  if (url.pathname === '/catalog') {
+  if (url.pathname === '/api-catalog') {
+    content = '<h1>API catalog</h1><button id="load-preview" type="button">Preview copper item</button><output id="api-preview">Not loaded</output>';
+  } else if (url.pathname === '/catalog') {
     content = `<h1>Local catalog</h1>
       <form id="search-form" action="/results" method="get">
         <input type="hidden" name="case" value="${name}">
@@ -121,6 +151,11 @@ const fixtureHtml = (url) => {
         if (event.target.id === 'decoy') sessionStorage.setItem('decoyClicked', 'yes');
       });
       document.addEventListener('submit', function() { sessionStorage.setItem('formSubmitted', 'yes'); });
+      document.querySelector('#load-preview')?.addEventListener('click', async function() {
+        sessionStorage.setItem('apiPreviewClicked', 'yes');
+        const response = await fetch('/api/items?material=copper', { cache: 'no-store' });
+        document.querySelector('#api-preview').textContent = JSON.stringify(await response.json());
+      });
     </script></body></html>`;
 };
 
@@ -128,7 +163,14 @@ const startFixture = async () => {
   fixtureServer = createHttpsServer({ cert: GIT_FIXTURE_TLS_CERT, key: GIT_FIXTURE_TLS_KEY }, (request, response) => {
     const url = new URL(request.url ?? '/', `https://${GIT_FIXTURE_HOST}`);
     if (url.pathname === '/favicon.ico') { response.writeHead(204); response.end(); return; }
-    requests.push({ pathname: url.pathname, query: Object.fromEntries(url.searchParams), at: Date.now() });
+    requests.push({ method: request.method, pathname: url.pathname, query: Object.fromEntries(url.searchParams), at: Date.now() });
+    if (url.pathname === '/api/items') {
+      const material = url.searchParams.get('material');
+      const item = Object.hasOwn(API_ITEMS, material) ? API_ITEMS[material] : undefined;
+      response.writeHead(item ? 200 : 404, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      response.end(JSON.stringify(item ?? { error: 'unknown material' }));
+      return;
+    }
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
     response.end(fixtureHtml(url));
   });
@@ -192,6 +234,8 @@ const readFixture = async (origin, name) => evalIn(context.page, `(async () => {
     itemClicked: sessionStorage.getItem('itemClicked'),
     formSubmitted: sessionStorage.getItem('formSubmitted'),
     decoyClicked: sessionStorage.getItem('decoyClicked'),
+    apiPreviewClicked: sessionStorage.getItem('apiPreviewClicked'),
+    apiPreview: document.querySelector('#api-preview')?.textContent,
     };
   } });
   return { tabCount: tabs.length, tabId: tabs[0].id, ...results[0]?.result };
@@ -277,12 +321,30 @@ const modelResponder = async (_index, request) => {
       active.actorCalls += 1;
       active.lastToolResult = body.messages?.filter(message => message.role === 'tool').at(-1)?.content ?? null;
       if (active.actorCalls > 36) throw new Error('Smoke actor wire budget exceeded');
+      if (active.api && active.stage === 'author') {
+        const turn = active.authoringResults.length;
+        active.authoringResults.push(active.lastToolResult);
+        if (turn === 0) return { sse: assistantSse(toolMessage('navigate', { url: active.url })) };
+        if (turn === 1) return { sse: assistantSse(toolMessage('site_capture', { action: 'start' })) };
+        if (turn === 2) return { sse: assistantSse(toolMessage('click', { selector: '#load-preview' })) };
+        if (turn === 3) return { sse: assistantSse(toolMessage('site_capture', { action: 'stop' })) };
+        if (turn === 4) return { sse: assistantSse(toolMessage('site_client_write', { origin: active.origin, ...apiClientDefinition() })) };
+        if (turn === 5 || turn === 7) return { sse: assistantSse(toolMessage('site_client_read', { origin: active.origin })) };
+        if (turn === 6) {
+          active.draftContract = parseSiteClientContract(active.lastToolResult, active.origin);
+          return { sse: assistantSse(toolMessage('site_client_run', {
+            origin: active.origin, mode: 'validate', revision: active.draftContract.revision,
+          })) };
+        }
+        active.validatedContract = parseSiteClientContract(active.lastToolResult, active.origin);
+        return { sse: assistantSse(textMessage('API-CLIENT-FIXTURE-AUTHORED')) };
+      }
       return { sse: assistantSse(await active.policy(body)) };
     }
     if (!active.delegated) {
       active.delegated = true;
       return { sse: assistantSse(toolMessage('message_actor', {
-        to: 'web', message: `Open ${active.url}. Search the catalog for copper, open the Copper widget details and stop there.`,
+        to: 'web', message: active.goal ?? `Open ${active.url}. Search the catalog for copper, open the Copper widget details and stop there.`,
       })) };
     }
     if (request.postData.includes('you messaged has replied')) active.actorSettled = true;
@@ -308,7 +370,113 @@ const prepareMainSession = async () => {
   requireOk(await rpc(context.page, { type: 'permission/set', mode: 'act' }), 'permission/set act');
 };
 
+// The author, API selector and expectations are fixture code. This case proves
+// the real capture/confirmation/worker/promotion/reuse path, not model accuracy.
+const runApiCase = async (spec, origin) => {
+  const row = {
+    ...spec, origin, stage: 'author', evidenceClass: 'scripted-model-real-browser',
+    ok: false, checks: [], events: [], decisions: 0, actorCalls: 0,
+    textHelperCalls: 0, apiSelectorCalls: 0, delegated: false, actorSettled: false,
+    modelErrors: [], authoringResults: [], startedAt: Date.now(),
+  };
+  report.cases.push(row);
+  active = row;
+  await prepareMainSession();
+  row.url = `${origin}/api-catalog?case=${row.name}`;
+  row.goal = `Open ${row.url}. Discover the catalog request, save its read client after review, and validate the declared examples.`;
+  phase = 'task';
+  console.log(`[local-browser-smoke] Running ${row.name}: capture and validate`);
+  requireOk(await rpc(context.page, { type: 'agent/send', text: 'Prepare the reusable API client fixture.' }), 'API authoring send');
+  const confirmation = await waitFor(async () => {
+    if (row.modelErrors.length) throw new Error(row.modelErrors[0]);
+    return evalIn(context.page, `(() => {
+      const modal = document.querySelector('.confirm-modal');
+      if (modal?.querySelector('h3')?.textContent !== 'Confirm site client') return null;
+      return {
+        code: modal.querySelector('[aria-label="Proposed site-client code"]')?.textContent,
+        contracts: modal.querySelector('[aria-label="Proposed site-client contracts"]')?.textContent,
+        text: modal.textContent,
+      };
+    })()`);
+  }, { budgetMs: 30_000, pollMs: 100 });
+  if (!confirmation) throw new Error('API client review did not appear');
+  check(row, 'real review contains exact client code, contracts and expected examples',
+    confirmation.code === apiClientDefinition().body
+      && confirmation.contracts?.includes('copper') && confirmation.contracts.includes('silver')
+      && confirmation.text.includes(origin));
+  mkdirSync(dirname(REPORT), { recursive: true });
+  writeFileSync(resolve(dirname(REPORT), 'api-client-confirmation.png'), await context.screenshot());
+  const approved = await evalIn(context.page, `(() => {
+    const button = [...document.querySelectorAll('.confirm-modal button')].find(item => item.textContent.trim() === 'Save client');
+    button?.click(); return !!button;
+  })()`);
+  if (!approved) throw new Error('API fixture review could not be approved');
+  const authored = await waitFor(() => {
+    if (row.modelErrors.length) throw new Error(row.modelErrors[0]);
+    return row.actorSettled && row.validatedContract;
+  }, { budgetMs: 30_000, pollMs: 100 });
+  if (!authored) throw new Error('API client validation did not finish');
+  row.authoringDurationMs = Date.now() - row.startedAt;
+  check(row, 'capture saw the real endpoint and preserved numeric response shape',
+    row.authoringResults[4]?.includes('/api/items') && row.authoringResults[4].includes('number'));
+  check(row, 'explicit validation promoted the exact saved revision',
+    row.draftContract.status === 'draft' && row.validatedContract.status === 'validated'
+      && row.draftContract.revision === row.validatedContract.revision
+      && row.validatedContract.validatedOperations.includes('lookup'));
+  const trainingReads = requests.filter(request => request.pathname === '/api/items');
+  check(row, 'both declared inputs ran before the held-out repeat task',
+    trainingReads.some(request => request.query.material === 'copper')
+      && trainingReads.some(request => request.query.material === 'silver')
+      && trainingReads.every(request => request.method === 'GET' && request.query.material !== 'gold'));
+
+  await prepareMainSession();
+  row.stage = 'reuse'; row.delegated = false; row.actorSettled = false; row.actorCalls = 0;
+  row.reuseCase = `${row.name}-repeat`;
+  row.url = `${origin}/api-catalog?case=${row.reuseCase}`;
+  row.goal = `Open ${row.url}. Read the gold catalog item's id and price using the saved client.`;
+  row.policy = createBrowserDecisionResponder({
+    emit: event => row.events.push(event),
+    decide: async () => { row.decisions += 1; throw new Error('Validated API task should not use DOM decisions'); },
+    generateText: async () => { row.textHelperCalls += 1; throw new Error('API reuse should not type into a page'); },
+    selectApi: async ({ contract }) => {
+      row.apiSelectorCalls += 1;
+      if (contract.origin !== origin) throw new Error('API selector received the wrong origin');
+      return { operation: 'lookup', input: { material: 'gold' } };
+    },
+  });
+  row.reuseStartedAt = Date.now();
+  phase = 'task';
+  requireOk(await rpc(context.page, { type: 'agent/send', text: 'Run the held-out repeat API lookup.' }), 'API repeat send');
+  const completed = await waitFor(() => {
+    if (row.modelErrors.length) throw new Error(row.modelErrors[0]);
+    return row.events.some(event => event.type === 'api_result');
+  }, { budgetMs: 30_000, pollMs: 100 });
+  if (!completed) throw new Error('API bridge did not receive a checked result');
+  row.reuseDurationMs = Date.now() - row.reuseStartedAt;
+  row.browserEvidence = await readFixture(origin, row.reuseCase);
+  row.apiReceipt = row.lastToolResult;
+  const repeatReads = requests.filter(request => request.pathname === '/api/items' && request.at >= row.reuseStartedAt);
+  check(row, 'real endpoint returned the held-out item through the typed stored operation',
+    repeatReads.length === 1 && repeatReads[0].method === 'GET' && repeatReads[0].query.material === 'gold'
+      && row.apiReceipt.includes(API_ITEMS.gold.id) && row.apiReceipt.includes(String(API_ITEMS.gold.price)));
+  check(row, 'repeat path needed one selector and zero browser decisions or field generations',
+    row.apiSelectorCalls === 1 && row.decisions === 0 && row.textHelperCalls === 0,
+    { apiSelectorCalls: row.apiSelectorCalls, decisions: row.decisions, textHelperCalls: row.textHelperCalls });
+  check(row, 'repeat task left the page controls untouched', row.browserEvidence.tabCount === 1
+    && row.browserEvidence.apiPreviewClicked === null && row.browserEvidence.apiPreview === 'Not loaded');
+  check(row, 'contract checking was not represented as independent task verification',
+    row.events.filter(event => event.type === 'api_result').every(event => event.inputValidated
+      && event.outputValidated && event.taskVerified === false));
+  check(row, 'model responder had no hidden failures', row.modelErrors.length === 0);
+  row.durationMs = Date.now() - row.startedAt;
+  row.ok = row.checks.every(item => item.pass);
+  delete row.policy; delete row.lastToolResult;
+  await waitFor(() => row.actorSettled, { budgetMs: 5_000, pollMs: 100 });
+  writeReport();
+};
+
 const runCase = async (spec, origin) => {
+  if (spec.api) return runApiCase(spec, origin);
   const row = {
     ...spec, evidenceClass: EVIDENCE_CLASS, ok: false, checks: [], events: [],
     decisions: 0, actorCalls: 0, textHelperCalls: 0, delegated: false,
@@ -367,7 +535,7 @@ const runSuite = async () => {
   requireOk(await rpc(context.page, { type: 'settings/update', patch: {
     webActorActionSurface: 'tools', runnerModel: BRIDGE_MODEL, advancedAutomationEnabled: false,
   } }), 'settings/update local browser experiment');
-  for (const spec of CASES.filter(row => !requestedCase || row.name === requestedCase)) {
+  for (const spec of CASES.filter(row => (!requestedCase || row.name === requestedCase) && (!realDecision || !row.api))) {
     try {
       await deadline(runCase(spec, origin), CASE_BUDGET_MS, spec.name);
     } catch (error) {

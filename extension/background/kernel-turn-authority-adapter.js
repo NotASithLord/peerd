@@ -3275,202 +3275,224 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       'actors/call': actorsRoutes['actors/call'],
       'site-fetch/call': async (/** @type {any} */ message = {}, /** @type {any} */ sender) => {
         if (!deps.isOffscreenSender(sender)) return { ok: false, error: 'site_fetch_unauthorized_relay' };
-        if (deps.vault.isLocked()) return { ok: false, error: 'locked' };
         const { ownerSessionId, siteOrigin, pathOrUrl, method, headers, body, runId } = message;
-        if (typeof ownerSessionId !== 'string' || !ownerSessionId) {
-          return { ok: false, error: 'site_fetch_no_owner' };
-        }
-        if (typeof runId !== 'string' || scriptRuns.ownerFor(runId) !== ownerSessionId
-            || scriptRuns.allows(runId, 'site') !== true
-            || scriptRuns.admitCodeOp(runId, 'site') !== true) {
-          return { ok: false, error: 'site_fetch_unknown_finished_foreign_or_over_limit_run' };
-        }
-        const signal = scriptRuns.signalFor(runId);
-        if (signal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
-        const owner = await shared.sessions.get(ownerSessionId).catch(() => null);
-        if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web') {
-          return { ok: false, error: 'site_fetch_not_web_actor' };
-        }
-        const pin = normalizeApiOrigin(siteOrigin);
-        if (!pin) return { ok: false, error: `site_fetch_bad_origin: ${siteOrigin}` };
-        if (isKnownIdpHost(pin)) {
-          return { ok: false, error: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE };
-        }
-        const target = resolveSiteUrl(pathOrUrl, pin);
-        if ('error' in target) return { ok: false, error: target.error };
-        let host = '';
-        try { host = new URL(target.url).hostname; } catch { /* resolveSiteUrl already validated */ }
-        const denied = host ? matchesDenylist(host, deps.denylist.patterns()) : null;
-        if (denied) return { ok: false, error: `denylisted: ${host} matches '${denied}'` };
-        const backing = owner.backing === undefined ? 'tab' : owner.backing;
-        const ownedApiOrigin = owner.backing === 'api'
-          ? normalizeApiOrigin(owner.instanceId) : null;
-        let originLock = null;
-        /** @type {string|undefined} */ let tabOrigin;
-        if (backing === 'tab' && hasDurableSiteClientState(owner.originState)) {
-          originStates.hydrate(ownerSessionId, owner.originState);
-          originLock = live.originLockFor(ownerSessionId);
-        }
-        const authorizeTabOrigin = originLock?.authorizeSiteClientOrigin(
-          async () => {
-            const landing = await live.liveLandingFor(ownerSessionId);
-            // The authorizer's last verified landing is also the cookie scope.
-            // Never retain the pre-pacing tab snapshot through an awaited check.
-            tabOrigin = landing.status === 'live' ? originOf(landing.url) : undefined;
-            return landing;
-          },
-        );
-        const reauthorize = () => authorizeSiteClientRelayOrigin({
-          backing, instanceOrigin: ownedApiOrigin, durableState: owner.originState,
-          targetOrigin: pin, authorizeTabOrigin, isKnownIdp: isKnownIdpHost,
-        });
-        if (!await reauthorize()) return { ok: false, error: 'site_fetch_cross_origin' };
-        const httpMethod = String(method ?? 'GET').toUpperCase();
-        const mutatesExternal = needsWebWriteConfirm(httpMethod);
-        /** @type {Record<string,string>} */
-        const safeHeaders = {};
-        for (const [name, value] of Object.entries(headers ?? {})) {
-          if (['cookie', 'authorization', 'proxy-authorization', 'dpop']
-            .includes(name.toLowerCase())) continue;
-          if (typeof value === 'string') safeHeaders[name] = value;
-        }
-        let requestBody = body;
-        if (requestBody !== undefined && typeof requestBody !== 'string') {
-          try { requestBody = JSON.stringify(requestBody); }
-          catch { return { ok: false, error: 'site_fetch_bad_body', outcomeKnown: true }; }
-          if (!safeHeaders['Content-Type'] && !safeHeaders['content-type']) {
-            safeHeaders['Content-Type'] = 'application/json';
+        const readOnly = scriptRuns.ownerFor(runId) === ownerSessionId
+          && scriptRuns.allows(runId, 'siteReadOnly');
+        const execute = async () => {
+          if (deps.vault.isLocked()) return { ok: false, error: 'locked' };
+          if (typeof ownerSessionId !== 'string' || !ownerSessionId) {
+            return { ok: false, error: 'site_fetch_no_owner' };
           }
-        }
-        const liveOwnerPermission = async () => {
-          const currentOwner = await shared.sessions.get(ownerSessionId).catch(() => null);
-          if (!currentOwner || currentOwner.kind !== 'actor'
-              || currentOwner.actorType !== 'web') return null;
-          return resolvePermission(currentOwner);
-        };
-        // why: confirmation is consent, not Plan/Act authorization. Stored
-        // site-client code is allowed to run in Plan for reads, so the final
-        // network edge must independently refuse every write method.
-        if (mutatesExternal
-            && (await liveOwnerPermission())?.mode !== PERMISSION_MODES.ACT) {
-          return { ok: false, error: 'plan_mode_refused', outcomeKnown: true };
-        }
-        if (mutatesExternal) {
-          const presentation = finalWebRequestConfirmation({
-            url: target.url, method: httpMethod, headers: safeHeaders,
-            ...(typeof requestBody === 'string' ? { body: requestBody } : {}),
-            source: 'site client',
-          });
-          const answer = await confirmAction({
-            tool: WEB_WRITE_CONFIRM_KEY, kind: 'web_write',
-            origins: [...presentation.origins], summary: presentation.summary,
-            sessionId: ownerSessionId,
-          }, /** @type {any} */ (signal));
-          if (answer !== 'yes_once' && answer !== 'yes_session') {
-            return { ok: false, error: 'declined: user declined the site-client write.' };
+          if (typeof runId !== 'string' || scriptRuns.ownerFor(runId) !== ownerSessionId
+              || scriptRuns.allows(runId, 'site') !== true
+              || scriptRuns.admitCodeOp(runId, 'site') !== true) {
+            return { ok: false, error: 'site_fetch_unknown_finished_foreign_or_over_limit_run' };
           }
+          const signal = scriptRuns.signalFor(runId);
           if (signal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
-          if ((await liveOwnerPermission())?.mode !== PERMISSION_MODES.ACT) {
-            return { ok: false, error: 'plan_mode_refused', outcomeKnown: true };
+          const owner = await shared.sessions.get(ownerSessionId).catch(() => null);
+          if (!owner || owner.kind !== 'actor' || owner.actorType !== 'web') {
+            return { ok: false, error: 'site_fetch_not_web_actor' };
           }
-        }
-        let scopedFetch;
-        if (owner.backing === 'api') {
-          if (!ownedApiOrigin || pin !== ownedApiOrigin) {
-            return { ok: false, error: 'site_fetch_cross_origin' };
+          const pin = normalizeApiOrigin(siteOrigin);
+          if (!pin) return { ok: false, error: `site_fetch_bad_origin: ${siteOrigin}` };
+          if (isKnownIdpHost(pin)) {
+            return { ok: false, error: IDENTITY_PROVIDER_TRANSIT_ONLY_CODE };
           }
-          scopedFetch = withDpopCredentials(webFetch, () => ownedApiOrigin, {
-            getSecret: (/** @type {string} */ name) => deps.vault.getSecret(name),
-            getDpopKey, audit: deps.auditLog.append,
-            captureRequestAuthority: () => deps.vault.captureRequestAuthority?.()
-              ?? (() => !deps.vault.isLocked()),
-          });
-        } else {
-          scopedFetch = withSessionScopedCredentials(
-            webFetch,
-            originLock ? originLock.makeScope(() => tabOrigin) : () => tabOrigin,
-            { captureRequestAuthority },
+          const target = resolveSiteUrl(pathOrUrl, pin);
+          if ('error' in target) return { ok: false, error: target.error };
+          let host = '';
+          try { host = new URL(target.url).hostname; } catch { /* resolveSiteUrl already validated */ }
+          const denied = host ? matchesDenylist(host, deps.denylist.patterns()) : null;
+          if (denied) return { ok: false, error: `denylisted: ${host} matches '${denied}'` };
+          const backing = owner.backing === undefined ? 'tab' : owner.backing;
+          const ownedApiOrigin = owner.backing === 'api'
+            ? normalizeApiOrigin(owner.instanceId) : null;
+          let originLock = null;
+          /** @type {string|undefined} */ let tabOrigin;
+          if (backing === 'tab' && hasDurableSiteClientState(owner.originState)) {
+            originStates.hydrate(ownerSessionId, owner.originState);
+            originLock = live.originLockFor(ownerSessionId);
+          }
+          const authorizeTabOrigin = originLock?.authorizeSiteClientOrigin(
+            async () => {
+              const landing = await live.liveLandingFor(ownerSessionId);
+              // The authorizer's last verified landing is also the cookie scope.
+              // Never retain the pre-pacing tab snapshot through an awaited check.
+              tabOrigin = landing.status === 'live' ? originOf(landing.url) : undefined;
+              return landing;
+            },
           );
-        }
-        if (!await reauthorize()) return { ok: false, error: 'site_fetch_cross_origin' };
-        if (signal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
-        if (mutatesExternal
-            && (await liveOwnerPermission())?.mode !== PERMISSION_MODES.ACT) {
-          return { ok: false, error: 'plan_mode_refused', outcomeKnown: true };
-        }
-        try {
-          let authorityCurrent = () => false;
-          const send = withWebRequestAuthority(scopedFetch, async () => {
-            authorityCurrent = captureRequestAuthority();
-            if (mutatesExternal
-                && (await liveOwnerPermission())?.mode !== PERMISSION_MODES.ACT) {
-              throw Object.assign(new Error('plan_mode_refused'), {
-                performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
-              });
-            }
-            if (!await reauthorize()) throw Object.assign(new Error('site_fetch_cross_origin'), {
-              performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
-            });
-          }, () => {
-            if (!authorityCurrent() || deps.vault.isLocked()) throw Object.assign(
-              new Error('site_fetch_authority_changed'), {
-                performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
-              },
-            );
+          const reauthorize = () => authorizeSiteClientRelayOrigin({
+            backing, instanceOrigin: ownedApiOrigin, durableState: owner.originState,
+            targetOrigin: pin, authorizeTabOrigin, isKnownIdp: isKnownIdpHost,
           });
-          const response = await send(target.url, {
-            method: httpMethod, headers: safeHeaders,
-            body: /** @type {string|undefined} */ (requestBody),
-            ...(signal ? { signal } : {}),
-          });
-          const contentType = response.headers.get('content-type') ?? '';
-          const { text } = await readBoundedResponseText(
-            response, 200_000, { signal: /** @type {AbortSignal|undefined} */ (signal) },
-          );
-          let json = null;
-          if (/(json|graphql)/i.test(contentType)) {
-            try { json = JSON.parse(text); } catch { json = null; }
-          }
-          return { ok: true, value: {
-            status: response.status, finalUrl: response.url ?? target.url,
-            contentType: contentType || null, body: text, json,
-          } };
-        } catch (cause) {
-          const error = /** @type {{reason?:string,message?:string,code?:string,performed?:boolean,
-            outcomeKnown?:boolean,outcomeKind?:string}} */ (cause);
-          if (error.performed === false && error.outcomeKnown === true
-              && error.outcomeKind === 'pre-effect-failure') return {
-            ok: false, error: error.message ?? 'site_fetch_authority_changed', code: error.code,
+          if (!await reauthorize()) return { ok: false, error: 'site_fetch_cross_origin' };
+          const httpMethod = String(method ?? 'GET').toUpperCase();
+          if (readOnly && httpMethod !== 'GET' && httpMethod !== 'HEAD') return {
+            ok: false, error: 'site_client_read_method_refused',
             performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
           };
-          if (error.reason === 'pacing_ceiling' || error.reason === 'pacing_unavailable') {
-            return pacingAuthorityRefusal(pin,
-              error.reason === 'pacing_unavailable' ? 'unavailable' : 'ceiling');
+          const mutatesExternal = needsWebWriteConfirm(httpMethod);
+          /** @type {Record<string,string>} */
+          const safeHeaders = {};
+          for (const [name, value] of Object.entries(headers ?? {})) {
+            if (['cookie', 'authorization', 'proxy-authorization', 'dpop']
+              .includes(name.toLowerCase())) continue;
+            if (typeof value === 'string') safeHeaders[name] = value;
           }
-          if (error.reason === 'redirect_blocked') {
-            return {
-              ok: false,
-              error: `redirected: ${target.url} issued a redirect (not followed). Use the final URL.`,
-              outcomeKnown: true,
-              ...(mutatesExternal ? {
-                performed: true, outcomeKind: 'effect-completed', retryable: false,
-              } : { outcomeKind: 'pre-effect-failure' }),
-            };
+          let requestBody = body;
+          if (requestBody !== undefined && typeof requestBody !== 'string') {
+            try { requestBody = JSON.stringify(requestBody); }
+            catch { return { ok: false, error: 'site_fetch_bad_body', outcomeKnown: true }; }
+            if (!safeHeaders['Content-Type'] && !safeHeaders['content-type']) {
+              safeHeaders['Content-Type'] = 'application/json';
+            }
           }
-          if (error.reason === 'private_network') {
-            return {
-              ok: false,
-              error: `blocked: ${target.url} is a private/loopback host (SSRF defense).`,
-              outcomeKnown: true, outcomeKind: 'pre-effect-failure',
-            };
-          }
-          return mutatesExternal ? {
-            ok: false, error: error.message ?? 'site_fetch_failed',
-            outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
-          } : {
-            ok: false, error: error.message ?? 'site_fetch_failed',
-            outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: true,
+          const liveOwnerPermission = async () => {
+            const currentOwner = await shared.sessions.get(ownerSessionId).catch(() => null);
+            if (!currentOwner || currentOwner.kind !== 'actor'
+                || currentOwner.actorType !== 'web') return null;
+            return resolvePermission(currentOwner);
           };
+          // why: confirmation is consent, not Plan/Act authorization. Stored
+          // site-client code is allowed to run in Plan for reads, so the final
+          // network edge must independently refuse every write method.
+          if (mutatesExternal
+              && (await liveOwnerPermission())?.mode !== PERMISSION_MODES.ACT) {
+            return { ok: false, error: 'plan_mode_refused', outcomeKnown: true };
+          }
+          if (mutatesExternal) {
+            const presentation = finalWebRequestConfirmation({
+              url: target.url, method: httpMethod, headers: safeHeaders,
+              ...(typeof requestBody === 'string' ? { body: requestBody } : {}),
+              source: 'site client',
+            });
+            const answer = await confirmAction({
+              tool: WEB_WRITE_CONFIRM_KEY, kind: 'web_write',
+              origins: [...presentation.origins], summary: presentation.summary,
+              sessionId: ownerSessionId,
+            }, /** @type {any} */ (signal));
+            if (answer !== 'yes_once' && answer !== 'yes_session') {
+              return { ok: false, error: 'declined: user declined the site-client write.' };
+            }
+            if (signal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
+            if ((await liveOwnerPermission())?.mode !== PERMISSION_MODES.ACT) {
+              return { ok: false, error: 'plan_mode_refused', outcomeKnown: true };
+            }
+          }
+          let scopedFetch;
+          if (owner.backing === 'api') {
+            if (!ownedApiOrigin || pin !== ownedApiOrigin) {
+              return { ok: false, error: 'site_fetch_cross_origin' };
+            }
+            scopedFetch = withDpopCredentials(webFetch, () => ownedApiOrigin, {
+              getSecret: (/** @type {string} */ name) => deps.vault.getSecret(name),
+              getDpopKey, audit: deps.auditLog.append,
+              captureRequestAuthority: () => deps.vault.captureRequestAuthority?.()
+                ?? (() => !deps.vault.isLocked()),
+            });
+          } else {
+            scopedFetch = withSessionScopedCredentials(
+              webFetch,
+              originLock ? originLock.makeScope(() => tabOrigin) : () => tabOrigin,
+              { captureRequestAuthority },
+            );
+          }
+          if (!await reauthorize()) return { ok: false, error: 'site_fetch_cross_origin' };
+          if (signal?.aborted) return { ok: false, error: 'site_fetch_aborted' };
+          if (mutatesExternal
+              && (await liveOwnerPermission())?.mode !== PERMISSION_MODES.ACT) {
+            return { ok: false, error: 'plan_mode_refused', outcomeKnown: true };
+          }
+          try {
+            let authorityCurrent = () => false;
+            const send = withWebRequestAuthority(scopedFetch, async () => {
+              authorityCurrent = captureRequestAuthority();
+              if (mutatesExternal
+                  && (await liveOwnerPermission())?.mode !== PERMISSION_MODES.ACT) {
+                throw Object.assign(new Error('plan_mode_refused'), {
+                  performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+                });
+              }
+              if (!await reauthorize()) throw Object.assign(new Error('site_fetch_cross_origin'), {
+                performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+              });
+            }, () => {
+              if (!authorityCurrent() || deps.vault.isLocked()) throw Object.assign(
+                new Error('site_fetch_authority_changed'), {
+                  performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+                },
+              );
+            });
+            const response = await send(target.url, {
+              method: httpMethod, headers: safeHeaders,
+              body: /** @type {string|undefined} */ (requestBody),
+              ...(signal ? { signal } : {}),
+            });
+            if (readOnly && (response.status < 200 || response.status >= 300)) {
+              void response.body?.cancel?.().catch(() => {});
+              return { ok: false, error: 'site_client_read_http_failed',
+                performed: true, outcomeKnown: true, outcomeKind: 'effect-completed', retryable: false };
+            }
+            const contentType = response.headers.get('content-type') ?? '';
+            const { text } = await readBoundedResponseText(
+              response, 200_000, { signal: /** @type {AbortSignal|undefined} */ (signal) },
+            );
+            let json = null;
+            if (/(json|graphql)/i.test(contentType)) {
+              try { json = JSON.parse(text); } catch { json = null; }
+            }
+            return { ok: true, value: {
+              status: response.status, finalUrl: response.url ?? target.url,
+              contentType: contentType || null, body: text, json,
+            } };
+          } catch (cause) {
+            const error = /** @type {{reason?:string,message?:string,code?:string,performed?:boolean,
+              outcomeKnown?:boolean,outcomeKind?:string}} */ (cause);
+            if (error.performed === false && error.outcomeKnown === true
+                && error.outcomeKind === 'pre-effect-failure') return {
+              ok: false, error: error.message ?? 'site_fetch_authority_changed', code: error.code,
+              performed: false, outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
+            };
+            if (error.reason === 'pacing_ceiling' || error.reason === 'pacing_unavailable') {
+              return pacingAuthorityRefusal(pin,
+                error.reason === 'pacing_unavailable' ? 'unavailable' : 'ceiling');
+            }
+            if (error.reason === 'redirect_blocked') {
+              return {
+                ok: false,
+                error: `redirected: ${target.url} issued a redirect (not followed). Use the final URL.`,
+                outcomeKnown: true,
+                ...(mutatesExternal ? {
+                  performed: true, outcomeKind: 'effect-completed', retryable: false,
+                } : { outcomeKind: 'pre-effect-failure' }),
+              };
+            }
+            if (error.reason === 'private_network') {
+              return {
+                ok: false,
+                error: `blocked: ${target.url} is a private/loopback host (SSRF defense).`,
+                outcomeKnown: true, outcomeKind: 'pre-effect-failure',
+              };
+            }
+            return mutatesExternal ? {
+              ok: false, error: error.message ?? 'site_fetch_failed',
+              outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
+            } : {
+              ok: false, error: error.message ?? 'site_fetch_failed',
+              outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: true,
+            };
+          }
+        };
+        try {
+          const result = await execute();
+          if (readOnly && result.ok !== true) scriptRuns.failSiteRead(runId,
+            result.error === 'site_client_read_method_refused' ? result.error : 'site_client_read_failed');
+          return result;
+        } catch (cause) {
+          if (readOnly) scriptRuns.failSiteRead(runId, 'site_client_read_failed');
+          throw cause;
         }
       },
       'a2a/call': a2aCall,

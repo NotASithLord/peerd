@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { useFakeIndexedDB } from '../setup.ts';
+import { createSiteClientStore } from '../../extension/peerd-runtime/site-clients/store.js';
+import { createScriptRunRegistry } from '../../extension/background/script-runs.js';
 import { makeOffscreenActorClient } from '../../extension/background/offscreen-actor-client.js';
 import { runActor } from '../../extension/offscreen/actor-runner.js';
 import { startActorWorker } from '../../extension/offscreen/actor-worker-runtime.js';
@@ -399,6 +402,57 @@ describe('production site-client actor vertical', () => {
     expect(replay).toMatchObject({
       ok: false, error: 'site-client/read: authority mismatch', outcomeKnown: true,
     });
+  });
+
+  test.serial('typed named reads cross the real actor wire without colliding with its semantic operation', async () => {
+    await useFakeIndexedDB();
+    const origin = 'https://api.example.test';
+    const actorRecord = { kind: 'actor', sessionId: 'typed-api-client', actorType: 'web', backing: 'api', instanceId: origin };
+    const siteClients = createSiteClientStore({ dbName: 'site-client-actor-typed-vertical', makeRevision: () => 'typed-revision' });
+    const operations = [{ name: 'lookup', readOnly: true, inputSchema: { type: 'string' }, outputSchema: { type: 'string' } }];
+    const validationCases = [{ operation: 'lookup', input: 'first', expected: 'first' },
+      { operation: 'lookup', input: 'second', expected: 'second' }];
+    const body = 'return { lookup: async (input) => input };';
+    const calls: ToolCall[] = [
+      { id: 'typed-write', name: 'site_client_write', args: { origin, body, operations, validationCases } },
+      { id: 'typed-validate', name: 'site_client_run', args: { origin, mode: 'validate', revision: 'typed-revision' } },
+      { id: 'typed-read', name: 'site_client_read', args: { origin } },
+      { id: 'typed-call', name: 'site_client_run', args: { origin, operation: 'lookup', input: 'held-out', revision: 'typed-revision' } },
+    ];
+    const runs = createScriptRunRegistry();
+    let executions = 0;
+    let confirmations = 0;
+    const { result } = await runProductionActor({ actorRecord, calls, buildToolContext: async () => ({
+      session: { sessionId: actorRecord.sessionId, kind: 'actor' },
+      actorType: 'web', actorBacking: 'api', backing: 'api', actorInstanceId: origin,
+      authorizeSiteClientOrigin: async (candidate: string) => candidate === origin,
+      siteClients, scriptRuns: runs,
+      permission: { mode: 'act', confirmActions: false },
+      readAuthorityPermission: async () => ({ mode: 'act', confirmActions: false }),
+      confirm: async (request: any) => {
+        confirmations += 1;
+        expect(request.proposal.dossier.operations[0].name).toBe('lookup');
+        expect(request.proposal.dossier.validationCases).toEqual(validationCases);
+        return 'yes_once';
+      },
+      jsOffscreenClient: { execHeadless: async (source: string, options: any) => {
+        executions += 1;
+        expect(runs.allows(options.runId, 'siteReadOnly')).toBe(true);
+        const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+        return { value: await new AsyncFunction(source)(), error: null };
+      } },
+      lifecycle: lifecycle([]), appendAudit: async () => {},
+    }) });
+    expect(result).toMatchObject({ ok: true, finalText: 'done' });
+    const blocks = result.newMessages.flatMap((message: any) => message.toolResults ?? []);
+    const validate = blocks.find((block: any) => block.tool_use_id === 'typed-validate');
+    const run = blocks.find((block: any) => block.tool_use_id === 'typed-call');
+    expect(validate).toMatchObject({ is_error: false, outcomeKnown: true });
+    expect(run).toMatchObject({ is_error: false, outcomeKnown: true, authorityPerformed: true });
+    expect(JSON.parse(run.content.split('\n')[1])).toMatchObject({ operation: 'lookup', result: 'held-out' });
+    expect(executions).toBe(3);
+    expect(confirmations).toBe(1);
+    await siteClients.remove(origin);
   });
 
   test.serial('API Web actor runs its exact origin surface and cannot forge capture', async () => {

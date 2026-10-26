@@ -31,3 +31,37 @@ export const shapeSketch = (value, depth = 0) => {
   }
   return out;
 };
+
+const SHAPE_MARKERS = new Set([
+  'string', 'number', 'boolean', 'null', 'undefined', 'bigint', 'symbol',
+  'function', '…', REDACTED,
+]);
+
+/**
+ * Accept the bounded shape vocabulary produced by the capture taps without
+ * sketching it twice. Page-side tap output remains untrusted: arbitrary leaf
+ * strings must never pass through merely because they claim to be a sketch.
+ * @param {unknown} value
+ * @param {number} [depth]
+ * @returns {unknown}
+ */
+export const sanitizeShapeSketch = (value, depth = 0) => {
+  if (typeof value === 'string') return SHAPE_MARKERS.has(value) ? value : 'string';
+  if (value === null || typeof value !== 'object') return shapeSketch(value);
+  if (depth > 3) return '…';
+  if (Array.isArray(value)) {
+    if (!value.length) return [];
+    const count = typeof value[1] === 'string' && /^…×[1-9]\d{0,9}$/.test(value[1])
+      ? value[1] : '…';
+    return [sanitizeShapeSketch(value[0], depth + 1), count];
+  }
+  /** @type {Record<string, unknown>} */
+  const out = Object.create(null);
+  let count = 0;
+  for (const [key, child] of Object.entries(value)) {
+    if (count++ >= 24) { out['…'] = 1; break; }
+    out[key] = SECRET_PARAM_RE.test(key) ? REDACTED
+      : key === '…' ? 1 : sanitizeShapeSketch(child, depth + 1);
+  }
+  return out;
+};
