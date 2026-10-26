@@ -560,7 +560,22 @@ jobs:
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
         id: render
-        run: bun run test:e2e:visual
+        run: |
+          set -o pipefail
+          bun run test:e2e:visual 2>&1 | tee "$RUNNER_TEMP/peerd-visual-head.log"
+
+      # why before comparison: a slow or cancelled merge-base render must not
+      # erase the head's failing checks, screenshots, or crash diagnostics.
+      - name: Preserve head render evidence before comparison
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: visual-head-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.ref_name }}-run${{ github.run_number }}.${{ github.run_attempt }}
+          path: |
+            scripts/cdp/artifacts/
+            ${{ runner.temp }}/peerd-visual-head.log
+          if-no-files-found: warn
+          retention-days: 14
 
       # The regression answer. Renders the SAME state definitions against the
       # merge-base extension build and diffs the pairs - see the header of
