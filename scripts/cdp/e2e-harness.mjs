@@ -547,6 +547,31 @@ export async function findPeerdSw(port) {
 
 // ---- the high-level launch --------------------------------------------------
 
+// Release only this harness's Fetch debugger session. A strict lifecycle
+// observer must still prove native destruction; this is never that proof.
+export const createAuxiliaryFetchRetirement = (connections, retiredEvents) => {
+  const retired = new Set();
+  const close = (targetId, connection) => {
+    if (connection?.events?.length) retiredEvents.push({ targetId, events: [...connection.events] });
+    try { connection?.close(); } catch { /* target already retired */ }
+  };
+  return {
+    has: targetId => retired.has(targetId),
+    adopt(targetId, connection) {
+      // An attach may finish after the observer saw this exact target detach.
+      if (retired.has(targetId)) close(targetId, connection);
+      else connections.set(targetId, connection);
+    },
+    release(targetId) {
+      if (!targetId) return;
+      retired.add(targetId);
+      const connection = connections.get(targetId);
+      connections.delete(targetId);
+      close(targetId, connection);
+    },
+  };
+};
+
 /**
  * Launch the real extension and return live CDP handles + a clean close().
  *
@@ -734,7 +759,7 @@ export async function launchPeerd({
       }
     } catch { /* the worker, controller, or request may have been physically torn down */ }
   };
-  const attachFetchTarget = async (targetId, targetType) => {
+  const attachFetchTarget = async (targetId, targetType, onAttached = undefined) => {
     if (!browserConn) throw new Error('browser CDP connection unavailable');
     const { sessionId } = await browserConn.send('Target.attachToTarget', {
       targetId,
@@ -753,15 +778,21 @@ export async function launchPeerd({
       }
       if (method === 'Fetch.requestPaused') void handlePausedRequest(connection, params);
     };
+    let closed = false;
     const connection = {
-      send: (method, params = {}) => browserConn.send(method, params, sessionId),
+      send: (method, params = {}) => closed
+        ? Promise.reject(new Error('Fetch debugger session retired'))
+        : browserConn.send(method, params, sessionId),
       events,
       close: () => {
+        if (closed) return;
+        closed = true;
         browserConn.off(onTargetEvent);
         browserConn.send('Target.detachFromTarget', { sessionId }).catch(() => {});
       },
     };
     browserConn.on(onTargetEvent);
+    onAttached?.(connection);
     if (targetType !== 'worker' || resumeAuxiliaryWorkers) await connection.send('Runtime.runIfWaitingForDebugger');
     await connection.send('Runtime.enable').catch(() => {});
     await connection.send('Fetch.enable', { patterns: [
@@ -777,6 +808,7 @@ export async function launchPeerd({
   let swConn = interceptModel ? await attachServiceWorker(sw) : null;
   const auxiliaryFetchConnections = new Map();
   const retiredTargetEvents = [];
+  const auxiliaryRetirement = createAuxiliaryFetchRetirement(auxiliaryFetchConnections, retiredTargetEvents);
   const auxiliaryFetchPending = new Set();
   const extensionTarget = (targetInfo) => {
     const url = String(targetInfo?.url ?? '');
@@ -788,11 +820,12 @@ export async function launchPeerd({
   const armAuxiliaryFetch = async (targetInfo) => {
     const targetId = targetInfo?.targetId;
     if (!interceptModel || !targetId || !extensionTarget(targetInfo)
+        || auxiliaryRetirement.has(targetId)
         || auxiliaryFetchConnections.has(targetId) || auxiliaryFetchPending.has(targetId)) return;
     auxiliaryFetchPending.add(targetId);
     try {
-      const connection = await attachFetchTarget(targetId, targetInfo.type);
-      auxiliaryFetchConnections.set(targetId, connection);
+      await attachFetchTarget(targetId, targetInfo.type,
+        connection => auxiliaryRetirement.adopt(targetId, connection));
     } catch { /* the short-lived target may retire before attachment */ }
     finally { auxiliaryFetchPending.delete(targetId); }
   };
@@ -800,12 +833,7 @@ export async function launchPeerd({
     if (method === 'Target.targetCreated' || method === 'Target.targetInfoChanged') {
       void armAuxiliaryFetch(params?.targetInfo);
     } else if (method === 'Target.targetDestroyed') {
-      const connection = auxiliaryFetchConnections.get(params?.targetId);
-      if (connection?.events?.length) {
-        retiredTargetEvents.push({ targetId: params?.targetId, events: [...connection.events] });
-      }
-      try { connection?.close(); } catch { /* target already retired */ }
-      auxiliaryFetchConnections.delete(params?.targetId);
+      auxiliaryRetirement.release(params?.targetId);
     }
   };
   if (interceptModel) {
@@ -1026,6 +1054,7 @@ export async function launchPeerd({
 
   const context = {
     sw, swConn, page, port, profile, screenshot, extensionDir,
+    releaseAuxiliaryFetchTarget: auxiliaryRetirement.release,
     bootTimeline: Object.freeze({
       clock: 'host-monotonic-ms',
       launchStartedAt,

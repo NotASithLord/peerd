@@ -584,8 +584,9 @@ jobs:
       # continue-on-error, deliberately: a computed reference cannot tell an
       # intended redesign from a regression, so this REPORTS. The reviewer
       # decides, from the before/after images in the PR comment below.
+      # Cancelled heads retain uploaded evidence but must not delay their replacement.
       - name: Compare every screen against the merge base
-        if: always() && github.event_name == 'pull_request'
+        if: always() && !cancelled() && github.event_name == 'pull_request'
         continue-on-error: true
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
@@ -641,7 +642,7 @@ jobs:
       # result rather than an absence. STICKY by a hidden marker, so a branch
       # pushed ten times leaves one comment, not ten.
       - name: Publish before/after montages + inline PR comment
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        if: always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}

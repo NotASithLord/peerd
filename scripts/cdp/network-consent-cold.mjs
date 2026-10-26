@@ -238,6 +238,9 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
     if (scope.detached) return;
     scope.detached = true; revision++;
     retirements.set(sessionId, scope);
+    // A second Fetch debugger session can retain the retired target's agent.
+    // Release our own session only; the barrier still requires targetDestroyed.
+    ctx.releaseAuxiliaryFetchTarget?.(scope.target.targetId);
     if (!scope.ready && !closing) failed(new Error(`Unobserved target detached: ${scope.target.targetId}`));
     // Preserve already-queued protocol rejections before cancelling this target's waits.
     const cancelling = new Promise(resolve => setTimeout(resolve, 0)).then(() => scope.controller.abort(scope.reason));

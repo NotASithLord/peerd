@@ -152,11 +152,12 @@ export const HOME_SETTINGS_STATES = [
         if (!choice) throw new Error('The real network opt-in did not render');
         await observeRequests(page);
         await evalIn(page, `document.querySelector('[data-network-choice="enable"]').click()`);
-        const retry = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.peer-network-status button, .disc-status button')].some((button) => /^Retry(?: connection)?$/.test(button.textContent) && !button.disabled)`), { budgetMs: 30_000 });
+        const retry = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.peer-network-status button, .disc-status button')].some((button) => /^(?:Retry(?: connection)?|Try again)$/.test(button.textContent) && !button.disabled)`), { budgetMs: 30_000 });
         if (!retry) throw new Error('The saved network choice did not expose its real Start route');
         // why: enabling also starts the host. Retry connection is the shipped
-        // control for the same Start route after participation is saved.
-        await evalIn(page, `[...document.querySelectorAll('.peer-network-status button, .disc-status button')].find((button) => /^Retry(?: connection)?$/.test(button.textContent) && !button.disabled).click()`);
+        // control for the same Start route after participation is saved; Discover
+        // labels that same action Try again.
+        await evalIn(page, `[...document.querySelectorAll('.peer-network-status button, .disc-status button')].find((button) => /^(?:Retry(?: connection)?|Try again)$/.test(button.textContent) && !button.disabled).click()`);
         const started = await waitFor(() => evalIn(page, `globalThis.__homeSettingsProof.messages.find((entry) => entry.type === 'dweb/base/start' && entry.reply?.ok === true)`), { budgetMs: 30_000 });
         rec.check('real opt-in and the Start route receive successful receipts', !!started, JSON.stringify(started));
         if (!started) throw new Error('The real network Start did not settle');

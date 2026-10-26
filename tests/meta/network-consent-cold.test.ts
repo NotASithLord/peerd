@@ -1,6 +1,25 @@
 import { expect, test } from 'bun:test';
 import { runInNewContext } from 'node:vm';
 import { OBSERVER_SOURCE, assertNoTransport } from '../../scripts/cdp/network-consent-cold.mjs';
+import { createAuxiliaryFetchRetirement } from '../../scripts/cdp/e2e-harness.mjs';
+
+test('auxiliary Fetch retirement fences late attachment and releases only the exact owned target', () => {
+  const connections = new Map();
+  const evidence: any[] = [];
+  const retirement = createAuxiliaryFetchRetirement(connections, evidence);
+  const closed: string[] = [];
+  const connection = (id: string) => ({ events: [id], close: () => closed.push(id) });
+  retirement.adopt('live', connection('live'));
+  retirement.adopt('old', connection('old'));
+  retirement.release('old');
+  retirement.release('old');
+  retirement.release('pending');
+  retirement.adopt('pending', connection('late'));
+  expect(closed).toEqual(['old', 'late']);
+  expect([...connections.keys()]).toEqual(['live']);
+  expect(retirement.has('pending')).toBe(true);
+  expect(evidence).toEqual([{ targetId: 'old', events: ['old'] }, { targetId: 'pending', events: ['late'] }]);
+});
 
 test('consent oracle rejects actual transport events, independent of lease status', () => {
   assertNoTransport([{ kind: 'observer-ready' }], 'fresh');
@@ -433,6 +452,7 @@ test('close fences an installation whose first native dispatch is still queued',
 const retirementObserver = async (barrierBudgetMs = 30_000) => {
   const { observeHosts, createConsentDiagnostics } = await import('../../scripts/cdp/network-consent-cold.mjs');
   const listeners = new Set<any>();
+  const released: string[] = [];
   const targets = new Map<string, any>();
   const calls: { method: string; sessionId?: string; params: any }[] = [];
   const evidence: any = { phase: 'before-choice', events: [], observerErrors: [] };
@@ -470,11 +490,12 @@ const retirementObserver = async (barrierBudgetMs = 30_000) => {
   const server = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => Response.json({ webSocketDebuggerUrl: 'fake' }) });
   try {
     const diagnostic = createConsentDiagnostics(evidence, () => {}, 50);
-    const observer = await observeHosts({ port: server.port, sw: { id: 'fixture' } }, evidence,
+    const observer = await observeHosts({ port: server.port, sw: { id: 'fixture' },
+      releaseAuxiliaryFetchTarget: (targetId: string) => released.push(targetId) }, evidence,
       (...[label, operation, budget, signal]: Parameters<typeof diagnostic>) =>
         diagnostic(label, operation, label === 'observer stable barrier' ? barrierBudgetMs : budget, signal),
       () => {}, async () => connection);
-    return { observer, evidence, calls, emit, target, targets,
+    return { observer, evidence, calls, emit, target, targets, released,
       onDrain: (callback: typeof onDrain) => { onDrain = callback; },
       failInventory: () => { inventoryFails = true; },
       retire(sessionId: string, destroyed = true) {
@@ -517,6 +538,7 @@ test('detached but live target cannot discharge a barrier and failed inventory i
     live.retire('old', false); return new Promise(() => {});
   });
   await expect(live.observer.barrier()).rejects.toThrow('target destruction target=old');
+  expect(live.released).toEqual(['old']);
   expect(live.targets.has('old')).toBe(true);
   await live.observer.close();
   const missing = await retirementObserver();

@@ -3564,7 +3564,7 @@ export const STATES = [
       const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
       const evidence = { schema: 1, phase: 'fresh', events: [], observerErrors: [] };
       const diagnostic = createConsentDiagnostics(evidence, () => {});
-      const fresh = await launchPeerd({ extensionDir: ctx.extensionDir, panelPath: 'home/home.html' });
+      const fresh = await launchPeerd({ extensionDir: ctx.extensionDir, panelPath: 'home/home.html', resumeAuxiliaryWorkers: false });
       const directory = await mkdtemp(join(tmpdir(), 'peerd-backup-policy-'));
       let observer;
       const click = async (selector) => {
@@ -6212,6 +6212,7 @@ export const STATES = [
   // --- visual: persisted runnable site-client confirmation -----------------
   {
     name: 'site-client-confirm', kind: 'visual', phase: 'post-unlock',
+    visualVariants: ['site-client-contract-details'],
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
       try {
