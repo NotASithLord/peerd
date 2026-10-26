@@ -464,11 +464,12 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
               catch (error) {
                 if (!(error instanceof ObserverDetachedError)) {
                   // why: a queued native rejection can beat the deferred detach abort.
-                  // Only this exact ready realm's browser-proven retirement may
-                  // discharge a missing-session drain; error text is not evidence.
+                  // A ready realm already detached by Chrome enters the retirement
+                  // queue. The next pass must await its exact targetDestroyed
+                  // event before succeeding; detach or error text never discharges it.
                   if (!(error instanceof Error)
                       || error.message !== 'Runtime.evaluate: Session with given id not found.'
-                      || !scope?.ready || !scope.detached || !scope.destroyed
+                      || !scope?.ready || !scope.detached
                       || scopes.get(sessionId) !== scope) throw error;
                 }
                 changed = true; break;

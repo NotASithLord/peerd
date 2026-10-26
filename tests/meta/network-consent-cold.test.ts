@@ -662,17 +662,12 @@ for (const delayed of [false, true]) {
       fixture.target('replacement');
       return failure;
     });
-    if (delayed) {
-      await expect(fixture.observer.barrier()).rejects.toThrow('Session with given id not found');
-      // Later destruction cannot retroactively turn a protocol failure into success.
-      await new Promise(resolve => setTimeout(resolve, 10));
-    } else {
-      await fixture.observer.barrier();
-      expect(fixture.evidence.lifecycle.some((entry: any) => entry.method === 'observer.retirementConfirmed'
-        && entry.targetId === 'old')).toBe(true);
-      expect(fixture.calls.some(call => call.method === 'Runtime.evaluate'
-        && call.params.expression === '0' && call.sessionId === 'replacement')).toBe(true);
-    }
+    await fixture.observer.barrier();
+    expect(fixture.targets.has('old')).toBe(false);
+    expect(fixture.evidence.lifecycle.some((entry: any) => entry.method === 'observer.retirementConfirmed'
+      && entry.targetId === 'old')).toBe(true);
+    expect(fixture.calls.some(call => call.method === 'Runtime.evaluate'
+      && call.params.expression === '0' && call.sessionId === 'replacement')).toBe(true);
     expect(fixture.evidence.commands.some((entry: any) => entry.label === 'Runtime.evaluate session=old'
       && entry.status === 'failed' && entry.error.includes('Session with given id not found'))).toBe(true);
     await fixture.observer.close();
@@ -701,7 +696,8 @@ test('missing-session drain cannot use destruction of an unrelated target', asyn
     fixture.retire('other');
     return failure;
   });
-  await expect(fixture.observer.barrier()).rejects.toThrow('Session with given id not found');
+  await expect(fixture.observer.barrier()).rejects.toThrow('target destruction target=old');
+  expect(fixture.evidence.lifecycle?.some((entry: any) => entry.method === 'observer.retirementConfirmed' && entry.targetId === 'old')).not.toBe(true);
   fixture.targets.delete('old');
   fixture.emit('Target.targetDestroyed', { targetId: 'old' });
   await fixture.observer.close();
