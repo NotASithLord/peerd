@@ -56,9 +56,11 @@ export const siteClientRunTool = composeTool("site_client_run", {
         .filter(key => executed?.[key] !== undefined).map(key => [key, executed[key]])),
     };
     if (executed.typedResult) return { ok: true,
-      content: siteClientEnvelope('site_client_result', executed.typedResult) };
+      content: wrapUntrusted({ origin: `site-client(${origin})`, tool: 'site_client_run',
+        body: siteClientEnvelope('site_client_result', executed.typedResult) }) };
     if (executed.validationResult) return { ok: true,
-      content: siteClientEnvelope('site_client_validation', executed.validationResult) };
+      content: wrapUntrusted({ origin: `site-client(${origin})`, tool: 'site_client_run',
+        body: siteClientEnvelope('site_client_validation', executed.validationResult) }) };
     return { ok: true, content: formatRunResult(origin, args.code, executed.result ?? {}) };
   },
 });

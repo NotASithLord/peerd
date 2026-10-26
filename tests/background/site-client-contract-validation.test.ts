@@ -57,8 +57,9 @@ const fixture = async (over: any = {}) => {
 
 const envelope = (result: any, tag: string) => {
   expect(result.ok).toBe(true);
-  expect(result.content.startsWith(`<${tag}>\n`)).toBe(true);
-  return JSON.parse(result.content.split('\n')[1]);
+  expect(result.content.startsWith('<untrusted_web_content ')).toBe(true);
+  expect(result.content.split('\n')[1]).toBe(`<${tag}>`);
+  return JSON.parse(result.content.split('\n')[2]);
 };
 
 describe('host-validated named site reads', () => {

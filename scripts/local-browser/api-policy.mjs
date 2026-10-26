@@ -5,7 +5,8 @@ import {
   validateSiteClientValue,
 } from '../../extension/peerd-runtime/site-clients/core.js';
 
-export const MAX_API_RECEIPT_CHARS = 64_000;
+// A bounded 32k JSON value can occupy 192k after lossless ASCII escaping.
+export const MAX_API_RECEIPT_CHARS = 256_000;
 export const MAX_HELPER_INPUT_CHARS = 24_000;
 export const MAX_AUTHORED_BODY_CHARS = 12_000;
 export const RECOVERY_TOOL_NAMES = Object.freeze([
@@ -82,8 +83,13 @@ export const hasSuccessfulToolReceipt = (raw, toolName) => {
   if (toolName === 'snapshot') return /^(?:a11y snapshot|pseudo-a11y snapshot \()/.test(content);
   if (toolName === 'site_capture') return content.startsWith('capture started on ')
     || content.startsWith('capture stopped: no in-scope API traffic observed ');
-  if (toolName === 'site_client_read') return content.startsWith('<site_client_contract>\n');
-  if (toolName === 'site_client_run') return /^<site_client_(?:result|validation)>\n/.test(content);
+  if (toolName === 'site_client_read' || toolName === 'site_client_run') {
+    try {
+      hostEnvelope(raw, toolName === 'site_client_read' ? 'site_client_contract'
+        : content.includes('<site_client_validation>') ? 'site_client_validation' : 'site_client_result');
+      return true;
+    } catch { return false; }
+  }
   if (toolName === 'site_client_write') {
     if (content === 'no change (identical to the stored client).') return true;
     try {
@@ -99,9 +105,15 @@ const hostEnvelope = (raw, tag) => {
   const receipt = inspectToolReceipt(raw);
   if (receipt.uncertain) fail('uncertain_outcome', 'The host could not establish the previous tool outcome.');
   if (receipt.failed) fail('tool_failed', 'The host refused or failed the site-client request.');
-  // why: a tag found inside fenced source or site data is not a host receipt.
+  // The canonical outer provenance fence is mandatory. Only its first body
+  // may hold the host envelope; never search arbitrary source or nested data.
+  const tool = tag === 'site_client_contract' ? 'site_client_read' : 'site_client_run';
+  const fence = /^<untrusted_web_content origin="[^"\n<>]+" tool="([a-z_]+)" retrieved_at="([^"\n<>]+)">\n([\s\S]*?)\n<\/untrusted_web_content>(?:\n|$)/.exec(receipt.content);
+  if (!fence || fence[1] !== tool || !Number.isFinite(Date.parse(fence[2]))) {
+    fail('missing_envelope', `Expected the anchored ${tag} host envelope in its provenance fence.`);
+  }
   // JSON occupies one physical line and the host escapes every literal '<'.
-  const match = new RegExp(`^<${tag}>\\n([^\\r\\n<]+)\\n</${tag}>(?:\\n|$)`).exec(receipt.content);
+  const match = new RegExp(`^<${tag}>\\n([^\\r\\n<]+)\\n</${tag}>(?:\\n|$)`).exec(fence[3]);
   if (!match) fail('missing_envelope', `Expected the anchored ${tag} host envelope.`);
   let value;
   try { value = JSON.parse(match[1]); }

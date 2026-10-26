@@ -27,11 +27,12 @@ export const siteClientReadTool = composeTool("site_client_read", {
     };
     const record = read.record;
     if (!record) return { ok: false, error: `no_site_client: none stored for ${origin}` };
-    const contract = siteClientEnvelope('site_client_contract', {
+    const contract = wrapUntrusted({ origin: `site-client(${origin})`, tool: 'site_client_read',
+      body: siteClientEnvelope('site_client_contract', {
       schema: 1, origin, revision: record.meta.revision ?? null,
       status: siteClientContractStatus(record.meta), operations: record.meta.operations ?? [],
       validatedOperations: siteClientValidatedOperations(record.meta),
-    });
+    }) });
     const header = stalenessHeader(record.meta);
     const endpoints = record.meta.endpoints?.length
       ? record.meta.endpoints.map((/** @type {{method:string,path:string,note?:string}} */ e) =>

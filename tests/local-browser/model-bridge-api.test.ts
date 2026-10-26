@@ -1,3 +1,5 @@
+import { wrapUntrusted } from '../../extension/peerd-runtime/tools/prompt-wrap.js';
+import { siteClientEnvelope } from '../../extension/peerd-runtime/site-clients/core.js';
 import { describe, expect, test } from 'bun:test';
 import { createBrowserDecisionResponder, LOCAL_BROWSER_BUDGETS, makeLocalClients, HELPER_CONTEXT } from '../../scripts/local-browser/model-bridge.mjs';
 
@@ -19,7 +21,8 @@ const append = (body: any, reply: any, content: string) => ({ ...body, messages:
 const nameOf = (reply: any) => reply.tool_calls?.[0]?.function?.name;
 const argsOf = (reply: any) => JSON.parse(reply.tool_calls[0].function.arguments);
 const choice = (value: string) => ({ answers: { action: { choice: value } } });
-const envelope = (tag: string, value: any) => `<${tag}>\n${JSON.stringify(value).replace(/</g, '\\u003c')}\n</${tag}>`;
+const envelope = (tag: string, value: any) => wrapUntrusted({ origin: 'site-client(https://orders.example.org)',
+  tool: tag === 'site_client_contract' ? 'site_client_read' : 'site_client_run', body: siteClientEnvelope(tag, value) });
 const op = { name: 'stock', readOnly: true,
   inputSchema: { type: 'object', properties: { sku: { type: 'string' } }, required: ['sku'], additionalProperties: false },
   outputSchema: { type: 'object', properties: { stock: { type: 'integer', minimum: 0 } }, required: ['stock'], additionalProperties: false } };

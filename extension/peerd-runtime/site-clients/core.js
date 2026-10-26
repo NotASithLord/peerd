@@ -219,9 +219,10 @@ export const siteClientContractStatus = (meta) => siteClientValidatedOperations(
   ? 'validated' : meta?.recentFailures > 0 || meta?.validation?.status === 'failed' ? 'stale' : 'draft';
 
 /** A machine-readable host envelope. All descriptions, schemas and result values
- * remain data; escaping '<' prevents any string from forging its delimiter.
+ * Escape delimiter and non-ASCII code units before canonical untrusted wrapping:
+ * CDR must not change an exact schema-checked value when the JSON is decoded.
  * @param {string} tag @param {any} value */
-export const siteClientEnvelope = (tag, value) => `<${tag}>\n${JSON.stringify(value).replace(/</g, '\\u003c')}\n</${tag}>`;
+export const siteClientEnvelope = (tag, value) => `<${tag}>\n${JSON.stringify(value).replace(/[<\u007f-\uffff]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`)}\n</${tag}>`;
 
 /** The three run modes are mutually exclusive. The host repeats this validation
  * after exact argument binding; callers cannot smuggle code into a typed read.
