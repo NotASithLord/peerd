@@ -218,7 +218,7 @@ export const siteClientValidatedOperations = (meta) => {
 export const siteClientContractStatus = (meta) => siteClientValidatedOperations(meta).length
   ? 'validated' : meta?.recentFailures > 0 || meta?.validation?.status === 'failed' ? 'stale' : 'draft';
 
-/** A machine-readable host envelope. All descriptions, schemas and result values
+/** A machine-readable host envelope for untrusted descriptions, schemas and values.
  * Escape delimiter and non-ASCII code units before canonical untrusted wrapping:
  * CDR must not change an exact schema-checked value when the JSON is decoded.
  * @param {string} tag @param {any} value */

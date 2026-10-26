@@ -449,7 +449,9 @@ describe('production site-client actor vertical', () => {
     const run = blocks.find((block: any) => block.tool_use_id === 'typed-call');
     expect(validate).toMatchObject({ is_error: false, outcomeKnown: true });
     expect(run).toMatchObject({ is_error: false, outcomeKnown: true, authorityPerformed: true });
-    expect(JSON.parse(run.content.split('\n')[1])).toMatchObject({ operation: 'lookup', result: 'held-out' });
+    const typedEnvelope = /^<untrusted_web_content origin="[^"\n<>]+" tool="site_client_run" retrieved_at="[^"\n<>]+">\n<site_client_result>\n([^\r\n<]+)\n<\/site_client_result>\n<\/untrusted_web_content>$/.exec(run.content);
+    expect(typedEnvelope).not.toBeNull();
+    expect(JSON.parse(typedEnvelope![1])).toMatchObject({ operation: 'lookup', result: 'held-out' });
     expect(executions).toBe(3);
     expect(confirmations).toBe(1);
     await siteClients.remove(origin);
