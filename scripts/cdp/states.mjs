@@ -4036,6 +4036,12 @@ export const STATES = [
               dossier: {
                 origin: 'https://shop.example',
                 summary: 'Read the current order status.',
+                operations: [{
+                  name: 'currentOrder', description: 'Read the current order.', readOnly: true,
+                  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+                  outputSchema: { type: 'object', properties: { status: { type: 'string' } }, required: ['status'], additionalProperties: false },
+                }],
+                validationCases: [{ operation: 'currentOrder', input: {}, expected: { status: 'shipped' } }],
                 endpoints: [{ method: 'GET', path: '/api/orders/current' }],
                 auth: 'session',
                 deriver: 'capture-cdp',
@@ -4056,6 +4062,16 @@ export const STATES = [
             && JSON.stringify(rendered?.buttons) === JSON.stringify(['Reject', 'Save client']),
           JSON.stringify(rendered));
         await rec.visual('site-client-confirm');
+        const contractsExpanded = await evalIn(ctx.page, `(() => {
+          const details = document.querySelector('[aria-label="Proposed site-client contracts"]')?.closest('details');
+          if (!details) return false;
+          details.open = true;
+          return true;
+        })()`);
+        if (!contractsExpanded && process.env.PEERD_VISUAL_BASE_RENDER !== '1') {
+          throw new Error('The proposed site-client contracts are unavailable for visual review');
+        }
+        await rec.visual('site-client-contract-details');
         const maximum = await evalIn(ctx.page, `(async () => {
           const m = (await import('/vendor/mithril/mithril.js')).default;
           const { ConfirmModal } = await import('/sidepanel/components/app.js');
