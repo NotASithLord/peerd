@@ -146,8 +146,8 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
     return { value, closest: shortlist() };
   };
 
-  /** @param {string} key @param {{signal?: AbortSignal}} [opts] */
-  const findProviderContacts = async (key, { signal } = {}) => {
+  /** @param {string} key @param {{signal?: AbortSignal,onQueryFailure?:()=>void}} [opts] */
+  const findProviderContacts = async (key, { signal, onQueryFailure } = {}) => {
       const keyBytes = fromHex(key);
       /** @type {Map<string, Contact>} */
       const found = new Map();
@@ -167,8 +167,11 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
           queried.add(c.did);
           let resp;
           try { resp = await rpc(c, { t: 'GET_PROVIDERS', key }, { signal }); }
-          catch { if (!signal?.aborted) rt.remove(c.did); return; }
+          catch { onQueryFailure?.(); if (!signal?.aborted) rt.remove(c.did); return; }
           if (signal?.aborted) return;
+          // why: an error or malformed reply is not a successful empty lookup.
+          // Keep partial usable referrals, but don't label absence as evidence.
+          if (resp?.t !== 'PROVIDERS' || !Array.isArray(resp.providers) || !Array.isArray(resp.nodes)) onQueryFailure?.();
           await learn(c.did, c.hints);
           // why: a provider identity alone is not a route. Retain the peer
           // that supplied it as a local signaling broker, without trusting it

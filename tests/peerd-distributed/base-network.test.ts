@@ -571,3 +571,44 @@ test('local recovery yields the publication lane even when unrelated peers are l
     expect((await publisher.base.fetchApp(shared.uri)).manifest.publisher).toBe(publisher.identity.did);
   } finally { publisher.base.close(); seeder.base.close(); }
 });
+
+
+test('recent missing-provider evidence excludes lookup errors and clears on retry, policy and close', async () => {
+  let time = 100;
+  const publisher = await spawn('publisher');
+  const reader = await spawn('reader', { now: () => time });
+  try {
+    const shared = await publisher.base.publishApp({ name: 'retry', entry: 'index.html', files: { 'index.html': 'retry' } });
+    const { card } = await publisher.base.publishMeta({ slug: 'retry', name: 'retry', head: {
+      version_id: shared.hash, content_addr: shared.uri, size: shared.packedBytes,
+    } });
+    await reader.base.discovery.ingest(card);
+    const evidence = () => reader.base.heardDwapps()[0]?.retrieval;
+    expect(evidence()).toBeNull();
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow('no peer is serving');
+    expect(evidence()?.outcome).toBe('no-provider-found');
+    time += 30_000;
+    expect(evidence()).toBeNull();
+    reader.base.node.dht.findProviderContacts = async () => { throw new Error('lookup failed'); };
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow();
+    expect(evidence()).toBeNull();
+    reader.base.node.dht.findProviderContacts = async (_key: string, options?: { onQueryFailure?: () => void }) => { options?.onQueryFailure?.(); return []; };
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow();
+    expect(evidence()).toBeNull();
+    reader.base.node.dht.findProviderContacts = async () => [];
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow();
+    expect(evidence()).not.toBeNull();
+    reader.base.enforceUserPolicy();
+    expect(evidence()).toBeNull();
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow();
+    const original = await publisher.base.fetchApp(shared.uri);
+    await reader.base.seedApp(original);
+    expect((await reader.base.fetchApp(shared.uri)).payload).toEqual(original.payload);
+    expect(evidence()).toBeNull();
+    await reader.base.unshareApp({ publisher: publisher.identity.did, hash: shared.hash });
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow();
+    expect(evidence()).not.toBeNull();
+    reader.base.close();
+    expect(evidence()).toBeNull();
+  } finally { publisher.base.close(); reader.base.close(); }
+});

@@ -7,7 +7,7 @@
 
 import { matchesWords, searchWords } from './explore-order.js';
 
-/** @typedef {{ dwapp_id?: string, uri?: string, name?: string, slug?: string, seq?: number, publisher?: string, from?: string, version_id?: string, description?: string, size?: number, includes_wasm?: boolean|null, runtimeCompatibility?: {status:string,message:string} }} DwebApp */
+/** @typedef {{ dwapp_id?: string, uri?: string, name?: string, slug?: string, seq?: number, publisher?: string, from?: string, version_id?: string, description?: string, size?: number, includes_wasm?: boolean|null, runtimeCompatibility?: {status:string,message:string}, retrieval?: {outcome:string,observedAt:number,expiresAt:number}|null }} DwebApp */
 /** @typedef {{action:'install'|'update', versionId:string|null, seq:number|null, uri:string|null}} PendingTarget */
 /** What an app's own peerd.json asks of peerd (see verifiedDeclared). @typedef {{dweb:boolean, instructions:boolean, observeAct:boolean}} Declared */
 /** @typedef {{appId?:string, notice?:string, failure?:string}} LinkOutcome */
@@ -186,10 +186,11 @@ export const libraryStatus = ({ ready, failed, offline = false }) => {
 /**
  * Why Surprise me opened no page. Only a filter or a search can be changed to
  * find more, so the line names them only while one is on.
- * @param {{filtered:boolean, allInLibrary:boolean}} grid
+ * @param {{filtered:boolean, allInLibrary:boolean, recentMisses?:boolean}} grid
  * @returns {string}
  */
-export const noSuggestionNote = ({ filtered, allInLibrary }) => {
+export const noSuggestionNote = ({ filtered, allInLibrary, recentMisses = false }) => {
+  if (recentMisses) return 'No new suggestions right now. Recent attempts found no sharing peers. You can open an app to retry, or try Surprise me again shortly.';
   if (filtered) return 'No new suggestions match these filters. Change your search or filters.';
   return allInLibrary ? 'No new suggestions. Every app here is already in your Library.' : 'No new suggestions.';
 };

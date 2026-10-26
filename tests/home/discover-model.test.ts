@@ -441,3 +441,8 @@ describe('filters and contacts', () => {
     expect(yourApps([], 6)).toEqual({ apps: [], total: 0 });
   });
 });
+
+
+test('recent retrieval misses explain how to retry suggestions', () => {
+  expect(noSuggestionNote({filtered:false,allInLibrary:false,recentMisses:true})).toContain('open an app to retry');
+});

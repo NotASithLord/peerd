@@ -90,16 +90,23 @@ export const exploreOrder = (apps, { query = '', seed = 0, names } = {}) => {
 export const SURPRISE_HISTORY_LIMIT = 512;
 /** @param {{dwapp_id?:string,version_id?:string,uri?:string}} app */
 export const suggestionKey = (app) => JSON.stringify([app.dwapp_id, app.version_id ?? app.uri ?? null]);
+/** @param {{retrieval?:{outcome:string,observedAt:number,expiresAt:number}|null}} app @param {number} now */
+export const recentRetrievalMiss = (app, now) => {
+  const evidence = app.retrieval;
+  return evidence?.outcome === 'no-provider-found' && Number.isFinite(evidence.observedAt)
+    && Number.isFinite(evidence.expiresAt) && evidence.observedAt <= now && now < evidence.expiresAt;
+};
 /** Candidates are already locally filtered and publisher-balanced. No network
  * availability is inferred. The caller owns the history: Discover clears
  * `seen` after a full pass.
- * @template {{dwapp_id?:string,version_id?:string,uri?:string,publisher?:string,runtimeCompatibility?:{status:string}}} T
+ * @template {{dwapp_id?:string,version_id?:string,uri?:string,publisher?:string,runtimeCompatibility?:{status:string},retrieval?:{outcome:string,observedAt:number,expiresAt:number}|null}} T
  * @param {T[]} apps @param {Set<string>} seen @param {string|null} lastPublisher
+ * @param {number} [now]
  * @returns {T|null}
  */
-export const nextSuggestion = (apps, seen, lastPublisher) => {
+export const nextSuggestion = (apps, seen, lastPublisher, now = Date.now()) => {
   if (seen.size >= SURPRISE_HISTORY_LIMIT) return null;
   const eligible = apps.filter(app => app.dwapp_id && app.runtimeCompatibility?.status !== 'unsupported'
-    && !seen.has(suggestionKey(app)));
+    && !recentRetrievalMiss(app, now) && !seen.has(suggestionKey(app)));
   return eligible.find(app => (app.publisher ?? null) !== lastPublisher) ?? eligible[0] ?? null;
 };
