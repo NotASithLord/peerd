@@ -152,7 +152,10 @@ export const makeVaultRoutes = (deps) => {
         try { await onLocked(); }
         catch (error) { failure ??= error; }
         await auditLog.append({ type: 'vault_locked' }).catch(() => {});
-        await Promise.resolve(pushState()).catch(() => {});
+        // The host has retired. Publishing a known locked receipt must not
+        // reacquire it merely to ask for the same authority status.
+        const authority = vault.snapshot?.();
+        await Promise.resolve(pushState(authority?.locked ? authority : undefined)).catch(() => {});
         if (failure) throw failure;
         return { ok: true };
       } finally { locking = false; }

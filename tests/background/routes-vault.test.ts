@@ -28,6 +28,7 @@ const makeDeps = (vaultOver: Record<string, any> = {}) => {
     initialize: async () => {},
     unlock: async () => {},
     lock: () => {},
+    snapshot: () => ({ initialized: true, locked: true }),
     initializeWithPrfOnly: async () => {},
     setRecoveryPassphrase: async () => {},
     prfStatus: async () => ({ enrolled: false }),
@@ -183,6 +184,33 @@ describe('vault routes — success paths', () => {
     const { r, calls } = routes();
     expect(await r['vault/lock']()).toEqual({ ok: true });
     expect(calls.pushState.length).toBe(1);
+  });
+
+  test('lock: final publication uses locked authority after its host retires', async () => {
+    const authority = { initialized: true, locked: true };
+    const { deps } = makeDeps({ snapshot: () => authority });
+    let retired = false;
+    let liveStatusReads = 0;
+    deps.onLocked = async () => { retired = true; };
+    deps.pushState = (snapshot?: unknown) => {
+      expect(retired).toBe(true);
+      if (!snapshot) liveStatusReads += 1;
+      expect(snapshot).toBe(authority);
+    };
+    expect(await makeVaultRoutes(deps)['vault/lock']()).toEqual({ ok: true });
+    expect(liveStatusReads).toBe(0);
+  });
+
+  test('lock: a failed lock never publishes cached unlocked authority', async () => {
+    const failure = new Error('lock rejected');
+    const { deps } = makeDeps({
+      lock: async () => { throw failure; },
+      snapshot: () => ({ initialized: true, locked: false }),
+    });
+    const published: unknown[] = [];
+    deps.pushState = (authority?: unknown) => { published.push(authority); };
+    await expect(makeVaultRoutes(deps)['vault/lock']()).rejects.toBe(failure);
+    expect(published).toEqual([undefined]);
   });
 
   test('lock: settles an asynchronous authority realm before retiring its host', async () => {
