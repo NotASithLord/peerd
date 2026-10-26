@@ -16,13 +16,15 @@ import { GIT_FIXTURE_TLS_KEY, GIT_FIXTURE_TLS_CERT, GIT_FIXTURE_SPKI_SHA256_BASE
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const wasmExecution = process.env.P2P_WASM_EXECUTION === '1';
-const output = join(repo, wasmExecution ? 'artifacts/discovered-wasm-twopeer' : 'artifacts/manual-address-twopeer');
+const randomDiscovery = process.env.P2P_RANDOM_DISCOVERY === '1';
+if (randomDiscovery && !wasmExecution) throw new Error('Random discovery qualification requires WASM execution');
+const output = join(repo, randomDiscovery ? 'artifacts/random-wasm-twopeer' : wasmExecution ? 'artifacts/discovered-wasm-twopeer' : 'artifacts/manual-address-twopeer');
 mkdirSync(output, { recursive: true });
 const temp = mkdtempSync(join(tmpdir(), 'peerd-manual-address-'));
 const sockets = new Set(), servers = [], checks = [];
 let ctx, publisher, signaling, stage = 'starting', failed = false, tunnels = 0;
-const evidence = { scope: wasmExecution
-  ? 'Actual packaged Preview manual discovery, signed binary transfer, installation and WASM execution in the opaque App runner over native loopback WebRTC. Public WAN and standalone WASI remain separate gates.'
+const evidence = { randomDiscovery, scope: wasmExecution
+  ? 'Actual packaged Preview discovery, signed binary transfer, installation and WASM execution in the opaque App runner over native loopback WebRTC. Public WAN and standalone WASI remain separate gates.'
   : 'Actual packaged Preview Home, custody routes, storage and native loopback WebRTC. Open acceptance proves navigation to the installed App tab; iframe execution and public WAN are separate gates.' };
 const report = () => writeFileSync(join(output, 'result.json'), JSON.stringify({ ok: !failed && stage === 'complete', stage, checks, evidence }, null, 2));
 const check = (name, ok, detail) => { checks.push({ name, ok: !!ok, detail }); report(); if (!ok) throw new Error(name); };
@@ -204,11 +206,13 @@ try {
       + (${wasmExecution} ? '<script>(async () => { const bytes = peerd.assets.bytes("answer.wasm"); const {instance} = await WebAssembly.instantiate(bytes); parent.postMessage({peerdWasmAcceptance: {answer: instance.exports.answer(), bytes: Array.from(bytes), extensionApi: typeof globalThis.chrome?.runtime}}, "*"); })();</script>' : '');
     const files = { 'index.html': html, ...(${wasmExecution} ? { 'answer.wasm': wasm } : {}) };
     const app = await base.publishApp({ name: 'Manual address acceptance', entry: 'index.html', files });
+    const catalog = ${randomDiscovery} ? await base.publishMeta({ slug: 'native-wasm', name: 'Manual address acceptance',
+      description: 'A peer-shared WebAssembly answer.', head: { version_id: app.hash, content_addr: app.uri, size: app.packedBytes, includes_wasm: true } }) : null;
     window.manualPublisher = { base, room, app, query: async did => {
       const client = createChannelClient(room.mesh.contentChannel(did), 5000);
       try { return await client.manifest(app.hash); } finally { client.close(); }
     } };
-    return { ...app, publisher: identity.did, wasmBytes: ${wasmExecution} ? Array.from(wasm) : null,
+    return { ...app, dwappId: catalog?.dwapp_id, publisher: identity.did, wasmBytes: ${wasmExecution} ? Array.from(wasm) : null,
       decodedBytes: new TextEncoder().encode(html).byteLength + (${wasmExecution} ? wasm.byteLength : 0),
       address: formatDwappUri({ did: identity.did, hash: app.hash }) };
   })()`, true));
@@ -230,18 +234,29 @@ try {
   // before typing; its requestAnimationFrame-driven UI must be visible too.
   await bounded('foreground Home for user input', () => ctx.page.send('Page.bringToFront'));
   await until('Home visible for user input', () => evalIn(ctx.page, `document.visibilityState === 'visible'`));
-  await enterLink(published.address);
-  await click('Check link', '.disc-start-form');
+  if (randomDiscovery) {
+    await until('signed App reaches receiver catalog', async () => {
+      const heard = await call({ type: 'dweb/base/heard' });
+      return heard?.apps?.some(app => app.dwapp_id === published.dwappId && app.version_id === published.hash && app.includes_wasm === true);
+    });
+    await until('catalog tile and Surprise me ready', () => evalIn(ctx.page, `[...document.querySelectorAll('.disc-tile-open')].some(b => b.textContent.trim() === 'Manual address acceptance') && [...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Surprise me' && !b.disabled)`));
+    await click('Surprise me');
+  } else {
+    await enterLink(published.address);
+    await click('Check link', '.disc-start-form');
+  }
   await until('verified inspection rendered', () => evalIn(ctx.page, `[...document.querySelectorAll('.disc-page .disc-panel button')].some(b => b.textContent === 'Install and share' && !b.disabled)`));
   await click('Technical details', '.disc-page');
   await until('Technical details open', () => evalIn(ctx.page, `document.querySelector('.disc-page .disc-tech-toggle')?.getAttribute('aria-expanded') === 'true'`));
   const inspection = await evaluate(ctx.page, `document.querySelector('.disc-page').textContent`);
-  check('inspection binds exact signer hash and decoded size', inspection.includes(published.publisher) && inspection.includes(published.hash) && inspection.includes(`${published.decodedBytes} bytes`), inspection);
+  if (randomDiscovery) check('catalog review binds the received signer and version', inspection.includes(published.publisher) && inspection.includes(published.hash), inspection);
+  else check('inspection binds exact signer hash and decoded size', inspection.includes(published.publisher) && inspection.includes(published.hash) && inspection.includes(`${published.decodedBytes} bytes`), inspection);
+  if (randomDiscovery) check('Surprise me opens the received WASM App', inspection.includes('Manual address acceptance') && inspection.includes('WebAssembly'), inspection);
   check('inspection does not install a user or peer catalog record', JSON.stringify(userApps((await call({ type: 'apps/list' })).apps)) === JSON.stringify(baselineIds));
   // The bundle has no peerd.json, so an install gets the dwapp default: the peer network, nothing more.
   const says = await evaluate(ctx.page, `(() => { const says = document.querySelector('.disc-page .disc-says');
     return says && { chips: [...says.querySelectorAll('li')].map(chip => chip.textContent), text: says.textContent }; })()`);
-  check('The app says it reads the verified files of the inspected link', JSON.stringify(says?.chips) === '["Uses the peer network"]'
+  if (!randomDiscovery) check('The app says it reads the verified files of the inspected link', JSON.stringify(says?.chips) === '["Uses the peer network"]'
     && says.text.includes('checked when peerd looked at it.'), says);
   const query = () => invoke(publisher, 'function(did) { return window.manualPublisher.query(did); }', [receiver.did]);
   const before = await query(); evidence.beforeInstallContent = before;
