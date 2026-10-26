@@ -22,6 +22,7 @@ import {
   assertBundlePayloadWithinLimits,
   buildManifest,
   manifestHash,
+  verifyManifest,
   MAX_BUNDLE_BYTES,
 } from './content/manifest.js';
 import { packTransportBundle } from './content/bundle.js';
@@ -364,19 +365,30 @@ export const createBaseNetwork = async ({
     let localHash = null;
     try { ({ did: publisher, hash: localHash } = parsePeerdUri(uri)); } catch { /* malformed uri → skip the fast path */ }
     if (publisher && isBlocked(publisher)) throw new Error('publisher-user-blocked');
-    // A freshly re-seeded renderer may be the only provider. Read its announced
-    // bytes directly instead of requiring a nonsensical mesh channel to self.
-    if (publisher === identity.did && localHash && node.content.isAnnounced(localHash)) {
-      const manifest = node.content.getManifest(localHash);
+    // why: a seeder can be the only remaining provider of another author's
+    // App. Read its explicitly announced bytes without a mesh channel to self,
+    // preserving the original signer and verifying the same addressed content.
+    if (publisher && localHash && node.content.isAnnounced(localHash)) {
+      const manifest = structuredClone(node.content.getManifest(localHash));
       if (!manifest || await manifestHash(manifest) !== localHash) {
         throw new Error('local manifest hash mismatch');
       }
+      if (manifest.publisher !== publisher) throw new Error('local manifest publisher mismatch');
       assertBundleWithinLimits(manifest);
+      if (!(await verifyManifest(manifest)).ok) throw new Error('local manifest signature invalid');
       acceptManifest(manifest);
-      const chunks = manifest.chunks.map((/** @type {{hash:string}} */ chunk) =>
-        node.content.getChunk(chunk.hash));
-      if (chunks.some((chunk) => !(chunk instanceof Uint8Array))) {
-        throw new Error('local bundle chunk unavailable');
+      const chunks = manifest.chunks.map((/** @type {{hash:string}} */ chunk) => {
+        const bytes = node.content.getChunk(chunk.hash);
+        return bytes instanceof Uint8Array ? new Uint8Array(bytes) : null;
+      });
+      for (const [index, chunk] of chunks.entries()) {
+        if (!(chunk instanceof Uint8Array)) throw new Error('local bundle chunk unavailable');
+        // assertBundleWithinLimits checked sizes; the generic content store
+        // intentionally models only the hash used by its serving firewall.
+        const committed = /** @type {{hash:string,size:number}} */ (manifest.chunks[index]);
+        if (chunk.byteLength !== committed.size || await sha256ChunkHex(chunk) !== committed.hash) {
+          throw new Error('local bundle chunk verification failed');
+        }
       }
       const payload = concat(.../** @type {Uint8Array[]} */ (chunks));
       assertBundlePayloadWithinLimits(payload, maxBundleBytes);
