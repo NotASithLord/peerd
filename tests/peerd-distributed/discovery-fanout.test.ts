@@ -237,3 +237,45 @@ test('reused request IDs cannot resurrect a stale profile acknowledgment after u
     net.assertMetadataOnly();
   } finally { release.resolve(); net.close(); }
 });
+
+
+test('a thousand-card catalog converges after reconnects and duplicate pressure while publishing continues', async () => {
+  const identity = await generateIdentity(); const net = network();
+  const source = net.add(identity.did);
+  const sink = net.add('new-subscriber', null);
+  try {
+    for (let i = 0; i < 1000; i++) {
+      await source.discovery.announce(await card(identity, `archive-${i}`));
+    }
+    net.link(source, sink);
+    await net.reconcile();
+    expect(sink.library.size()).toBe(60);
+    // why: known cards arriving before each repair must not consume the
+    // unseen-card allowance, including after a disconnected subscription resets.
+    const duplicates = sink.library.list().slice(0, 10);
+    let published = 0;
+    // A cursor may need a second sweep for live cards missed while the first
+    // sweep exhausted admission. Bound recovery instead of assuming one sweep.
+    for (let round = 0; round < 60; round++) {
+      if (round === 4) net.unlink(source, sink);
+      if (round === 6) net.link(source, sink);
+      await source.discovery.announce(await card(identity, `live-${round}`));
+      published++;
+      await net.pump();
+      if (sink.peers.has(source.did)) {
+        for (const item of duplicates) await sink.receive({ from: source.did, to: sink.did,
+          env: { from: source.did, ch: DISCOVERY.CH, typ: DISCOVERY.ITEM, body: { item } } });
+      }
+      await net.reconcile();
+      if (round >= 29 && sink.library.size() === source.library.size()) break;
+    }
+    expect(source.library.size()).toBe(1000 + published);
+    expect(sink.library.size()).toBe(1000 + published);
+    expect(sink.library.rows().map((row: any) => row.dwapp_id).sort())
+      .toEqual(source.library.rows().map((row: any) => row.dwapp_id).sort());
+    expect(sink.discovery.stats().known).toBeGreaterThan(0);
+    const pages = net.sent.filter(frame => frame.env.typ === DISCOVERY.SNAPSHOT);
+    expect(pages.every(frame => frame.env.body.items.length <= 200)).toBe(true);
+    net.assertMetadataOnly();
+  } finally { net.close(); }
+}, 15_000);
