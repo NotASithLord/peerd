@@ -108,16 +108,21 @@ const hostEnvelope = (raw, tag) => {
   // The canonical outer provenance fence is mandatory. Only its first body
   // may hold the host envelope; never search arbitrary source or nested data.
   const tool = tag === 'site_client_contract' ? 'site_client_read' : 'site_client_run';
-  const fence = /^<untrusted_web_content origin="[^"\n<>]+" tool="([a-z_]+)" retrieved_at="([^"\n<>]+)">\n([\s\S]*?)\n<\/untrusted_web_content>(?:\n|$)/.exec(receipt.content);
-  if (!fence || fence[1] !== tool || !Number.isFinite(Date.parse(fence[2]))) {
+  const fence = /^<untrusted_web_content origin="([^"\n<>]+)" tool="([a-z_]+)" retrieved_at="([^"\n<>]+)">\n([\s\S]*?)\n<\/untrusted_web_content>(?:\n|$)/.exec(receipt.content);
+  if (!fence || fence[2] !== tool || !Number.isFinite(Date.parse(fence[3]))) {
     fail('missing_envelope', `Expected the anchored ${tag} host envelope in its provenance fence.`);
   }
   // JSON occupies one physical line and the host escapes every literal '<'.
-  const match = new RegExp(`^<${tag}>\\n([^\\r\\n<]+)\\n</${tag}>(?:\\n|$)`).exec(fence[3]);
+  const match = new RegExp(`^<${tag}>\\n([^\\r\\n<]+)\\n</${tag}>(?:\\n|$)`).exec(fence[4]);
   if (!match) fail('missing_envelope', `Expected the anchored ${tag} host envelope.`);
   let value;
   try { value = JSON.parse(match[1]); }
   catch { fail('invalid_envelope', 'The site-client host envelope is not valid JSON.'); }
+  // Public canonical origins are ASCII host names plus an optional port; the
+  // production wrapper does not need attribute escaping for this identity.
+  if (!canonicalOrigin(value?.origin) || fence[1] !== `site-client(${value.origin})`) {
+    fail('invalid_envelope', 'The site-client provenance origin does not match its envelope.');
+  }
   return value;
 };
 

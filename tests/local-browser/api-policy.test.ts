@@ -174,3 +174,16 @@ test('machine parsing requires canonical provenance and preserves exact Unicode'
   expect(() => parseSiteClientContract(envelope('site_client_contract', value)
     .replace('tool="site_client_read"', 'tool="read_page"'), origin)).toThrow('provenance fence');
 });
+
+test('typed contracts and results refuse a mismatched provenance origin', () => {
+  const wrongOrigin = (text: string) => text.replace(
+    `origin="site-client(${origin})"`, 'origin="site-client(https://other.example.org)"');
+  expect(() => parseSiteClientContract(wrongOrigin(contractText()), origin)).toThrow('provenance origin');
+  expect(() => verifySiteClientResult(wrongOrigin(resultText()), invoke())).toThrow('provenance origin');
+  // Canonical public origins contain no HTML-attribute escapes, including
+  // punycoded names and non-default ports produced by the real wrapper.
+  const pinned = 'https://xn--caf-dma.example:8443';
+  const text = wrapUntrusted({ origin: `site-client(${pinned})`, tool: 'site_client_read',
+    body: siteClientEnvelope('site_client_contract', contractValue({ origin: pinned })) });
+  expect(parseSiteClientContract(text, pinned).origin).toBe(pinned);
+});
