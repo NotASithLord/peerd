@@ -2918,16 +2918,19 @@ export const makeOffscreenActorClient = ({
     },
     'site-client/run': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = await siteClientEntry(
-        grantFor(msg, sender, boundGrant), msg, ['origin', 'code', 'timeoutMs'],
+        grantFor(msg, sender, boundGrant), msg, ['origin', 'timeoutMs'],
+            ['code', 'mode', 'clientOperation', 'input', 'revision'],
       );
       if (!entry) return { ok: false, error: 'site-client/run: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'site-client/run', () =>
-        entry.authority.runStoredClient(msg.origin, msg.code, msg.timeoutMs), HOST_EFFECT_OUTCOME.siteClientRun);
+        entry.authority.runStoredClient(msg.origin, msg.code, msg.timeoutMs,
+          Object.fromEntries(['mode', 'clientOperation', 'input', 'revision']
+            .filter(key => msg[key] !== undefined).map(key => [key === 'clientOperation' ? 'operation' : key, msg[key]]))), HOST_EFFECT_OUTCOME.siteClientRun);
     },
     'site-client/commit': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = await siteClientEntry(
         grantFor(msg, sender, boundGrant), msg, ['origin'],
-        ['summary', 'endpoints', 'auth', 'deriver', 'body'],
+        ['summary', 'endpoints', 'auth', 'deriver', 'body', 'operations', 'validationCases'],
       );
       if (!entry) return { ok: false, error: 'site-client/commit: authority mismatch', outcomeKnown: true };
       return runDomainEffect(entry, 'site-client/commit', () =>

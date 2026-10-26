@@ -11,8 +11,7 @@
 // imported here. Its own DB: spilled results are best-effort cache bytes,
 // safe to clear, never mixed into a durable store.
 
-import { SPILL_CACHE_MAX_ENTRIES } from './web/spill.js';
-import { MAX_SPILL_TEXT_CHARS } from './result-store-policy.js';
+import { MAX_SPILL_TEXT_CHARS, SPILL_CACHE_MAX_ENTRIES } from './result-store-policy.js';
 
 export { MAX_SPILL_TEXT_CHARS } from './result-store-policy.js';
 

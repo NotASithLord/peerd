@@ -1,0 +1,660 @@
+{
+  "schema": 1,
+  "recordedAt": "2026-10-26T06:42:15.380Z",
+  "evidenceClass": "scripted-model-real-browser",
+  "environment": {
+    "os": "Linux",
+    "architecture": "x86_64",
+    "browser": "Chrome for Testing 151.0.7922.47",
+    "runtime": "Bun 1.4.0",
+    "memoryLimitBytes": 8589934592,
+    "appleSilicon": false
+  },
+  "modelInference": "All model replies, client authoring, and API selection are scripted. No model weights were loaded for these runs.",
+  "scope": "Real unpacked Peerd, browser events, capture, confirmation, sealed client execution, origin-bound API requests, and bridge routing. This is integration evidence, not a browser-model success benchmark or Mac latency result.",
+  "smoke": {
+    "ok": true,
+    "startedAt": "2026-10-26T06:41:52.148Z",
+    "finishedAt": "2026-10-26T06:42:15.380Z",
+    "enforceWebSecurity": true,
+    "automation": "DOM-walk through the normal advancedAutomationEnabled=false setting",
+    "fixtureRouting": "exact local CONNECT destination with the repository test TLS identity; no upstream Internet",
+    "command": "bun scripts/local-browser/run-smoke.mjs",
+    "cases": [
+      {
+        "name": "search-navigation",
+        "evidenceClass": "scripted-model-real-browser",
+        "ok": true,
+        "decisions": 4,
+        "actorCalls": 14,
+        "textHelperCalls": 1,
+        "durationMs": 3041,
+        "browserEvidence": {
+          "tabCount": 1,
+          "tabId": 1562302009,
+          "apiPreviewClicked": null,
+          "decoyClicked": null,
+          "findClicked": "yes",
+          "formSubmitted": "yes",
+          "itemClicked": "yes",
+          "itemId": "CW-42",
+          "mutation": "0",
+          "query": "copper",
+          "title": "Copper widget",
+          "typedQuery": "copper",
+          "url": "https://git-fixture.peerd.test/item/copper-widget?case=search-navigation&q=copper&mutation=0"
+        },
+        "checks": [
+          {
+            "name": "policy reached its terminal protocol state",
+            "pass": true
+          },
+          {
+            "name": "actual final URL and DOM match independent result conditions",
+            "pass": true
+          },
+          {
+            "name": "real input, form and link events occurred",
+            "pass": true
+          },
+          {
+            "name": "ordinary actor delegation and text-helper paths ran",
+            "pass": true
+          },
+          {
+            "name": "no unrelated control was activated",
+            "pass": true
+          },
+          {
+            "name": "policy DONE was not represented as outcome verification",
+            "pass": true
+          },
+          {
+            "name": "model responder had no hidden failures",
+            "pass": true
+          }
+        ],
+        "events": [
+          {
+            "type": "api_inspection",
+            "at": 1792996924919,
+            "lane": "api",
+            "origin": "https://git-fixture.peerd.test"
+          },
+          {
+            "type": "api_fallback",
+            "at": 1792996924971,
+            "lane": "api",
+            "reason": "missing_envelope"
+          },
+          {
+            "type": "decision",
+            "at": 1792996925038,
+            "lane": "decision",
+            "durationMs": 1,
+            "operation": "TYPE_TEXT",
+            "ref": "@e1",
+            "probability": 1,
+            "candidateCount": 6,
+            "requestChars": 1890
+          },
+          {
+            "type": "text_helper",
+            "at": 1792996925038,
+            "lane": "helper",
+            "durationMs": 0,
+            "characters": 6
+          },
+          {
+            "type": "action",
+            "at": 1792996925110,
+            "lane": "decision",
+            "operation": "TYPE_TEXT",
+            "ref": "@e1"
+          },
+          {
+            "type": "decision",
+            "at": 1792996925461,
+            "lane": "decision",
+            "durationMs": 0,
+            "operation": "CLICK",
+            "ref": "@e2",
+            "probability": 1,
+            "candidateCount": 6,
+            "requestChars": 2438
+          },
+          {
+            "type": "action",
+            "at": 1792996925534,
+            "lane": "decision",
+            "operation": "CLICK",
+            "ref": "@e2"
+          },
+          {
+            "type": "decision",
+            "at": 1792996925876,
+            "lane": "decision",
+            "durationMs": 0,
+            "operation": "CLICK",
+            "ref": "@e1",
+            "probability": 1,
+            "candidateCount": 5,
+            "requestChars": 2690
+          },
+          {
+            "type": "action",
+            "at": 1792996925946,
+            "lane": "decision",
+            "operation": "CLICK",
+            "ref": "@e1"
+          },
+          {
+            "type": "decision",
+            "at": 1792996926300,
+            "lane": "decision",
+            "durationMs": 0,
+            "operation": "DONE",
+            "ref": null,
+            "probability": 1,
+            "candidateCount": 4,
+            "requestChars": 3074
+          },
+          {
+            "type": "completion_claim",
+            "at": 1792996926300,
+            "claimed": true,
+            "verified": false
+          }
+        ]
+      },
+      {
+        "name": "mutation-replan",
+        "evidenceClass": "scripted-model-real-browser",
+        "ok": true,
+        "decisions": 5,
+        "actorCalls": 15,
+        "textHelperCalls": 2,
+        "durationMs": 3216,
+        "browserEvidence": {
+          "tabCount": 1,
+          "tabId": 1562302010,
+          "apiPreviewClicked": null,
+          "decoyClicked": null,
+          "findClicked": "yes",
+          "formSubmitted": "yes",
+          "itemClicked": "yes",
+          "itemId": "CW-42",
+          "mutation": "1",
+          "query": "copper",
+          "title": "Copper widget",
+          "typedQuery": "copper",
+          "url": "https://git-fixture.peerd.test/item/copper-widget?case=mutation-replan&q=copper&mutation=1"
+        },
+        "checks": [
+          {
+            "name": "policy reached its terminal protocol state",
+            "pass": true
+          },
+          {
+            "name": "actual final URL and DOM match independent result conditions",
+            "pass": true
+          },
+          {
+            "name": "real input, form and link events occurred",
+            "pass": true
+          },
+          {
+            "name": "ordinary actor delegation and text-helper paths ran",
+            "pass": true
+          },
+          {
+            "name": "no unrelated control was activated",
+            "pass": true
+          },
+          {
+            "name": "DOM changed while the old decision was being computed",
+            "pass": true
+          },
+          {
+            "name": "changed snapshot caused replan before a mutation tool was released",
+            "pass": true
+          },
+          {
+            "name": "mutated page state survived the verified navigation",
+            "pass": true
+          },
+          {
+            "name": "policy DONE was not represented as outcome verification",
+            "pass": true
+          },
+          {
+            "name": "model responder had no hidden failures",
+            "pass": true
+          }
+        ],
+        "events": [
+          {
+            "type": "api_inspection",
+            "at": 1792996928581,
+            "lane": "api",
+            "origin": "https://git-fixture.peerd.test"
+          },
+          {
+            "type": "api_fallback",
+            "at": 1792996928620,
+            "lane": "api",
+            "reason": "missing_envelope"
+          },
+          {
+            "type": "decision",
+            "at": 1792996928685,
+            "lane": "decision",
+            "durationMs": 3,
+            "operation": "TYPE_TEXT",
+            "ref": "@e1",
+            "probability": 1,
+            "candidateCount": 6,
+            "requestChars": 1880
+          },
+          {
+            "type": "text_helper",
+            "at": 1792996928685,
+            "lane": "helper",
+            "durationMs": 0,
+            "characters": 6
+          },
+          {
+            "type": "stale_observation_replanned",
+            "at": 1792996928746,
+            "lane": "decision"
+          },
+          {
+            "type": "decision",
+            "at": 1792996928747,
+            "lane": "decision",
+            "durationMs": 0,
+            "operation": "TYPE_TEXT",
+            "ref": "@e2",
+            "probability": 1,
+            "candidateCount": 7,
+            "requestChars": 1994
+          },
+          {
+            "type": "text_helper",
+            "at": 1792996928747,
+            "lane": "helper",
+            "durationMs": 0,
+            "characters": 6
+          },
+          {
+            "type": "action",
+            "at": 1792996928808,
+            "lane": "decision",
+            "operation": "TYPE_TEXT",
+            "ref": "@e2"
+          },
+          {
+            "type": "decision",
+            "at": 1792996929135,
+            "lane": "decision",
+            "durationMs": 0,
+            "operation": "CLICK",
+            "ref": "@e3",
+            "probability": 1,
+            "candidateCount": 7,
+            "requestChars": 2541
+          },
+          {
+            "type": "action",
+            "at": 1792996929203,
+            "lane": "decision",
+            "operation": "CLICK",
+            "ref": "@e3"
+          },
+          {
+            "type": "decision",
+            "at": 1792996929548,
+            "lane": "decision",
+            "durationMs": 0,
+            "operation": "CLICK",
+            "ref": "@e1",
+            "probability": 1,
+            "candidateCount": 5,
+            "requestChars": 2679
+          },
+          {
+            "type": "action",
+            "at": 1792996929616,
+            "lane": "decision",
+            "operation": "CLICK",
+            "ref": "@e1"
+          },
+          {
+            "type": "decision",
+            "at": 1792996929975,
+            "lane": "decision",
+            "durationMs": 0,
+            "operation": "DONE",
+            "ref": null,
+            "probability": 1,
+            "candidateCount": 4,
+            "requestChars": 3063
+          },
+          {
+            "type": "completion_claim",
+            "at": 1792996929975,
+            "claimed": true,
+            "verified": false
+          }
+        ]
+      },
+      {
+        "name": "api-reuse",
+        "evidenceClass": "scripted-model-real-browser",
+        "ok": true,
+        "decisions": 0,
+        "actorCalls": 6,
+        "textHelperCalls": 0,
+        "durationMs": 4687,
+        "browserEvidence": {
+          "tabCount": 1,
+          "tabId": 1562302012,
+          "apiPreview": "Not loaded",
+          "apiPreviewClicked": null,
+          "decoyClicked": null,
+          "findClicked": null,
+          "formSubmitted": null,
+          "itemClicked": null,
+          "title": "API catalog",
+          "typedQuery": null,
+          "url": "https://git-fixture.peerd.test/api-catalog?case=api-reuse-repeat"
+        },
+        "checks": [
+          {
+            "name": "real review contains exact client code, contracts and expected examples",
+            "pass": true
+          },
+          {
+            "name": "capture saw the real endpoint and preserved numeric response shape",
+            "pass": true
+          },
+          {
+            "name": "explicit validation promoted the exact saved revision",
+            "pass": true
+          },
+          {
+            "name": "both declared inputs ran before the held-out repeat task",
+            "pass": true
+          },
+          {
+            "name": "real endpoint returned the held-out item through the typed stored operation",
+            "pass": true
+          },
+          {
+            "name": "repeat path needed one selector and zero browser decisions or field generations",
+            "pass": true
+          },
+          {
+            "name": "repeat task left the page controls untouched",
+            "pass": true
+          },
+          {
+            "name": "contract checking was not represented as independent task verification",
+            "pass": true
+          },
+          {
+            "name": "model responder had no hidden failures",
+            "pass": true
+          }
+        ],
+        "events": [
+          {
+            "type": "api_inspection",
+            "at": 1792996934767,
+            "lane": "api",
+            "origin": "https://git-fixture.peerd.test"
+          },
+          {
+            "type": "api_contract",
+            "at": 1792996934808,
+            "lane": "api",
+            "origin": "https://git-fixture.peerd.test",
+            "revision": "62d83ef0-0da9-4184-8d18-9ab9229670f9",
+            "status": "validated",
+            "eligibleCount": 1
+          },
+          {
+            "type": "api_selection",
+            "at": 1792996934810,
+            "lane": "api",
+            "helper": true,
+            "durationMs": 1,
+            "operation": "lookup"
+          },
+          {
+            "type": "api_run",
+            "at": 1792996934879,
+            "lane": "api",
+            "origin": "https://git-fixture.peerd.test",
+            "revision": "62d83ef0-0da9-4184-8d18-9ab9229670f9",
+            "operation": "lookup"
+          },
+          {
+            "type": "api_result",
+            "at": 1792996934989,
+            "lane": "api",
+            "origin": "https://git-fixture.peerd.test",
+            "revision": "62d83ef0-0da9-4184-8d18-9ab9229670f9",
+            "operation": "lookup",
+            "inputValidated": true,
+            "outputValidated": true,
+            "taskVerified": false
+          }
+        ],
+        "authoringDurationMs": 2823,
+        "reuseDurationMs": 1355,
+        "apiSelectorCalls": 1,
+        "captureReceipt": "<untrusted_web_content origin=\"https://git-fixture.peerd.test\" tool=\"site_capture\" retrieved_at=\"2026-10-26T06:42:12.235Z\">\nderiver: capture-tap\ncaptured origins (1):\norigin: https://git-fixture.peerd.test (owned tab)\n  auth posture: none\n  endpoints (1):\n    GET /api/items - query: material; → {\"available\":\"boolean\",\"id\":\"string\",\"name\":\"string\",\"price\":\"number\"}\n\nPersist only the https://git-fixture.peerd.test group here with site_client_write. For every other origin, report the attributed group and have the orchestrator delegate to that exact API actor to verify and derive its own client.\n</untrusted_web_content>",
+        "validationReceipt": {
+          "schema": 1,
+          "origin": "https://git-fixture.peerd.test",
+          "revision": "62d83ef0-0da9-4184-8d18-9ab9229670f9",
+          "status": "validated",
+          "validatedOperations": [
+            "lookup"
+          ],
+          "cases": [
+            {
+              "index": 0,
+              "operation": "lookup",
+              "ok": true
+            },
+            {
+              "index": 1,
+              "operation": "lookup",
+              "ok": true
+            }
+          ],
+          "evidence": "declared cases and schemas; no independent business-outcome judgment"
+        },
+        "typedResult": {
+          "schema": 1,
+          "origin": "https://git-fixture.peerd.test",
+          "revision": "62d83ef0-0da9-4184-8d18-9ab9229670f9",
+          "operation": "lookup",
+          "inputValidated": true,
+          "outputValidated": true,
+          "readOnly": true,
+          "result": {
+            "available": true,
+            "id": "GW-07",
+            "name": "Gold widget",
+            "price": 48
+          }
+        }
+      }
+    ],
+    "fixtureRequests": [
+      {
+        "method": "GET",
+        "pathname": "/catalog",
+        "query": {
+          "case": "search-navigation"
+        },
+        "at": 1792996924784
+      },
+      {
+        "method": "GET",
+        "pathname": "/results",
+        "query": {
+          "case": "search-navigation",
+          "mutation": "0",
+          "q": "copper"
+        },
+        "at": 1792996925611
+      },
+      {
+        "method": "GET",
+        "pathname": "/item/copper-widget",
+        "query": {
+          "case": "search-navigation",
+          "q": "copper",
+          "mutation": "0"
+        },
+        "at": 1792996926025
+      },
+      {
+        "method": "GET",
+        "pathname": "/catalog",
+        "query": {
+          "case": "mutation-replan"
+        },
+        "at": 1792996928447
+      },
+      {
+        "method": "GET",
+        "pathname": "/results",
+        "query": {
+          "case": "mutation-replan",
+          "mutation": "1",
+          "q": "copper"
+        },
+        "at": 1792996929279
+      },
+      {
+        "method": "GET",
+        "pathname": "/item/copper-widget",
+        "query": {
+          "case": "mutation-replan",
+          "q": "copper",
+          "mutation": "1"
+        },
+        "at": 1792996929686
+      },
+      {
+        "method": "GET",
+        "pathname": "/api-catalog",
+        "query": {
+          "case": "api-reuse"
+        },
+        "at": 1792996931843
+      },
+      {
+        "method": "GET",
+        "pathname": "/api/items",
+        "query": {
+          "material": "copper"
+        },
+        "at": 1792996932003
+      },
+      {
+        "method": "GET",
+        "pathname": "/api/items",
+        "query": {
+          "material": "copper"
+        },
+        "at": 1792996932706
+      },
+      {
+        "method": "GET",
+        "pathname": "/api/items",
+        "query": {
+          "material": "silver"
+        },
+        "at": 1792996932755
+      },
+      {
+        "method": "GET",
+        "pathname": "/api-catalog",
+        "query": {
+          "case": "api-reuse-repeat"
+        },
+        "at": 1792996934641
+      },
+      {
+        "method": "GET",
+        "pathname": "/api/items",
+        "query": {
+          "material": "gold"
+        },
+        "at": 1792996934947
+      }
+    ]
+  },
+  "productionConfirmation": {
+    "command": "bun run e2e:verify --only=site-client-vertical",
+    "ok": true,
+    "runAt": "2026-10-26T06:41:36.329Z",
+    "checks": [
+      {
+        "name": "the single site-client turn was accepted",
+        "pass": true
+      },
+      {
+        "name": "the page request occurs only after the refused call delegated to the actor",
+        "pass": true
+      },
+      {
+        "name": "the live confirmation names the stored executable and captured endpoint",
+        "pass": true
+      },
+      {
+        "name": "the user can review exact contracts and both expected examples",
+        "pass": true
+      },
+      {
+        "name": "the actor is blocked on the real confirmation channel until the user answers",
+        "pass": true
+      },
+      {
+        "name": "the user approved through the rendered production modal",
+        "pass": true
+      },
+      {
+        "name": "the forged main-agent site_capture was refused before browser effects",
+        "pass": true
+      },
+      {
+        "name": "capture observed the real page request and returned its redacted dossier",
+        "pass": true
+      },
+      {
+        "name": "write settled, read returned the persisted client, and sealed run used it",
+        "pass": true
+      },
+      {
+        "name": "the tab Web actor completed and its fenced reply reached the orchestrator",
+        "pass": true
+      }
+    ],
+    "modelInference": "scripted",
+    "enforceWebSecurity": false,
+    "visualReview": "Collapsed and expanded contract details inspected from actual Chrome screenshots; screenshots remain local ignored artifacts.",
+    "environmentNote": "A temporary Chrome wrapper supplied --no-proxy-server so the reserved .test fixture used the harness loopback host mapping."
+  },
+  "limitations": [
+    "Declared validation cases and output schemas do not independently establish business correctness.",
+    "Real small-model client authoring, full two-model browser quality, 16 GB Mac memory and performance remain unmeasured.",
+    "The local smoke keeps web security enabled and uses an exact local CONNECT proxy; the standard e2e UI harness disables browser web security."
+  ]
+}

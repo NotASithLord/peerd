@@ -801,9 +801,10 @@ const runControllerTurnWith = async (payload, options) => {
             const siteClientAuthority = Object.freeze({
               readStoredClient: (/** @type {string} */ origin) =>
                 rpc('turn.site-client.read', { ...binding(), origin }),
-              runStoredClient: (/** @type {string} */ origin, /** @type {string} */ code,
-                /** @type {number} */ timeoutMs) =>
-                rpc('turn.site-client.run', { ...binding(), origin, code, timeoutMs }),
+              runStoredClient: (/** @type {string} */ origin, /** @type {string|undefined} */ code,
+                /** @type {number} */ timeoutMs, /** @type {any} */ runOptions = {}) =>
+                rpc('turn.site-client.run', { ...binding(), origin, ...(code === undefined ? {} : { code }), timeoutMs,
+                ...Object.fromEntries(Object.entries(runOptions).map(([key, value]) => [key === 'operation' ? 'clientOperation' : key, value])) }),
               commitConfirmedClient: (/** @type {string} */ origin) =>
                 rpc('turn.site-client.commit', {
                   ...binding(), origin,
@@ -815,6 +816,8 @@ const runControllerTurnWith = async (payload, options) => {
                   ...(request.args?.deriver !== undefined
                     ? { deriver: request.args.deriver } : {}),
                   ...(typeof request.args?.body === 'string' ? { body: request.args.body } : {}),
+                  ...(request.args?.operations !== undefined ? { operations: request.args.operations } : {}),
+                  ...(request.args?.validationCases !== undefined ? { validationCases: request.args.validationCases } : {}),
                 }),
               startOwnedCapture: () => rpc('turn.site-client.capture-start', binding()),
               stopOwnedCapture: () => rpc('turn.site-client.capture-stop', binding()),

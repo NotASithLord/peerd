@@ -1,9 +1,10 @@
 // @ts-check
 // Background-only egress surface. WebAuthn enrollment UI and public proof
 // construction helpers remain available from index.js without joining the
-// service worker's listener-registration path.
+// service worker's listener-registration path. The sealed authority worker
+// imports the resident vault through offscreen.js; the background uses only
+// its proxy and the rollback/default primitives in kernel-storage.js.
 
-export { createVault, purgeVaultBlob, DEFAULT_AUTO_LOCK_MS } from './vault/vault.js';
 export { deriveArgon2id } from '../shared/argon2id.js';
 export {
   VaultLockedError, VaultNotInitializedError, VaultAlreadyInitializedError,

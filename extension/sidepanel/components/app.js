@@ -359,7 +359,7 @@ const SITE_DERIVER_LABEL = Object.freeze({
  * @property {{
  *   op: string, header?: string, addedLines?: number, removedLines?: number,
  *   body?: string, prevBody?: string, bodyBytesBefore?: number, bodyBytesAfter?: number,
- *   dossier?: { origin?: string, summary?: string, endpoints?: Array<{ method?: string, path?: string }>, auth?: string, deriver?: string },
+ *   dossier?: { origin?: string, summary?: string, endpoints?: Array<{ method?: string, path?: string }>, auth?: string, deriver?: string, operations?: Array<{name:string,readOnly:boolean}>, validationCases?: unknown[] },
  *   endpointDelta?: { added?: number, removed?: number },
  * }} [proposal]
  * @property {string} [actionClass]
@@ -561,6 +561,22 @@ export const ConfirmModal = {
                         ? p.dossier.endpoints.map((endpoint) => `${endpoint.method || '?'} ${endpoint.path || '?'}`).join('\n')
                         : '(no endpoints declared)'),
                   ]),
+                  p.dossier?.operations?.length
+                    ? m('.site-client-contracts', [
+                        m('strong', 'Reuse checks'),
+                        m('p', `${p.dossier.operations.length} named operation(s), ${p.dossier.validationCases?.length ?? 0} declared example(s). Read operations become reusable after their examples pass. These checks cover the declared examples, not every future result.`),
+                        m('details', [
+                          m('summary', 'Review inputs, outputs and expected results'),
+                          m('pre.confirm-summary', {
+                            style: 'max-height:240px; overflow:auto; white-space:pre-wrap;',
+                            'aria-label': 'Proposed site-client contracts',
+                          }, JSON.stringify({
+                            operations: p.dossier.operations,
+                            validationCases: p.dossier.validationCases ?? [],
+                          }, null, 2)),
+                        ]),
+                      ])
+                    : null,
                   p.op === 'update'
                     ? [
                         m('strong', 'Existing runnable JavaScript'),

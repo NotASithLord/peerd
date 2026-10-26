@@ -1,0 +1,359 @@
+{
+  "schemaVersion": 1,
+  "recordedDate": "2026-10-26",
+  "baseCommit": "dbf9208202d848d06c464a6221a2920952082dfd",
+  "environment": {
+    "platform": "Linux x86_64 CPU",
+    "cpuQuotaCores": 8,
+    "chromeVersion": "151.0.7922.47"
+  },
+  "decisionCheckpoint": {
+    "repo": "Mapika/decider-4b-GGUF",
+    "revision": "d3a78581751d518bbfa9e871a6d84059554d53c5",
+    "ggufSha256": "fc6e32a39ca74a4201f7a7b2393bde16b83b7c26957465f257ca75c5c3fc3b3a",
+    "runtimeCommit": "91b6fa9b94ab6c4dc2c63d3b14d413243b4fffcc"
+  },
+  "limitations": [
+    "Two owned fixture episodes, not a general browser benchmark.",
+    "The mixed run used real decision-model weights; main delegation and field text were scripted.",
+    "The full two-model pair and a 16 GB Mac were not tested.",
+    "These reports contain actual client wall times; per-call token usage was not captured and is not backfilled.",
+    "Model completion claims are separate from the independent URL, DOM, and page-event checks."
+  ],
+  "runs": [
+    {
+      "evidenceClass": "scripted-model-real-browser",
+      "modelInference": "scripted; no model weights loaded",
+      "enforceWebSecurity": true,
+      "automation": "DOM-walk through the normal advancedAutomationEnabled=false setting",
+      "startedAt": "2026-10-26T05:22:36.102Z",
+      "finishedAt": "2026-10-26T05:22:53.119Z",
+      "ok": true,
+      "cases": [
+        {
+          "name": "search-navigation",
+          "ok": true,
+          "durationMs": 2401,
+          "decisions": 4,
+          "textHelperCalls": 1,
+          "mutationApplied": false,
+          "modelErrors": [],
+          "checks": [
+            {
+              "name": "policy reached its terminal protocol state",
+              "pass": true
+            },
+            {
+              "name": "actual final URL and DOM match independent result conditions",
+              "pass": true,
+              "detail": {
+                "tabCount": 1,
+                "tabId": 2116707928,
+                "decoyClicked": null,
+                "findClicked": "yes",
+                "formSubmitted": "yes",
+                "itemClicked": "yes",
+                "itemId": "CW-42",
+                "mutation": "0",
+                "query": "copper",
+                "title": "Copper widget",
+                "typedQuery": "copper",
+                "url": "https://git-fixture.peerd.test/item/copper-widget?case=search-navigation&q=copper&mutation=0"
+              }
+            },
+            {
+              "name": "real input, form and link events occurred",
+              "pass": true
+            },
+            {
+              "name": "ordinary actor delegation and text-helper paths ran",
+              "pass": true
+            },
+            {
+              "name": "no unrelated control was activated",
+              "pass": true
+            },
+            {
+              "name": "scripted DONE was not represented as outcome verification",
+              "pass": true
+            },
+            {
+              "name": "model responder had no hidden failures",
+              "pass": true
+            }
+          ],
+          "decisionsObserved": [],
+          "staleReplans": 0
+        },
+        {
+          "name": "mutation-replan",
+          "ok": true,
+          "durationMs": 2774,
+          "decisions": 5,
+          "textHelperCalls": 2,
+          "mutationApplied": true,
+          "modelErrors": [],
+          "checks": [
+            {
+              "name": "policy reached its terminal protocol state",
+              "pass": true
+            },
+            {
+              "name": "actual final URL and DOM match independent result conditions",
+              "pass": true,
+              "detail": {
+                "tabCount": 1,
+                "tabId": 2116707929,
+                "decoyClicked": null,
+                "findClicked": "yes",
+                "formSubmitted": "yes",
+                "itemClicked": "yes",
+                "itemId": "CW-42",
+                "mutation": "1",
+                "query": "copper",
+                "title": "Copper widget",
+                "typedQuery": "copper",
+                "url": "https://git-fixture.peerd.test/item/copper-widget?case=mutation-replan&q=copper&mutation=1"
+              }
+            },
+            {
+              "name": "real input, form and link events occurred",
+              "pass": true
+            },
+            {
+              "name": "ordinary actor delegation and text-helper paths ran",
+              "pass": true
+            },
+            {
+              "name": "no unrelated control was activated",
+              "pass": true
+            },
+            {
+              "name": "DOM changed while the old decision was being computed",
+              "pass": true
+            },
+            {
+              "name": "changed snapshot caused replan before a mutation tool was released",
+              "pass": true,
+              "detail": {
+                "replans": 1
+              }
+            },
+            {
+              "name": "mutated page state survived the verified navigation",
+              "pass": true
+            },
+            {
+              "name": "scripted DONE was not represented as outcome verification",
+              "pass": true
+            },
+            {
+              "name": "model responder had no hidden failures",
+              "pass": true
+            }
+          ],
+          "mutationEvidence": {
+            "mutationApplied": true,
+            "newLabel": "Catalog query",
+            "priorValue": ""
+          },
+          "decisionsObserved": [],
+          "staleReplans": 1
+        }
+      ]
+    },
+    {
+      "evidenceClass": "real-decision-scripted-helper-real-browser",
+      "modelInference": "real local decision endpoint; orchestrator and copper text helper remain scripted",
+      "enforceWebSecurity": true,
+      "automation": "DOM-walk through the normal advancedAutomationEnabled=false setting",
+      "startedAt": "2026-10-26T05:24:39.756Z",
+      "finishedAt": "2026-10-26T05:27:24.878Z",
+      "ok": true,
+      "cases": [
+        {
+          "name": "search-navigation",
+          "ok": true,
+          "durationMs": 65337,
+          "decisions": 4,
+          "textHelperCalls": 1,
+          "mutationApplied": false,
+          "modelErrors": [],
+          "checks": [
+            {
+              "name": "policy reached its terminal protocol state",
+              "pass": true
+            },
+            {
+              "name": "actual final URL and DOM match independent result conditions",
+              "pass": true,
+              "detail": {
+                "tabCount": 1,
+                "tabId": 1765117382,
+                "decoyClicked": null,
+                "findClicked": "yes",
+                "formSubmitted": "yes",
+                "itemClicked": "yes",
+                "itemId": "CW-42",
+                "mutation": "0",
+                "query": "copper",
+                "title": "Copper widget",
+                "typedQuery": "copper",
+                "url": "https://git-fixture.peerd.test/item/copper-widget?case=search-navigation&q=copper&mutation=0"
+              }
+            },
+            {
+              "name": "real input, form and link events occurred",
+              "pass": true
+            },
+            {
+              "name": "ordinary actor delegation and text-helper paths ran",
+              "pass": true
+            },
+            {
+              "name": "no unrelated control was activated",
+              "pass": true
+            },
+            {
+              "name": "policy DONE was not represented as outcome verification",
+              "pass": true
+            },
+            {
+              "name": "model responder had no hidden failures",
+              "pass": true
+            }
+          ],
+          "decisionsObserved": [
+            {
+              "durationMs": 11006,
+              "choice": "type_e1",
+              "candidateCount": 6
+            },
+            {
+              "durationMs": 16081,
+              "choice": "click_e2",
+              "candidateCount": 6
+            },
+            {
+              "durationMs": 16821,
+              "choice": "click_e1",
+              "candidateCount": 5
+            },
+            {
+              "durationMs": 18737,
+              "choice": "done",
+              "candidateCount": 4
+            }
+          ],
+          "staleReplans": 0
+        },
+        {
+          "name": "mutation-replan",
+          "ok": true,
+          "durationMs": 87594,
+          "decisions": 5,
+          "textHelperCalls": 2,
+          "mutationApplied": true,
+          "modelErrors": [],
+          "checks": [
+            {
+              "name": "policy reached its terminal protocol state",
+              "pass": true
+            },
+            {
+              "name": "actual final URL and DOM match independent result conditions",
+              "pass": true,
+              "detail": {
+                "tabCount": 1,
+                "tabId": 1765117383,
+                "decoyClicked": null,
+                "findClicked": "yes",
+                "formSubmitted": "yes",
+                "itemClicked": "yes",
+                "itemId": "CW-42",
+                "mutation": "1",
+                "query": "copper",
+                "title": "Copper widget",
+                "typedQuery": "copper",
+                "url": "https://git-fixture.peerd.test/item/copper-widget?case=mutation-replan&q=copper&mutation=1"
+              }
+            },
+            {
+              "name": "real input, form and link events occurred",
+              "pass": true
+            },
+            {
+              "name": "ordinary actor delegation and text-helper paths ran",
+              "pass": true
+            },
+            {
+              "name": "no unrelated control was activated",
+              "pass": true
+            },
+            {
+              "name": "DOM changed while the old decision was being computed",
+              "pass": true
+            },
+            {
+              "name": "changed snapshot caused replan before a mutation tool was released",
+              "pass": true,
+              "detail": {
+                "replans": 1
+              }
+            },
+            {
+              "name": "mutated page state survived the verified navigation",
+              "pass": true
+            },
+            {
+              "name": "policy DONE was not represented as outcome verification",
+              "pass": true
+            },
+            {
+              "name": "model responder had no hidden failures",
+              "pass": true
+            }
+          ],
+          "mutationEvidence": {
+            "mutationApplied": true,
+            "newLabel": "Catalog query",
+            "priorValue": "",
+            "inferencePending": true
+          },
+          "decisionsObserved": [
+            {
+              "durationMs": 11565,
+              "choice": "type_e1",
+              "candidateCount": 6
+            },
+            {
+              "durationMs": 11633,
+              "choice": "type_e2",
+              "candidateCount": 7
+            },
+            {
+              "durationMs": 19670,
+              "choice": "click_e3",
+              "candidateCount": 7
+            },
+            {
+              "durationMs": 19368,
+              "choice": "click_e1",
+              "candidateCount": 5
+            },
+            {
+              "durationMs": 22441,
+              "choice": "done",
+              "candidateCount": 4
+            }
+          ],
+          "staleReplans": 1
+        }
+      ]
+    }
+  ],
+  "reproduce": [
+    "bun scripts/local-browser/run-smoke.mjs",
+    "bun scripts/local-browser/run-smoke.mjs --decision-origin=http://127.0.0.1:8000"
+  ]
+}

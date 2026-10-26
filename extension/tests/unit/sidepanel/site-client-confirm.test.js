@@ -61,6 +61,31 @@ describe('sidepanel site-client confirmation', () => {
     } finally { unmount(); }
   });
 
+  it('shows the exact operation contracts and expected examples being saved', () => {
+    const operations = [{
+      name: 'currentOrder', readOnly: true,
+      inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false },
+      outputSchema: { type: 'string' },
+    }];
+    const validationCases = [{ operation: 'currentOrder', input: { id: 'sample' }, expected: '<script>untrusted example</script>' }];
+    const { root, unmount } = mount({
+      id: 'site-contract', kind: 'site_client_write', tool: 'site_client_write',
+      proposal: { ...proposal, dossier: { ...proposal.dossier, operations, validationCases } },
+      origins: ['https://shop.example'],
+    });
+    try {
+      expect(root.querySelector('[aria-label="Proposed site-client contracts"]')?.textContent)
+        .toBe(JSON.stringify({ operations, validationCases }, null, 2));
+      expect(root.querySelector('script')).toBe(null);
+      expect(root.textContent.includes('not every future result')).toBe(true);
+      expect(root.querySelector('[aria-label="Proposed site-client code"]')?.textContent).toBe(proposal.body);
+      const save = /** @type {HTMLElement} */ (root.querySelector('.peerd-modal-actions button:last-child'));
+      save.focus();
+      save.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+      expect(document.activeElement).toBe(root.querySelector('summary'));
+    } finally { unmount(); }
+  });
+
   it('shows both code bodies and the endpoint delta for an update', () => {
     const { root, unmount } = mount({
       id: 'site-update', kind: 'site_client_write', tool: 'site_client_write',

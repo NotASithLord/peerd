@@ -14,9 +14,9 @@ export const executeSiteClientTool = (
       readStoredClient: (origin: string) => authorityFor(
         'turn.site-client.read', { origin },
       ).readStoredClient(origin),
-      runStoredClient: (origin: string, code: string, timeoutMs: number) => authorityFor(
+      runStoredClient: (origin: string, code: string|undefined, timeoutMs: number, options = {}) => authorityFor(
         'turn.site-client.run', args,
-      ).runStoredClient(origin, code, timeoutMs),
+      ).runStoredClient(origin, code, timeoutMs, options),
       commitConfirmedClient: (origin: string) => authorityFor(
         'turn.site-client.commit', args,
       ).commitConfirmedClient(origin),

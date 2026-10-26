@@ -720,8 +720,8 @@ export const createDebuggerPool = (/** @type {{bindTabEvents?:boolean,bindTabRem
             if (!networkCaptures.isCurrent(source.tabId, cap)) return; // capture stopped or replaced
             const raw = typeof r?.body === 'string' ? (r.base64Encoded ? '' : r.body) : '';
             if (raw) {
-              try { e.resSample = shapeSketch(JSON.parse(raw.slice(0, RESP_BODY_SAMPLE * 4))); }
-              catch { e.resSample = 'string'; }
+              try { e.resShape = shapeSketch(JSON.parse(raw.slice(0, RESP_BODY_SAMPLE * 4))); }
+              catch { e.resShape = 'string'; }
             }
           })
           .catch(() => {});

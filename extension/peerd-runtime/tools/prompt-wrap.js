@@ -20,7 +20,7 @@
 // execute(), not in the agent loop — so it's impossible to forget when
 // adding a new web-sourced tool.
 
-import { escapeAttr } from '/shared/util.js';
+import { escapeAttr } from '../../shared/util.js';
 import { disarmText } from '../dom/cdr.js';
 
 // All fence tag names this module manages. Any occurrence of one of these

@@ -112,7 +112,7 @@ export function installFetchTapInjected(allowedOrigins) {
               var ct = res.headers && res.headers.get ? res.headers.get('content-type') : '';
               var entry = { method: String(method).toUpperCase(), url: String(url), status: res.status, contentType: ct, reqHeaders: posture(headers) };
               // clone so we never consume the page's own body stream
-              res.clone().text().then(function (t) { entry.resSample = sampleJson(t, ct); push(entry); }).catch(function () { push(entry); });
+              res.clone().text().then(function (t) { entry.resShape = sampleJson(t, ct); push(entry); }).catch(function () { push(entry); });
             } catch (e2) { /* skip */ }
           }).catch(function () { /* network error — not an endpoint we can shape */ });
         } catch (e) { /* skip */ }
@@ -144,7 +144,7 @@ export function installFetchTapInjected(allowedOrigins) {
               try { ct = self.getResponseHeader('content-type') || ''; } catch (e) { /* skip */ }
               var text = '';
               try { text = (self.responseType === '' || self.responseType === 'text') ? String(self.responseText || '') : ''; } catch (e) { /* skip */ }
-              push({ method: self.__peerd.method, url: self.__peerd.url, status: self.status, contentType: ct, reqHeaders: posture(null), resSample: sampleJson(text, ct) });
+              push({ method: self.__peerd.method, url: self.__peerd.url, status: self.status, contentType: ct, reqHeaders: posture(null), resShape: sampleJson(text, ct) });
             } catch (e2) { /* skip */ }
           });
         } catch (e) { /* skip */ }

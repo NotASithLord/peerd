@@ -43,6 +43,5 @@ export {
 } from './browser-authority/child-policy-result.js';
 export { wrapUntrusted } from './tools/prompt-wrap.js';
 export { disarmMarkup } from './dom/cdr.js';
-export { excerptFooter, excerptRelevant, pagingFooter, windowText } from './tools/web/spill.js';
 export { readFrameworkStateInjected } from './dom/framework-state.js';
 export { captureSnapshot } from './dom/capture.js';
