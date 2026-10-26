@@ -7,7 +7,7 @@ export const RETRIEVAL_MISS_TTL_MS = 30_000;
 export class NoAppProviderError extends Error {
   /** @param {string} uri */
   constructor(uri) {
-    super(`no peer is serving ${uri} right now — the peer may have dropped; try again`);
+    super(`no peer is serving ${uri} right now. The peer may have dropped; try again`);
     this.name = 'NoAppProviderError';
   }
 }
