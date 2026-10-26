@@ -135,12 +135,15 @@ export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   entryBytesCeiling: 236,
   directImportsCeiling: 3,
 });
+// Locked publication reuses its authority receipt after host retirement.
+// Remeasured Firefox source ceilings add exactly 322 bytes; all packaged
+// graphs and Chrome source remain under their existing ceilings.
 export const FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Exact shared authority closure including synchronous session revocation.
-  modules: 88, graphBytes: 660_979, entryBytes: 239, directImports: 3,
+  modules: 88, graphBytes: 661_301, entryBytes: 239, directImports: 3,
 });
 export const PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  modules: 90, graphBytes: 668_610, entryBytes: 250, directImports: 2,
+  modules: 90, graphBytes: 668_932, entryBytes: 250, directImports: 2,
 });
 
 // The offscreen entry is a broker/supervisor, not a feature host. Its former
