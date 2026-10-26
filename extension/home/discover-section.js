@@ -23,7 +23,7 @@ import { openOptions } from '/shared/open-options.js';
 import { packagedStarter, starterKeys } from '/shared/starter-catalog.js';
 import { blockedSet, effectOutcome, withoutBlocked } from './blocked-makers.js';
 import { discoveryAddress } from './discovery-address.js';
-import { exploreOrder, EXPLORE_WINDOW, nextSuggestion, suggestionKey } from './explore-order.js';
+import { exploreOrder, EXPLORE_WINDOW, nextSuggestion, recentRetrievalMiss, suggestionKey } from './explore-order.js';
 import {
   BLOCKED, BLOCKED_ERROR, bytesLabel, createEffects, FAILED, failureHint, isFailure, kbLabel, keptCards, letterOf, libraryPeerApps,
   libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, pillFilter, appCountLabel, peerCountLabel, rootView,
@@ -1220,18 +1220,20 @@ export const DiscoverSection = (initialVnode) => {
   const surprise = (shown) => {
     if (!localReady || localFailed) return;
     const candidates = surpriseCandidates(shown);
-    let chosen = nextSuggestion(candidates, suggested, lastPublisher);
+    const now = Date.now();
+    let chosen = nextSuggestion(candidates, suggested, lastPublisher, now);
     // why clear and pick again: the history only prevents repeats within one
     // pass; once every candidate was shown, the next pass starts fresh.
     if (!chosen && suggested.size) {
       suggested.clear();
       lastPublisher = null;
-      chosen = nextSuggestion(candidates, suggested, lastPublisher);
+      chosen = nextSuggestion(candidates, suggested, lastPublisher, now);
     }
     // why a line, not silence: the button stays on, as drawn, so a click
     // that finds nothing must still say why no page opened.
     if (!chosen) {
       surpriseNote = noSuggestionNote({
+        recentMisses: candidates.some(app => recentRetrievalMiss(app, now)),
         filtered: pill !== 'all' || !!query.trim(), allInLibrary: shown.length > 0 && shown.every(app => !!facts(app).localId),
       });
       return;

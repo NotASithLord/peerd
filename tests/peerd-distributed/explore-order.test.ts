@@ -98,3 +98,14 @@ test('Surprise me rotates publishers and immutable versions without implying ava
   seen.clear();
   expect(nextSuggestion([a],seen,null)).toEqual(a);
 });
+
+
+test('Surprise me skips only fresh retrieval misses and restores eligibility after expiry', () => {
+  const a = {dwapp_id:'a', publisher:'one', retrieval:{outcome:'no-provider-found',observedAt:100,expiresAt:200}};
+  const b = {dwapp_id:'b', publisher:'two'};
+  expect(nextSuggestion([a,b],new Set(),null,150)).toEqual(b);
+  expect(nextSuggestion([a],new Set(),null,150)).toBeNull();
+  expect(nextSuggestion([a],new Set(),null,200)).toEqual(a);
+  expect(nextSuggestion([a],new Set(),null,99)).toEqual(a);
+  expect(nextSuggestion([{...a,retrieval:{...a.retrieval,outcome:'lookup-error'}}],new Set(),null,150)?.dwapp_id).toBe('a');
+});

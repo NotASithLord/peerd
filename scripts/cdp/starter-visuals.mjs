@@ -314,7 +314,32 @@ const starterAdded = {
   },
 };
 
+
+const recentMissState = (narrow) => ({
+  name: `discovery-recent-misses${narrow ? '-narrow' : ''}`, kind: 'visual', phase: 'post-unlock', responder: null,
+  async run(ctx, rec) {
+    const surface = discoverSurface();
+    if (surface.base && !readFileSync(join(surface.tree, 'home/explore-order.js'), 'utf8').includes('recentRetrievalMiss')) {
+      rec.observe('merge-base surface', { present: false, reason: 'Recent retrieval history was introduced on this branch' });
+      return;
+    }
+    const page = await openExtPage(ctx, 'tests/fixtures/explore.html?state=recent-misses');
+    try {
+      await page.send('Emulation.setDeviceMetricsOverride', {width:narrow?320:960,height:narrow?1450:900,deviceScaleFactor:1,mobile:false});
+      if (!await waitFor(() => evalIn(page, `${cards(3)} && [...document.querySelectorAll('button')].some(b => b.textContent === 'Surprise me' && !b.disabled)`), {budgetMs:8000,pollMs:50})) throw new Error('Discovery not ready');
+      await clickSync(page, 'button', 'Surprise me');
+      rec.check('recent misses explain retry without opening a suggestion', await evalIn(page, `${has('Recent attempts found no sharing peers.')} && !document.querySelector('.disc-page')`));
+      rec.check('retry explanation fits viewport', await evalIn(page, 'document.documentElement.scrollWidth <= innerWidth'));
+      await rec.visualPage(`discovery-recent-misses${narrow ? '-narrow' : ''}`, page);
+      await clickSync(page, '.disc-tile-open', 'Field notes');
+      rec.check('direct retry remains available', !!await waitFor(() => evalIn(page, `!!document.querySelector('.disc-page') && [...document.querySelectorAll('button')].some(b => b.textContent === 'Install and share' && !b.disabled)`), {budgetMs:4000,pollMs:50}));
+      rec.check('selection and direct review perform no network fetch or install', await evalIn(page, `window.__exploreFixtureCalls.every(type => ${JSON.stringify(READS)}.includes(type))`));
+    } finally { try { page.close(); } catch {} }
+  },
+});
+
 export const STARTER_VISUAL_STATES = [
+  recentMissState(false), recentMissState(true),
   ...[false, true].flatMap(narrow => ['home', 'review', 'empty', 'no-results', 'publisher', 'suggestion'].map(mode => keptState(mode, narrow))),
   ...FLOW_FRAMES.flatMap(row => [frameState(row), ...row[4]?.narrow ? [frameState(row, true)] : []]),
   ...CONTACT_FRAMES.flatMap(row => [contactsState(row), ...row[4]?.narrow ? [contactsState(row, true)] : []]),

@@ -12,6 +12,7 @@
 // simulator. Verbose by design (dlog) — every join/announce/sub-protocol step
 // is logged so a real-network bug is visible in the console immediately.
 
+import { createRetrievalHistory, NoAppProviderError } from './apps/retrieval-history.js';
 import { PROVIDER_TTL_MS } from './dht/provider-store.js';
 import { createPeerNode } from './peer-node.js';
 import { createPresence } from './gossip/presence.js';
@@ -119,8 +120,9 @@ export const createBaseNetwork = async ({
   /** @param {string} did */
   const isBlocked = (did) => userBlocked(did) || blocklist.has(did);
   let contributionGeneration = 0;
+  const retrievalHistory = createRetrievalHistory({ now });
   /** @param {string} did @param {string} [reason] */
-  const block = (did, reason) => { contributionGeneration += 1; if (reason !== 'user-policy') blocklist.add(did); audit?.('dwapp_publisher_blocked', { did, reason }); };
+  const block = (did, reason) => { contributionGeneration += 1; retrievalHistory.clear(); if (reason !== 'user-policy') blocklist.add(did); audit?.('dwapp_publisher_blocked', { did, reason }); };
   /** @type {Set<(card: any) => void>} */
   const dwappCbs = new Set();
   const library = createLibrary({ isBlocked, now });
@@ -421,10 +423,15 @@ export const createBaseNetwork = async ({
     }
     // Retain the DHT responder as the signaling broker for each provider.
     // Bound both lookup and dialing; unavailable referrals must not hang an install.
+    let lookupCompleted = false;
     const contacts = await withNetworkBudget(async (signal) => {
       const key = await contentKey(uri);
       signal.throwIfAborted();
-      return node.dht.findProviderContacts(key, { signal });
+      let queryFailed = false;
+      const found = await node.dht.findProviderContacts(key, { signal, onQueryFailure: () => { queryFailed = true; } });
+      signal.throwIfAborted();
+      lookupCompleted = !queryFailed;
+      return found;
     }).catch(() => []);
     const candidates = contacts.filter((/** @type {any} */ contact) => contact.did !== identity.did && !isBlocked(contact.did)).slice(0, 8);
     let next = 0;
@@ -440,6 +447,7 @@ export const createBaseNetwork = async ({
     if (closed) throw new Error('base network closed');
     const provided = candidates.map((/** @type {any} */ contact) => contact.did);
     const providers = [...new Set([...provided, ...linked])];
+    if (!providers.length && lookupCompleted && !contacts.length) throw new NoAppProviderError(uri);
     if (!providers.length) throw new Error(`no peer is serving ${uri} right now — the peer may have dropped; try again`);
     return swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress, isAllowed, acceptManifest });
   };
@@ -449,7 +457,20 @@ export const createBaseNetwork = async ({
     const { did, hash } = parsePeerdUri(uri);
     const generation = contributionGeneration;
     if (did && isBlocked(did)) throw new Error('publisher-user-blocked');
-    const result = await fetchAllowedApp(uri, options);
+    // why: only a completed, explicitly requested lookup can suppress a recent
+    // suggestion. A newer request supersedes an older completion; policy and
+    // host changes invalidate all tickets without retaining unbounded history.
+    const address = formatPeerdUri({ did, hash });
+    const ticket = retrievalHistory.begin(address);
+    let result;
+    try { result = await fetchAllowedApp(uri, options); }
+    catch (error) {
+      if (!closed && generation === contributionGeneration && error instanceof NoAppProviderError) {
+        retrievalHistory.miss(address, ticket);
+      }
+      throw error;
+    }
+    retrievalHistory.forget(address, ticket);
     if (closed) throw new Error('base network closed');
     if (isBlocked(result.manifest.publisher)) throw new Error('publisher-user-blocked');
     // why: a ban/unban during a transfer cannot resurrect pre-policy history.
@@ -542,7 +563,11 @@ export const createBaseNetwork = async ({
     /** @param {(card: any) => void} cb */
     onDwappAnnounce: (cb) => { dwappCbs.add(cb); return () => dwappCbs.delete(cb); },
     // The discovery view the Library UI lists — the bounded, no-downgrade cache.
-    heardDwapps: () => library.rows(),
+    heardDwapps: () => library.rows().map((row) => ({
+      ...row,
+      // Unsigned, local observation; never accept this field from card metadata.
+      retrieval: retrievalHistory.read(row.head.content_addr),
+    })),
     // Resolve a card by id: the Library first (already subscribed), else the DHT
     // by (publisher, slug) — the durable late-join path that survives a card we
     // never had streamed to us. A DHT hit is verified + cached into the Library.
@@ -569,6 +594,7 @@ export const createBaseNetwork = async ({
       // from the publisher catalog. Fence every older transfer, even if the
       // blocked DID is subsequently unblocked before verification completes.
       contributionGeneration += 1;
+      retrievalHistory.clear();
       for (const did of new Set([...node.mesh.peers().map((/** @type {any} */ peer) => peer.did),
         ...library.rows().map((/** @type {any} */ row) => row.publisher)])) {
         // why: a temporary policy outage closes admission without turning
@@ -664,6 +690,6 @@ export const createBaseNetwork = async ({
       // subscribe to current peers too, or a late starter's Library stays empty.
       discovery.subscribeAll();
     },
-    close: () => { closed = true; library.clearContributors(); for (const ac of operations) ac.abort(); if (maintenanceTimer) clearInterval(maintenanceTimer); providerRenewals.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
+    close: () => { closed = true; retrievalHistory.clear(); library.clearContributors(); for (const ac of operations) ac.abort(); if (maintenanceTimer) clearInterval(maintenanceTimer); providerRenewals.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
   });
 };

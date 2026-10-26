@@ -21,6 +21,11 @@ const apps = [
   return {...app,dwapp_id:`fixture-${i}`,publisher,version_id,seq:2,size:1024 * (i+1),uri:`peerd://${publisher}/${version_id}`};
 });
 const [orbit, notes, garden] = apps;
+if (frame === 'recent-misses') {
+  const observedAt = Date.now();
+  for (const app of apps) Object.assign(app, { retrieval: { outcome: 'no-provider-found', observedAt, expiresAt: observedAt + 30_000 } });
+}
+
 // The user's own key, and an app they made and shared from their Library.
 const self = encodeDidKey(new Uint8Array(32).fill(9));
 const own = {name:'Packing list',description:'Pack for a trip, one item at a time.',includes_wasm:false,dwapp_id:'fixture-own',

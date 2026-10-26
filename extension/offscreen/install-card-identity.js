@@ -39,6 +39,12 @@ export const discoveredAppFromRow = (row) => hasConsistentVersionAddress(row) ? 
   ...(row.head.runtime !== undefined ? { runtime: normalizeAppRuntime(row.head.runtime) } : {}),
   runtimeCompatibility: appRuntimeVerdict(row.head.runtime),
   includes_wasm: typeof row.head.includes_wasm === 'boolean' ? row.head.includes_wasm : null,
+  // Only the host-owned row field is projected; signed head metadata cannot
+  // assert local retrieval history.
+  retrieval: row.retrieval?.outcome === 'no-provider-found'
+    && Number.isFinite(row.retrieval.observedAt) && Number.isFinite(row.retrieval.expiresAt)
+    && row.retrieval.expiresAt > row.retrieval.observedAt
+    ? { outcome: row.retrieval.outcome, observedAt: row.retrieval.observedAt, expiresAt: row.retrieval.expiresAt } : null,
   uri: row.head.content_addr,
   version_id: row.head.version_id,
   seq: row.seq ?? 0,
