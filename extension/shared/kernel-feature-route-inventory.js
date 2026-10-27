@@ -25,9 +25,15 @@ export const KERNEL_CREDENTIAL_ROUTE_NAMES = Object.freeze(
   'git-cred/list git-cred/set git-cred/delete origin-cred/list origin-cred/set origin-cred/delete'.split(' '),
 );
 
-export const KERNEL_SEMANTIC_OWNER_ROUTE_NAMES = Object.freeze(
-  'actor-isolation/retry actor/spawn agent/send agent/stop actors/count actors/overview app/get-meta apps/favorite apps/list apps/open apps/rename contacts/forget contacts/list contacts/set memory/delete memory/deleteAll memory/export memory/suggestions memory/suggestions/approve memory/suggestions/dismiss memory/write provider/status skills/list skills/remove skills/setEnabled provider/test models/options openrouter/models local-model/catalog local-model/init local-model/probe local-model/status apps/repository/status apps/repository/history apps/repository/diff apps/repository/commit apps/repository/restore apps/repository/branch apps/repository/checkout apps/repository/link apps/repository/fetch apps/repository/push apps/import-git session/archive session/debugBundle session/reset session/switch'.split(' '),
+export const KERNEL_REPOSITORY_ROUTE_NAMES = Object.freeze(
+  'apps/repository/status apps/repository/history apps/repository/diff apps/repository/commit apps/repository/restore apps/repository/branch apps/repository/checkout apps/repository/link apps/repository/fetch apps/repository/push apps/import-git'.split(' '),
 );
+
+export const KERNEL_SEMANTIC_OWNER_ROUTE_NAMES = Object.freeze([
+  ...'actor-isolation/retry actor/spawn agent/send agent/stop actors/count actors/overview app/get-meta apps/favorite apps/list apps/open apps/rename contacts/forget contacts/list contacts/set memory/delete memory/deleteAll memory/export memory/suggestions memory/suggestions/approve memory/suggestions/dismiss memory/write provider/status skills/list skills/remove skills/setEnabled provider/test models/options openrouter/models local-model/catalog local-model/init local-model/probe local-model/status'.split(' '),
+  ...KERNEL_REPOSITORY_ROUTE_NAMES,
+  ...'session/archive session/debugBundle session/reset session/switch'.split(' '),
+]);
 
 export const KERNEL_POD_ROUTE_NAMES = Object.freeze(
   'pod/cancel-io pod/get-meta pod/git pod/web-fetch'.split(' '),
@@ -67,12 +73,10 @@ export const KERNEL_TRANSFER_ROUTE_NAMES = Object.freeze(
 );
 
 export const KERNEL_DWEB_ROUTE_NAMES = Object.freeze(
-  'dweb/app-authority-generations dweb/app-install dweb/app-record-served dweb/app-snapshot dweb/app-update dweb/audit dweb/base/announce dweb/base/find dweb/base/heard dweb/base/install dweb/base/inspect-address dweb/base/install-address dweb/base/room dweb/base/share-app dweb/base/start dweb/base/status dweb/base/stop dweb/base/update-app dweb/base/updates dweb/blocked-peers dweb/distributed/info dweb/ensure-seed-app dweb/peer-block dweb/peer-policy dweb/peer-unblock dweb/meta-admit dweb/open-commons dweb/self-apply-surface dweb/self-prepare-offer dweb/self-read-surface dweb/self-restore dweb/self-status'.split(' '),
+  'app-authority-generations app-install app-record-served app-snapshot app-update audit base/announce base/find base/heard base/install base/inspect-address base/install-address base/install-status base/cancel-install base/room base/share-app base/start base/status base/stop base/update-app base/updates blocked-peers distributed/info ensure-seed-app peer-block peer-policy peer-unblock meta-admit open-commons self-apply-surface self-prepare-offer self-read-surface self-restore self-status'.split(' ').map((name) => `dweb/${name}`),
 );
 
-export const KERNEL_REPOSITORY_ROUTE_NAMES = Object.freeze(
-  'apps/repository/status apps/repository/history apps/repository/diff apps/repository/commit apps/repository/restore apps/repository/branch apps/repository/checkout apps/repository/link apps/repository/fetch apps/repository/push apps/import-git'.split(' '),
-);
+
 
 export const KERNEL_LOCAL_ROUTE_NAMES = Object.freeze(
   'provider/test models/options models/state-projection openrouter/models local-model/catalog local-model/init local-model/probe local-model/status'.split(' '),

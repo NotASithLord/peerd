@@ -63,7 +63,7 @@ test('offscreen update carries exact conflict and publication receipts and trust
   const { manifest, hash } = await buildManifest({ payload, type: 'app', identity });
   const app = await prepareAppBundle({ uri: formatPeerdUri({ did: identity.did, hash }), manifest, payload });
   const update = source.slice(source.indexOf("case 'dweb/base-host/update-app':"));
-  const callback = section('announce: async', '\n            },', update)
+  const callback = section('announce: async', '\n              },', update)
     .replace(/^announce: /, '') + '\n}';
   const calls: any[] = [];
   let reply: any = { ok: true, app: { id: 'a' }, cleanupHashes: ['old', 'old', 3] };
@@ -104,7 +104,7 @@ test('a heard install and a room install record what the version\'s verified fil
   const app = await prepareAppBundle({ uri: formatPeerdUri({ did: identity.did, hash }), manifest, payload });
   const heard = source.slice(source.indexOf("case 'dweb/base-host/install-app':"));
   const room = source.slice(source.indexOf("if (op === 'install-app') {"));
-  for (const [install, end] of [[heard, '\n            },'], [room, '\n      },']]) {
+  for (const [install, end] of [[heard, '\n              },'], [room, '\n      },']]) {
     const callback = section('announce: async', end, install).replace(/^announce: /, '') + '\n}';
     const calls: ({ type: string } & Record<string, unknown>)[] = [];
     const announce = new Function('msg', 'swEffectCall', 'publishFailureError', 'manifest', 'payload', 'appSeedHandoff', 'prepared',

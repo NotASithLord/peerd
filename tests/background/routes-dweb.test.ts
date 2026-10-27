@@ -1925,3 +1925,41 @@ test('cold discovery lookup preserves the publisher namespace for the DHT fallba
     type: 'dweb/base-host/find', dwappId: 'app-id', publisherDid: 'publisher-did', slug: 'shared-app',
   }]);
 });
+
+test('install controls bypass the occupied publication lane without acquiring a new host', async () => {
+  const address = `dwapp://content/z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP/${'0'.repeat(64)}`;
+  let release!: () => void; const occupied = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+  let acquisitions = 0; const messages: any[] = [];
+  const { deps } = baseDeps({
+    withDwebPublication: async () => { entered(); await occupied; return { ok: true }; },
+    ensureDwebFeature: async () => { acquisitions++; },
+    browser: { runtime: { sendMessage: async (message: any) => { messages.push(message); return { ok: true, attempt: { id: 'active' } }; } } },
+  });
+  const routes = makeDwebRoutes(deps);
+  const install = routes['dweb/base/install']({ uri: 'peerd://pending' });
+  await started;
+  try {
+    expect((await within(routes['dweb/base/install-status']({ address }))).ok).toBe(true);
+    expect((await within(routes['dweb/base/cancel-install']({ address, attemptId: 'active', unrelated: 'discard' }))).ok).toBe(true);
+    expect(acquisitions).toBe(0);
+    expect(messages).toEqual([
+      { type: 'dweb/base-host/install-status', address },
+      { type: 'dweb/base-host/cancel-install', address, attemptId: 'active' },
+    ]);
+  } finally { release(); await install; }
+});
+
+test('install controls refuse missing attempt, disabled network and locked vault before host IO', async () => {
+  const address = 'bounded-address';
+  for (const overrides of [{}, { DWEB_ENABLED: false }, { vault: { isLocked: () => true } }]) {
+    const { deps, sent } = baseDeps(overrides); const routes = makeDwebRoutes(deps);
+    expect((await routes['dweb/base/cancel-install']({ address })).ok).toBe(false);
+    expect(sent).toHaveLength(0);
+    if ('DWEB_ENABLED' in overrides || 'vault' in overrides) {
+      expect((await routes['dweb/base/install-status']({ address })).ok).toBe(false);
+      expect((await routes['dweb/base/cancel-install']({ address, attemptId: 'active' })).ok).toBe(false);
+      expect(sent).toHaveLength(0);
+    }
+  }
+});

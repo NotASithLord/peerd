@@ -45,13 +45,15 @@ const ALPHA = 3;
  *   channelFor: (did: string) => (ContentChannel | null),     // a content channel, or null if unreachable
  *   onProgress?: (p: any) => void,
  *   timeoutMs?: number,
+ *   signal?: AbortSignal,
  *   alpha?: number,
  *   acceptManifest?: (manifest: any) => void | Promise<void>,
  *   isAllowed?: (did: string) => boolean,
  * }} opts
  * @returns {Promise<{ manifest: any, payload: Uint8Array, providers: string[], verifiedContributors: string[] }>}
  */
-export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeoutMs = 15000, alpha = ALPHA, isAllowed = () => true, acceptManifest: checkManifest = () => {} }) => {
+export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeoutMs = 15000, signal, alpha = ALPHA, isAllowed = () => true, acceptManifest: checkManifest = () => {} }) => {
+  signal?.throwIfAborted();
   const concurrency = Number.isInteger(alpha) && alpha > 0 ? Math.min(alpha, ALPHA) : ALPHA;
   const { hash, did: publisher } = parsePeerdUri(uri);
   /** @type {Array<{ did: string, client: ChannelClient }>} */
@@ -67,11 +69,19 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
   // expose evidence only after whole-bundle verification succeeds.
   const verifiedContributors = new Set();
   const selection = new AbortController();
+  // why: cancellation belongs to this retrieval, not its shared mesh links.
+  // Abort pending requests and detach only the clients owned by this transfer.
+  const cancel = () => {
+    selection.abort();
+    for (const { client } of clients) client.close();
+  };
+  signal?.addEventListener('abort', cancel, { once: true });
   const qualified = new Set();
   const active = new Map();
   // why: probes and chunk workers share one live cancellation state, including
   // continuations that resume after a sibling rejects and cleanup has run.
   try {
+    signal?.throwIfAborted();
     // why: begin downloading on the first verified manifest, but keep bounded
     // probes alive so other seeders can join without waiting for author failure.
     // Unqualified peers remain fallback chunk sources (partial-piece serving).
@@ -103,6 +113,8 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
         } catch { /* one unavailable candidate cannot suppress other providers */ }
       }
     };
+    onProgress?.({ phase: 'manifest', providers: clients.length });
+    signal?.throwIfAborted();
     Promise.all(Array.from({ length: Math.min(concurrency, clients.length) }, candidate))
       .then(() => rejectManifest(new Error(`no reachable provider holds ${hash}`)))
       .catch(rejectManifest);
@@ -110,7 +122,9 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
     // Compatibility is a property of the immutable version, not its seeder.
     // Run the host gate once, before workers can send any CHUNK_REQ.
     await checkManifest(manifest);
+    signal?.throwIfAborted();
     onProgress?.({ phase: 'manifest', publisher: manifest.publisher, total: manifest.chunks.length, providers: clients.length });
+    signal?.throwIfAborted();
 
     // 3. Stripe unique chunks across providers — α concurrent, per-chunk failover.
     const uniqueHashes = [...new Set(manifest.chunks.map((c) => c.hash))];
@@ -140,7 +154,7 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
           if (!isAllowed(did)) continue;
           active.set(did, (active.get(did) ?? 0) + 1);
           try {
-            const resp = await client.chunk(h);
+            const resp = await client.chunk(h, selection.signal);
             if (!selection.signal.aborted && isAllowed(did) && resp.t === 'CHUNK') {
               // why cast: a CHUNK reply carries bytes; re-verified by the
               // hash check on the next line.
@@ -171,8 +185,13 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
     if (selection.signal.aborted || [...verifiedContributors].some((did) => !isAllowed(did))) {
       throw new Error('content provider policy changed during transfer');
     }
+    signal?.throwIfAborted();
     return { manifest, payload, providers: clients.map((c) => c.did), verifiedContributors: [...verifiedContributors] };
+  } catch (error) {
+    signal?.throwIfAborted();
+    throw error;
   } finally {
+    signal?.removeEventListener('abort', cancel);
     selection.abort();
     for (const { client } of clients) client.close();
   }
