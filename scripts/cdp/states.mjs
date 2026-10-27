@@ -10448,6 +10448,10 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
           controls: ['#fullscreen-btn', '#actor-chat-toggle', '#export-btn', '#mode-toggle', '.peerd-pull'].filter(shown),
         };
       })()`);
+      // why wait for the status too: Chrome sets fullscreenElement first and fires
+      // fullscreenchange at the next frame. The handle, the status and the App focus come from that event.
+      const fullScreenOn = () => evalIn(app, `document.fullscreenElement === document.documentElement
+        && !document.getElementById('fullscreen-status').hidden`);
       try {
         await unlockAndReady(child.page);
         const sent = await rpc(child.page, { type: 'agent/send', text: 'Create the Full screen check App.' });
@@ -10473,7 +10477,7 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
           if (event.source === document.getElementById('app-frame').contentWindow && event.data?.type === 'full-screen-key') window.appKeys.push(event.data.key);
         })`);
         await click('#fullscreen-btn');
-        await waitFor(() => evalIn(app, `document.fullscreenElement === document.documentElement`), { budgetMs: 5_000, pollMs: 50 });
+        await waitFor(fullScreenOn, { budgetMs: 5_000, pollMs: 50 });
         const entered = await fullScreenView();
         verdict('the button puts the whole App page in full screen, with only the App, the P handle and the Esc status',
           entered.full && entered.handle && entered.status && entered.controls.length === 0
@@ -10528,9 +10532,10 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         verdict('once the side panel is open, the P handle hides and its focus goes to the App', handleGone === true && frameFocused === true,
           JSON.stringify({ handleGone, frameFocused }));
         await rec.visualPage('app-full-screen-panel-open', app);
-        // why the native key code on macOS: Chrome builds the key press from it there, and
-        // the browser's own Esc handling reads that press. Other platforms read windowsVirtualKeyCode.
-        const escape = { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, ...(process.platform === 'darwin' ? { nativeVirtualKeyCode: 53 } : {}) };
+        // why a native key code: without one, Chrome gives a DevTools key press to the page only,
+        // and the browser's own Esc handling never sees it. On macOS, Chrome builds the key press
+        // from the code (53). On Linux, the browser reads windowsVirtualKeyCode. 9 is the Linux code for Esc.
+        const escape = { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: process.platform === 'darwin' ? 53 : 9 };
         for (const type of ['rawKeyDown', 'keyUp']) await app.send('Input.dispatchKeyEvent', { type, ...escape });
         await waitFor(() => evalIn(app, `document.fullscreenElement === null`), { budgetMs: 5_000, pollMs: 50 });
         const left = await fullScreenView();
@@ -10549,7 +10554,7 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         verdict('a hidden Full screen button stays hidden', staysHidden === true);
         // why a prompt leaves full screen: the browser's own exit message shows at the top center, over the bar.
         await click('#fullscreen-btn');
-        const again = await waitFor(() => evalIn(app, `document.fullscreenElement === document.documentElement`), { budgetMs: 5_000, pollMs: 50 });
+        const again = await waitFor(fullScreenOn, { budgetMs: 5_000, pollMs: 50 });
         // why: the panel that the handle opened is still open, as when a person asks peerd for an App and then clicks Full screen.
         const reentry = await evalIn(app, `({
           chip: document.querySelector('.peerd-pull').getAttribute('aria-label'),
