@@ -26,15 +26,20 @@ describe('packaged starters', () => {
       } });
       const root = view.root;
       const title = () => root.querySelector('.options-page > h2')?.textContent;
+      /** The Settings list entry marked as the page on screen. */
+      const current = () => [...root.querySelectorAll('.options-nav-item.is-active, .options-nav-item[aria-current="page"]')]
+        .map(item => item.textContent);
       expect(!!root.querySelector('#exppass')).toBe(true);
       expect(title()).toBe('Backup & restore');
+      expect(current()).toEqual(['Backup & restore']);
       starter = 'csv-lab'; await flush();
       await until(() => !!button(root, 'Add to Library'));
       expect(root.textContent).toContain('Tables and charts');
       // The line under the name says what the app does, as Discover's tile does.
       expect(root.querySelector('.starter-review h3 + p')?.textContent).toBe('Explore tables, numbers and a chart, all on your device.');
-      // Discover's Try opens this page, and it only adds the app.
+      // Discover's Try opens this page, and it only adds the app, so no Settings entry is marked as this page.
       expect(title()).toBe('Try an app');
+      expect(current()).toEqual([]);
       const first = calls.filter(call => call.type === 'import/inspect')[0].envelope;
       starter = 'wasm-image'; await flush();
       await until(() => !!button(root, 'Add to Library'));
@@ -45,6 +50,7 @@ describe('packaged starters', () => {
       starter = undefined; await flush();
       expect(!!view.root.querySelector('#exppass')).toBe(true);
       expect(title()).toBe('Backup & restore');
+      expect(current()).toEqual(['Backup & restore']);
       expect(calls.some(call => call.type === 'import/apply')).toBe(false);
     } finally { try { view?.close(); } finally { m.route.param = originalParam; } }
   });

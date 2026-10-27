@@ -647,6 +647,9 @@
  * an avatar + an inline-editable name + an expandable activity panel; the
  * panel takes a full row via flex-wrap so it drops BELOW the row contents. */
 .contact-row { flex-wrap: wrap; align-items: center; }
+/* why a basis: the key of a person with no name must show in full. On a
+ * narrow row the buttons move under the name instead of cutting it. */
+.contact-row .peerd-disc-meta { flex: 1 1 72px; }
 .contact-avatar {
   width: 30px; height: 30px; border-radius: 50%; flex: none;
   display: flex; align-items: center; justify-content: center;
@@ -675,6 +678,12 @@
   border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px;
 }
 .contact-did { font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted); word-break: break-all; }
+/* why: the full key sits behind Technical details, as in Discover. */
+.contact-tech summary { cursor: pointer; font-size: 12px; color: var(--fg-muted); }
+.contact-tech .contact-did { margin-top: 6px; }
+/* why plain words under a name: only the short key is a code. */
+.contacts .peerd-disc-pub { font-family: inherit; }
+.contacts .peerd-disc-pub .contact-key { font-size: inherit; }
 .contact-activity { display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
 .contact-stat-label { color: var(--fg); }
 .contact-app { color: var(--fg-muted); }
@@ -693,7 +702,7 @@
 .contacts-blocked-avatar.is-key { font-family: var(--font-mono); font-size: 13px; }
 .contacts-blocked-id { flex: 1 1 120px; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .contacts-blocked-name { font-size: 15px; line-height: 1.45; font-weight: 600; overflow-wrap: anywhere; }
-.contacts-blocked-key { font-family: var(--font-mono); font-size: 13px; font-weight: 400; }
+.contacts-blocked-key, .contact-key { font-family: var(--font-mono); font-size: 13px; font-weight: 400; }
 .contacts-blocked-meta { font-size: 12px; line-height: 1.45; color: var(--secondary); }
 .contacts-blocked-row > button, .contacts-blocked-retry { flex: none; min-height: 40px; padding: 0 16px; }
 .contacts-blocked-row > p { flex: 1 1 100%; }

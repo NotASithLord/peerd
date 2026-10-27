@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  appCountLabel, BLOCKED, bytesLabel, createEffects, FAILED, failureHint, installSteps, isFailure, kbLabel,
+  appCountLabel, BLOCKED, bytesLabel, createEffects, descriptionLine, emptyBrowse, FAILED, failureHint, installSteps, isFailure, kbLabel,
   keptCards, letterOf, libraryName, libraryPeerApps, libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, peerCountLabel,
   pillFilter, rootView, savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, tileAction, toneOf, TONES, UNKNOWN,
   unknownLines, updateOffer, verifiedDeclared, wasmLabel, yourApps,
@@ -125,21 +125,41 @@ describe('network and root state', () => {
   });
 
   test('the Library line: checking, never read, or refresh failed; silent after a good read', () => {
-    expect(libraryStatus({ ready: false, failed: false })).toBe('Checking your Library…');
-    expect(libraryStatus({ ready: false, failed: true })).toBe('Could not read your Library. Install stays off until peerd can read it.');
-    expect(libraryStatus({ ready: true, failed: true }))
-      .toBe('Could not refresh your Library. Surprise me stays off until peerd can read it.');
-    expect(libraryStatus({ ready: true, failed: false })).toBe(null);
-    // The offline root offers neither Install nor Surprise me, so its lines name what it shows.
     // An error says what failed, then what to do: the poll reads the Library again.
-    expect(libraryStatus({ ready: false, failed: true, offline: true })).toBe('peerd could not read your Library. Try again in a moment.');
-    expect(libraryStatus({ ready: true, failed: true, offline: true })).toBe('Could not refresh your Library. This list may be out of date.');
+    expect(libraryStatus({ ready: false, failed: false })).toBe('Checking your Library…');
+    expect(libraryStatus({ ready: false, failed: true }))
+      .toBe('peerd could not read your Library. Install stays off until peerd can read it. Try again in a moment.');
+    expect(libraryStatus({ ready: true, failed: true }))
+      .toBe('peerd could not refresh your Library. Surprise me stays off until peerd can read it. Try again in a moment.');
+    expect(libraryStatus({ ready: true, failed: false })).toBe(null);
+    // The offline root offers neither Install nor Surprise me, so its lines name what it shows. Its one
+    // button starts the peer network, so the line says that peerd reads the Library again by itself.
+    expect(libraryStatus({ ready: false, failed: true, offline: true })).toBe('peerd could not read your Library. peerd tries again by itself.');
+    expect(libraryStatus({ ready: true, failed: true, offline: true }))
+      .toBe('peerd could not refresh your Library. This list may be out of date. peerd tries again by itself.');
     expect(libraryStatus({ ready: false, failed: false, offline: true })).toBe('Checking your Library…');
     expect(libraryStatus({ ready: true, failed: false, offline: true })).toBe(null);
   });
 
-  test('Surprise me names the filters only while one is on, and the Library only when every app is in it', () => {
-    const filters = 'No new suggestions match these filters. Change your search or filters.';
+  test('an empty browse list says why: an empty pill says how its apps get there, a search says nothing matches', () => {
+    const search = { title: 'No matching apps', text: 'Try other words.' };
+    expect(emptyBrowse({ pill: 'updates', searching: false })).toEqual({
+      title: 'No updates right now', text: 'When someone shares a new version of an app in your Library, it shows up here.',
+    });
+    expect(emptyBrowse({ pill: 'contacts', searching: false })).toEqual({
+      title: 'No apps from people you know yet',
+      // The steps go as far as the name: Add a name is in the menu of the maker's page.
+      text: 'People you know are makers you added a name for. To add one, open an app and select who made it. '
+        + 'Then open the menu on their page and choose Add a name.',
+    });
+    // A search names the search on every pill.
+    for (const pill of ['all', 'updates', 'contacts', 'included'] as const) expect(emptyBrowse({ pill, searching: true })).toEqual(search);
+    expect(emptyBrowse({ pill: 'all', searching: false })).toEqual(search);
+  });
+
+  test('Surprise me says to show all apps only while a pill or a search hides some, and names the Library only when every app is in it', () => {
+    // why no "filters": the screen never uses that word.
+    const filters = 'No new suggestions here. Show all apps, then try again.';
     expect(noSuggestionNote({ filtered: true, allInLibrary: true })).toBe(filters);
     expect(noSuggestionNote({ filtered: true, allInLibrary: false })).toBe(filters);
     expect(noSuggestionNote({ filtered: false, allInLibrary: true })).toBe('No new suggestions. Every app here is already in your Library.');
@@ -230,16 +250,26 @@ describe('tile and page states', () => {
     });
   });
 
-  test('install steps for every state; "You are here" only on a current first step', () => {
+  test('install steps for every state; a done step is a check and a title only', () => {
     const table = (state: Parameters<typeof installSteps>[0]) => installSteps(state).map(step => [step.state, step.sub]);
     const install = 'peerd checks every file, then adds the app to your Library';
     const open = 'It opens in its own tab';
     expect(installSteps('review').map(step => step.title)).toEqual(['Look at it', 'Install', 'Open']);
     expect(table('review')).toEqual([['current', 'You are here'], ['pending', install], ['pending', open]]);
     expect(table('installing')).toEqual([['done', null], ['working', install], ['pending', open]]);
-    expect(table('installed')).toEqual([['done', null], ['done', install], ['current', open]]);
+    expect(table('installed')).toEqual([['done', null], ['done', null], ['current', open]]);
     expect(table('failed')).toEqual([['done', null], ['failed', install], ['pending', open]]);
     expect(table('unknown')).toEqual([['done', null], ['unknown', install], ['pending', open]]);
+  });
+
+  test('an update names its own step: the page says update throughout', () => {
+    const update = 'peerd checks every file, then updates the app in your Library';
+    for (const state of ['installing', 'failed', 'unknown'] as const) {
+      expect(installSteps(state, 'update').map(step => [step.title, step.sub])).toEqual([
+        ['Look at it', null], ['Update', update], ['Open', 'It opens in its own tab'],
+      ]);
+    }
+    expect(installSteps('failed', 'install')[1]?.title).toBe('Install');
   });
 
   test('effects start empty and are independent per call', () => {
@@ -324,6 +354,9 @@ describe('the app says it', () => {
     expect(saysIt({ declared, checked: 'installed', changed: false })?.chips).toHaveLength(3);
     // A share link's facts are its own files: no copy here to change.
     for (const changed of [true, null]) expect(saysIt({ declared, checked: 'link', changed })?.chips).toHaveLength(3);
+    // A copy this visit updated keeps the same rule, and its note says when peerd read the files.
+    for (const changed of [true, null]) expect(saysIt({ declared, checked: 'updated', changed })).toBe(null);
+    expect(saysIt({ declared, checked: 'updated', changed: false })?.note).toBe('From the app’s own files, checked when peerd updated it.');
   });
 });
 
@@ -400,6 +433,14 @@ describe('filters and contacts', () => {
     expect(libraryPeerApps(records.slice(0, 1), newer)).toEqual([
       { dwapp_id: 'a', uri: 'peerd://a/1', name: 'Expense splitter', publisher: ana, version_id: '1', description: undefined, size: undefined },
     ]);
+  });
+
+  test('the description line: the maker’s text, "none" only from a card that says so, nothing without a card', () => {
+    expect(descriptionLine('Split costs.')).toEqual({ text: 'Split costs.', missing: false });
+    // A heard card always carries the maker's text, so an empty one is the maker's own "none".
+    expect(descriptionLine('')).toEqual({ text: 'No description from the maker.', missing: true });
+    // No card: peerd does not know what the maker said, so it claims nothing.
+    for (const unknown of [undefined, null, 42]) expect(descriptionLine(unknown)).toBe(null);
   });
 
   test('the heard cache keeps the latest read and only the earlier cards it is told to keep', () => {

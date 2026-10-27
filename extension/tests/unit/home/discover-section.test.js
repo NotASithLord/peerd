@@ -28,7 +28,7 @@ const READS = Object.freeze(['bootstrap/ready', 'dweb/distributed/info', 'dweb/b
   'dweb/app-local-changes']);
 const UNKNOWN_INSTALL = 'peerd is not sure the install finished. It may still finish by itself.';
 const RECEIPT_HELD = 'peerd is not sure the install finished. It may still finish by itself. Install stays off until peerd knows.';
-const NO_SUGGESTION = 'No new suggestions match these filters. Change your search or filters.';
+const NO_SUGGESTION = 'No new suggestions here. Show all apps, then try again.';
 const ALL_IN_LIBRARY = 'No new suggestions. Every app here is already in your Library.';
 const MAKER_EMPTY = 'This maker’s apps show up here when the people you are connected to share them.';
 const OFFLINE_EMPTY = 'You can still open the apps in your Library. New apps need the peer network.';
@@ -45,12 +45,16 @@ const CARL = didOf(3);
 const SELF = didOf(9);
 
 /**
+ * A heard card. The host gives every card a description string, empty when
+ * the maker gave none.
  * @param {string} id @param {string} name @param {string} publisher @param {Partial<DwebApp>} [extra]
  * @returns {DwebApp}
  */
 const card = (id, name, publisher, extra = {}) => {
   const version = extra.version_id ?? `${id}-v1`;
-  return { dwapp_id: id, name, publisher, slug: id, seq: 1, version_id: version, uri: `peerd://${publisher}/${version}`, ...extra };
+  return {
+    dwapp_id: id, name, publisher, slug: id, seq: 1, version_id: version, uri: `peerd://${publisher}/${version}`, description: '', ...extra,
+  };
 };
 /** @param {string} id @param {DwebApp} app @param {Record<string, unknown>} [dweb] @returns {LibraryRow} */
 const local = (id, app, dweb = {}) => ({
@@ -76,7 +80,8 @@ const fakeHost = (initial = {}, routes = {}) => {
     const route = routes[message.type];
     if (route) return route(message);
     if (message.type === 'bootstrap/ready') return { ok: true, featureLeases: { leases: { dweb: { status: state.lease } } } };
-    if (message.type === 'dweb/distributed/info') return { ok: true, running: state.running, linkedCount: state.linked, did: SELF };
+    // why no key while it is not running: the real host answers did: null then.
+    if (message.type === 'dweb/distributed/info') return { ok: true, running: state.running, linkedCount: state.linked, did: state.running ? SELF : null };
     if (message.type === 'dweb/base/heard') {
       return state.heardFails ? { ok: false, error: 'raw offscreen host epoch' } : { ok: true, apps: state.heard };
     }
@@ -428,7 +433,7 @@ describe('home.discover root states', () => {
       first.resolve({ ok: false }); await settle();
       // The offline root offers no Install, so the line names what it shows.
       expect(text(/** @type {Element} */ (libraryLine(view.root))))
-        .toBe('peerd could not read your Library. Try again in a moment.');
+        .toBe('peerd could not read your Library. peerd tries again by itself.');
       expect(text(view.root).includes(OFFLINE_EMPTY)).toBe(false);
       await focusPoll();
       expect(text(view.root).includes(OFFLINE_EMPTY)).toBe(false);
@@ -438,7 +443,8 @@ describe('home.discover root states', () => {
       // A failed refresh keeps the list and says it may be out of date; there is no Surprise me offline.
       replies.push({ ok: false });
       await focusPoll();
-      expect(text(/** @type {Element} */ (libraryLine(view.root)))).toBe('Could not refresh your Library. This list may be out of date.');
+      expect(text(/** @type {Element} */ (libraryLine(view.root))))
+        .toBe('peerd could not refresh your Library. This list may be out of date. peerd tries again by itself.');
       expect(text(el(view.root, '.disc-empty'))).toBe(OFFLINE_EMPTY);
       expect(host.writes().length).toBe(0);
     } finally { first.resolve({ ok: false }); view.close(); }
@@ -499,8 +505,10 @@ describe('home.discover root states', () => {
       host.state.running = false;
       await focusPoll();
       expect(tileKeys(view.root)).toEqual(['gone']);
-      // Nothing peers said is kept, so the tile says the maker gave none.
-      expect(text(el(view.root, '[data-key="gone"] .disc-tile-desc.is-missing'))).toBe('No description from the maker.');
+      // Nothing peers said is kept, and peerd does not know what the maker
+      // said, so the tile claims nothing: never that the maker gave none.
+      expect(el(view.root, '[data-key="gone"]').querySelector('.disc-tile-desc')).toBe(null);
+      expect(text(view.root).includes('No description from the maker.')).toBe(false);
     } finally { view.close(); }
   });
 
@@ -634,7 +642,7 @@ describe('home.discover apps that come with peerd', () => {
       await focusPoll();
       expect(tileNames(view.root)).toEqual(['Tables and charts', 'Desaturator', 'Chat rooms']);
       search(view.root, 'kanban');
-      await press(view.root, 'Clear filters');
+      await press(view.root, 'Show all apps');
       expect(text(el(view.root, '.disc-empty h2'))).toBe('No shared apps yet');
       expect(view.root.querySelector('.disc-pills')).toBe(null);
       expect(document.activeElement).toBe(el(view.root, 'h1'));
@@ -854,7 +862,32 @@ describe('home.discover tiles and filters', () => {
     } finally { view.close(); }
   });
 
-  it('pills: All, From people you know (saved only), Updates, Comes with peerd, and Clear filters', async () => {
+  it('a search on All finds the apps that come with peerd too, after the shared apps; a pill of shared apps keeps them out', async () => {
+    const effects = createEffects();
+    // An earlier add whose outcome is not known: its line shows where the Chat rooms tile can.
+    effects.commons = 'unknown';
+    const host = fakeHost({ heard: [card('group', 'Group chat', ANA), card('trip', 'Trip planner', BOB)] });
+    const view = mount({ send: host.send, effects });
+    try {
+      await settle();
+      expect(tileKeys(view.root).sort()).toEqual(['group', 'trip']);
+      expect(commonsNote(view.root)).toBe(null);
+      search(view.root, 'chat');
+      expect(tileNames(view.root)).toEqual(['Group chat', 'Chat rooms']);
+      expect(text(el(view.root, '[data-key="commons"] .disc-tile-meta'))).toBe('Comes with peerd');
+      expect(commonsNote(view.root)?.getAttribute('role')).toBe('status');
+      search(view.root, 'chart');
+      expect(tileNames(view.root)).toEqual(['Tables and charts']);
+      expect(view.root.querySelector('.disc-empty')).toBe(null);
+      await click(view.root, 'From people you know');
+      expect(text(el(view.root, '.disc-empty'))).toContain('No matching apps');
+      await click(view.root, 'Show all apps');
+      expect(tileKeys(view.root).sort()).toEqual(['group', 'trip']);
+      expect(host.writes().length).toBe(0);
+    } finally { view.close(); }
+  });
+
+  it('pills: All, From people you know (saved only), Updates, Comes with peerd, and Show all apps', async () => {
     const host = fakeHost({
       heard: [
         card('upd', 'Updater', CARL, { version_id: 'upd-v2', seq: 2 }),
@@ -885,14 +918,54 @@ describe('home.discover tiles and filters', () => {
       expect(included.map(node => text(el(node, '.disc-tile-name')))).toEqual(['Tables and charts', 'Desaturator', 'Chat rooms']);
       expect(included.every(node => text(node).includes('Comes with peerd'))).toBe(true);
       expect(included.slice(0, 2).map(node => text(el(node, '.disc-actions')))).toEqual(['Try it', 'Try it']);
+      // Each name starts with the label on screen, so "Try it" said to voice control reaches the button.
+      expect(included.slice(0, 2).map(node => el(node, '.disc-actions button').getAttribute('aria-label')))
+        .toEqual(['Try it: Tables and charts', 'Try it: Desaturator']);
       search(view.root, 'kanban');
       expect(view.root.querySelectorAll('.disc-tile').length).toBe(0);
-      expect(text(el(view.root, '.disc-empty[role="status"]'))).toContain('No matching apps');
-      await click(view.root, 'Clear filters');
+      expect(text(el(view.root, '.disc-empty'))).toContain('No matching apps');
+      await click(view.root, 'Show all apps');
       expect(pressed('All')).toBe('true');
       expect(/** @type {HTMLInputElement} */ (el(view.root, 'input.disc-search')).value).toBe('');
       expect(document.activeElement).toBe(view.root.querySelector('input.disc-search'));
       expect(tileKeys(view.root).length).toBe(4);
+      expect(host.writes().length).toBe(0);
+    } finally { view.close(); }
+  });
+
+  it('an empty pill says why it is empty and what to do; a search says that nothing matches', async () => {
+    const app = card('a', 'App A', ANA);
+    const host = fakeHost({ heard: [app, card('b', 'App B', BOB)], library: [local('local-a', app)] });
+    const view = mount({ send: host.send });
+    const empty = () => [...view.root.querySelectorAll('.disc-empty h2, .disc-empty p')].map(node => text(node));
+    // why one node for every grid: a live region must exist before its text changes.
+    const announced = () => view.root.querySelector('.disc-view > p.sr-only[role="status"]');
+    try {
+      await settle();
+      const live = announced();
+      expect(live && text(live)).toBe('');
+      // Every installed app is current: peerd offers no update and claims no more than it heard.
+      await click(view.root, 'Updates');
+      expect(empty()).toEqual(['No updates right now', 'When someone shares a new version of an app in your Library, it shows up here.']);
+      expect(announced()).toBe(live);
+      expect(text(/** @type {Element} */ (live)))
+        .toBe('No updates right now. When someone shares a new version of an app in your Library, it shows up here.');
+      // The empty box is not a second live region, so the words are read once.
+      expect(view.root.querySelector('.disc-empty[role]')).toBe(null);
+      // A new user knows nobody yet: the line says how a maker becomes someone they know, to the last step.
+      await click(view.root, 'From people you know');
+      expect(empty()).toEqual(['No apps from people you know yet',
+        'People you know are makers you added a name for. To add one, open an app and select who made it. '
+          + 'Then open the menu on their page and choose Add a name.']);
+      // Words in the search decide, on any pill.
+      search(view.root, 'kanban');
+      expect(empty()).toEqual(['No matching apps', 'Try other words.']);
+      expect(text(/** @type {Element} */ (live))).toBe('No matching apps. Try other words.');
+      expect(text(view.root).includes('filters')).toBe(false);
+      await press(view.root, 'Show all apps');
+      expect(tileKeys(view.root).sort()).toEqual(['a', 'b']);
+      expect(announced()).toBe(live);
+      expect(text(/** @type {Element} */ (live))).toBe('');
       expect(host.writes().length).toBe(0);
     } finally { view.close(); }
   });
@@ -997,7 +1070,7 @@ describe('home.discover tiles and filters', () => {
       host.state.library = [local('local-pending', app)];
       el(view.root, 'button.disc-refresh').click(); await settle();
       expect(tileKeys(view.root)).toEqual([]);
-      expect(text(view.root)).toContain('No matching apps');
+      expect(text(view.root)).toContain('No updates right now');
       expect(host.count('dweb/base/install')).toBe(1);
     } finally { install.resolve({ ok: false }); view.close(); }
   });
@@ -1119,6 +1192,14 @@ describe('home.discover app page', () => {
       expect(document.activeElement).toBe(line);
       expect([line.getAttribute('role'), line.getAttribute('tabindex')]).toEqual(['status', '-1']);
       expect([...el(view.root, '.disc-panel-actions').querySelectorAll('button')].map(node => text(node).trim())).toEqual(['Open', 'Go to Library']);
+      // As the after-install frame draws it: a done step is a check and a title,
+      // and Open carries the icon of a new tab, as the tile Open does.
+      expect([...panel(view.root).querySelectorAll('.disc-step')].map(step => [text(el(step, '.disc-step-title')), !!step.querySelector('.disc-step-sub')]))
+        .toEqual([['Look at it', false], ['Install', false], ['Open', true]]);
+      // The check of a done step is hidden from screen readers, so words say it is done.
+      expect([...panel(view.root).querySelectorAll('.disc-step')].slice(0, 2).map(step => text(step))).toEqual(['Done: Look at it', 'Done: Install']);
+      expect(el(view.root, '.disc-steps').getAttribute('aria-label')).toBe('Install steps');
+      expect(button(panel(view.root), 'Open')?.querySelector('svg use')?.getAttribute('href')).toBe('#ic-ext');
       expect(host.count('apps/open')).toBe(0);
       await click(view.root, 'Go to Library');
       expect(library).toBe(1);
@@ -1239,7 +1320,13 @@ describe('home.discover app page', () => {
       expect(text(el(view.root, '.disc-panel [role="alert"]'))).toBe('peerd could not update Updater.');
       expect(text(el(view.root, '.disc-panel .disc-hint'))).toBe('The person who shares it may have gone offline. Try again in a moment.');
       expect(labels()).toEqual(['Try again', 'Open']);
-      // The page updates, so every line under the panel says update too.
+      // The page updates, so its steps say update, and so does every line under the panel.
+      /** @returns {string[]} */
+      const steps = () => [...panel(view.root).querySelectorAll('.disc-step-title, .disc-step-sub')].map(node => text(node));
+      expect(steps()).toEqual(['Look at it', 'Update', 'peerd checks every file, then updates the app in your Library',
+        'Open', 'It opens in its own tab']);
+      // A screen reader hears the list by the same word.
+      expect(el(view.root, '.disc-steps').getAttribute('aria-label')).toBe('Update steps');
       expect(text(el(view.root, '.disc-safety-text'))).toContain('When you update it, peerd checks that every file is exactly what its maker shared.');
       expect(text(el(view.root, '.disc-says'))).toContain('Paste its link or update it, and peerd checks every file first.');
       expect(text(panel(view.root))).toContain('Another version of this app is in your Library. Open runs the version you have.');
@@ -1250,11 +1337,15 @@ describe('home.discover app page', () => {
         .toBe('peerd is not sure the update finished. It may still finish by itself.');
       expect(text(el(view.root, '.disc-panel .disc-hint'))).toBe('Check again before you try to update it again.');
       expect(labels()).toEqual(['Check again', 'Open']);
+      expect(steps()[1]).toBe('Update');
+      expect(el(view.root, '.disc-steps').getAttribute('aria-label')).toBe('Update steps');
       expect(text(panel(view.root))).toContain('Another version of this app is in your Library. Open runs the version you have.');
       await click(view.root, 'Discover');
       await openTile(view.root, 'a');
       await click(view.root, 'Install and share');
       expect(labels()).toEqual(['Try again']);
+      expect(steps()[1]).toBe('Install');
+      expect(el(view.root, '.disc-steps').getAttribute('aria-label')).toBe('Install steps');
       expect(host.count('dweb/base/update-app')).toBe(2);
     } finally { view.close(); }
   });
@@ -1327,7 +1418,8 @@ describe('home.discover app page', () => {
       await openTile(view.root, 'upd');
       version = 'upd-v2'; seq = 2; refreshLibrary();
       await click(view.root, 'Check again');
-      expect(text(panel(view.root))).toContain('In your Library.');
+      // The update did finish: the line says so.
+      expect(text(panel(view.root))).toContain('in your Library is now the new version.');
       expect(button(view.root, 'Update')).toBe(undefined);
       expect(host.count('dweb/base/update-app')).toBe(1);
     } finally { view.close(); }
@@ -1479,7 +1571,7 @@ describe('home.discover app page', () => {
         type: 'dweb/base/update-app', appId: 'local-trip', uri: announced.uri, name: announced.name, dwappId: 'trip',
         slug: 'trip', seq: 2, publisher: BOB, strategy: 'replace', conflictToken: 8,
       });
-      expect(text(panel(view.root))).toContain('In your Library.');
+      expect(text(panel(view.root))).toContain('in your Library is now the new version.');
       expect(view.root.querySelector('.disc-chip--strong')).toBe(null);
       expect(updates().length).toBe(3);
     } finally { view.close(); }
@@ -1561,7 +1653,9 @@ describe('home.discover app page', () => {
       el(view.root, '[data-key="upd"] .disc-tile-action').click(); await settle();
       const status = panelNotice(view.root);
       expect(status).toContain('Updated, but peerd could not add it to the security log.');
-      expect(status).toContain('Older shared bytes will be cleaned up on the next update or delete.');
+      // The old version's files stay shared until the next update or delete: plain words, no bytes.
+      expect(status).toContain('peerd still shares the old version. Sharing stops the next time you update or remove this app.');
+      expect(status.includes('bytes')).toBe(false);
     } finally { view.close(); }
   });
 
@@ -1573,11 +1667,13 @@ describe('home.discover app page', () => {
     const view = mount({ send: host.send });
     try {
       await settle();
-      expect(text(/** @type {Element} */ (libraryLine(view.root)))).toBe('Could not read your Library. Install stays off until peerd can read it.');
+      // What failed, why Install is off, then what to do.
+      const line = 'peerd could not read your Library. Install stays off until peerd can read it. Try again in a moment.';
+      expect(text(/** @type {Element} */ (libraryLine(view.root)))).toBe(line);
       await openTile(view.root, 'a');
       const install = /** @type {HTMLButtonElement} */ (button(view.root, 'Install and share'));
       expect(install.disabled).toBe(true);
-      expect(text(panel(view.root))).toContain('Could not read your Library.');
+      expect(text(el(view.root, '.disc-panel .disc-footnote[role="status"]'))).toBe(line);
       install.disabled = false;
       install.click(); await settle();
       expect(host.count('dweb/base/install')).toBe(0);
@@ -1654,7 +1750,7 @@ describe('home.discover app page', () => {
       // The read that started before the commit lands with the older version.
       early.resolve({ ok: true, apps: before }); await settle();
       expect(button(view.root, 'Update')).toBe(undefined);
-      expect(text(panel(view.root))).toContain('In your Library. Other people can get it from you');
+      expect(text(panel(view.root))).toContain('App in your Library is now the new version. Other people can get it from you');
       await click(view.root, 'Discover');
       expect(tileAction(view.root, 'a')).toBe('Open');
       expect(text(view.root).includes('new version ready')).toBe(false);
@@ -1683,6 +1779,11 @@ describe('home.discover app page', () => {
         await settle();
         await openTile(view.root, 'a');
         await click(view.root, 'Update');
+        if (outcome === 'committed') {
+          // The update runs: its step and its line both say update.
+          expect(text(el(panel(view.root), '.disc-step.is-working .disc-step-title'))).toBe('Update');
+          expect(text(panel(view.root))).toContain('You can leave this page. The update keeps going.');
+        }
         if (outcome === 'unknown') {
           commit.reject(new Error('renderer deadline')); await settle();
           // A Library read of this view is still in flight when it closes.
@@ -1775,7 +1876,7 @@ describe('home.discover app page', () => {
       await click(view.root, 'Open');
       expect(host.writes()).toEqual([{ type: 'apps/open', appId: 'local-trip' }]);
       await click(view.root, 'Update');
-      await until(() => text(panel(view.root)).includes('In your Library.'));
+      await until(() => text(panel(view.root)).includes('in your Library is now the new version.'));
       expect(host.count('dweb/base/update-app')).toBe(1);
       expect(button(panel(view.root), 'Update')).toBe(undefined);
     } finally { view.close(); }
@@ -1864,6 +1965,9 @@ describe('home.discover app page', () => {
       await settle();
       await openTile(view.root, 'mine'); await settle();
       expect(text(panel(view.root))).toContain('In your Library.');
+      // The user made it, so it never went through the steps of an install: the panel draws none.
+      expect(panel(view.root).querySelector('.disc-steps')).toBe(null);
+      expect([...panel(view.root).querySelectorAll('button')].map(node => text(node).trim())).toEqual(['Open', 'Go to Library']);
       expect(text(el(view.root, '.disc-safety-text'))).toBe('You made this app. Other people get the files you share from your Library.');
       expect(text(el(view.root, '.disc-safety')).includes('peerd checked')).toBe(false);
       expect(view.root.querySelector('.disc-says')).toBe(null);
@@ -1872,6 +1976,38 @@ describe('home.discover app page', () => {
       expect(host.count('dweb/app-local-changes')).toBe(0);
       expect(host.writes().length).toBe(0);
     } finally { view.close(); }
+  });
+
+  it('offline, the user\'s own shared app stays theirs: peerd knows them from the Library and asks nothing about its files', async () => {
+    const mine = card('mine', 'My app', SELF);
+    // A share from this device whose record names no maker: the share alone says the user made it.
+    const unsigned = card('unsigned', 'Notes to self', SELF);
+    // why both: a host that is not running knows no key, and Discover asks no key of a lease that is not active.
+    for (const initial of [{ running: false }, { lease: 'idle' }]) {
+      const host = fakeHost({ ...initial, changedHere: ['local-mine', 'local-unsigned'],
+        library: [local('local-mine', mine, { local: true, hash: mine.version_id, git_oid: 'g1' }),
+          local('local-unsigned', unsigned, { local: true, publisher: undefined, hash: unsigned.version_id, git_oid: 'g2' })] });
+      const view = mount({ send: host.send });
+      try {
+        await settle();
+        expect(text(el(view.root, '.disc-status-live'))).toBe('Peer network is offline');
+        await openTile(view.root, 'mine'); await settle();
+        expect(text(el(view.root, '.disc-app-maker'))).toBe('Made by you');
+        expect(text(el(view.root, '.disc-safety-text'))).toBe('You made this app. Other people get the files you share from your Library.');
+        expect(text(el(view.root, '.disc-safety')).includes('peerd checked')).toBe(false);
+        expect(text(el(view.root, '.disc-app-head')).includes('Changed on this device')).toBe(false);
+        // No install checked its files, so peerd asks nothing about them.
+        expect(host.count('dweb/app-local-changes')).toBe(0);
+        await click(view.root, 'Made by you');
+        expect(text(el(view.root, '.disc-person-head h2'))).toBe('You');
+        await click(view.root, 'My app');
+        await click(view.root, 'Discover');
+        await openTile(view.root, 'unsigned'); await settle();
+        expect(text(el(view.root, '.disc-safety-text'))).toBe('You made this app. Other people get the files you share from your Library.');
+        expect(host.count('dweb/app-local-changes')).toBe(0);
+        expect(host.writes()).toEqual([]);
+      } finally { view.close(); }
+    }
   });
 
   it('an installed app whose own version can not run here shows the can not run state', async () => {
@@ -2245,6 +2381,53 @@ describe('home.discover the app says it', () => {
       expect(host.writes().map(call => call.type)).toEqual(['dweb/base/inspect-address', 'apps/open']);
     } finally { view.close(); sessionStorage.removeItem(KEY); }
   });
+
+  it('a finished update says update throughout: its line, its steps, What to know and when peerd read the facts', async () => {
+    const newer = card('upd', 'Trip planner', BOB, { version_id: 'upd-v2', seq: 2 });
+    const older = local('local-upd', newer, { version_id: 'upd-v1', seq: 1, hash: 'upd-v1' });
+    const row = local('local-upd', newer, { hash: newer.version_id, declared: declared(newer.version_id, { dweb: true }) });
+    const host = fakeHost({ heard: [newer], library: [older] }, {
+      'dweb/base/update-app': () => { host.state.library = [row]; return { ok: true, app: row }; },
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'upd');
+      await press(view.root, 'Update'); await settle(); await settle();
+      expect(text(el(view.root, '.disc-panel .disc-installed')))
+        .toBe('Updated. Trip planner in your Library is now the new version. Other people can get it from you while your peer network is on.');
+      expect(text(el(view.root, '.disc-panel .disc-installed bdi'))).toBe('Trip planner');
+      expect([...panel(view.root).querySelectorAll('.disc-step-title')].map(node => text(node))).toEqual(['Look at it', 'Update', 'Open']);
+      expect(el(view.root, '.disc-steps').getAttribute('aria-label')).toBe('Update steps');
+      expect(text(el(view.root, '.disc-safety-text'))).toBe(`Made by ${shortKey(BOB)}. When you updated it, peerd checked that it was `
+        + 'exactly the app its maker shared. Nobody reviewed it for safety.');
+      expect(chips(view.root)).toEqual([['Uses the peer network', false]]);
+      expect(text(el(view.root, '.disc-says .disc-footnote'))).toBe('From the app’s own files, checked when peerd updated it.');
+      // A plain update adds no line of its own: the installed line says it.
+      expect(panel(view.root).querySelector('.disc-footnote[role="status"]')).toBe(null);
+      expect(host.writes().map(call => call.type)).toEqual(['dweb/base/update-app']);
+    } finally { view.close(); }
+  });
+
+  it('a finished update moves focus from the Update button that is gone to its Updated. line, as an install does', async () => {
+    const newer = card('upd', 'Trip planner', BOB, { version_id: 'upd-v2', seq: 2 });
+    const reply = deferred();
+    const host = fakeHost({ heard: [newer], library: [local('local-upd', newer, { version_id: 'upd-v1', seq: 1 })] }, {
+      'dweb/base/update-app': () => reply.promise,
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'upd');
+      await press(view.root, 'Update');
+      expect(document.activeElement).toBe(document.body);
+      host.state.library = [local('local-upd', newer)];
+      reply.resolve({ ok: true, app: { id: 'local-upd' } }); await settle();
+      const line = el(view.root, '.disc-panel .disc-installed');
+      expect(text(line).startsWith('Updated.')).toBe(true);
+      expect(document.activeElement).toBe(line);
+    } finally { reply.resolve({ ok: false }); view.close(); }
+  });
 });
 
 describe('home.discover technical details', () => {
@@ -2578,7 +2761,7 @@ describe('home.discover suggestions', () => {
       el(view.root, 'button.disc-refresh').click(); await settle();
       expect(button(view.root, 'Surprise me')?.disabled).toBe(true);
       expect(text(/** @type {Element} */ (libraryLine(view.root))))
-        .toBe('Could not refresh your Library. Surprise me stays off until peerd can read it.');
+        .toBe('peerd could not refresh your Library. Surprise me stays off until peerd can read it. Try again in a moment.');
       expect(host.writes().length).toBe(0);
     } finally { library.resolve({ ok: false }); view.close(); }
   });
@@ -2606,8 +2789,8 @@ describe('home.discover suggestions', () => {
       search(view.root, '');
       await click(view.root, 'Surprise me');
       expect(text(el(view.root, '.disc-footnote[aria-live="polite"]'))).toBe(NO_SUGGESTION);
-      // And so does Clear filters.
-      await click(view.root, 'Clear filters');
+      // And so does Show all apps.
+      await click(view.root, 'Show all apps');
       expect(text(view.root).includes(NO_SUGGESTION)).toBe(false);
       expect(host.writes().length).toBe(0);
     } finally { view.close(); }
@@ -2865,6 +3048,8 @@ describe('home.discover share link', () => {
         .toBe('Installed. Signed app is now in your Library. Other people can get it from you while your peer network is on.');
       expect(text(el(view.root, '.disc-app-size'))).toBe('In your Library');
       expect([...el(view.root, '.disc-panel-actions').querySelectorAll('button')].map(node => text(node).trim())).toEqual(['Open', 'Go to Library']);
+      // Open runs the app in its own tab, so it carries that icon, as on the app page.
+      expect(button(panel(view.root), 'Open')?.querySelector('svg use')?.getAttribute('href')).toBe('#ic-ext');
       await click(view.root, 'Go to Library');
       expect(library).toBe(1);
       expect(host.count('apps/open')).toBe(0);
@@ -3173,6 +3358,8 @@ describe('home.discover share link', () => {
         enterLink(view.root, address);
         await click(view.root, 'Check link');
         expect(text(panel(view.root))).toContain(`You can leave this page. The ${action} keeps going.`);
+        // The step that runs says the same word as the line.
+        expect(text(el(panel(view.root), '.disc-step.is-working .disc-step-title'))).toBe(action === 'update' ? 'Update' : 'Install');
         expect(button(view.root, 'Install and share')).toBe(undefined);
         // A failed heard read must not release the shared target either.
         host.state.heardFails = true;
@@ -3300,7 +3487,8 @@ describe('home.discover share link', () => {
       await click(view.root, 'Check link');
       expect(text(el(view.root, '.disc-app-maker'))).toBe('Made by Ana, someone you know');
       expect(text(el(view.root, '.disc-app-title'))).toBe('Unnamed app');
-      expect(text(el(view.root, '.disc-app-desc'))).toBe('No description from the maker.');
+      // No card its publisher signed: peerd does not know the description, so it claims none.
+      expect(view.root.querySelector('.disc-app-desc')).toBe(null);
       await click(view.root, 'Technical details');
       expect(text(view.root).includes(WASM_HINT)).toBe(false);
       host.state.heard = [forged, signed];
@@ -3435,6 +3623,62 @@ describe('home.discover makers', () => {
       expect(text(view.root).includes('Someone you know')).toBe(false);
       expect(host.writes().length).toBe(0);
     } finally { view.close(); }
+  });
+
+  it('your own app and maker page speak to you: Made by you, You, Apps you made, and You made this app on its share link', async () => {
+    const link = formatDwappUri({ did: SELF, hash: 'e'.repeat(64) });
+    // A version with a share link, so its page offers Share.
+    const host = fakeHost({ heard: [card('mine', 'My app', SELF, { version_id: 'b'.repeat(64) }), card('a', 'Ana app', ANA)] }, {
+      'dweb/base/inspect-address': () => ({ ok: true, summary: {
+        ...immutableAppRoot(link), name: 'Linked mine', decodedBytes: 3, fileCount: 1, entryFile: 'index.html', containsWasm: false,
+      } }),
+    });
+    const view = mount({ send: host.send });
+    const NOT_IN_LIBRARY = 'You made this app. It is not in your Library now. When you install it, peerd checks that every file is exactly what you shared.';
+    try {
+      await settle();
+      // The tile and the page never show the user their own key as a maker.
+      expect(text(el(view.root, '[data-key="mine"] .disc-tile-meta'))).toBe('Made by you');
+      await openTile(view.root, 'mine');
+      expect(text(el(view.root, '.disc-app-maker'))).toBe('Made by you');
+      // Peers share it, and the Library no longer holds it: What to know says so, in the user's own words.
+      expect(text(el(view.root, '.disc-safety-text'))).toBe(NOT_IN_LIBRARY);
+      // Its share dialog speaks to its maker too.
+      await click(view.root, 'Share');
+      expect(text(el(view.root, '.disc-share .disc-footnote')))
+        .toBe('The link points to this exact version. If you update the app later, your friend still gets the version you shared.');
+      el(view.root, '.disc-share-close').click(); await settle();
+      await click(view.root, 'Made by you');
+      expect(text(el(view.root, '.disc-person-id .type-small'))).toBe('This is you.');
+      // The page names them in a word, and their key stays in Technical details.
+      expect(text(el(view.root, '.disc-person-head h2'))).toBe('You');
+      expect(view.root.querySelector('.disc-person-head .type-code')).toBe(null);
+      expect(text(el(view.root, '.disc-section--tight .type-label-strong'))).toBe('Apps you made');
+      expect(text(view.root).includes('Apps from')).toBe(false);
+      expect(text(view.root).replace(text(el(view.root, '.disc-facts')), '').includes(shortKey(SELF))).toBe(false);
+      expect(el(view.root, '[data-maker-menu]').getAttribute('aria-label')).toBe('More options');
+      // Someone else's page keeps its words.
+      await click(view.root, 'My app');
+      await click(view.root, 'Discover');
+      await openTile(view.root, 'a');
+      await click(view.root, `Made by ${shortKey(ANA)}`);
+      expect(text(el(view.root, '.disc-person-id .type-small'))).toBe('You have not saved a name for this maker.');
+      // A share link to the user's own app: What to know says they made it.
+      await click(view.root, 'Ana app');
+      await click(view.root, 'Discover');
+      await click(view.root, 'Paste link');
+      enterLink(view.root, link);
+      await click(view.root, 'Check link');
+      expect(text(el(view.root, '.disc-app-title'))).toBe('Linked mine');
+      expect(text(el(view.root, '.disc-app-maker'))).toBe('Made by you');
+      expect(text(el(view.root, '.disc-safety-text'))).toBe(NOT_IN_LIBRARY);
+      // Peers stop sharing the user's apps: their own page says where they show up.
+      host.state.heard = [];
+      await focusPoll();
+      await click(view.root, 'Made by you');
+      expect(text(el(view.root, '.disc-section--tight p'))).toBe('Your apps show up here when the people you are connected to share them.');
+      expect(host.writes().map(call => call.type)).toEqual(['dweb/base/inspect-address']);
+    } finally { view.close(); sessionStorage.removeItem(KEY); }
   });
 
   it('Back on a maker page returns to the page that opened it and names it; its Back then goes to Discover', async () => {
@@ -3643,6 +3887,13 @@ describe('home.discover block a maker', () => {
       expect(document.activeElement).toBe(items[0]);
       keydown(items[0], 'End');
       expect(document.activeElement).toBe(items[1]);
+      // The arrows move between the items, so they are out of the Tab order: Tab leaves the
+      // menu, and the menu closes when focus leaves it.
+      expect(items.map(item => item.tabIndex)).toEqual([-1, -1]);
+      const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+      items[1].dispatchEvent(tab); m.redraw.sync();
+      expect(tab.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(items[1]);
       keydown(items[1], 'Escape'); await settle();
       expect(view.root.querySelector('.disc-menu')).toBe(null);
       expect(document.activeElement).toBe(kebab);
@@ -3657,7 +3908,7 @@ describe('home.discover block a maker', () => {
     try {
       await settle();
       await openTile(view.root, 'mine');
-      await click(view.root, `Made by ${shortKey(SELF)}`);
+      await click(view.root, 'Made by you');
       await openMenu(view.root);
       expect(menuItems(view.root)).toEqual(['Add a name']);
       // Someone else's page in the same visit does offer it.
