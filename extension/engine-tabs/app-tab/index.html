@@ -68,7 +68,7 @@
     }
 
     /* Trusted host controls in the top-right corner. */
-    #mode-toggle, #export-btn, #actor-chat-toggle {
+    #mode-toggle, #export-btn, #actor-chat-toggle, #fullscreen-btn {
       position: fixed; top: 6px; right: 8px;
       z-index: 30;
       background: var(--bg-elev);
@@ -92,6 +92,52 @@
     #actor-chat-toggle:hover, #actor-chat-toggle[aria-expanded="true"] {
       opacity: 1; border-color: var(--accent);
     }
+    #fullscreen-btn { right: 251px; display: inline-flex; align-items: center; gap: 5px; }
+    #fullscreen-btn:hover { opacity: 1; border-color: var(--fg-muted); }
+    #fullscreen-btn svg { width: 12px; height: 12px; flex: none; }
+    #fullscreen-btn[hidden], body.mode-edit #fullscreen-btn { display: none; }
+
+    /* Full screen shows the App, the P handle and the Esc status. The page root
+       is the full-screen element, so notices and the actor drawer still show
+       when they open. */
+    :root:fullscreen #mode-toggle, :root:fullscreen #export-btn,
+    :root:fullscreen #actor-chat-toggle, :root:fullscreen #fullscreen-btn,
+    :root:fullscreen .peerd-pull, :root:fullscreen .peerd-pull-hint { display: none; }
+    #peerd-handle {
+      position: fixed; left: 0; top: calc(50% - 32px);
+      z-index: 40;
+      width: 34px; height: 64px; padding: 0;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+      border: 0; border-radius: 0 12px 12px 0;
+      background: var(--bg); color: var(--fg-muted);
+      box-shadow: 0 4px 16px rgba(0,0,0,.18), 0 0 0 1px var(--border-strong);
+      cursor: pointer;
+    }
+    #peerd-handle:hover { color: var(--fg); }
+    /* Inside the dark handle, so the ring shows on a light App too. */
+    #peerd-handle:focus-visible { outline: 2px solid var(--fg); outline-offset: -5px; }
+    #peerd-handle img { display: block; width: 18px; height: 18px; border-radius: 4px; }
+    #peerd-handle svg { display: block; width: 12px; height: 12px; }
+    #fullscreen-status {
+      position: fixed; left: 8px; top: calc(50% + 44px);
+      z-index: 40;
+      display: flex; align-items: center; gap: 6px;
+      padding: 8px 14px; border-radius: 999px;
+      background: var(--bg); color: var(--fg);
+      font: 13px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      white-space: nowrap;
+      box-shadow: 0 6px 20px rgba(0,0,0,.25), 0 0 0 1px var(--border-strong);
+      pointer-events: none;
+      /* 4s is STATUS_MS in full-screen.js: the status fades as it hides. */
+      animation: fullscreen-status-fade 4s ease-in forwards;
+    }
+    #fullscreen-status kbd {
+      font: inherit; font-weight: 600;
+      padding: 1px 6px; border-radius: 4px; border: 1px solid currentColor;
+    }
+    #peerd-handle[hidden], #fullscreen-status[hidden] { display: none; }
+    @keyframes fullscreen-status-fade { 0%, 85% { opacity: 1; } 100% { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { #fullscreen-status { animation: none; } }
 
     /* Host-owned App actor drawer. It sits outside the sandboxed iframe: App
        code can request that it open, but cannot read, populate, or submit it. */
@@ -214,6 +260,12 @@
     <button id="actor-retry" type="button" hidden>Retry actor</button>
   </div>
 
+  <button id="peerd-handle" type="button" aria-label="Open peerd" title="Open peerd" hidden>
+    <img src="/icons/icon48.png" alt="">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg>
+  </button>
+  <div id="fullscreen-status" role="status" hidden>Press <kbd>Esc</kbd> to leave full screen</div>
+
   <div class="frame-host">
     <iframe id="app-frame" title="peerd app" sandbox="allow-scripts allow-modals allow-pointer-lock"></iframe>
   </div>
@@ -255,6 +307,7 @@
     </div>
   </aside>
 
+  <button id="fullscreen-btn" type="button" title="Show this App on the whole screen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>Full screen</button>
   <button id="actor-chat-toggle" type="button" title="Talk directly with this App's actor" aria-expanded="false">Actor ◇</button>
   <button id="export-btn" title="Download this app as a .peerd file">Export ⤓</button>
   <button id="mode-toggle" title="Toggle render / edit">Edit ✎</button>

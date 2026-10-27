@@ -10410,6 +10410,189 @@ export const STATES = [
       }
     },
   },
+  // why a child browser: the P handle must open the REAL native side panel, and
+  // the shared harness panel must stay as it is for the next state.
+  {
+    name: 'app-full-screen', kind: 'visual', phase: 'post-unlock',
+    visualVariants: ['app-full-screen-button', 'app-full-screen-handle-focus', 'app-full-screen-panel-open'],
+    responder: null,
+    async run(ctx, rec) {
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir, panelPath: 'home/home.html',
+        modelResponder: (index) => ({ sse: index === 0 ? sseToolCall('sandbox_create', {
+          kind: 'app', name: 'Full screen check', files: { 'index.html': `<!doctype html><title>Full screen check</title>
+<style>body{margin:0;font:16px/1.5 system-ui,sans-serif;background:#f6f6f6;color:#1a1a1a}main{height:100vh;display:grid;place-content:center;text-align:center}</style>
+<main><h1>Full screen check</h1><p>This App fills the whole screen.</p></main>
+<script>'use strict'; addEventListener('message', event => { if (event.data?.type === 'request-link') parent.postMessage({type:'app-link',href:'https://full-screen.peerd.test/'},'*'); });
+addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',key:event.key},'*'));</script>` },
+        }) : sseText('App ready.') }) });
+      let app;
+      let browser;
+      // why observe on the merge base: its render only supplies the before pictures.
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const verdict = (name, pass, detail) => (baseRender ? rec.observe(`base ${name}`, { pass, detail }) : rec.check(name, pass, detail));
+      const center = (selector) => evalIn(app, `(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+      const click = async (selector) => {
+        const point = await center(selector);
+        for (const type of ['mousePressed', 'mouseReleased']) {
+          await app.send('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 1 });
+        }
+      };
+      const fullScreenView = () => evalIn(app, `(() => {
+        const shown = (selector) => { const node = document.querySelector(selector); return !!node && getComputedStyle(node).display !== 'none'; };
+        const handle = document.getElementById('peerd-handle').getBoundingClientRect();
+        return {
+          full: document.fullscreenElement === document.documentElement,
+          handle: shown('#peerd-handle'), status: shown('#fullscreen-status'),
+          statusText: document.getElementById('fullscreen-status').textContent,
+          handleBox: { left: handle.left, width: handle.width, height: handle.height, middle: handle.top + handle.height / 2, viewMiddle: innerHeight / 2 },
+          controls: ['#fullscreen-btn', '#actor-chat-toggle', '#export-btn', '#mode-toggle', '.peerd-pull'].filter(shown),
+        };
+      })()`);
+      try {
+        await unlockAndReady(child.page);
+        const sent = await rpc(child.page, { type: 'agent/send', text: 'Create the Full screen check App.' });
+        if (!sent?.ok) throw new Error('real App creation refused');
+        const target = await waitFor(async () => (await fetch(`http://127.0.0.1:${child.port}/json/list`).then((reply) => reply.json()))
+          .find((entry) => entry.title === 'peerd · Full screen check'), { budgetMs: 30_000, pollMs: 100 });
+        if (!target) throw new Error('the App tab did not open');
+        app = await attach(target.webSocketDebuggerUrl);
+        await app.send('Runtime.enable');
+        await app.send('Page.enable');
+        await app.send('Page.bringToFront');
+        await app.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+        await waitFor(() => evalIn(app, `document.getElementById('boot')?.classList.contains('is-hidden')`), { budgetMs: 10_000, pollMs: 50 });
+        // why: the pull-in chip types a short hint in and out after load. Capture after it leaves.
+        await waitFor(() => evalIn(app, `!!document.getElementById('peerd-pull-hint')`), { budgetMs: 3_000, pollMs: 50 });
+        await waitFor(() => evalIn(app, `!document.getElementById('peerd-pull-hint')`), { budgetMs: 15_000, pollMs: 100 });
+        await rec.visualPage('app-full-screen-button', app);
+        // why: a merge base from before full screen has no full-screen view to picture.
+        if (baseRender && !await evalIn(app, `!!document.getElementById('fullscreen-btn')`)) return;
+        await checkAccessibleNames(app, rec, 'the Full screen button has its visible name', [['#fullscreen-btn', 'Full screen']]);
+        // why the App reports its keys: a check can then see a key press reach it.
+        await evalIn(app, `window.appKeys = []; addEventListener('message', (event) => {
+          if (event.source === document.getElementById('app-frame').contentWindow && event.data?.type === 'full-screen-key') window.appKeys.push(event.data.key);
+        })`);
+        await click('#fullscreen-btn');
+        await waitFor(() => evalIn(app, `document.fullscreenElement === document.documentElement`), { budgetMs: 5_000, pollMs: 50 });
+        const entered = await fullScreenView();
+        verdict('the button puts the whole App page in full screen, with only the App, the P handle and the Esc status',
+          entered.full && entered.handle && entered.status && entered.controls.length === 0
+            && entered.statusText === 'Press Esc to leave full screen', JSON.stringify(entered));
+        verdict('the P handle sits at the left edge, in the middle', entered.handleBox.left === 0 && entered.handleBox.width === 34
+          && entered.handleBox.height === 64 && Math.abs(entered.handleBox.middle - entered.handleBox.viewMiddle) <= 1, JSON.stringify(entered.handleBox));
+        // why: full screen hides the button that the click focused. A game or an editor must still get the keys.
+        const appFocused = await evalIn(app, `document.activeElement === document.getElementById('app-frame')`);
+        for (const type of ['keyDown', 'keyUp']) {
+          await app.send('Input.dispatchKeyEvent', { type, key: 'k', code: 'KeyK', windowsVirtualKeyCode: 75, ...(type === 'keyDown' ? { text: 'k' } : {}) });
+        }
+        const keyReached = await waitFor(() => evalIn(app, `window.appKeys.includes('k')`), { budgetMs: 2_000, pollMs: 50 });
+        verdict('the App gets the keys in full screen, with no extra click', appFocused === true && keyReached === true,
+          JSON.stringify({ appFocused, keyReached }));
+        const hintHidden = await evalIn(app, `(() => {
+          const hint = document.createElement('div');
+          hint.className = 'peerd-pull-hint';
+          document.body.append(hint);
+          const display = getComputedStyle(hint).display;
+          hint.remove();
+          return display === 'none';
+        })()`);
+        verdict('the pull-in hint stays hidden in full screen', hintHidden === true);
+        await checkAccessibleNames(app, rec, 'the P handle names what it does', [['#peerd-handle', 'Open peerd']]);
+        const faded = await waitFor(() => evalIn(app, `document.getElementById('fullscreen-status').hidden`), { budgetMs: 8_000, pollMs: 100 });
+        verdict('the Esc status hides on its own after a few seconds', faded === true);
+        // why show it again: the capture is the moment of entry. Its timer has already run, so nothing hides it mid-shot.
+        await rec.visualPage('app-full-screen', app, { beforeShot: (page) => evalIn(page, `document.getElementById('fullscreen-status').hidden = false`) });
+        await evalIn(app, `document.getElementById('fullscreen-status').hidden = true`);
+        // why Shift+Tab: the handle comes just before the App frame, and a key press shows the focus ring.
+        await pressNativeKey(app, 'Tab', true);
+        const handleFocus = await evalIn(app, `(() => {
+          const handle = document.getElementById('peerd-handle');
+          return document.activeElement === handle && handle.matches(':focus-visible');
+        })()`);
+        verdict('Shift+Tab from the App reaches the P handle and shows its focus ring', handleFocus === true);
+        await rec.visualPage('app-full-screen-handle-focus', app);
+        await click('#peerd-handle');
+        const version = await fetch(`http://127.0.0.1:${child.port}/json/version`).then((reply) => reply.json());
+        browser = await attach(version.webSocketDebuggerUrl);
+        const panel = await waitFor(async () => (await browser.send('Target.getTargets')).targetInfos
+          .find((entry) => entry.url.split('#')[0] === `chrome-extension://${child.sw.id}/sidepanel/sidepanel.html`), { budgetMs: 10_000, pollMs: 100 });
+        // why watch, not read once: the handle keeps full screen on because Chrome keeps it
+        // beside the panel. A drop a moment after the panel opens must fail here.
+        const dropped = await waitFor(() => evalIn(app, `document.fullscreenElement !== document.documentElement`), { budgetMs: 2_000, pollMs: 100 });
+        const beside = !dropped;
+        verdict('the P handle opens the side panel beside the App, and full screen stays on', !!panel && beside,
+          JSON.stringify({ panel: panel?.url ?? null, beside }));
+        // why: with the panel beside the App, peerd is on screen and the handle has nothing to open.
+        const handleGone = await waitFor(() => evalIn(app, `getComputedStyle(document.getElementById('peerd-handle')).display === 'none'`), { budgetMs: 5_000, pollMs: 50 });
+        const frameFocused = await evalIn(app, `document.activeElement === document.getElementById('app-frame')`);
+        verdict('once the side panel is open, the P handle hides and its focus goes to the App', handleGone === true && frameFocused === true,
+          JSON.stringify({ handleGone, frameFocused }));
+        await rec.visualPage('app-full-screen-panel-open', app);
+        // why the native key code on macOS: Chrome builds the key press from it there, and
+        // the browser's own Esc handling reads that press. Other platforms read windowsVirtualKeyCode.
+        const escape = { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, ...(process.platform === 'darwin' ? { nativeVirtualKeyCode: 53 } : {}) };
+        for (const type of ['rawKeyDown', 'keyUp']) await app.send('Input.dispatchKeyEvent', { type, ...escape });
+        await waitFor(() => evalIn(app, `document.fullscreenElement === null`), { budgetMs: 5_000, pollMs: 50 });
+        const left = await fullScreenView();
+        // why beside first: with full screen already gone, Esc would pass without doing anything.
+        verdict('Esc leaves full screen and brings the App controls back', beside && !left.full && !left.handle && !left.status
+          && ['#fullscreen-btn', '#actor-chat-toggle', '#export-btn', '#mode-toggle'].every((selector) => left.controls.includes(selector)),
+        JSON.stringify(left));
+        // why: the button's own display rule must not beat its hidden attribute, set where the browser cannot go full screen.
+        const staysHidden = await evalIn(app, `(() => {
+          const button = document.getElementById('fullscreen-btn');
+          button.hidden = true;
+          const display = getComputedStyle(button).display;
+          button.hidden = false;
+          return display === 'none';
+        })()`);
+        verdict('a hidden Full screen button stays hidden', staysHidden === true);
+        // why a prompt leaves full screen: the browser's own exit message shows at the top center, over the bar.
+        await click('#fullscreen-btn');
+        const again = await waitFor(() => evalIn(app, `document.fullscreenElement === document.documentElement`), { budgetMs: 5_000, pollMs: 50 });
+        // why: the panel that the handle opened is still open, as when a person asks peerd for an App and then clicks Full screen.
+        const reentry = await evalIn(app, `({
+          chip: document.querySelector('.peerd-pull').getAttribute('aria-label'),
+          handle: getComputedStyle(document.getElementById('peerd-handle')).display,
+        })`);
+        verdict('full screen with the side panel already open shows no P handle', again === true
+          && reentry.chip === 'Close the peerd side panel' && reentry.handle === 'none', JSON.stringify({ again, ...reentry }));
+        const consent = await evalIn(app, `(async () => {
+          const bar = await new Promise((resolve, reject) => {
+            const observer = new MutationObserver(() => {
+              const found = document.querySelector('[role="alertdialog"]');
+              if (found) { observer.disconnect(); clearTimeout(timer); resolve(found); }
+            });
+            const timer = setTimeout(() => { observer.disconnect(); reject(new Error('consent bar missing')); }, 5000);
+            observer.observe(document.body, { childList: true });
+            document.getElementById('app-frame').contentWindow.postMessage({ type: 'request-link' }, '*');
+          });
+          await new Promise((resolve) => {
+            if (!document.fullscreenElement) { resolve(); return; }
+            document.addEventListener('fullscreenchange', resolve, { once: true });
+            setTimeout(resolve, 5000);
+          });
+          const deny = [...bar.querySelectorAll('button')].find((button) => button.textContent === 'Deny');
+          const box = deny.getBoundingClientRect();
+          const onTop = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === deny;
+          deny.click();
+          return { full: document.fullscreenElement !== null, onTop };
+        })()`, true);
+        verdict('a consent prompt leaves full screen and shows on top of the App', again === true && consent?.full === false && consent.onTop === true,
+          JSON.stringify({ again, ...consent }));
+        await evalIn(app, `document.getElementById('mode-toggle').click()`);
+        const editing = await waitFor(() => evalIn(app, `document.body.classList.contains('mode-edit')`), { budgetMs: 10_000, pollMs: 100 });
+        // why outside full screen: full screen hides the button too, so only the editor's own rule can pass this.
+        const editor = await evalIn(app, `({ full: document.fullscreenElement !== null, display: getComputedStyle(document.getElementById('fullscreen-btn')).display })`);
+        verdict('the editor shows no Full screen button', editing === true && editor.full === false && editor.display === 'none',
+          JSON.stringify({ editing, ...editor }));
+      } finally {
+        try { app?.close(); } catch { /* already closed */ }
+        browser?.close();
+        await child.close();
+      }
+    },
+  },
   {
     name: 'library-app-reuse', kind: 'functional', phase: 'post-unlock',
     responder: () => ({ sse: sseText('No model call is needed to open a local App.') }),
