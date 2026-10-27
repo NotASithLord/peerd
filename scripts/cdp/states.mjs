@@ -5008,8 +5008,8 @@ export const STATES = [
         const final = messages.at(-1);
         const idle = await evalIn(ctx.page, `!document.querySelector('form.input-bar button.stop')
           && !document.querySelector('.message-assistant.streaming')`);
-        return idle && (baseRender ? final?.stopReason === 'max_tokens'
-          : final?.content === 'I will split the work into smaller calls.')
+        return idle && (final?.content === 'I will split the work into smaller calls.'
+          || (baseRender && final?.stopReason === 'max_tokens'))
           ? { sessionId: state.state.session.sessionId, messages } : null;
       }, { budgetMs: 20_000, pollMs: 100 });
       if (!settled) throw new Error('The cut tool call did not settle');
@@ -10469,6 +10469,7 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         await waitFor(() => evalIn(app, `!!document.getElementById('peerd-pull-hint')`), { budgetMs: 3_000, pollMs: 50 });
         await waitFor(() => evalIn(app, `!document.getElementById('peerd-pull-hint')`), { budgetMs: 15_000, pollMs: 100 });
         await rec.visualPage('app-full-screen-button', app);
+        if (process.env.PEERD_BROWSER_WINDOW_EVIDENCE === '1') await rec.browserWindow('app-window', child, app);
         // why: a merge base from before full screen has no full-screen view to picture.
         if (baseRender && !await evalIn(app, `!!document.getElementById('fullscreen-btn')`)) return;
         await checkAccessibleNames(app, rec, 'the Full screen button has its visible name', [['#fullscreen-btn', 'Full screen']]);
@@ -10506,6 +10507,7 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         verdict('the Esc status hides on its own after a few seconds', faded === true);
         // why show it again: the capture is the moment of entry. Its timer has already run, so nothing hides it mid-shot.
         await rec.visualPage('app-full-screen', app, { beforeShot: (page) => evalIn(page, `document.getElementById('fullscreen-status').hidden = false`) });
+        if (process.env.PEERD_BROWSER_WINDOW_EVIDENCE === '1') await rec.browserWindow('full-screen', child, app);
         await evalIn(app, `document.getElementById('fullscreen-status').hidden = true`);
         // why Shift+Tab: the handle comes just before the App frame, and a key press shows the focus ring.
         await pressNativeKey(app, 'Tab', true);
@@ -10532,6 +10534,7 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         verdict('once the side panel is open, the P handle hides and its focus goes to the App', handleGone === true && frameFocused === true,
           JSON.stringify({ handleGone, frameFocused }));
         await rec.visualPage('app-full-screen-panel-open', app);
+        if (process.env.PEERD_BROWSER_WINDOW_EVIDENCE === '1') await rec.browserWindow('full-screen-beside-panel', child, app);
         // why a native key code: without one, Chrome gives a DevTools key press to the page only,
         // and the browser's own Esc handling never sees it. On macOS, Chrome builds the key press
         // from the code (53). On Linux, the browser reads windowsVirtualKeyCode. 9 is the Linux code for Esc.
@@ -10881,6 +10884,11 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
             editorHidden: document.getElementById('editor-panel')?.hidden,
             files: [...document.querySelectorAll('.pe-node[data-path]')].map((node) => node.dataset.path),
           })`);
+          if (process.env.PEERD_VISUAL_BASE_RENDER === '1' && diagnostic.boot?.includes('is-failed') && diagnostic.bootMessage) {
+            rec.observe('merge-base App editor', diagnostic);
+            await rec.visualPage('app-editor-recovery', page);
+            return;
+          }
           throw new Error(`The renewed App editor did not expose notes.txt: ${JSON.stringify(diagnostic)}`);
         }
         await evalIn(page, `document.querySelector('.pe-node[data-path="notes.txt"]').click()`);

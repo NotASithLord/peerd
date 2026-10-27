@@ -1,27 +1,8 @@
 #!/usr/bin/env bun
-// Compose before/after review images from two directories of captures.
-//
-// why this exists: the `visual` CI job answers "did the UI move?" with a ratio
-// and a diff-highlight. That is the right answer for a REGRESSION. It is the
-// wrong answer for an intentional redesign, where the reviewer's question is
-// "show me the old one next to the new one" — and a red-pixel mask of a screen
-// where everything changed is just a red rectangle.
-//
-// Produces, per state, a single side-by-side PNG that drops straight into a PR
-// body. Same hand-rolled codec as visual.mjs — no npm, no ImageMagick.
-//
-//   bun scripts/cdp/visual-compare.mjs --before <dir> --after <dir> --out <dir>
-//                                      [--report <visual-vs-base.json>]
-//
-// Inputs match on the shared basename, tolerating the harness's `-current`
-// suffix, so you can point it straight at two artifacts/ runs.
-//
-// --report narrows the set to the screens that comparison flagged, so a PR that
-// moved two screens does not compose sixty-odd identical pairs to push. Exits
-// non-zero when nothing is left to compose, which the caller reads as "no
-// montage needed" rather than as a failure.
+// Compose image pairs for review. Copy captures that have no before image.
+// --report selects captures with a change or incomplete evidence.
 
-import { readdirSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readdirSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, existsSync, rmSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { decodePng, encodePng } from './visual.mjs';
 
@@ -80,39 +61,45 @@ const blit = (canvas, cw, img, ox, oy) => {
 };
 
 const REPORT = arg('report');
-const wanted = REPORT && existsSync(REPORT)
-  ? new Set(JSON.parse(readFileSync(REPORT, 'utf8')).rows
+const report = REPORT && existsSync(REPORT) ? JSON.parse(readFileSync(REPORT, 'utf8')) : null;
+const wanted = report
+  ? new Set(report.rows
     .filter((/** @type {{verdict:string}} */ r) => r.verdict !== 'identical')
     .map((/** @type {{key:string}} */ r) => r.key))
   : null;
 
 const befores = index(BEFORE);
 const afters = index(AFTER);
-const names = [...befores.keys()]
-  .filter((n) => afters.has(n))
+const names = [...afters.keys()]
   .filter((n) => !wanted || wanted.has(n))
   .sort();
 
 const onlyBefore = [...befores.keys()].filter((n) => !afters.has(n));
-const onlyAfter = [...afters.keys()].filter((n) => !befores.has(n));
-// why report these rather than skip silently: a state that exists on only one
-// side is exactly the interesting case (a screen was added or removed), and a
-// composite that quietly omits it reads as "nothing changed there".
+// why report missing after images: a partial render must remain visible.
 for (const n of onlyBefore) console.error(`[compare] only in BEFORE, no pair: ${n}`);
-for (const n of onlyAfter) console.error(`[compare] only in AFTER, no pair: ${n}`);
 
-if (!names.length) {
-  console.error(wanted
-    ? '[compare] nothing flagged as changed - no montage to compose'
-    : '[compare] no paired states - nothing to compose');
-  process.exit(1);
-}
-
+// why clear output: a rerun must not publish a previous image.
+rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
+let written = 0;
+for (const screen of report?.browserScreens ?? []) try {
+  decodePng(readFileSync(screen.file));
+  copyFileSync(screen.file, join(OUT, basename(screen.file)));
+  written += 1;
+} catch (error) { console.error(`[compare] skipped ${screen.file}: ${error.message}`); }
 
-for (const name of names) {
-  const a = decodePng(readFileSync(/** @type {string} */(befores.get(name))));
-  const b = decodePng(readFileSync(/** @type {string} */(afters.get(name))));
+for (const name of names) try {
+  const b = decodePng(readFileSync(afters.get(name)));
+  let a;
+  if (befores.has(name)) try { a = decodePng(readFileSync(befores.get(name))); }
+  catch (error) { console.error(`[compare] invalid before image ${name}: ${error.message}`); }
+  if (!a) {
+    const file = join(OUT, `${name}.after.png`);
+    copyFileSync(afters.get(name), file);
+    written += 1;
+    console.log(`${file} - this branch only`);
+    continue;
+  }
 
   const innerH = Math.max(a.height, b.height);
   const w = PAD * 2 + a.width + GUTTER + RULE + GUTTER + b.width;
@@ -135,9 +122,10 @@ for (const name of names) {
 
   const file = join(OUT, `${name}.before-after.png`);
   writeFileSync(file, encodePng(w, h, canvas));
+  written += 1;
   const note = a.width === b.width && a.height === b.height ? '' : ' (capture size changed)';
   console.log(`${file}  ${a.width}x${a.height} | ${b.width}x${b.height}${note}`);
-}
+} catch (error) { console.error(`[compare] skipped ${name}: ${error.message}`); }
 
-console.log(`\n${names.length} comparison image(s) → ${OUT}`);
-console.log('Left = before, right = after.');
+console.log(`\n${written} review image(s): ${OUT}`);
+process.exitCode = written ? 0 : 1;
