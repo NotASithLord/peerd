@@ -362,6 +362,42 @@ jobs:
           name: manual-address-twopeer
           path: artifacts/manual-address-twopeer/
           if-no-files-found: warn
+      - name: Cancel a real peer install before commit and retry
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          P2P_INSTALL_CANCELLATION: '1'
+        run: bun scripts/cdp/manual-address-twopeer.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: install-cancellation-twopeer
+          path: artifacts/install-cancellation-twopeer/
+          if-no-files-found: warn
+      - name: Cancel a real WASM install before commit and retry
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          P2P_INSTALL_CANCELLATION: '1'
+          P2P_WASM_EXECUTION: '1'
+        run: bun scripts/cdp/manual-address-twopeer.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: wasm-install-cancellation-twopeer
+          path: artifacts/wasm-install-cancellation-twopeer/
+          if-no-files-found: warn
+      - name: Cancel and retry a WASM app selected by Surprise me
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          P2P_INSTALL_CANCELLATION: '1'
+          P2P_WASM_EXECUTION: '1'
+          P2P_RANDOM_DISCOVERY: '1'
+        run: bun scripts/cdp/manual-address-twopeer.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: catalog-install-cancellation-twopeer
+          path: artifacts/catalog-install-cancellation-twopeer/
+          if-no-files-found: warn
       - name: Discover, install and execute a peer WASM binary
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
@@ -609,7 +645,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: visual-head-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.ref_name }}-run${{ github.run_number }}.${{ github.run_attempt }}
+          name: visual-head-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.sha }}-run${{ github.run_number }}.${{ github.run_attempt }}
           path: |
             scripts/cdp/artifacts/
             ${{ runner.temp }}/peerd-visual-head.log
@@ -659,7 +695,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: visual-screens-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.ref_name }}-run${{ github.run_number }}.${{ github.run_attempt }}
+          name: visual-screens-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.sha }}-run${{ github.run_number }}.${{ github.run_attempt }}
           path: scripts/cdp/visual-runs/screens/
           if-no-files-found: warn
           retention-days: 14

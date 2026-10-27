@@ -1,3 +1,6 @@
+// Install status/cancellation adds 1,308 authored authority bytes, no modules.
+// Preview route identifier compaction reduces shipped bytes; timings and the
+// package byte ceilings remain independent release gates, with no reserve.
 // API-first integration removes six Chrome cold modules; typed run custody adds
 // 428 Firefox source bytes / 192 packaged bytes. Exact measured values, no reserve.
 // Integrated authority, consent, Discover and recovery fixes are measured
@@ -136,8 +139,8 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 407, graphBytes: 4_081_980 }),
-  target: Object.freeze({ modules: 410, graphBytes: 4_173_031 }),
+  shared: Object.freeze({ modules: 407, graphBytes: 4_083_288 }),
+  target: Object.freeze({ modules: 410, graphBytes: 4_174_339 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_251 }),
@@ -180,7 +183,7 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // Exact Settings/Home/Lab admission and chat-scoped integration metadata
   // repair existing leaves without new modules. Pin their measured closure
   // without reserve; Lab requests retain their narrow payload validators.
-  kernel: Object.freeze({ modules: 407, graphBytes: 4_081_980, entryBytes: 200, directImports: 2 }),
+  kernel: Object.freeze({ modules: 407, graphBytes: 4_083_288, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity

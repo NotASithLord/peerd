@@ -15,9 +15,10 @@ import { digestTree, PRODUCTION_PREVIEW_CHROME_BACKGROUND_ENTRY } from './passke
 import { GIT_FIXTURE_TLS_KEY, GIT_FIXTURE_TLS_CERT, GIT_FIXTURE_SPKI_SHA256_BASE64 } from '../acceptance/git-smart-http-fixture.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const cancellation = process.env.P2P_INSTALL_CANCELLATION === '1';
 const wasmExecution = process.env.P2P_WASM_EXECUTION === '1';
 const randomDiscovery = process.env.P2P_RANDOM_DISCOVERY === '1';
-const output = join(repo, randomDiscovery ? (wasmExecution ? 'artifacts/random-wasm-twopeer' : 'artifacts/random-js-twopeer') : wasmExecution ? 'artifacts/discovered-wasm-twopeer' : 'artifacts/manual-address-twopeer');
+const output = join(repo, cancellation ? (randomDiscovery ? 'artifacts/catalog-install-cancellation-twopeer' : wasmExecution ? 'artifacts/wasm-install-cancellation-twopeer' : 'artifacts/install-cancellation-twopeer') : randomDiscovery ? (wasmExecution ? 'artifacts/random-wasm-twopeer' : 'artifacts/random-js-twopeer') : wasmExecution ? 'artifacts/discovered-wasm-twopeer' : 'artifacts/manual-address-twopeer');
 mkdirSync(output, { recursive: true });
 const temp = mkdtempSync(join(tmpdir(), 'peerd-manual-address-'));
 const sockets = new Set(), servers = [], checks = [];
@@ -263,7 +264,36 @@ try {
   check('inspection does not seed bytes (explicit negative response)', before?.t === 'NOMANIFEST' && before.hash === published.hash, before);
   check('inspection does not execute an App', (await appTabs()).length === baselineTabs.length);
   await screenshotReceipt('inspected');
+  if (cancellation) {
+    // Suspend only the remote publisher. The real receiver must stop its
+    // outstanding retrieval without requiring a reply from that peer.
+    await publisher.send('Debugger.enable');
+    await publisher.send('Debugger.pause');
+    try {
+      await click('Install and share', '.disc-page .disc-panel');
+      const attempt = await until('cancellable native retrieval', async () => {
+        const reply = await call({ type: 'dweb/base/install-status', address: published.address, kind: randomDiscovery ? 'install' : 'address' });
+        evidence.installStatus = reply; report();
+        return reply?.attempt?.cancellable === true && reply.attempt.progress?.phase === 'manifest'
+          ? reply.attempt : null;
+      });
+      check('host owns a cancellable precommit attempt', attempt.phase === 'retrieving' && typeof attempt.id === 'string', attempt);
+      await until('real Cancel control visible', () => evalIn(ctx.page, `[...document.querySelectorAll('.disc-transfer button')].some(b => b.textContent === 'Cancel' && !b.disabled)`));
+      await click('Cancel', '.disc-transfer');
+      await until('known cancellation receipt rendered', () => evalIn(ctx.page, `document.querySelector('.disc-panel')?.textContent.includes('Installation cancelled.')`));
+      check('cancelled retrieval leaves the user catalog unchanged', JSON.stringify(userApps((await call({ type: 'apps/list' })).apps)) === JSON.stringify(baselineIds));
+      check('cancelled retrieval does not execute an App', (await appTabs()).length === baselineTabs.length);
+      await screenshotReceipt('cancelled');
+    } finally {
+      await publisher.send('Debugger.resume');
+      await publisher.send('Debugger.disable');
+    }
+    const cancelledSeed = await query();
+    check('cancelled retrieval does not seed bytes', cancelledSeed?.t === 'NOMANIFEST' && cancelledSeed.hash === published.hash, cancelledSeed);
+    await click('Try again', '.disc-page .disc-panel');
+  } else {
   await click('Install and share', '.disc-page .disc-panel');
+  }
   await until('install receipt rendered', () => evalIn(ctx.page, `[...document.querySelectorAll('.disc-page .disc-panel button')].some(b => b.textContent === 'Open' && !b.disabled)`));
   const catalog = await call({ type: 'apps/list' });
   const installed = catalog.apps.filter(app => app.dweb?.uri === published.uri && app.dweb?.hash === published.hash && app.dweb?.publisher === published.publisher);

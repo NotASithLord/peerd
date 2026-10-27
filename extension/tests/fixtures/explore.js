@@ -68,6 +68,8 @@ const EFFECTS = {
 };
 /** @type {string[]} */ const calls = [];
 /** @type {Window & {__exploreFixtureCalls?: string[]}} */ (window).__exploreFixtureCalls = calls;
+let finishTransfer = (/** @type {any} */ _value) => {};
+const transferFrame = ['install-progress', 'install-cancelled', 'install-committing'].includes(frame);
 /** @param {{type:string} & Record<string, unknown>} message */
 const send = async message => {
   calls.push(message.type);
@@ -83,6 +85,17 @@ const send = async message => {
   if (message.type === 'bootstrap/ready') return {ok:true,featureLeases:{leases:{dweb:{status:'active'}}}};
   if (message.type === 'dweb/distributed/info') {
     return {ok:true,running:!OFFLINE.includes(frame),linkedCount:frame === 'looking' ? 0 : 3,did:self};
+  }
+  if (message.type === 'dweb/base/install-status') return { ok: true, attempt: {
+    id: 'fixture-attempt', phase: frame === 'install-committing' ? 'committing' : 'retrieving',
+    cancellable: frame !== 'install-committing', progress: { phase: 'chunk', done: 2, total: 8 },
+  } };
+  if (message.type === 'dweb/base/install' && transferFrame) return new Promise(resolve => { finishTransfer = resolve; });
+  if (message.type === 'dweb/base/cancel-install' && transferFrame) {
+    if (message.attemptId !== 'fixture-attempt' || message.kind !== 'install'
+      || message.address !== formatDwappUri({ did: notes.publisher, hash: notes.version_id })) throw new Error('wrong cancellation target');
+    finishTransfer({ ok: false, code: 'install-cancelled', outcomeKnown: true, performed: false, outcomeKind: 'pre-effect-failure' });
+    return { ok: true, id: 'fixture-attempt', phase: 'cancelling' };
   }
   if (message.type === 'dweb/base/install' && Object.hasOwn(EFFECTS, frame)) return EFFECTS[frame]();
   if (message.type === 'dweb/base/install' && frame === 'open-unknown') return EFFECTS.installed();
@@ -102,6 +115,9 @@ const send = async message => {
 // A step clicks the first match, or types `value` into it.
 /** @type {Record<string, [string, string|null, string?][]>} */
 const STEPS = {
+  'install-progress': [['.disc-primary', 'Install and share']],
+  'install-committing': [['.disc-primary', 'Install and share']],
+  'install-cancelled': [['.disc-primary', 'Install and share'], ['.disc-transfer button', 'Cancel']],
   installing: [['.disc-primary', 'Install and share']],
   installed: [['.disc-primary', 'Install and share']],
   'open-unknown': [['.disc-primary', 'Install and share'], ['.disc-primary', 'Open']],
@@ -128,6 +144,7 @@ const STEPS = {
   'share-off': [['button', 'Paste link'], ['.disc-start-form input', null, formatDwappUri({ did: notes.publisher, hash: notes.version_id })]],
 };
 const OPEN_KEYS = /** @type {Record<string, string>} */ ({
+  'install-progress': notes.dwapp_id, 'install-committing': notes.dwapp_id, 'install-cancelled': notes.dwapp_id,
   installing: notes.dwapp_id, installed: notes.dwapp_id, failed: notes.dwapp_id,
   'open-unknown': notes.dwapp_id,
   unknown: notes.dwapp_id, maker: notes.dwapp_id, 'cant-run': garden.dwapp_id, update: notes.dwapp_id, share: notes.dwapp_id,

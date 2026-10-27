@@ -28,7 +28,7 @@ export const discoverSurface = () => {
 };
 
 // Every read a Discover frame may send. Any other route is an effect.
-const READS = ['apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distributed/info', 'contacts/list', 'dweb/blocked-peers'];
+const READS = ['dweb/base/install-status', 'apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distributed/info', 'contacts/list', 'dweb/blocked-peers'];
 const has = text => `document.body.textContent.includes(${JSON.stringify(text)})`;
 // why the tree's own words: changed screens also render on the merge-base
 // tree, in its words, and a check that took either would not prove the new ones.
@@ -338,7 +338,31 @@ const recentMissState = (narrow) => ({
   },
 });
 
+const installControlState = (mode, narrow) => ({
+  name: `discovery-install-${mode}${narrow ? '-narrow' : ''}`, kind: 'visual', phase: 'post-unlock', responder: null,
+  async run(ctx, rec) {
+    const surface = discoverSurface();
+    if (surface.base && !existsSync(join(surface.tree, 'home/install-transfer.js'))) {
+      rec.observe('merge-base surface', { present: false, reason: 'Install controls introduced on this branch' }); return;
+    }
+    const page = await openExtPage(ctx, `tests/fixtures/explore.html?state=install-${mode}`);
+    try {
+      await page.send('Emulation.setDeviceMetricsOverride', { width: narrow ? 320 : 960, height: narrow ? 1450 : 900, deviceScaleFactor: 1, mobile: false });
+      const text = mode === 'progress' ? 'Downloading and checking files: 2 of 8 pieces.'
+        : mode === 'committing' ? 'Finishing installation. It is too late to cancel.' : 'Installation cancelled.';
+      rec.check('install state renders', !!await waitFor(() => evalIn(page, has(text)), { budgetMs: 8000, pollMs: 50 }));
+      rec.check('install controls fit viewport', await evalIn(page, 'document.documentElement.scrollWidth <= innerWidth'));
+      rec.check('only precommit retrieval offers Cancel', await evalIn(page,
+        `[...document.querySelectorAll('.disc-transfer button')].some(b => b.textContent === 'Cancel' && !b.disabled) === ${mode === 'progress'}`));
+      if (mode === 'cancelled') rec.check('known cancellation offers retry without another install', await evalIn(page,
+        `[...document.querySelectorAll('button')].some(b => b.textContent === 'Try again' && !b.disabled) && window.__exploreFixtureCalls.filter(t => t === 'dweb/base/install').length === 1`));
+      await rec.visualPage(`discovery-install-${mode}${narrow ? '-narrow' : ''}`, page);
+    } finally { try { page.close(); } catch {} }
+  },
+});
+
 export const STARTER_VISUAL_STATES = [
+  ...['progress', 'committing', 'cancelled'].flatMap(mode => [installControlState(mode, false), installControlState(mode, true)]),
   recentMissState(false), recentMissState(true),
   ...[false, true].flatMap(narrow => ['home', 'review', 'empty', 'no-results', 'publisher', 'suggestion'].map(mode => keptState(mode, narrow))),
   ...FLOW_FRAMES.flatMap(row => [frameState(row), ...row[4]?.narrow ? [frameState(row, true)] : []]),

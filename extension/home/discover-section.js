@@ -16,6 +16,7 @@
 // Contacts) and view pieces in discover-pages.js.
 
 import m from '/vendor/mithril/mithril.js';
+import { InstallTransfer } from './install-transfer.js';
 import { immutableAppRoot } from '/shared/address/immutable-app-root.js';
 import { disarmText } from '/shared/disarm-text.js';
 import { loadDweb } from '/shared/dweb-loader.js';
@@ -290,7 +291,7 @@ export const DiscoverSection = (initialVnode) => {
     conflicts.delete(id);
     const failure = /** @type {{code?:string,error?:string}} */ (result);
     // why keep the runtime reason: Technical details shows it.
-    busy[id] = RUNTIME_CODES.includes(failure?.code ?? '') && typeof failure?.error === 'string' ? failure.error
+    busy[id] = failure?.code === 'install-cancelled' ? 'install-cancelled' : RUNTIME_CODES.includes(failure?.code ?? '') && typeof failure?.error === 'string' ? failure.error
       : failure?.error === BLOCKED_ERROR ? BLOCKED : FAILED;
   };
 
@@ -732,7 +733,7 @@ export const DiscoverSection = (initialVnode) => {
       if (reply?.ok === false && reply?.outcomeKnown !== false && reply?.performed !== true
           && !['effect-completed', 'host-lost', 'transport-lost'].includes(reply?.outcomeKind)) {
         sessionStorage.removeItem(PENDING_KEY);
-        return { failure: RUNTIME_CODES.includes(reply?.code) && typeof reply.error === 'string' ? reply.error
+        return { failure: reply?.code === 'install-cancelled' ? 'install-cancelled' : RUNTIME_CODES.includes(reply?.code) && typeof reply.error === 'string' ? reply.error
           : reply.error === BLOCKED_ERROR ? BLOCKED : FAILED };
       }
     } catch { /* no receipt: keep the exact pending address fenced */ }
@@ -1546,8 +1547,12 @@ export const DiscoverSection = (initialVnode) => {
         })
           : installPanel({
             state, name, fresh: fresh.has(f.id),
+            transfer: state === 'installing' && discoveryAddress(app) ? m(InstallTransfer, {
+              key: `${f.id}:${f.state}`, send: attrs.send, address: discoveryAddress(app),
+              kind: f.state === 'updating' ? 'update' : 'install', ...(f.state === 'updating' && localId ? { appId: localId } : {}),
+            }) : null,
             message: state === 'installing' ? `You can leave this page. The ${f.state === 'updating' ? 'update' : 'install'} keeps going.` : null,
-            failure: failure ? { action, hint: failure.hint } : null,
+            failure: failure ? { action, ...failure } : null,
             unknown: state === 'unknown' ? unknownLines(unconfirmed.get(f.id)?.action ?? 'install') : null,
             notice, error, primary, secondary, otherVersion: !f.sameVersion,
             sharing: state === 'review' ? SHARING : null, onLibrary: toLibrary,
@@ -1631,8 +1636,11 @@ export const DiscoverSection = (initialVnode) => {
       }),
       state === 'cant-run' ? cantRunPanel() : installPanel({
         state: state === 'conflict' ? 'review' : state, name, fresh: linkFresh,
+        transfer: state === 'installing' && linkBusy === 'install' ? m(InstallTransfer, {
+          key: target.address, send: attrs.send, address: target.address, kind: 'address',
+        }) : null,
         message: state === 'installing' ? `You can leave this page. The ${held?.action ?? 'install'} keeps going.` : null,
-        failure: failure ? { action: 'install', hint: failure.hint } : null,
+        failure: failure ? { action: 'install', ...failure } : null,
         unknown: state === 'unknown' ? unknownLines(held?.action ?? 'install') : null,
         notice: linkNotice || null,
         error: rootAlert('link'),

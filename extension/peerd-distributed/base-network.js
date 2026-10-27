@@ -428,6 +428,8 @@ export const createBaseNetwork = async ({
     }
     // Retain the DHT responder as the signaling broker for each provider.
     // Bound both lookup and dialing; unavailable referrals must not hang an install.
+    onProgress?.({ phase: 'locating' });
+    callerSignal?.throwIfAborted();
     let lookupCompleted = false;
     const contacts = await withNetworkBudget(async (signal) => {
       const key = await contentKey(uri);
@@ -445,6 +447,8 @@ export const createBaseNetwork = async ({
       while (next < candidates.length && !closed && !callerSignal?.aborted) {
         const contact = candidates[next++];
         if (node.mesh.hasLink(contact.did) || !dial) continue;
+        onProgress?.({ phase: 'connecting' });
+        callerSignal?.throwIfAborted();
         try { await withNetworkBudget((signal) => dial(contact, { signal }), undefined, callerSignal); }
         catch { /* another provider may be reachable */ }
       }

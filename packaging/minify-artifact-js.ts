@@ -158,15 +158,20 @@ export const minifyColdArtifactModules = async (
   for (const file of allModules) {
     if (!shouldTransform(staging, file, browser, channel)) continue;
     const source = beforeSource.get(file) as string;
+    const compactIdentifiers = relative(staging, file).replaceAll('\\', '/') === 'background/routes/dweb.js';
     const built = await Bun.build({
       entrypoints: [file],
       target: 'browser',
       format: 'esm',
       external: ['*'],
+      // This route module never serializes functions into another realm.
+      // Compact its lexical bindings; public export names, import specifiers,
+      // property keys and explicit error codes remain unchanged. This module
+      // defines no error classes or function-name-based protocol.
       minify: {
         whitespace: true,
         syntax: true,
-        identifiers: false,
+        identifiers: compactIdentifiers,
       },
     });
     if (!built.success || built.outputs.length !== 1) {
