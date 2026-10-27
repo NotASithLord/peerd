@@ -802,7 +802,7 @@ export const LibrarySection = {
         onclick: () => { ui.gitImportOpen = !ui.gitImportOpen; ui.error = null; },
       }, ui.gitImportOpen ? 'Cancel import' : 'Import Git'),
       m('button.icon.library-star', {
-        title: ui.favOnly ? 'Show all apps' : 'Show favorites only',
+        title: ui.favOnly ? 'Show all apps' : 'Show favorites only', 'aria-label': 'Show favorites only',
         'aria-pressed': String(ui.favOnly),
         // The glyph (filled ★ / outline ☆) carries the state; the amber-gold
         // fill when active is the sanctioned splash of brand color, not a new
@@ -811,7 +811,7 @@ export const LibrarySection = {
         onclick: () => { ui.favOnly = !ui.favOnly; },
       }, ui.favOnly ? '★' : '☆'),
       m('button.icon.library-refresh', {
-        title: 'Refresh',
+        title: 'Refresh', 'aria-label': 'Refresh',
         class: ui.refreshing ? 'is-spinning' : '',
         onclick: () => LibrarySection.refresh(vnode),
       }, '↻'),
@@ -940,12 +940,19 @@ export const LibrarySection = {
           renaming
             ? m('input', {
                 style: 'width:100%; font-size:14px;',
+                'aria-label': `Rename ${app.name}`,
                 value: ui.renameValue,
-                oncreate: (/** @type {{ dom: HTMLInputElement }} */ v) => v.dom.focus(),
+                // why select: the field opens holding the current name, and a
+                // new name typed at once must replace it, not append to it.
+                oncreate: (/** @type {{ dom: HTMLInputElement }} */ v) => { v.dom.focus(); v.dom.select(); },
                 oninput: (/** @type {{ target: HTMLInputElement }} */ e) => { ui.renameValue = e.target.value; },
+                // why redraw before the restore: focusLibraryAction runs next
+                // frame and yields to a foreign focus owner; without a queued
+                // redraw the input still holds focus then and the restore is
+                // skipped. Blur (a click elsewhere) keeps the user's target.
                 onkeydown: (/** @type {KeyboardEvent} */ e) => {
-                  if (e.key === 'Enter') LibrarySection.commitRename(vnode, app);
-                  if (e.key === 'Escape') { ui.renamingId = null; m.redraw(); }
+                  if (e.key === 'Enter') { LibrarySection.commitRename(vnode, app); m.redraw(); focusLibraryAction(app.id, 'more'); }
+                  if (e.key === 'Escape') { ui.renamingId = null; m.redraw(); focusLibraryAction(app.id, 'more'); }
                 },
                 onblur: () => LibrarySection.commitRename(vnode, app),
               })
@@ -967,7 +974,7 @@ export const LibrarySection = {
         ]),
         m('button.icon.library-star', {
           disabled: busy,
-          title: app.favorite ? 'Unfavorite' : 'Favorite',
+          title: app.favorite ? 'Unfavorite' : 'Favorite', 'aria-label': `Favorite ${app.name}`,
           'aria-pressed': String(!!app.favorite),
           class: app.favorite ? 'is-on' : '',
           onclick: () => LibrarySection.toggleFavorite(vnode, app),
@@ -1028,7 +1035,7 @@ export const LibrarySection = {
             }, ui.sharedId === app.id ? 'Shared ✓' : (isSeeded(app) ? 'Reshare' : 'Share'))
           : null,
         m('button.icon.library-kebab', {
-          'aria-haspopup': 'menu', 'aria-expanded': String(menuOpen), title: 'More actions',
+          'aria-haspopup': 'menu', 'aria-expanded': String(menuOpen), title: 'More actions', 'aria-label': `More actions for ${app.name}`,
           'data-library-action': 'more',
           onclick: (/** @type {Event} */ e) => { e.stopPropagation(); ui.menuOpenId = menuOpen ? null : app.id; ui.armedDeleteId = null; },
         }, '⋯'),

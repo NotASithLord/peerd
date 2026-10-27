@@ -89,3 +89,28 @@ test('parallel provider referrals cannot race past the contact cap', async () =>
   expect(contacts).toHaveLength(64);
   expect(contacts.every((contact) => brokers.some((broker) => broker.did === contact.hints.broker))).toBe(true);
 });
+
+
+test('provider lookup reports RPC and malformed-reply uncertainty without losing valid referrals', async () => {
+  const identity = await generateIdentity();
+  const broker = await generateIdentity();
+  const provider = await generateIdentity();
+  let mode = 'failure';
+  let failures = 0;
+  const node = createDhtNode({
+    identity, selfId: await nodeIdOf(identity.did), store: createDhtStore(),
+    rpc: async () => {
+      if (mode === 'failure') throw new Error('unreachable');
+      if (mode === 'malformed') return { t: 'ERR' };
+      return { t: 'PROVIDERS', providers: mode === 'provider' ? [provider.did] : [], nodes: [] };
+    },
+  });
+  for (const next of ['failure', 'malformed', 'empty', 'provider']) {
+    mode = next;
+    failures = 0;
+    await node.learn(broker.did);
+    const result = await node.findProviderContacts(KEY, { onQueryFailure: () => { failures++; } });
+    expect(failures).toBe(next === 'failure' || next === 'malformed' ? 1 : 0);
+    expect(result.map(contact => contact.did)).toEqual(next === 'provider' ? [provider.did] : []);
+  }
+});

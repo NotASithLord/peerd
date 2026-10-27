@@ -216,8 +216,8 @@ export const createChannelClient = (channel, timeoutMs, timers = globalThis) => 
   return {
     /** @param {string} h @param {AbortSignal} [signal] */
     manifest: (h, signal) => req('MANIFEST_REQ', ['MANIFEST', 'NOMANIFEST'], h, signal),
-    /** @param {string} h */
-    chunk: (h) => req('CHUNK_REQ', ['CHUNK', 'NOCHUNK'], h),
+    /** @param {string} h @param {AbortSignal} [signal] */
+    chunk: (h, signal) => req('CHUNK_REQ', ['CHUNK', 'NOCHUNK'], h, signal),
     close,
   };
 };

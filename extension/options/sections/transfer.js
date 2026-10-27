@@ -211,6 +211,7 @@ export const TransferSection = {
             ok: false,
             text: reply?.error === 'vault-locked' ? 'Vault is locked — unlock in the peerd panel first.'
               : reply?.error === 'passphrase-required' ? `A long passphrase (${EXPORT_PASSPHRASE_MIN_LENGTH}+ characters) is required to protect credentials and peer identity.`
+              : reply?.error === 'identity-export-network-off' ? 'Backup stopped because your peer identity can only be included while the peer network is on. Nothing was downloaded. Turn it on in Settings > Decentralized web, then try again.'
               : reply?.error === 'identity-export-failed' ? 'Backup stopped because your peer identity could not be protected. Nothing was downloaded; retry after reopening peerd.'
               : 'The backup could not be created.',
           };

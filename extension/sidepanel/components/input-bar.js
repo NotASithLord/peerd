@@ -61,6 +61,7 @@ import {
  * @property {string} transcriptBaseline
  * @property {Trigger|null} trigger
  * @property {number} paletteIndex
+ * @property {string|null} dismissed   draft text whose popup Escape closed
  * @property {PaletteItems} items
  * @property {string|null} itemsKey
  * @property {HTMLTextAreaElement|null} el
@@ -68,6 +69,7 @@ import {
  * @property {string|null} attachError
  * @property {string|null} sendError
  * @property {UnconfirmedSend|null} unconfirmedSend
+ * @property {string|null} [adoptedOperationId]  the pending record whose text filled the composer
  * @property {HTMLInputElement|null} fileInputEl
  * @property {string|null} [sendAccent]
  * @property {(() => void)|null} [resizeListener]
@@ -154,6 +156,7 @@ const autosize = (el) => {
 const closePalette = (ui) => {
   ui.trigger = null;
   ui.paletteIndex = 0;
+  ui.dismissed = null;
 };
 
 // Fetch candidate data for the current trigger type, then redraw. Cached
@@ -274,7 +277,7 @@ export const sendAgentWithCustody = async ({ send, message, pending, currentSess
  *   state: InputBarState,
  *   attrs: {
  *     state: ChatState, send: Send, voiceManager?: any,
- *     goalArmed?: boolean, onGoalSent?: () => void,
+ *     goalArmed?: boolean, onGoalSent?: () => void, onSubmit?: () => void,
  *   },
  * }} InputBarVnode
  */
@@ -296,6 +299,7 @@ export const InputBar = {
     // Composer palette state.
     vnode.state.trigger = null;       // current activeTrigger() result | null
     vnode.state.paletteIndex = 0;     // active option in the popup
+    vnode.state.dismissed = null;     // text whose popup Escape closed
     vnode.state.items = {};           // { commands?, tabs?, files? } cache
     vnode.state.itemsKey = null;      // which type the cache currently holds
     vnode.state.el = null;            // the textarea DOM node
@@ -305,6 +309,7 @@ export const InputBar = {
     vnode.state.unconfirmedSend = loadUnconfirmed(vnode.state._sid)
       ?? (vnode.state._sid ? loadUnconfirmed(null) : null);
     if (vnode.state.unconfirmedSend && !vnode.state.value) {
+      vnode.state.adoptedOperationId = vnode.state.unconfirmedSend.operationId;
       vnode.state.value = vnode.state.unconfirmedSend.text;
       saveDraft(vnode.state._sid, vnode.state.value);
     }
@@ -325,7 +330,7 @@ export const InputBar = {
   },
 
   /** @param {InputBarVnode} vnode */
-  view: ({ attrs: { state, send, voiceManager, goalArmed, onGoalSent }, state: ui }) => {
+  view: ({ attrs: { state, send, voiceManager, goalArmed, onGoalSent, onSubmit }, state: ui }) => {
     const streaming = !!state.streaming;
     const sid = state.session?.sessionId;
     // Switched chats → save the draft we were holding and load the new chat's.
@@ -354,17 +359,26 @@ export const InputBar = {
         ? 'Peerd has an unconfirmed message for this chat. Check delivery before sending again.'
         : null;
       ui._sid = sid;
+      // The popup belonged to the previous chat's draft.
+      closePalette(ui);
     }
     // A first send creates its session inside the worker. If the state push with
     // that new id wins the race against a lost send reply, the pending fence was
     // necessarily persisted under `new`; adopt it conservatively rather than
     // letting the newly identified chat expose an unfenced Send button.
-    if (!ui.unconfirmedSend && sid) {
+    // why !ui.busy on both adoption branches: this composer's own send persists
+    // its record BEFORE awaiting the reply, and Mithril redraws as soon as the
+    // submit handler yields. Adopting that record would put the sent text back
+    // into the composer, where Enter sends it again.
+    if (!ui.unconfirmedSend && sid && !ui.busy) {
       const freshPending = loadUnconfirmed(null);
       if (freshPending) {
         ui.unconfirmedSend = freshPending;
-        ui.value = freshPending.text;
-        saveDraft(sid, ui.value);
+        if (!ui.value.trim()) {
+          ui.adoptedOperationId = freshPending.operationId;
+          ui.value = freshPending.text;
+          saveDraft(sid, ui.value);
+        }
         saveDraft(null, '');
         ui.sendError = 'Peerd has an unconfirmed message for this chat. Check delivery before sending again.';
         saveUnconfirmed(sid, freshPending);
@@ -372,13 +386,22 @@ export const InputBar = {
       }
     }
     const persistedPending = loadUnconfirmed(sid) ?? (sid ? loadUnconfirmed(null) : null);
-    if (!ui.unconfirmedSend && persistedPending) {
+    if (!ui.unconfirmedSend && persistedPending && !ui.busy) {
       ui.unconfirmedSend = persistedPending;
-      ui.value = persistedPending.text;
-      saveDraft(sid, ui.value);
+      // why fill only an empty composer: the record may belong to another
+      // window's send; that window owns the text, this one keeps its own draft.
+      if (!ui.value.trim()) {
+        ui.adoptedOperationId = persistedPending.operationId;
+        ui.value = persistedPending.text;
+        saveDraft(sid, ui.value);
+      }
       ui.sendError = 'Message unconfirmed.';
     } else if (ui.unconfirmedSend && !persistedPending && !ui.busy) {
-      if (ui.unconfirmedSend.source === 'starter' && ui.value === ui.unconfirmedSend.text) {
+      // The record settled elsewhere: clear only a copy this composer adopted
+      // from it, never text the user typed.
+      const adopted = ui.unconfirmedSend.source === 'starter'
+        || ui.adoptedOperationId === ui.unconfirmedSend.operationId;
+      if (adopted && ui.value === ui.unconfirmedSend.text) {
         ui.value = '';
         saveDraft(sid, '');
       }
@@ -411,7 +434,7 @@ export const InputBar = {
       e?.preventDefault?.();
       const text = ui.value.trim();
       if (!text || ui.busy || ui.unconfirmedSend || !canSend) return;
-      ui.sendError = null;
+      ui.sendError = null; onSubmit?.();
       const operationId = `send.${Date.now().toString(36)}.${crypto.randomUUID()}`;
 
       // Goal-armed (mode-row toggle): this send starts an autonomous goal run
@@ -482,10 +505,10 @@ export const InputBar = {
       ui.attachments = [];
       ui.attachError = null;
       closePalette(ui);
-      // Render the in-flight ownership immediately. Mithril does not redraw an
-      // async event handler until its promise settles, which can leave the
-      // stale draft and enabled Send button visible for the entire worker/host
-      // wait. The component state already retains the exact recovery copy.
+      // Render the in-flight ownership immediately. Mithril's own redraw after
+      // this handler yields waits for the next frame, which would leave the
+      // stale draft and enabled Send button visible until then. The component
+      // state already retains the exact recovery copy.
       m.redraw.sync();
       try {
         const reply = await sendAgentWithCustody({
@@ -666,6 +689,11 @@ export const InputBar = {
     const refreshTrigger = () => {
       const el = ui.el;
       if (!el) { closePalette(ui); return; }
+      // why: Escape closes the popup on keydown, but the keyup (and a click)
+      // lands here with the same text and would reopen it. Stay closed until
+      // the text changes.
+      if (ui.dismissed === el.value) return;
+      ui.dismissed = null;
       const trig = activeTrigger(el.value, el.selectionStart ?? el.value.length);
       const changed = (trig?.type !== ui.trigger?.type) || (trig?.kind !== ui.trigger?.kind);
       ui.trigger = trig;
@@ -707,6 +735,14 @@ export const InputBar = {
       // user loses their half-composed text. isComposing + the legacy keyCode
       // 229 both mark an in-progress composition.
       const composing = e.isComposing || e.keyCode === 229;
+      // Escape closes the popup whether or not it has matches ("No matching
+      // commands" is a popup too) and marks the text as dismissed.
+      if (ui.trigger && e.key === 'Escape' && !composing) {
+        e.preventDefault();
+        closePalette(ui);
+        ui.dismissed = ui.value;
+        return;
+      }
       // Palette is open: intercept navigation keys so they drive the
       // popup, not the textarea.
       if (ui.trigger) {
@@ -735,11 +771,6 @@ export const InputBar = {
               return;
             }
           }
-          if (e.key === 'Escape') {
-            e.preventDefault();
-            closePalette(ui);
-            return;
-          }
         }
       }
       // Enter sends; Shift+Enter inserts a newline (textarea default).
@@ -767,9 +798,12 @@ export const InputBar = {
           : 'Message peerd…';
 
     // aria-activedescendant points at the active option when the palette
-    // is open, so screen readers announce the highlighted candidate.
+    // lists one, so screen readers announce the highlighted candidate. An
+    // empty "no matches" popup has no option, so it names no descendant.
     const paletteOpen = !!ui.trigger;
-    const activeDesc = paletteOpen ? PALETTE_OPTION_ID(ui.paletteIndex) : undefined;
+    const optionCount = paletteOpen ? visibleCandidates(ui.trigger, ui.items).length : 0;
+    const activeDesc = optionCount > 0
+      ? PALETTE_OPTION_ID(Math.min(ui.paletteIndex, optionCount - 1)) : undefined;
 
     // The mic→send morph. A draft arms the send disc — EXCEPT while the
     // mic is actively listening: transcript chunks make the value
@@ -805,7 +839,6 @@ export const InputBar = {
             rows: 2,
             placeholder,
             value: ui.value,
-            role: 'textbox',
             'aria-autocomplete': 'list',
             'aria-expanded': paletteOpen ? 'true' : 'false',
             'aria-controls': paletteOpen ? 'composer-palette' : undefined,
@@ -815,9 +848,10 @@ export const InputBar = {
             oncreate: (/** @type {{ dom: HTMLTextAreaElement }} */ vnode) => {
               ui.el = vnode.dom;
               autosize(vnode.dom);
-              // why a window listener: resizing the panel re-wraps the draft,
-              // which changes its content height - and Mithril does not
-              // redraw on resize, so no onupdate would fire.
+              // why: restore typing after Unlock only if no control owns focus.
+              // A mounted modal keeps its selected control.
+              if (document.activeElement === document.body) vnode.dom.focus();
+              // why: resize changes wrapping without a Mithril redraw.
               ui.resizeListener = () => autosize(vnode.dom);
               window.addEventListener('resize', ui.resizeListener);
             },

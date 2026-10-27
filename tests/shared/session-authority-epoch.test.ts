@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { captureSessionAuthority } from '../../extension/shared/session-authority-epoch.js';
+import { captureSessionAuthority, withSessionAuthorityMutation } from '../../extension/shared/session-authority-epoch.js';
 import { createSessionStore } from '../../extension/peerd-runtime/sessions/store.js';
 import { createKernelSessionReader } from '../../extension/background/kernel-session-reader.js';
 import { bindCurrentChat } from '../../extension/shared/current-session-binding.js';
@@ -53,4 +53,30 @@ describe('host session authority epoch', () => {
     gate.resolve({ status: 'done' });
     await running;
   });
+});
+
+
+test('queued authority mutations revoke immediately and survive a failed predecessor', async () => {
+  const storage = {};
+  const gate = Promise.withResolvers<void>();
+  const order: string[] = [];
+  const first = withSessionAuthorityMutation(storage, async () => {
+    order.push('first');
+    await gate.promise;
+    throw new Error('failed write');
+  });
+  const rejected = first.catch((error: Error) => error);
+  const second = withSessionAuthorityMutation(storage, async () => {
+    order.push('second');
+    expect(captureSessionAuthority(storage)()).toBe(false);
+    return 42;
+  });
+  expect(captureSessionAuthority(storage)()).toBe(false);
+  await Promise.resolve();
+  expect(order).toEqual(['first']);
+  gate.resolve();
+  expect((await rejected)?.message).toBe('failed write');
+  expect(await second).toBe(42);
+  expect(order).toEqual(['first', 'second']);
+  expect(captureSessionAuthority(storage)()).toBe(true);
 });

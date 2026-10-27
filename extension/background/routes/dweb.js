@@ -1,8 +1,9 @@
 // @ts-check
 // Gate dependency-injected dweb routes by build and user settings.
 
-import { userPeerPolicy } from '../dweb-peer-policy.js';
+import { setUserPeerBlocked, userPeerPolicy } from '../dweb-peer-policy.js';
 import { withDeadline } from '/shared/cold-util.js';
+import { policyDid } from '/shared/peer-policy.js';
 import { finiteEffectReceiptFields } from '../host-effect-verdict.js';
 import { appReleaseDescriptorMatches } from '/shared/app-dweb-identity.js';
 
@@ -17,7 +18,7 @@ export const makeDwebRoutes = (deps) => {
     DWEB_ENABLED, APP_TAB_GROUP_TITLE,
     disableDweb, withDwebPublication, withAppLifecycle, ensureSettingsReady, repositories,
     isOffscreenSender, createDwebRollbackGuard, getCurrentSessionId,
-    dwebPublicationGeneration, ensureAppTrackerReady,
+    dwebPublicationGeneration, ensureAppTrackerReady, revokePeer,
   } = deps;
   if (typeof ensureDwebFeature !== 'function'
       || typeof dwebPublicationGeneration !== 'function') {
@@ -170,6 +171,27 @@ export const makeDwebRoutes = (deps) => {
       return publicationReply(`dweb/base-host/${action}-address`, { address }, isCurrent, action === 'install');
     }, false);
   };
+  /** @param {'install-status'|'cancel-install'} op @param {any} message */
+  const installControl = async (op, { address, attemptId, kind, appId } = {}) => {
+    if (typeof address !== 'string' || address.length > 4096 || !(await dwebReady())) {
+      return refuse('invalid-address-or-network-off');
+    }
+    if (op === 'cancel-install' && (typeof attemptId !== 'string' || !attemptId || attemptId.length > 64)) {
+      return refuse('install-attempt-required');
+    }
+    if (kind !== undefined && !['address', 'install', 'update'].includes(kind)) return refuse('invalid-install-kind');
+    if (kind === 'update' && (typeof appId !== 'string' || !appId || appId.length > 256)) return refuse('appId-required');
+    const generation = dwebPublicationGeneration();
+    // why: the install owns the publication lane while retrieving. Controls
+    // must reach its existing host without joining that lane or acquiring one.
+    const reply = await withDeadline(() => browser.runtime.sendMessage({
+      type: `dweb/base-host/${op}`, address,
+      ...(op === 'cancel-install' ? { attemptId } : {}),
+      ...(kind !== undefined ? { kind } : {}),
+      ...(kind === 'update' ? { appId } : {}),
+    }), 2000, () => Object.assign(new Error('install-control-timeout'), { outcomeKnown: false }));
+    return publicationActive(generation) ? reply : { ...custodyChanged(), outcomeKnown: false };
+  };
   /** @param {unknown} claim */
   const dwebStorageRefusal = async (claim) => {
     if (!DWEB_ENABLED) return dwebDisabled();
@@ -239,6 +261,20 @@ export const makeDwebRoutes = (deps) => {
     return record;
   };
 
+  // why Home only (the default dweb admission) and no network gate: a block
+  // is the user's own click in Discover or Contacts. It writes the policy the
+  // agent's dweb_block writes, and the host reads that policy before it joins.
+  // A block also runs dweb_block's revocation (`revokePeer`): the agent's
+  // remembered A2A consent and its conversations with them end.
+  /** @param {unknown} did @param {boolean} block */
+  const setPeerBlocked = async (did, block) => {
+    if (!DWEB_ENABLED) return dwebDisabled();
+    try { policyDid(did); } catch { return { ...refuse('invalid-peer-did'), outcomeKnown: true }; }
+    const generation = dwebPublicationGeneration();
+    return setUserPeerBlocked({ kv, vault, browser, revokePeer, current: () => dwebPublicationGeneration() === generation },
+      { did: /** @type {string} */ (did), block });
+  };
+
   /** @type {ReturnType<typeof makeDwebRoutes>} */
   const routes = {
     'dweb/peer-policy': async (_message, sender) => {
@@ -247,6 +283,14 @@ export const makeDwebRoutes = (deps) => {
       try { return { ok: true, policy: await userPeerPolicy(kv).snapshot(), discoveryEnabled: settingsStore.get().dwebDiscoveryEnabled === true }; }
       catch (error) { return failureResult(error); }
     },
+    'dweb/blocked-peers': async () => {
+      if (!DWEB_ENABLED) return dwebDisabled();
+      if (vault.isLocked()) return refuse('vault-locked');
+      try { return { ok: true, blocked: (await userPeerPolicy(kv).snapshot()).blocked }; }
+      catch (error) { return failureResult(error); }
+    },
+    'dweb/peer-block': ({ did } = {}) => setPeerBlocked(did, true),
+    'dweb/peer-unblock': ({ did } = {}) => setPeerBlocked(did, false),
     'dweb/app-authority-generations': async (_msg, sender) => {
       if (isOffscreenSender?.(sender) !== true) return refuse('offscreen-sender-required');
       if (!DWEB_ENABLED) return dwebDisabled();
@@ -624,6 +668,8 @@ export const makeDwebRoutes = (deps) => {
     // base mesh, verifies it, and persists it. The card's version identity rides
     // along so the installed record can be matched against future announces.
     'dweb/base/inspect-address': ({ address } = {}) => addressOperation('inspect', address),
+    'dweb/base/install-status': (message = {}) => installControl('install-status', message),
+    'dweb/base/cancel-install': (message = {}) => installControl('cancel-install', message),
     'dweb/base/install-address': ({ address } = {}) => addressOperation('install', address),
     'dweb/base/install': async ({ uri, name, dwappId, slug, seq } = {}) => {
       return withReadyPublication((isCurrent) => publicationReply('dweb/base-host/install-app',

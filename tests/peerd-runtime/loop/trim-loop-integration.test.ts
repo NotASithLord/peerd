@@ -8,6 +8,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { runUserTurn } from '../../../extension/peerd-runtime/loop/agent-loop.js';
+import { makeTrimEnricher } from '../../../extension/peerd-runtime/loop/summary-enrichment.js';
 
 const makeStore = (opts: { withSetTrimSummary?: boolean } = {}) => {
   const sessions = new Map<string, any>();
@@ -71,6 +72,28 @@ const baseCtx = (store: any, extra: any = {}) => ({
 });
 
 describe('runUserTurn trim integration', () => {
+  test('four real turns run one enrichment and retain its facts on the wire', async () => {
+    const store = makeStore();
+    store.seed('s1', longHistory(80).map((message) => ({ ...message, content: 'x'.repeat(800) })));
+    let summaries = 0;
+    const sent: any[][] = [];
+    const enricher = makeTrimEnricher({ sessions: store, cheapCall: async () => {
+      summaries++;
+      return { ok: true, text: JSON.stringify({ facts: ['Keep the saved goal.'] }) };
+    } });
+    for (let turn = 0; turn < 4; turn++) {
+      await drain(runUserTurn(baseCtx(store, { contextWindow: 16_000,
+        enrichTrimSummary: enricher.queue,
+        callModel: ({ messages }: any) => { sent.push(structuredClone(messages)); return fakeModel(); },
+      })));
+      await enricher.drain('s1');
+    }
+    expect(summaries).toBe(1);
+    expect(new Set(sent.map((messages) => messages[0].id)).size).toBe(1);
+    for (const messages of sent.slice(1)) expect(messages[0].content).toContain('Keep the saved goal.');
+    await drain(runUserTurn(baseCtx(store, { contextWindow: 100_000, callModel: () => fakeModel() })));
+    expect((await store.get('s1')).trimSummary).toBeNull();
+  });
   test('over-cap history: state persists before streaming, seam fires once, model sees the summary', async () => {
     const store = makeStore();
     store.seed('s1', longHistory(80));

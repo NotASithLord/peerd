@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  actorIsolationFailureKey, makeActorIsolationStateStore,
+  actorIsolationFailureKey, makeActorIsolationStateStore, readColdActorIsolation,
 } from '../../extension/background/actor-isolation-state.js';
+import { ACTOR_WORKER_PROTOCOL } from '../../extension/shared/actor-worker-protocol.js';
 
 const capability = { host: 'background-page-worker' };
 
@@ -53,5 +54,51 @@ describe('actor isolation failure state', () => {
     expect(await store.load(capability)).not.toBeNull();
     await store.clear(capability);
     expect(await store.load(capability)).toBeNull();
+  });
+});
+
+
+describe('cold actor isolation projection', () => {
+  test.each(['background-page-worker', 'offscreen-document-worker'])('keeps an absent %s record neutral without changing storage', async (host) => {
+    const memory = memoryStorage();
+    const reads: string[] = [];
+    const store = makeActorIsolationStateStore({
+      storage: { ...memory.storage, get: async (key) => {
+        reads.push(key); return memory.storage.get(key);
+      } },
+      protocol: ACTOR_WORKER_PROTOCOL,
+    });
+    expect(await readColdActorIsolation(store, host)).toEqual({
+      status: 'not-started', host, reason: null, retryable: false,
+    });
+    expect(reads).toEqual([actorIsolationFailureKey({ host }, ACTOR_WORKER_PROTOCOL)]);
+    expect(memory.values).toEqual({});
+  });
+
+  test.each(['background-page-worker', 'offscreen-document-worker'])('keeps the exact stored %s failure across a cold read', async (host) => {
+    const memory = memoryStorage();
+    const store = makeActorIsolationStateStore({ storage: memory.storage, protocol: ACTOR_WORKER_PROTOCOL });
+    await store.markUnavailable({ host }, 'worker startup failed', 'actor_worker_crashed');
+    const before = structuredClone(memory.values);
+    expect(await readColdActorIsolation(store, host)).toEqual({
+      status: 'temporarily_unavailable', host, reason: 'worker startup failed', retryable: true,
+    });
+    expect(memory.values).toEqual(before);
+    expect(await readColdActorIsolation(makeActorIsolationStateStore({
+      storage: memory.storage, protocol: ACTOR_WORKER_PROTOCOL + 1,
+    }), host)).toMatchObject({ status: 'not-started', retryable: false });
+  });
+
+  test.each([new TypeError('storage is unavailable'), 'storage refused'])('fails closed when a cold failure read rejects with %s', async (cause) => {
+    const memory = memoryStorage();
+    const store = makeActorIsolationStateStore({
+      storage: { ...memory.storage, get: async () => { throw cause; } },
+      protocol: ACTOR_WORKER_PROTOCOL,
+    });
+    expect(await readColdActorIsolation(store, capability.host)).toEqual({
+      status: 'temporarily_unavailable', host: capability.host, retryable: true,
+      reason: cause instanceof Error ? cause.message : cause,
+    });
+    expect(memory.values).toEqual({});
   });
 });

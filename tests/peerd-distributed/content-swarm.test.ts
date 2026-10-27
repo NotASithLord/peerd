@@ -550,3 +550,33 @@ test('a chunk finishing verification after sibling failure cannot publish progre
     digestSpy.mockRestore();
   }
 });
+
+for (const phase of ['before-start', 'manifest', 'chunk'] as const) {
+  test(`caller cancellation at ${phase} releases only its own transfer and allows retry`, async () => {
+    const identity = await generateIdentity(); const store = createContentStore();
+    const { uri } = await publishInto(store, identity, { 'index.html': 'cancel test' });
+    const ac = new AbortController(); let handler: any = null; let sends = 0; let channels = 0;
+    let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+    const respond = createContentResponder({ store });
+    const channel = {
+      setHandler: (next: any) => { handler = next; },
+      send: async (req: any) => {
+        sends++;
+        if (req.t === (phase === 'manifest' ? 'MANIFEST_REQ' : 'CHUNK_REQ')) { entered(); return; }
+        await respond(req, (response: any) => handler?.(response));
+      },
+    };
+    if (phase === 'before-start') ac.abort();
+    const outcome = swarmFetch({ uri, providers: ['provider'], signal: ac.signal, timeoutMs: 10_000,
+      channelFor: () => { channels++; return channel; } }).catch(error => error);
+    if (phase !== 'before-start') { await started; ac.abort(); }
+    expect((await outcome).name).toBe('AbortError');
+    expect(handler).toBeNull();
+    expect(channels).toBe(phase === 'before-start' ? 0 : 1);
+    expect(sends).toBe(phase === 'before-start' ? 0 : phase === 'manifest' ? 1 : 2);
+    // A fresh request on the same provider still works; cancellation did not
+    // tear down the shared transport or claim that its content is unavailable.
+    const retry = await swarmFetch({ uri, providers: ['provider'], channelFor: () => providerChannel(store) });
+    expect(retry.payload.byteLength).toBe(retry.manifest.size);
+  }, 2000);
+}

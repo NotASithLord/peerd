@@ -3,6 +3,7 @@ import {
   makeKernelLearnedOriginRoutes,
   normalizeKernelLearnedHost,
 } from '../../extension/background/settings-store.js';
+import { makeLearnedOrigins } from '../../extension/peerd-runtime/actor/learned-origins.js';
 import { normalizeApiOrigin } from '../../extension/peerd-runtime/actor/web-actor.js';
 
 const hostFromLegacy = (value: unknown) => {
@@ -18,12 +19,15 @@ const setup = (seed: Record<string, string>) => {
     get: async () => structuredClone(stored),
     set: async (_key: string, value: any) => { stored = structuredClone(value); },
   };
-  const routes = makeKernelLearnedOriginRoutes({
-    kv,
-    auditLog: { append: async (entry: any) => { audits.push(structuredClone(entry)); } },
+  const learnedOrigins = makeLearnedOrigins({
+    load: () => kv.get(), save: (all) => kv.set('learnedOrigins.v1', all),
+    onForget: (hosts) => {
+      for (const host of hosts) audits.push({ type: 'origin_unlearned_sensitive', details: { host } });
+    },
     onError: (...args) => { errors.push(args); },
   });
-  return { routes, audits, errors, stored: () => stored };
+  const routes = makeKernelLearnedOriginRoutes({ learnedOrigins });
+  return { routes, learnedOrigins, audits, errors, stored: () => stored };
 };
 
 describe('native kernel learned-origin settings authority', () => {
@@ -71,15 +75,53 @@ describe('native kernel learned-origin settings authority', () => {
     expect(native.errors).toEqual([]);
   });
 
+  test('forget and clear change the classifier and stay removed after later learns', async () => {
+    const h = setup({ 'bank.example.com': 'password-field' });
+    await h.routes['learned/forget']({ host: 'bank.example.com' });
+    expect(h.learnedOrigins.snapshot().has('bank.example.com')).toBe(false);
+    h.learnedOrigins.note('mail.example.org', 'confirmed-write');
+    await h.learnedOrigins.settled({ strict: true });
+    expect(h.stored()).toEqual({ 'mail.example.org': 'confirmed-write' });
+    expect(await h.routes['learned/clear']()).toEqual({ ok: true, origins: [], forgotten: 1 });
+    h.learnedOrigins.note('shop.example.net', 'password-field');
+    await h.learnedOrigins.settled({ strict: true });
+    expect(h.stored()).toEqual({ 'shop.example.net': 'password-field' });
+  });
+
+  test('a learn during a forgotten-site save remains protected and durable', async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const saving = new Promise<void>((done) => { started = done; });
+    const gate = new Promise<void>((done) => { release = done; });
+    let stored: Record<string, string> = { 'bank.example.com': 'password-field' };
+    let first = true;
+    const learnedOrigins = makeLearnedOrigins({
+      load: async () => stored,
+      save: async (all) => {
+        if (first) { first = false; started(); await gate; }
+        stored = structuredClone(all);
+      },
+    });
+    const routes = makeKernelLearnedOriginRoutes({ learnedOrigins });
+    const forget = routes['learned/forget']({ host: 'bank.example.com' });
+    await saving;
+    learnedOrigins.note('mail.example.org', 'confirmed-write');
+    release();
+    await forget;
+    await learnedOrigins.settled({ strict: true });
+    expect([...learnedOrigins.snapshot()]).toEqual([['mail.example.org', 'confirmed-write']]);
+    expect(stored).toEqual({ 'mail.example.org': 'confirmed-write' });
+  });
+
   test('load fails open for reads but a failed mutation is outcome-unknown', async () => {
     const errors: any[] = [];
-    const routes = makeKernelLearnedOriginRoutes({
-      kv: {
-        get: async () => { throw new Error('read failed'); },
-        set: async () => { throw new Error('write failed'); },
-      },
-      auditLog: { append: async () => {} },
+    const learnedOrigins = makeLearnedOrigins({
+      load: async () => { throw new Error('read failed'); },
+      save: async () => { throw new Error('write failed'); },
       onError: (...args) => { errors.push(args); },
+    });
+    const routes = makeKernelLearnedOriginRoutes({
+      learnedOrigins, onError: (...args: unknown[]) => { errors.push(args); },
     });
     await expect(routes['learned/list']()).resolves.toEqual({ ok: true, origins: [] });
     await expect(routes['learned/clear']()).rejects.toMatchObject({

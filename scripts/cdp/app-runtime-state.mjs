@@ -6,15 +6,16 @@ const descriptor = (runtime) => JSON.stringify({
   capabilities: [], ...(runtime ? { runtime } : {}),
 });
 const core = { schema: 1, target: 'browser-app', requires: ['wasm-core'] };
+const simd = { ...core, requires: ['wasm-core', 'wasm-simd'] };
 const unsupported = { ...core, requires: ['future-runtime-feature'] };
 
 // This deliberately loads the production App host, not just runner.html: the
 // host must withhold app-body after its private runner capability handshake.
-export const APP_RUNTIME_STATES = ['legacy', 'core', 'unsupported'].map((variant) => ({
+export const APP_RUNTIME_STATES = ['legacy', 'core', 'simd', 'unsupported'].map((variant) => ({
   name: `app-runtime-${variant}`, kind: 'functional', phase: 'post-unlock',
   responder: (callIndex) => ({ sse: callIndex === 0 ? sseToolCall('sandbox_create', {
     kind: 'app', name: `Runtime ${variant}`, files: {
-      'peerd.json': descriptor(variant === 'legacy' ? undefined : variant === 'core' ? core : unsupported),
+      'peerd.json': descriptor(variant === 'legacy' ? undefined : variant === 'core' ? core : variant === 'simd' ? simd : unsupported),
       'index.html': '<!doctype html><title>Runtime canary</title><script>parent.postMessage({runtimeCanary:"executed"},"*")</script>',
     },
   }) : sseText('RUNTIME-READY') }),

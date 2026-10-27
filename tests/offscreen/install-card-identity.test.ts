@@ -73,3 +73,12 @@ test('verified row projection exposes signed discovery hints and keeps legacy ru
   expect(discoveredAppFromRow({head,description:'Signed text'})).toMatchObject({description:'Signed text',size:128,includes_wasm:null});
   for (const includes_wasm of [true,false]) expect(discoveredAppFromRow({head:{...head,includes_wasm}})).toMatchObject({includes_wasm});
 });
+
+
+test('projection exposes only host retrieval history, never signed-head claims', () => {
+  const retrieval = {outcome:'no-provider-found',observedAt:100,expiresAt:200};
+  const head = {version_id:'a'.repeat(64),content_addr:`peerd://did:key:zPeer/${'a'.repeat(64)}`,retrieval};
+  expect(discoveredAppFromRow({head}).retrieval).toBeNull();
+  expect(discoveredAppFromRow({head,retrieval}).retrieval).toEqual(retrieval);
+  expect(discoveredAppFromRow({head,retrieval:{...retrieval,expiresAt:NaN}}).retrieval).toBeNull();
+});

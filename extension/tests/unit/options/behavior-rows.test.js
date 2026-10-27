@@ -18,14 +18,33 @@ const SETTINGS = {
   webActorActionSurface: 'tools', providerName: 'anthropic',
 };
 
-const mount = () => {
+/** @param {any} [reply] what every send() answers */
+const mount = (reply = { ok: true }) => {
   const sent = /** @type {any[]} */ ([]);
   const root = document.createElement('div');
   document.body.appendChild(root);
-  const send = async (/** @type {any} */ msg) => { sent.push(msg); return { ok: true }; };
+  const send = async (/** @type {any} */ msg) => { sent.push(msg); return reply; };
   const state = { settings: { ...SETTINGS }, session: { permission: { confirmActions: false } } };
   m.mount(root, { view: () => m(BehaviorSection, { state, send }) });
   return { root, sent, unmount: () => { m.mount(root, null); root.remove(); } };
+};
+
+/** @param {ParentNode} scope @param {string} text */
+const button = (scope, text) => {
+  const el = [...scope.querySelectorAll('button')].find((b) => b.textContent === text);
+  if (!el) throw new Error(`missing button: ${text}`);
+  return el;
+};
+
+const settle = () => new Promise((r) => setTimeout(r, 0)).then(() => m.redraw.sync());
+
+/** Click the reset trigger, then its Yes. */
+/** @param {ParentNode} root */
+const confirmReset = async (root) => {
+  button(root, 'Reset section to defaults').click();
+  m.redraw.sync();
+  button(root, 'Yes').click();
+  await settle();
 };
 
 describe('options.behavior — settings rows', () => {
@@ -93,6 +112,68 @@ describe('options.behavior — settings rows', () => {
       // Confirm-before-actions rides permission/set, NOT settings/update — it
       // must not yank the user out of Plan as a side effect.
       expect(sent[0]).toEqual({ type: 'permission/set', confirmActions: true });
+    } finally { unmount(); }
+  });
+
+  it('the reset asks first: the trigger sends nothing, Yes sends settings/reset once', async () => {
+    const { root, sent, unmount } = mount();
+    try {
+      button(root, 'Reset section to defaults').click();
+      m.redraw.sync();
+      expect(sent.length).toBe(0);
+      expect(root.textContent).toContain('Reset the settings on this page to their defaults?');
+      // The trigger left the pointer's spot: a repeat click lands on the question.
+      expect([...root.querySelectorAll('button')].some((b) => b.textContent === 'Reset section to defaults')).toBe(false);
+      button(root, 'No').click();
+      m.redraw.sync();
+      expect(sent.length).toBe(0);
+      await confirmReset(root);
+      expect(sent.filter((msg) => msg.type === 'settings/reset').length).toBe(1);
+      const status = root.querySelector('.key-msg.ok');
+      expect(status?.getAttribute('role')).toBe('status');
+      expect(status?.textContent).toBe('Section reset to defaults.');
+    } finally { unmount(); }
+  });
+
+  it('keyboard focus lands on No, and comes back to the trigger', async () => {
+    // The strip replaces the focused trigger. Without a hand-off a keyboard
+    // user lands on <body> and tabs through the whole page to reach it.
+    const { root, unmount } = mount();
+    try {
+      const trigger = button(root, 'Reset section to defaults');
+      trigger.focus();
+      trigger.click();
+      m.redraw.sync();
+      expect(document.activeElement).toBe(button(root, 'No'));
+      button(root, 'No').click();
+      m.redraw.sync();
+      expect(document.activeElement).toBe(button(root, 'Reset section to defaults'));
+      // After Yes the trigger comes back once the reset has replied.
+      await confirmReset(root);
+      expect(document.activeElement).toBe(button(root, 'Reset section to defaults'));
+    } finally { unmount(); }
+  });
+
+  it('the reset covers every setting this page writes, the web actor surface included', async () => {
+    // #119 added the surface row without its reset key, so a store user who
+    // tried the code surface and pressed Reset stayed on it.
+    const { root, sent, unmount } = mount();
+    try {
+      await confirmReset(root);
+      const reset = sent.find((msg) => msg.type === 'settings/reset');
+      for (const key of Object.keys(SETTINGS).filter((k) => k !== 'providerName')) {
+        expect(reset?.keys).toContain(key);
+      }
+    } finally { unmount(); }
+  });
+
+  it('a failed reset says so instead of looking like a reset', async () => {
+    const { root, unmount } = mount({ ok: false, outcomeKnown: true });
+    try {
+      await confirmReset(root);
+      expect(root.querySelector('.key-msg.err')?.textContent).toBe('The section could not be reset.');
+      // A known failure leaves the row retryable.
+      expect(/** @type {HTMLButtonElement} */ (button(root, 'Reset section to defaults')).disabled).toBe(false);
     } finally { unmount(); }
   });
 });

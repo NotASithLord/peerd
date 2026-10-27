@@ -1,27 +1,9 @@
 // @ts-check
-// offscreen/doc-extract.js — convert an office/publishing document in the
-// OFFSCREEN document. The controller-owned read_doc tool requests an exact
-// extraction effect through background/offscreen-doc-client.js → a
-// 'doc/extract' message → here.
-//
-// Why here and not the SW: not because the conversion needs a DOM (it does not
-// — peerd-runtime/doc is pure and would run anywhere), but because of what
-// happens BEFORE it. The bytes have to be fetched, and a document is routinely
-// tens of megabytes; holding that in the service worker fights the MV3
-// lifecycle, and it is exactly the buffer the SW should not be sitting on when
-// it is also the context that holds the vault DK. The offscreen document is
-// where peerd already puts untrusted heavy parsing. Structured conversion then
-// enters a disposable Worker so a hostile .docx cannot stall this host's Stop
-// route or feature-lease lifecycle.
-//
-// SECURITY: the bytes are UNTRUSTED web content, and the conversion is entirely
-// declarative — a ZIP index read, an XML tokenizer, and string building. There
-// is no eval, no scripting engine, no DOM insertion, and no external entity
-// resolution (xml.js SKIPS doctypes and never resolves an entity it did not
-// define — so XXE and billion-laughs have no surface here). A hostile document
-// can at worst make the parse fail, which is surfaced as an error. The text
-// crosses back as a raw bounded receipt; the sealed read_doc tool wraps it in
-// <untrusted_web_content> before exposing it to the model.
+// why: fetch and parse untrusted document bytes outside the vault worker.
+// Structured formats use a disposable worker, so hostile input cannot block
+// this host's Stop route. PDF keeps its separate reader and byte ceiling.
+// Conversion is declarative. It runs no document scripts or external entities.
+// The sealed read_doc tool fences the bounded receipt before model use.
 
 import { base64ToBytes } from '/shared/util.js';
 import {
@@ -61,11 +43,11 @@ const fetchDocBytes = async ({ url, bytesB64 } = {}, { signal, fetchImpl = fetch
     // large buffer. The post-decode check remains authoritative around base64
     // padding and any unusual encoder spelling.
     if (bytesB64.length > Math.ceil(MAX_FETCH_BYTES / 3) * 4 + 4) {
-      throw new DocFetchError(`document too large (limit ${MAX_FETCH_BYTES} bytes)`);
+      throw new ResponseTooLargeError(bytesB64.length * 3 / 4, MAX_FETCH_BYTES);
     }
     const bytes = base64ToBytes(bytesB64);
     if (bytes.length > MAX_FETCH_BYTES) {
-      throw new DocFetchError(`document too large: ${bytes.length} bytes (limit ${MAX_FETCH_BYTES})`);
+      throw new ResponseTooLargeError(bytes.length, MAX_FETCH_BYTES);
     }
     return { bytes, contentType: '' };
   }
@@ -94,9 +76,7 @@ const fetchDocBytes = async ({ url, bytesB64 } = {}, { signal, fetchImpl = fetch
     if (signal?.aborted || (/** @type {{name?:string}} */ (error))?.name === 'AbortError') {
       throw abortError(signal, 'Document extraction stopped.');
     }
-    if (error instanceof ResponseTooLargeError) {
-      throw new DocFetchError(`document too large: ${error.bytes} bytes (limit ${MAX_FETCH_BYTES})`);
-    }
+    if (error instanceof ResponseTooLargeError) throw error;
     throw new DocFetchError(`could not read the document response: ${(/** @type {{message?:string}} */ (error))?.message ?? error}`);
   }
   return { bytes, contentType: res.headers.get('content-type') ?? '' };
@@ -156,7 +136,7 @@ export const handleDocExtract = async (
 
     stage = 'convert';
     if (bytes.length > MAX_DOCUMENT_CONVERSION_BYTES) {
-      throw new DocFetchError(`document too large: ${bytes.length} bytes (limit ${MAX_DOCUMENT_CONVERSION_BYTES})`);
+      throw new ResponseTooLargeError(bytes.length, MAX_DOCUMENT_CONVERSION_BYTES);
     }
     const byteLength = bytes.length;
     const converted = await convertDocumentInWorker(bytes, hints, {
@@ -176,6 +156,7 @@ export const handleDocExtract = async (
     // why details do not cross the wire: archive member names and parser error
     // messages are producer-controlled. The controller maps these stable codes
     // to tool-authored recovery guidance outside the untrusted-content fence.
+    if (e instanceof ResponseTooLargeError) return { ok: false, error: 'document_too_large' };
     if (e instanceof DocFetchError) return { ok: false, error: 'fetch_failed' };
     return { ok: false, error: 'doc_extract_failed' };
   }

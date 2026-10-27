@@ -210,7 +210,7 @@ describe('kernel production runtime', () => {
     await createKernelProductionRuntime(base(async ({ engine, transfer, turn }) => {
       for (const call of [
         () => engine.archiveOrphanedActor('actor'),
-        () => engine.noteVmTab(1, {}),
+        () => engine.noteAgentTab(1, {}),
         () => engine.onAppManifestMutation('app'),
         () => engine.resolveAppOwnerRoot('actor'),
         () => engine.onAppDeleted('app'),

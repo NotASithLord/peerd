@@ -9,7 +9,15 @@ export const probeAppRuntime = (wasm = globalThis.WebAssembly) => {
   try {
     if (!wasm) return [];
     new wasm.Module(Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0]));
-    return ['wasm-core'];
+    const features = ['wasm-core'];
+    try {
+      // (module (func (drop (v128.const i32x4 0 0 0 0))))
+      // Compilation tests the engine and this realm's CSP without granting
+      // threads, shared memory, or any host imports to the App.
+      new wasm.Module(Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 10, 23, 1, 21, 0, 253, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 26, 11]));
+      features.push('wasm-simd');
+    } catch { /* core-only engines remain supported */ }
+    return features;
   } catch { return []; }
 };
 

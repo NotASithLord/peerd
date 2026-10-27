@@ -111,14 +111,9 @@ export const fetchUrlTool = composeTool("fetch_url", {
         throw Object.assign(new Error(res.error ?? 'fetch_failed'), { reason: res.reason });
       }
       const ct = res.headers['content-type'] ?? '';
-      // A DOCUMENT FILE, not a page. fetch_url's primitive decodes every
-      // response with Response.text(), so a .docx/.xlsx/.pptx/PDF arrives as
-      // mojibake — and the paths below would then disarm it, window it, spill
-      // 16k of it to the cache, and hand the model a screenful of garbage it
-      // will nonetheless try to answer from. Hand over the reader that CAN
-      // open it instead. The bytes are re-fetched there (offscreen, under the
-      // same denylist + SSRF gates), which costs one request and is worth it:
-      // the alternative is a confident answer drawn from noise.
+      // why: document bytes decoded as text are noise. Do not spill that noise
+      // or ask the model to read it. The document reader fetches them again
+      // under the same denylist and SSRF gates.
       const asDocument = sniffResponseAsDocument({
         contentType: ct, url: res.finalUrl || args.url, bodyHead: res.body.slice(0, 4096),
       });

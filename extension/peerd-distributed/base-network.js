@@ -12,6 +12,7 @@
 // simulator. Verbose by design (dlog) — every join/announce/sub-protocol step
 // is logged so a real-network bug is visible in the console immediately.
 
+import { createRetrievalHistory, NoAppProviderError } from './apps/retrieval-history.js';
 import { PROVIDER_TTL_MS } from './dht/provider-store.js';
 import { createPeerNode } from './peer-node.js';
 import { createPresence } from './gossip/presence.js';
@@ -22,6 +23,7 @@ import {
   assertBundlePayloadWithinLimits,
   buildManifest,
   manifestHash,
+  verifyManifest,
   MAX_BUNDLE_BYTES,
 } from './content/manifest.js';
 import { packTransportBundle } from './content/bundle.js';
@@ -78,10 +80,13 @@ export const createBaseNetwork = async ({
   const providerAttempts = new Map();
   // The injected dialer must honor cancellation by closing pending transports.
   // Production propagates it through the room dial and HELLO admission fence.
-  /** @template T @param {(signal: AbortSignal) => Promise<T>} run @param {string} [hash] */
-  const withNetworkBudget = async (run, hash) => {
+  /** @template T @param {(signal: AbortSignal) => Promise<T>} run @param {string} [hash] @param {AbortSignal} [parentSignal] */
+  const withNetworkBudget = async (run, hash, parentSignal) => {
     if (closed) throw new Error('base network closed');
+    parentSignal?.throwIfAborted();
     const ac = new AbortController();
+    const cancel = () => ac.abort(parentSignal?.reason);
+    parentSignal?.addEventListener('abort', cancel, { once: true });
     operations.add(ac);
     if (hash) {
       if (!providerAttempts.has(hash)) providerAttempts.set(hash, new Set());
@@ -91,6 +96,7 @@ export const createBaseNetwork = async ({
     try { return await run(ac.signal); }
     finally {
       clearTimeout(timer);
+      parentSignal?.removeEventListener('abort', cancel);
       operations.delete(ac);
       if (hash) {
         const attempts = providerAttempts.get(hash);
@@ -118,8 +124,9 @@ export const createBaseNetwork = async ({
   /** @param {string} did */
   const isBlocked = (did) => userBlocked(did) || blocklist.has(did);
   let contributionGeneration = 0;
+  const retrievalHistory = createRetrievalHistory({ now });
   /** @param {string} did @param {string} [reason] */
-  const block = (did, reason) => { contributionGeneration += 1; if (reason !== 'user-policy') blocklist.add(did); audit?.('dwapp_publisher_blocked', { did, reason }); };
+  const block = (did, reason) => { contributionGeneration += 1; retrievalHistory.clear(); if (reason !== 'user-policy') blocklist.add(did); audit?.('dwapp_publisher_blocked', { did, reason }); };
   /** @type {Set<(card: any) => void>} */
   const dwappCbs = new Set();
   const library = createLibrary({ isBlocked, now });
@@ -351,8 +358,9 @@ export const createBaseNetwork = async ({
 
   // Fetch only on request. Prefer the named publisher while qualifying other
   // linked seeders concurrently; unrelated neighbors never delay useful chunks.
-  /** @param {string} uri @param {{ timeoutMs?: number, onProgress?: (p: any) => void, expectedRuntime?: {value:unknown} }} [opts] */
-  const fetchAllowedApp = async (uri, { timeoutMs = 15_000, onProgress, expectedRuntime } = {}) => {
+  /** @param {string} uri @param {{ timeoutMs?: number, onProgress?: (p: any) => void, signal?: AbortSignal, expectedRuntime?: {value:unknown} }} [opts] */
+  const fetchAllowedApp = async (uri, { timeoutMs = 15_000, onProgress, signal: callerSignal, expectedRuntime } = {}) => {
+    callerSignal?.throwIfAborted();
     /** @param {string} did */
     const channelFor = (did) => isBlocked(did) ? null : node.mesh.contentChannel(did);
     const acceptManifest = (/** @type {any} */ manifest) => {
@@ -364,19 +372,30 @@ export const createBaseNetwork = async ({
     let localHash = null;
     try { ({ did: publisher, hash: localHash } = parsePeerdUri(uri)); } catch { /* malformed uri → skip the fast path */ }
     if (publisher && isBlocked(publisher)) throw new Error('publisher-user-blocked');
-    // A freshly re-seeded renderer may be the only provider. Read its announced
-    // bytes directly instead of requiring a nonsensical mesh channel to self.
-    if (publisher === identity.did && localHash && node.content.isAnnounced(localHash)) {
-      const manifest = node.content.getManifest(localHash);
+    // why: a seeder can be the only remaining provider of another author's
+    // App. Read its explicitly announced bytes without a mesh channel to self,
+    // preserving the original signer and verifying the same addressed content.
+    if (publisher && localHash && node.content.isAnnounced(localHash)) {
+      const manifest = structuredClone(node.content.getManifest(localHash));
       if (!manifest || await manifestHash(manifest) !== localHash) {
         throw new Error('local manifest hash mismatch');
       }
+      if (manifest.publisher !== publisher) throw new Error('local manifest publisher mismatch');
       assertBundleWithinLimits(manifest);
+      if (!(await verifyManifest(manifest)).ok) throw new Error('local manifest signature invalid');
       acceptManifest(manifest);
-      const chunks = manifest.chunks.map((/** @type {{hash:string}} */ chunk) =>
-        node.content.getChunk(chunk.hash));
-      if (chunks.some((chunk) => !(chunk instanceof Uint8Array))) {
-        throw new Error('local bundle chunk unavailable');
+      const chunks = manifest.chunks.map((/** @type {{hash:string}} */ chunk) => {
+        const bytes = node.content.getChunk(chunk.hash);
+        return bytes instanceof Uint8Array ? new Uint8Array(bytes) : null;
+      });
+      for (const [index, chunk] of chunks.entries()) {
+        if (!(chunk instanceof Uint8Array)) throw new Error('local bundle chunk unavailable');
+        // assertBundleWithinLimits checked sizes; the generic content store
+        // intentionally models only the hash used by its serving firewall.
+        const committed = /** @type {{hash:string,size:number}} */ (manifest.chunks[index]);
+        if (chunk.byteLength !== committed.size || await sha256ChunkHex(chunk) !== committed.hash) {
+          throw new Error('local bundle chunk verification failed');
+        }
       }
       const payload = concat(.../** @type {Uint8Array[]} */ (chunks));
       assertBundlePayloadWithinLimits(payload, maxBundleBytes);
@@ -404,40 +423,69 @@ export const createBaseNetwork = async ({
     const isAllowed = (/** @type {string} */ did) => !closed && !isBlocked(did);
     const preferred = [...new Set([...(publisher ? [publisher] : []), ...linked])];
     if (linked.length) {
-      try { return await swarmFetch({ uri, providers: preferred, channelFor, timeoutMs, onProgress, isAllowed, acceptManifest }); }
-      catch (e) { if (e instanceof AppRuntimeError) throw e; dlog('base', `linked seeder fetch failed (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}); trying DHT providers (bounded)`); }
+      try { return await swarmFetch({ uri, providers: preferred, channelFor, timeoutMs, onProgress, signal: callerSignal, isAllowed, acceptManifest }); }
+      catch (e) { callerSignal?.throwIfAborted(); if (e instanceof AppRuntimeError) throw e; dlog('base', `linked seeder fetch failed (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}); trying DHT providers (bounded)`); }
     }
     // Retain the DHT responder as the signaling broker for each provider.
     // Bound both lookup and dialing; unavailable referrals must not hang an install.
+    onProgress?.({ phase: 'locating' });
+    callerSignal?.throwIfAborted();
+    let lookupCompleted = false;
     const contacts = await withNetworkBudget(async (signal) => {
       const key = await contentKey(uri);
       signal.throwIfAborted();
-      return node.dht.findProviderContacts(key, { signal });
-    }).catch(() => []);
+      let queryFailed = false;
+      const found = await node.dht.findProviderContacts(key, { signal, onQueryFailure: () => { queryFailed = true; } });
+      signal.throwIfAborted();
+      lookupCompleted = !queryFailed;
+      return found;
+    }, undefined, callerSignal).catch(() => []);
+    callerSignal?.throwIfAborted();
     const candidates = contacts.filter((/** @type {any} */ contact) => contact.did !== identity.did && !isBlocked(contact.did)).slice(0, 8);
     let next = 0;
     const connectProvider = async () => {
-      while (next < candidates.length && !closed) {
+      while (next < candidates.length && !closed && !callerSignal?.aborted) {
         const contact = candidates[next++];
         if (node.mesh.hasLink(contact.did) || !dial) continue;
-        try { await withNetworkBudget((signal) => dial(contact, { signal })); }
+        onProgress?.({ phase: 'connecting' });
+        callerSignal?.throwIfAborted();
+        try { await withNetworkBudget((signal) => dial(contact, { signal }), undefined, callerSignal); }
         catch { /* another provider may be reachable */ }
       }
     };
     await Promise.all(Array.from({ length: Math.min(3, candidates.length) }, connectProvider));
+    callerSignal?.throwIfAborted();
     if (closed) throw new Error('base network closed');
     const provided = candidates.map((/** @type {any} */ contact) => contact.did);
     const providers = [...new Set([...provided, ...linked])];
+    if (!providers.length && lookupCompleted && !contacts.length) throw new NoAppProviderError(uri);
     if (!providers.length) throw new Error(`no peer is serving ${uri} right now — the peer may have dropped; try again`);
-    return swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress, isAllowed, acceptManifest });
+    return swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress, signal: callerSignal, isAllowed, acceptManifest });
   };
 
-  /** @param {string} uri @param {{timeoutMs?:number,onProgress?:(p:any)=>void,expectedRuntime?:{value:unknown}}} [options] */
+  /** @param {string} uri @param {{timeoutMs?:number,onProgress?:(p:any)=>void,signal?:AbortSignal,expectedRuntime?:{value:unknown}}} [options] */
   const fetchApp = async (uri, options) => {
+    options?.signal?.throwIfAborted();
     const { did, hash } = parsePeerdUri(uri);
     const generation = contributionGeneration;
     if (did && isBlocked(did)) throw new Error('publisher-user-blocked');
-    const result = await fetchAllowedApp(uri, options);
+    // why: only a completed, explicitly requested lookup can suppress a recent
+    // suggestion. A newer request supersedes an older completion; policy and
+    // host changes invalidate all tickets without retaining unbounded history.
+    const address = formatPeerdUri({ did, hash });
+    const ticket = retrievalHistory.begin(address);
+    let result;
+    try {
+      result = await fetchAllowedApp(uri, options);
+      options?.signal?.throwIfAborted();
+    }
+    catch (error) {
+      if (!closed && !options?.signal?.aborted && generation === contributionGeneration && error instanceof NoAppProviderError) {
+        retrievalHistory.miss(address, ticket);
+      }
+      throw error;
+    }
+    retrievalHistory.forget(address, ticket);
     if (closed) throw new Error('base network closed');
     if (isBlocked(result.manifest.publisher)) throw new Error('publisher-user-blocked');
     // why: a ban/unban during a transfer cannot resurrect pre-policy history.
@@ -530,7 +578,11 @@ export const createBaseNetwork = async ({
     /** @param {(card: any) => void} cb */
     onDwappAnnounce: (cb) => { dwappCbs.add(cb); return () => dwappCbs.delete(cb); },
     // The discovery view the Library UI lists — the bounded, no-downgrade cache.
-    heardDwapps: () => library.rows(),
+    heardDwapps: () => library.rows().map((row) => ({
+      ...row,
+      // Unsigned, local observation; never accept this field from card metadata.
+      retrieval: retrievalHistory.read(row.head.content_addr),
+    })),
     // Resolve a card by id: the Library first (already subscribed), else the DHT
     // by (publisher, slug) — the durable late-join path that survives a card we
     // never had streamed to us. A DHT hit is verified + cached into the Library.
@@ -557,6 +609,7 @@ export const createBaseNetwork = async ({
       // from the publisher catalog. Fence every older transfer, even if the
       // blocked DID is subsequently unblocked before verification completes.
       contributionGeneration += 1;
+      retrievalHistory.clear();
       for (const did of new Set([...node.mesh.peers().map((/** @type {any} */ peer) => peer.did),
         ...library.rows().map((/** @type {any} */ row) => row.publisher)])) {
         // why: a temporary policy outage closes admission without turning
@@ -652,6 +705,6 @@ export const createBaseNetwork = async ({
       // subscribe to current peers too, or a late starter's Library stays empty.
       discovery.subscribeAll();
     },
-    close: () => { closed = true; library.clearContributors(); for (const ac of operations) ac.abort(); if (maintenanceTimer) clearInterval(maintenanceTimer); providerRenewals.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
+    close: () => { closed = true; retrievalHistory.clear(); library.clearContributors(); for (const ac of operations) ac.abort(); if (maintenanceTimer) clearInterval(maintenanceTimer); providerRenewals.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
   });
 };

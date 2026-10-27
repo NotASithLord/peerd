@@ -6,7 +6,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';
 import { semanticCallAuditEntry } from '/background/semantic-call-audit.js';
-import { createAuditLog, idb } from '/peerd-egress/index.js';
+import { createAuditLog, idb, makeWebFetch } from '/peerd-egress/index.js';
 import { ActivityView, activityEventMeta } from '/options/sections/activity.js';
 
 /** @param {(msg: any) => Promise<any>} send */
@@ -32,6 +32,38 @@ const auditEntry = (callId, result) => semanticCallAuditEntry({
 });
 
 describe('options.activity: host-derived semantic verdicts', () => {
+  for (const outcome of ['success', 'unknown']) it(`shows the real ${outcome} web request with its method and safe destination`, async () => {
+    await idb.clear('audit_log'); await idb.clear('audit_meta');
+    const log = createAuditLog({ idb });
+    /** @type {Promise<unknown>} */ let persisted = Promise.resolve();
+    const webFetch = makeWebFetch({
+      getDenylist: () => [], matchDenylist: () => false, audit: (entry) => { persisted = log.append(entry); return persisted.then(() => {}); },
+      fetchFn: /** @type {any} */ (async () => { if (outcome === 'unknown') throw new TypeError('private transport detail'); return new Response('ok'); }),
+    });
+    try { await webFetch('https://collector.example/upload?private-query=hidden', { method: 'POST', body: 'private-body' }); }
+    catch (error) { if (outcome !== 'unknown') throw error; }
+    await persisted;
+    const entries = await log.list();
+    expect(entries.length).toBe(1);
+    expect(JSON.stringify(entries).includes('private')).toBe(false);
+    const { root, unmount } = mount(async () => ({ ok: true, entries, total: entries.length }));
+    try {
+      await settle();
+      expect(root.querySelector('.log-label')?.textContent).toBe('web request');
+      expect(root.querySelector('.log-detail')?.textContent).toContain('POST');
+      expect(root.querySelector('.log-detail')?.textContent).toContain('https://collector.example');
+      expect(root.textContent?.includes('private')).toBe(false);
+      const filter = /** @type {HTMLSelectElement} */ (root.querySelector('.log-filter-level'));
+      filter.value = 'warn'; filter.dispatchEvent(new Event('change', { bubbles: true }));
+      await settle();
+      expect(root.querySelectorAll('.log-row').length).toBe(outcome === 'unknown' ? 1 : 0);
+      if (outcome === 'unknown') {
+        expect(root.querySelector('.log-detail')?.textContent).toContain('unknown');
+        expect(root.querySelector('.log-warn') !== null).toBe(true);
+      }
+    } finally { unmount(); }
+  });
+
   it('uses warning severity for known blocks/refusals and danger only for unknown custody', () => {
     const cases = [
       [{ type: 'tool_blocked', details: {} }, 'warn', 'tool blocked'],
@@ -94,9 +126,12 @@ describe('options.activity: host-derived semantic verdicts', () => {
     expect(semanticOnly?.type).toBe('semantic_report');
     expect(semanticOnly?.details.outcome).toBe('semantic-success');
 
-    const { root, unmount } = mount(async (msg) => (msg.type === 'audit/list'
-      ? { ok: true, entries, total: entries.length }
-      : { ok: true }));
+    /** @type {any[]} */
+    const calls = [];
+    const { root, unmount } = mount(async (msg) => {
+      calls.push(msg);
+      return msg.type === 'audit/list' ? { ok: true, entries, total: entries.length } : { ok: true };
+    });
     try {
       await settle();
       const text = root.textContent ?? '';
@@ -109,6 +144,12 @@ describe('options.activity: host-derived semantic verdicts', () => {
       expect(root.querySelectorAll('.log-info').length >= 2).toBe(true);
       expect(root.querySelectorAll('.log-warn').length >= 2).toBe(true);
       expect(root.querySelectorAll('.log-ok').length).toBe(1);
+      expect(root.querySelectorAll('.log-danger').length).toBe(1);
+      const refresh = /** @type {HTMLButtonElement} */ (root.querySelector('button[title="Refresh"]'));
+      expect(refresh.getAttribute('aria-label')).toBe('Refresh');
+      refresh.click();
+      await settle();
+      expect(calls.filter((message) => message.type === 'audit/list').length).toBe(2);
       expect(root.querySelectorAll('.log-danger').length).toBe(1);
     } finally { unmount(); }
   });

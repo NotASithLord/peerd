@@ -74,7 +74,7 @@ describe('minimal vault authority-kernel prototype', () => {
     vault.lock();
   });
 
-  test('first-paint state is explicit about unavailable semantic execution', () => {
+  test('first-paint state keeps a controller that has not started neutral', () => {
     const state = buildVaultKernelState({
       kernel: KERNEL,
       status: { initialized: false, prfEnrolled: false, hasRecovery: false },
@@ -88,8 +88,7 @@ describe('minimal vault authority-kernel prototype', () => {
       prfEnrolled: false, hasRecovery: false, lockReason: null,
     });
     expect(state.capabilities.actorExecution).toEqual({
-      status: 'temporarily_unavailable', host: 'offscreen-document-worker',
-      reason: 'controller-not-ready', retryable: true,
+      status: 'not-started', host: 'offscreen-document-worker', reason: null, retryable: false,
     });
     expect(state.session.sessionId).toBeNull();
     expect(state.providers).toEqual({ current: '', model: '', hasKey: false });
@@ -98,6 +97,23 @@ describe('minimal vault authority-kernel prototype', () => {
     expect(state.composer.model).toBe('');
     expect(validateKernelStateProjection(state)).toEqual({ ok: true, state });
     expect(JSON.stringify(state)).not.toMatch(/credentialId|prfSalt|wrappedDK|secret|apiKey/);
+  });
+
+  test('cold Goal receipts carry bounded text only for an unlocked owning chat', () => {
+    const base = buildVaultKernelState({ kernel: KERNEL,
+      status: { initialized: true, prfEnrolled: false, hasRecovery: true },
+      locked: true, unlockedAt: 0, lockReason: null, autoLockMs: 1_000, ...lockedUi });
+    const note = { id: 'goal-end-receipt', text: 'Goal run stopped (needs verification).', at: 1 };
+    const state = { ...base, vault: { ...base.vault, locked: false },
+      profile: { id: 'default', peerName: 'peerd', onboardingComplete: true },
+      session: { ...base.session, sessionId: 'owning-chat', goalStopNote: note } };
+    expect(validateKernelStateProjection(state).ok).toBe(true);
+    for (const invalid of [
+      { ...note, id: '' }, { ...note, id: 'x'.repeat(129) },
+      { ...note, text: '' }, { ...note, text: 'x'.repeat(1_001) },
+      { ...note, at: NaN }, { ...note, at: -1 }, { ...note, action: { kind: 'open-tab' } },
+    ]) expect(validateKernelStateProjection({ ...state, session: { ...state.session, goalStopNote: invalid } }).ok).toBe(false);
+    expect(validateKernelStateProjection({ ...base, session: { ...base.session, goalStopNote: note } }).ok).toBe(false);
   });
 
   test('locked cleanup projection excludes authority metadata and rejects invalid cleanup states', () => {

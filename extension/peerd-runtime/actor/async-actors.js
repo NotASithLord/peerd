@@ -4,8 +4,8 @@
 
 /**
  * @param {Object} deps
- * @param {(req: object) => Promise<{ result?: string, sessionId?: string|null, exceeded?: boolean, refused?: boolean, timedOut?: boolean, stopped?: boolean, executionFailed?: boolean, outcomeKnown?: boolean }>} deps.spawnActor
- * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void, runWhenIdleClaimed?: (sessionId: string, fn: (lease: { controller: AbortController, release: () => void }) => void) => void, generation?: (sessionId: string) => number, isBusy: (sessionId: string) => boolean, stop?: (sessionId: string) => boolean }} deps.turnSlots
+ * @param {(req: object) => Promise<{ result?: string, sessionId?: string|null, exceeded?: boolean, refused?: boolean, timedOut?: boolean, stopped?: boolean, incomplete?: boolean, executionFailed?: boolean, outcomeKnown?: boolean }>} deps.spawnActor
+ * @param {{ runWhenIdle: (sessionId: string, fn: () => void) => void, runWhenIdleClaimed?: (sessionId: string, fn: (lease: { controller: AbortController, release: () => void }) => void) => void, generation?: (sessionId: string) => number, isBusy: (sessionId: string) => boolean, stop?: (sessionId: string) => boolean, advanceQueue?: (sessionId: string) => void }} deps.turnSlots
  * @param {(sessionId: string) => string[]} [deps.stopSubtree]
  * @param {(opts: { userText: string, sessionId: string, synthetic: boolean, actorReply?: { kind: string, instanceId: string, failed: boolean, actorDeliveryId?: string, outcomeKnown?: boolean, parentToolUseId?: string, parentToolUseIds?: string[], correlationComplete?: boolean }, turnLease?: { controller: AbortController, release: () => void } }) => Promise<unknown>} deps.reenter
  * @param {() => Promise<string|null>} deps.getActiveSessionId
@@ -44,6 +44,7 @@ export const makeAsyncActors = (deps) => {
    * @property {boolean} interrupted
    * @property {boolean} timedOut     the child hit its wall-clock budget (PR #134)
    * @property {boolean} stopped      the child's slot was aborted (Stop cascade)
+   * @property {boolean} incomplete   the child ended without a final reply
    * @property {boolean} executionFailed the Worker failed after execution began
    * @property {boolean} outcomeKnown false when effects may have landed before failure
    * @property {string | null} childSessionId
@@ -134,25 +135,27 @@ export const makeAsyncActors = (deps) => {
         const outcomeUnknown = c.executionFailed && c.outcomeKnown === false;
         const flag = outcomeUnknown
           ? ' (execution failed after work began; outcome unknown; do not retry automatically)'
-          : c.executionFailed ? ' (failed before target work ran)'
+          : c.executionFailed ? (c.incomplete ? ' (failed before finishing)' : ' (failed before target work ran)')
           : c.interrupted ? ' (interrupted before finishing, partial)'
           : c.timedOut ? ' (hit its wall-clock timeout, partial)'
           : c.stopped ? ' (stopped before finishing, partial)'
-          : c.exceeded ? ' (hit its step cap, may be incomplete)' : '';
+          : c.exceeded ? ' (hit its step cap, may be incomplete)'
+          : c.incomplete ? ' (ended without a final reply, partial)' : '';
         return `Actor "${c.task.slice(0, 80)}"${flag}:\n${wrapped}`;
       });
       const hasUnknownOutcome = finished.some((entry) => entry.executionFailed && entry.outcomeKnown === false);
       const hasKnownFailure = finished.some((entry) => entry.executionFailed && entry.outcomeKnown !== false);
+      const hasIncomplete = finished.some((entry) => entry.incomplete);
       const lead = finished.length === 1
         ? hasUnknownOutcome
           ? 'An actor you started earlier stopped after execution began. Its outcome is unknown. Do not retry automatically. Here is the failure:'
-          : hasKnownFailure
-            ? 'An actor you started earlier failed before target work ran. Here is the failure:'
+          : hasKnownFailure || hasIncomplete
+            ? 'An actor you started earlier did not complete. Here is its terminal report:'
           : 'An actor you started earlier has finished. Here is its result:'
         : hasUnknownOutcome
           ? `${finished.length} spawned actors completed or failed. Review each result and do not automatically retry an unknown outcome:`
-          : hasKnownFailure
-            ? `${finished.length} spawned actors completed or failed before target work ran. Review each result:`
+          : hasKnownFailure || hasIncomplete
+            ? `${finished.length} spawned actors completed or did not finish. Review each terminal report:`
           : `${finished.length} actors you started earlier have finished. Here are their results:`;
       const wakeText = `${lead}\n\n${blocks.join('\n\n')}`;
 
@@ -173,7 +176,7 @@ export const makeAsyncActors = (deps) => {
         userText: wakeText, sessionId: parentSessionId, synthetic: true,
         actorReply: {
           kind: 'spawned', instanceId: 'spawned', actorDeliveryId: id,
-          failed: hasUnknownOutcome || hasKnownFailure,
+          failed: hasUnknownOutcome || hasKnownFailure || hasIncomplete,
           ...(hasUnknownOutcome ? { outcomeKnown: false } : {}),
           ...(parentToolUseIds.length === 1 ? { parentToolUseId: parentToolUseIds[0] } : {}),
           ...(parentToolUseIds.length > 0 ? { parentToolUseIds } : {}),
@@ -196,18 +199,23 @@ export const makeAsyncActors = (deps) => {
     }, caps.retryMs ?? 1_000);
   };
 
-  // why: claim before setup so a result cannot replace a newer user turn.
+  // why: reject empty wakes at dequeue. Claim real work before async setup.
   const queueReintegration = (/** @type {string} */ parentSessionId) => {
     const start = (/** @type {{ controller: AbortController, release: () => void } | undefined} */ turnLease) => {
-      Promise.resolve(drainReintegration(parentSessionId, turnLease))
-        .catch(() => {})
+      Promise.resolve(drainReintegration(parentSessionId, turnLease)).catch(() => {})
         .finally(() => turnLease?.release());
     };
-    if (typeof turnSlots.runWhenIdleClaimed === 'function') {
-      turnSlots.runWhenIdleClaimed(parentSessionId, start);
-    } else {
-      turnSlots.runWhenIdle(parentSessionId, () => start(undefined));
-    }
+    turnSlots.runWhenIdle(parentSessionId, () => {
+      const generation = turnSlots.generation?.(parentSessionId) ?? 0;
+      const batch = deliveries.get(parentSessionId);
+      const ready = !isVaultLocked() && (batch?.generation === generation ? !batch.busy
+        : [...(children.get(parentSessionId)?.values() ?? [])].some((child) =>
+          child.status === 'done' && child.parentStopGeneration === generation));
+      if (!ready) Promise.resolve(drainReintegration(parentSessionId)).catch(() => {})
+        .finally(() => turnSlots.advanceQueue?.(parentSessionId));
+      else if (typeof turnSlots.runWhenIdleClaimed === 'function') turnSlots.runWhenIdleClaimed(parentSessionId, start);
+      else start(undefined);
+    });
   };
 
   const acknowledgeDelivery = (/** @type {string} */ parentSessionId, /** @type {string} */ id) => {
@@ -216,7 +224,7 @@ export const makeAsyncActors = (deps) => {
     for (const child of batch.children) child.status = 'delivered';
     deliveries.delete(parentSessionId);
     onTasksChanged(parentSessionId);
-    queueReintegration(parentSessionId);
+    if ([...(children.get(parentSessionId)?.values() ?? [])].some((child) => child.status === 'done')) queueReintegration(parentSessionId);
     return true;
   };
 
@@ -250,7 +258,7 @@ export const makeAsyncActors = (deps) => {
     /** @type {ChildEntry} */
     const entry = {
       taskId, task: String(req.task ?? ''), status: 'running', result: '',
-      exceeded: false, interrupted: false, timedOut: false, stopped: false,
+      exceeded: false, interrupted: false, timedOut: false, stopped: false, incomplete: false,
       executionFailed: false, outcomeKnown: true,
       childSessionId: null, ring: [],
       parentToolUseId: typeof req.parentToolUseId === 'string' ? req.parentToolUseId : null,
@@ -319,6 +327,7 @@ export const makeAsyncActors = (deps) => {
           exceeded: out.exceeded === true || out.refused === true,
           timedOut: out.timedOut === true,
           stopped: out.stopped === true,
+          incomplete: out.incomplete === true,
           executionFailed: out.executionFailed === true,
           outcomeKnown: out.outcomeKnown !== false,
           childSessionId: out.sessionId ?? entry.childSessionId,

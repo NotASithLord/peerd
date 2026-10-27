@@ -381,7 +381,11 @@ html, body, #app {
 /* Vault-gate hero brand block: wordmark + version + tagline as one centered
  * column. The version sits small and mono right under the wordmark; the
  * tagline reads as the brand promise. The generous bottom margin is the
- * breathing room between the brand and the action buttons below. */
+ * breathing room between the brand and the action buttons below.
+ * why 24 / 12 / 16px between the parts: the version is a caption of the
+ * wordmark, so it gets the smallest gap. The lock chip and the tagline are
+ * separate items, so they get more. At 8px the version looked crowded
+ * under the 52px blocks. */
 .vault-brand {
   display: flex;
   flex-direction: column;
@@ -396,7 +400,7 @@ html, body, #app {
   justify-content: center;
   width: 42px;
   height: 42px;
-  margin-bottom: 26px;
+  margin-bottom: 24px;
   border: 1px solid var(--border);
   border-radius: var(--r3);
   background: var(--elev);
@@ -404,14 +408,14 @@ html, body, #app {
 }
 .vault-lockmark .ic { display: block; }
 .brand-version {
-  margin-top: 8px;
+  margin-top: 12px;
   font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 0.04em;
   color: var(--fg-muted);
 }
 .brand-tagline {
-  margin-top: 19px;
+  margin-top: 16px;
   font-size: 13px;
   color: var(--fg-muted);
 }
@@ -729,7 +733,26 @@ html, body, #app {
   pointer-events: none;
   opacity: 0.29;
 }
-.gate-card { text-align: center; position: relative; z-index: 1; }
+/* why a backdrop in the page color: the stream is full-bleed, so in the
+ * panel its glyphs ran under the gate text. The border-image outset paints
+ * past the box: 14px (the panel gutter) at the top and sides, and a 48px
+ * fade below. It changes no layout and adds no scroll. A blurred box-shadow
+ * left faint bands around the column in the dark theme. */
+.gate-card {
+  text-align: center;
+  position: relative;
+  z-index: 1;
+  border-image: linear-gradient(var(--bg) calc(100% - 48px), transparent) fill 0 / 0 / 14px 14px 48px;
+}
+/* Forced colors keep the authored --bg in a border image, so the backdrop
+ * shows as a block on the system background. There, text has its own
+ * backplate. */
+@media (forced-colors: active) { .gate-card { border-image: none; } }
+/* The cold vault shell (vault-shell.js) mounts the gate straight into #app.
+ * When the app has loaded, the gate sits in .body, which gives it a 14px
+ * gutter. Give the cold mount the same gutter, so a new panel and a locked
+ * panel show the same screen. */
+#app > .gate-card { margin: 14px; }
 .gate-card .input-row { text-align: left; }
 .gate-card .input-row input { text-align: left; }
 /* §5c: the wordmark's colorize is the front door's ONE accent moment - every
@@ -742,17 +765,15 @@ html, body, #app {
 }
 /* §5d/§5f: the gate's message line - a dot + sentence. Neutral voice for
  * conditions; red is reserved for a WRONG ANSWER (mismatch, wrong
- * passphrase). The marked field carries the same severity on its border. */
+ * passphrase). The marked field carries the same severity on its border.
+ * why an inline dot: a long message wraps, and the dot must lead its first
+ * line. As a flex item, it stood apart, beside the whole paragraph. */
 .gate-msg {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  justify-content: center;
   font-size: 12px;
   margin: 8px 0 0;
   color: var(--fg-muted);
 }
-.gate-msg-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex: 0 0 auto; }
+.gate-msg-dot { display: inline-block; width: 5px; height: 5px; margin-right: 6px; border-radius: 50%; background: currentColor; vertical-align: middle; }
 .gate-msg.is-wrong { color: var(--danger); }
 .gate-card .input-row input.is-error { border-color: var(--danger); }
 /* §5d: the passphrase floor, announced before it can be violated. A
@@ -946,8 +967,7 @@ textarea {
    text-input surface above and swap the native arrow for a themed chevron so
    it reads like the rest of the form. (Same appearance-strip approach as
    type=search below.) The open option list stays OS-native, as selects do. */
-.input-row select,
-.disc-controls select {
+.input-row select {
   font: inherit;
   padding: 8px 32px 8px 10px;
   border: 1px solid var(--border);
@@ -1346,7 +1366,7 @@ button.icon.is-active {
    usage-limit on send) — the error-line is the only child, so it carries no
    top margin. */
 .message .bubble-error .error-line { margin-top: 0; }
-.message.tools-only .bubble { display: none; }
+.message.tools-only > .bubble { display: none; }
 /* ...but a provider error on an otherwise tools-only turn must still show —
    the error bubble is the only place that failure surfaces inline. */
 .message.tools-only .bubble-error { display: block; }
@@ -1414,6 +1434,17 @@ button.icon.is-active {
   color: var(--fg-muted);
 }
 .reasoning-header:hover { background: rgba(0, 183, 235, 0.08); }
+button.reasoning-header {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+button.reasoning-header:focus-visible {
+  outline: 2px solid var(--fg-muted);
+  outline-offset: -2px;
+}
 .reasoning-label {
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -2181,8 +2212,8 @@ button.tool-call-header:focus-visible {
   font-size: 13px;
   color: var(--fg-muted);
 }
-.voice-section .voice-status.is-ok { color: var(--ok); }
-.voice-section .voice-status.is-err { color: var(--danger); }
+.voice-section .voice-status.is-ok { color: var(--ok-ink); }
+.voice-section .voice-status.is-err { color: var(--danger-ink); }
 
 /* --- confirmation modal (voice enrollment) --- */
 .peerd-modal-backdrop {
@@ -3176,7 +3207,8 @@ button.tool-call-header:focus-visible {
   font-variant-numeric: tabular-nums;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.key-badge.key-set   { color: var(--ok); border-color: var(--ok); }
+/* why -ink for the text: the fill token reads 2.3:1 on the light theme. */
+.key-badge.key-set   { color: var(--ok-ink); border-color: var(--ok); }
 .key-badge.key-unset { color: var(--fg-muted); }
 /* Keyless local providers (Ollama, on-device WebGPU): neutral until proven
    ready/connected — green (.key-set) is reserved for that, never default. */
@@ -3224,8 +3256,8 @@ button.tool-call-header:focus-visible {
    (a live region must exist before its first announcement) - empty, it
    must cost zero pixels. */
 .key-msg:empty { margin: 0; }
-.key-msg.ok  { color: var(--ok); }
-.key-msg.err { color: var(--danger); }
+.key-msg.ok  { color: var(--ok-ink); }
+.key-msg.err { color: var(--danger-ink); }
 
 /* --- OpenRouter model curation (Settings → Providers) ----------------- */
 .or-models { margin-top: 4px; }

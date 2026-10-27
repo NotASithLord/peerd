@@ -695,7 +695,7 @@ describe('App runner binary assets', () => {
     expect(result.missing).toBe(null);
     expect(result.list).toEqual(['asset.bin', 'empty.wasm']);
     expect(result.exports).toEqual([]);
-    expect(result.runtimeFeatures).toEqual(['wasm-core']);
+    expect(result.runtimeFeatures).toEqual(['wasm-core', 'wasm-simd']);
   });
 });
 
@@ -884,6 +884,40 @@ describe('App editor binary asset UX', () => {
     expect(editor.getActiveFile()).toBe('index.html');
     expect(await opfs.read('other.js')).toBe('unsaved change');
     expect(dirtyStates).toEqual([true, false]);
+    editor.destroy();
+    mount.remove();
+    await opfs.nuke();
+  });
+
+  it('keeps file loads out of undo history', async () => {
+    const root = ['peerd-apps', 'binary-editor-undo-load'];
+    const opfs = opfsHelpers(root);
+    await opfs.nuke();
+    await opfs.write('index.html', 'entry');
+    await opfs.write('other.js', 'other');
+    const mount = document.createElement('div');
+    mount.style.cssText = 'position:fixed;left:-9999px;width:600px;height:400px';
+    document.body.appendChild(mount);
+    /** @type {string[]} */
+    const persisted = [];
+    const editor = await createEditor({
+      mountEl: mount,
+      opfsBase: root,
+      pinnedFile: 'index.html',
+      writeFile: async (path, content) => { persisted.push(`${path}=${content}`); },
+    });
+    const mac = /Mac/.test(navigator.platform);
+    const undo = () => mount.querySelector('.cm-content')?.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'z', code: 'KeyZ', keyCode: 90, metaKey: mac, ctrlKey: !mac, bubbles: true, cancelable: true,
+    }));
+    undo();
+    await editor.flushSave();
+    expect(editor.getActiveContent()).toBe('entry');
+    await editor.switchToFile('other.js');
+    undo();
+    await editor.flushSave();
+    expect(editor.getActiveContent()).toBe('other');
+    expect(persisted).toEqual([]);
     editor.destroy();
     mount.remove();
     await opfs.nuke();

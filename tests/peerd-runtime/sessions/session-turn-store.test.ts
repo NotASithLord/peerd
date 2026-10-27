@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { IDBFactory } from 'fake-indexeddb';
+import { readFileSync } from 'node:fs';
+import { prepareUserAttachments } from '../../../extension/peerd-runtime/loop/attachments.js';
+import { composeTurn } from '../../../extension/offscreen/controller-compose-runtime.js';
 import { createSessionTurnStore } from '../../../extension/shared/session-turn-store.js';
 import { emptySummaryState } from '../../../extension/peerd-runtime/loop/rolling-summary.js';
 
@@ -214,6 +217,86 @@ describe('shared turn-session store parity', () => {
       const backend = await makeBackend();
       try { await exerciseTurnStore(backend); }
       finally { backend.close(); }
+    });
+
+    test(`${name}: titles use user text and keep shared content intact`, async () => {
+      const backend = await makeBackend();
+      const { idb } = backend;
+      const turns = createSessionTurnStore({ idb, notFound: (id) => new Error(id) });
+      const page = '<untrusted_web_content source="tab" url="https://example.test/">Page heading\nPrivate page text</untrusted_web_content>';
+      const file = '<peerd_file name="report.csv" type="text/csv">one,two\n3,4</peerd_file>';
+      try {
+        for (const [content, title] of [
+          [`${page}\nSummarize this page`, 'Summarize this page'],
+          [`Compare ${page} with ${file} please`, 'Compare with please'],
+          [`${page}\n${file}`, undefined],
+          ['<untrusted_web_content source="tab">cut page text', undefined],
+          ['<peerd_file name="cut.csv">cut file text', undefined],
+          ['Normal user request', 'Normal user request'],
+          ['/my-skill Body from the selected skill', '/my-skill Body from the selected skill'],
+        ] as const) {
+          const sessionId = crypto.randomUUID();
+          await idb.put('sessions', { sessionId, createdAt: 1, messagesV2: true, msgIndex: [] });
+          const message = { id: crypto.randomUUID(), role: 'user' as const, content, when: 2 };
+          const saved = await turns.appendMessage(sessionId, message);
+          expect(saved.title).toBe(title);
+          expect(saved.messages).toEqual([message]);
+          await turns.appendMessage(sessionId, { ...message, id: crypto.randomUUID(), content: 'Follow up' });
+          expect((await turns.get(sessionId))!.title).toBe(title ?? 'Follow up');
+        }
+      } finally { backend.close(); }
+    });
+
+    test(`${name}: real appended file bodies cannot enter titles through inner fence tokens`, async () => {
+      const backend = await makeBackend();
+      const { idb } = backend;
+      const turns = createSessionTurnStore({ idb, notFound: (id) => new Error(id) });
+      const bytes = readFileSync(new URL('../../../extension/peerd-runtime/tools/prompt-wrap.js', import.meta.url));
+      const attachment = {
+        name: 'prompt-wrap.js', mediaType: 'text/javascript', size: bytes.length,
+        data: bytes.toString('base64'),
+      };
+      const converted = {
+        ...attachment, name: 'converted.docx',
+        mediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        text: bytes.toString(), data: undefined,
+      };
+      const compose = async (text: string) => {
+        const result = await composeTurn({ text }, {
+          kernelCall: async (operation) => ({
+            ok: true, outcomeKnown: true, value: operation === 'turn.compose.capture-tab'
+              ? { origin: 'https://example.test', snapshot: {
+                title: 'Page', url: 'https://example.test/', text: bytes.toString(),
+              } } : { content: bytes.toString() },
+          }),
+        });
+        if (!result.ok) throw new Error(result.code);
+        return result.value.text;
+      };
+      try {
+        for (const [text, title, attachments, truncated = false] of [
+          ['Review', 'Review', [attachment]],
+          ['', undefined, [attachment]],
+          [await compose('@tab summarize this page'), 'summarize this page', [attachment]],
+          [await compose('Compare @tab with @file:prompt-wrap.js please'), 'Compare with please', [attachment, attachment]],
+          ['Review', 'Review', [converted]],
+          ['Review', 'Review', [attachment], true],
+        ] as const) {
+          const prepared = prepareUserAttachments({ text, attachments: [...attachments] });
+          const content = truncated ? prepared.text.slice(0, -'</peerd_file>'.length) : prepared.text;
+          const sessionId = crypto.randomUUID();
+          await idb.put('sessions', { sessionId, createdAt: 1, messagesV2: true, msgIndex: [] });
+          const message = {
+            id: crypto.randomUUID(), role: 'user' as const, content,
+            attachments: prepared.attachments as import('../../../extension/peerd-provider/types.js').Attachment[], when: 2,
+          };
+          const saved = await turns.appendMessage(sessionId, message);
+          expect(saved.title).toBe(title);
+          expect(saved.messages).toEqual([message]);
+          expect(saved.messages[0]!.content).toContain(bytes.toString());
+          expect(prepared.text.endsWith(`\n${bytes}\n</peerd_file>`)).toBe(true);
+        }
+      } finally { backend.close(); }
     });
 
     test(`${name}: a foreign message ID cannot overwrite or patch another session`, async () => {

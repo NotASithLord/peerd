@@ -27,6 +27,7 @@ import {
 import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
 import { MAX_NETWORK_BUNDLE_BYTES } from '/shared/bundle/bundle.js';
 import { appSeedHandoff } from '/shared/app-seed-handoff.js';
+import { verifiedDeclaration, withDeclaration } from '/offscreen/app-declaration.js';
 import { publishFailureError, runPublishTransaction } from '/shared/publish-transaction.js';
 import { createSelfDeviceHost } from '/offscreen/dweb-self.js';
 import { createAppRoomLiveness } from '/offscreen/app-room-liveness.js';
@@ -73,6 +74,16 @@ const refreshPeerPolicy = () => policyRead ??= (async () => {
 // base handle activates, never when a successor kernel adopts the existing
 // lease. Bound with hostEpoch, this makes a hidden stop/restart observable.
 const manualInstalls = createImmutableInstallOwner();
+/** @param {string} kind @param {string} address @param {unknown} [appId] */
+const installAttemptKey = (kind, address, appId) => {
+  if (!['address', 'install', 'update'].includes(kind)) throw new Error('invalid-install-kind');
+  if (kind === 'update' && (typeof appId !== 'string' || !appId || appId.length > 256)) throw new Error('appId-required');
+  return JSON.stringify([kind, immutableAppRoot(address).address, kind === 'update' ? appId : null]);
+};
+/** @param {any} msg */
+const discoveredAttemptKey = (msg) => installAttemptKey(msg.type === 'dweb/base-host/update-app' ? 'update' : 'install',
+  typeof msg.uri === 'string' ? msg.uri.replace(/^peerd:\/\/did:key:/, 'dwapp://content/') : '', msg.appId);
+
 let meshGeneration = 0;
 /** @type {string | null} */
 let activeFeatureHostEpoch = null;
@@ -801,7 +812,7 @@ const handleRoomOpUnlocked = async (msg, current = () => true) => {
       announce: async () => {
         const a = prepared;
         const r = await swEffectCall('dweb/app-install', {
-          appId, ...appSeedHandoff(a, manifest, payload),
+          appId, ...appSeedHandoff(withDeclaration(a), manifest, payload),
           publicationGeneration: msg.publicationGeneration,
         });
         if (!r?.ok) throw publishFailureError(r, 'install failed');
@@ -939,6 +950,20 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
   (async () => {
     try {
       switch (msg.type) {
+        // These host controls never wait on the operation they need to cancel.
+        case 'dweb/base-host/install-status': {
+          const target = immutableAppRoot(msg.address);
+          sendResponse({ ok: true, attempt: manualInstalls.status(installAttemptKey(msg.kind ?? 'address', target.address, msg.appId)) });
+          return;
+        }
+        case 'dweb/base-host/cancel-install': {
+          const target = immutableAppRoot(msg.address);
+          if (typeof msg.attemptId !== 'string' || msg.attemptId.length > 64) {
+            sendResponse({ ok: false, error: 'install-attempt-required' }); return;
+          }
+          sendResponse(manualInstalls.cancel(installAttemptKey(msg.kind ?? 'address', target.address, msg.appId), msg.attemptId));
+          return;
+        }
         // Parsing uses this existing privileged host, never the mesh start path.
         case 'dweb/base-host/parse-address': {
           sendResponse({ ok: true, address: immutableAppRoot(msg.address).address });
@@ -947,17 +972,20 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
         case 'dweb/base-host/inspect-address':
         case 'dweb/base-host/install-address': {
           const target = immutableAppRoot(msg.address);
-          const execute = async () => {
+          /** @param {{signal?:AbortSignal,beginCommit?:()=>void,progress?:(value:any)=>void}} [control] */
+          const execute = async (control = {}) => {
             const h = await start();
             const client = /** @type {any} */ (await loadDweb());
             const verified = await client.fetchImmutableApp({ address: target.address,
-              fetchApp: (/** @type {string} */ uri) => h.base.fetchApp(uri) });
+              fetchApp: (/** @type {string} */ uri) => h.base.fetchApp(uri, { signal: control.signal, onProgress: control.progress }) });
+            control.signal?.throwIfAborted();
             if (handle !== h) throw new Error('dweb-generation-retired');
             if (msg.type === 'dweb/base-host/inspect-address') {
-              return { ok: true, summary: client.immutableAppSummary(verified) };
+              return { ok: true, summary: { ...client.immutableAppSummary(verified), declared: verifiedDeclaration(verified.app) } };
             }
             // why: a manual immutable install has no mutable discovery lineage.
             // Revalidation above pins the same signer/revision the user inspected.
+            control.beginCommit?.();
             const appId = mintAppId();
             const ownerId = appContentOwner(appId, 'seed');
             const { announced: installed } = await runPublishTransaction({
@@ -969,7 +997,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
                 const summary = client.immutableAppSummary(verified);
                 const a = verified.app;
                 const result = await swEffectCall('dweb/app-install', {
-                  appId, ...appSeedHandoff(a, verified.manifest, verified.payload), name: summary.name ?? a.name,
+                  appId, ...appSeedHandoff(withDeclaration(a), verified.manifest, verified.payload), name: summary.name ?? a.name,
                   publicationGeneration: msg.publicationGeneration,
                 });
                 if (!result?.ok) throw publishFailureError(result, 'install failed');
@@ -982,7 +1010,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
             return { ok: true, ...installed };
           };
           sendResponse(await (msg.type === 'dweb/base-host/install-address'
-            ? manualInstalls.run(target.address, msg.existing, execute) : execute()));
+            ? manualInstalls.run(installAttemptKey('address', target.address), msg.existing, execute) : execute()));
           return;
         }
         case 'dweb/base-host/start': { await start(); sendResponse({ ok: true, ...status() }); return; }
@@ -1323,45 +1351,46 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
             });
             return;
           }
-          const { manifest, payload } = await h.base.fetchApp(msg.uri, { expectedRuntime: { value: identity?.runtime } });
-          const publisherError = discoveredIdentityError(identity, {
-            manifestPublisher: manifest.publisher,
-          });
-          if (publisherError) {
-            sendResponse({
-              ok: false, error: publisherError, outcomeKind: 'pre-effect-failure',
+          sendResponse(await manualInstalls.run(discoveredAttemptKey(msg), null, async (control) => {
+            const { manifest, payload } = await h.base.fetchApp(msg.uri, { signal: control.signal, onProgress: control.progress, expectedRuntime: { value: identity?.runtime } });
+            const publisherError = discoveredIdentityError(identity, {
+              manifestPublisher: manifest.publisher,
             });
-            return;
-          }
-          const client = /** @type {any} */ (await loadDweb());
-          const prepared = await client.prepareAppBundle({ uri: msg.uri, manifest, payload, name: msg.name,
-            dwappId: identity?.dwappId ?? null, slug: identity?.slug ?? null, seq: identity?.seq ?? null });
-          const appId = mintAppId();
-          const ownerId = appContentOwner(appId, 'seed');
-          const { announced: installed } = await runPublishTransaction({
-            publish: async () => {
-              const hash = await h.base.seedApp({ manifest, payload });
-              return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
-            },
-            announce: async () => {
-              const a = prepared;
-              const r = await swEffectCall('dweb/app-install', {
-                appId, ...appSeedHandoff(a, manifest, payload),
-                publicationGeneration: msg.publicationGeneration,
-              });
-              if (!r?.ok) throw publishFailureError(r, 'install failed');
-              return { app: r.app, warning: r.warning };
-            },
-            rollback: ({ hash, ownershipAdded }) => {
-              if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
-            },
-          });
-          log(`installed app "${installed.app?.name ?? msg.name}" from the dweb`);
-          sendResponse({
-            ok: true,
-            app: installed.app,
-            ...(installed.warning ? { warning: installed.warning } : {}),
-          });
+            if (publisherError) {
+              return { ok: false, error: publisherError, outcomeKind: 'pre-effect-failure' };
+            }
+            const client = /** @type {any} */ (await loadDweb());
+            control.progress({ phase: 'verifying' });
+            const prepared = await client.prepareAppBundle({ uri: msg.uri, manifest, payload, name: msg.name,
+              dwappId: identity?.dwappId ?? null, slug: identity?.slug ?? null, seq: identity?.seq ?? null });
+            const appId = mintAppId();
+            const ownerId = appContentOwner(appId, 'seed');
+            control.beginCommit();
+            const { announced: installed } = await runPublishTransaction({
+              publish: async () => {
+                const hash = await h.base.seedApp({ manifest, payload });
+                return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
+              },
+              announce: async () => {
+                const a = prepared;
+                const r = await swEffectCall('dweb/app-install', {
+                  appId, ...appSeedHandoff(withDeclaration(a), manifest, payload),
+                  publicationGeneration: msg.publicationGeneration,
+                });
+                if (!r?.ok) throw publishFailureError(r, 'install failed');
+                return { app: r.app, warning: r.warning };
+              },
+              rollback: ({ hash, ownershipAdded }) => {
+                if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
+              },
+            });
+            log(`installed app "${installed.app?.name ?? msg.name}" from the dweb`);
+            return {
+              ok: true,
+              app: installed.app,
+              ...(installed.warning ? { warning: installed.warning } : {}),
+            };
+          }));
           return;
         }
         // Update one installed App through the same verified fetch path as install.
@@ -1376,72 +1405,75 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
             sendResponse({ ok: false, error: streamError, outcomeKind: 'pre-effect-failure' });
             return;
           }
-          const { manifest, payload } = await h.base.fetchApp(msg.uri, { expectedRuntime: { value: identity?.runtime } });
-          const publisherError = discoveredIdentityError(identity, {
-            manifestPublisher: manifest.publisher,
-          });
-          if (publisherError) {
-            sendResponse({ ok: false, error: publisherError, outcomeKind: 'pre-effect-failure' });
-            return;
-          }
-          const client = /** @type {any} */ (await loadDweb());
-          const prepared = await client.prepareAppBundle({ uri: msg.uri, manifest, payload, name: msg.name,
-            dwappId: identity?.dwappId ?? null, slug: identity?.slug ?? null, seq: identity?.seq ?? null });
-          const ownerId = appContentOwner(msg.appId, 'seed');
-          /** @type {string[]} */
-          let cleanupHashes = [];
-          /** @type {string[]} */
-          const remainingCleanupHashes = [];
-          const { announced: updated } = await runPublishTransaction({
-            publish: async () => {
-              const hash = await h.base.seedApp({ manifest, payload });
-              return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
-            },
-            announce: async () => {
-              const a = prepared;
-              const r = await swEffectCall('dweb/app-update', {
-                appId: msg.appId,
-                publicationGeneration: msg.publicationGeneration,
-                ...(msg.strategy === 'replace' || msg.strategy === 'fork'
-                  ? { strategy: msg.strategy, conflictToken: msg.conflictToken }
-                  : {}),
-                ...appSeedHandoff(a, manifest, payload),
-              });
-              if (!r?.ok) throw Object.assign(publishFailureError(r, 'update failed'), {
-                conflictToken: r?.conflictToken,
-                requiresAction: r?.requiresAction,
-              });
-              // Only the committed repository transition knows which old
-              // versions are no longer retained by the resulting App.
-              cleanupHashes = Array.isArray(r.cleanupHashes)
-                ? [...new Set(r.cleanupHashes.filter((/** @type {unknown} */ hash) => typeof hash === 'string'))]
-                : [];
-              return { app: r.app, warning: r.warning, fork: r.fork };
-            },
-            rollback: ({ hash, ownershipAdded }) => {
-              if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
-            },
-            supersede: () => {
-              for (const hash of cleanupHashes) {
-                try { unserveTrackedHash(h, ownerId, hash); }
-                catch { remainingCleanupHashes.push(hash); }
-              }
-            },
-          });
-          const warnings = [...new Set([
-            ...(updated.warning ? [updated.warning] : []),
-            ...(remainingCleanupHashes.length ? ['previous-version-cleanup-pending'] : []),
-          ])];
-          log(`updated app "${updated.app?.name ?? msg.name}" to a newer dweb version`);
-          sendResponse({
-            ok: true,
-            app: updated.app,
-            ...(updated.fork ? { fork: updated.fork } : {}),
-            cleanupHashes,
-            pendingUnserveHashes: remainingCleanupHashes,
-            ...(remainingCleanupHashes.length ? { cleanupPending: true } : {}),
-            ...(warnings.length ? { warning: warnings[0], warnings } : {}),
-          });
+          sendResponse(await manualInstalls.run(discoveredAttemptKey(msg), null, async (control) => {
+            const { manifest, payload } = await h.base.fetchApp(msg.uri, { signal: control.signal, onProgress: control.progress, expectedRuntime: { value: identity?.runtime } });
+            const publisherError = discoveredIdentityError(identity, {
+              manifestPublisher: manifest.publisher,
+            });
+            if (publisherError) {
+              return { ok: false, error: publisherError, outcomeKind: 'pre-effect-failure' };
+            }
+            const client = /** @type {any} */ (await loadDweb());
+            control.progress({ phase: 'verifying' });
+            const prepared = await client.prepareAppBundle({ uri: msg.uri, manifest, payload, name: msg.name,
+              dwappId: identity?.dwappId ?? null, slug: identity?.slug ?? null, seq: identity?.seq ?? null });
+            const ownerId = appContentOwner(msg.appId, 'seed');
+            /** @type {string[]} */
+            let cleanupHashes = [];
+            /** @type {string[]} */
+            const remainingCleanupHashes = [];
+            control.beginCommit();
+            const { announced: updated } = await runPublishTransaction({
+              publish: async () => {
+                const hash = await h.base.seedApp({ manifest, payload });
+                return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
+              },
+              announce: async () => {
+                const a = prepared;
+                const r = await swEffectCall('dweb/app-update', {
+                  appId: msg.appId,
+                  publicationGeneration: msg.publicationGeneration,
+                  ...(msg.strategy === 'replace' || msg.strategy === 'fork'
+                    ? { strategy: msg.strategy, conflictToken: msg.conflictToken }
+                    : {}),
+                  ...appSeedHandoff(withDeclaration(a), manifest, payload),
+                });
+                if (!r?.ok) throw Object.assign(publishFailureError(r, 'update failed'), {
+                  conflictToken: r?.conflictToken,
+                  requiresAction: r?.requiresAction,
+                });
+                // Only the committed repository transition knows which old
+                // versions are no longer retained by the resulting App.
+                cleanupHashes = Array.isArray(r.cleanupHashes)
+                  ? [...new Set(r.cleanupHashes.filter((/** @type {unknown} */ hash) => typeof hash === 'string'))]
+                  : [];
+                return { app: r.app, warning: r.warning, fork: r.fork };
+              },
+              rollback: ({ hash, ownershipAdded }) => {
+                if (ownershipAdded) unserveTrackedHash(h, ownerId, hash);
+              },
+              supersede: () => {
+                for (const hash of cleanupHashes) {
+                  try { unserveTrackedHash(h, ownerId, hash); }
+                  catch { remainingCleanupHashes.push(hash); }
+                }
+              },
+            });
+            const warnings = [...new Set([
+              ...(updated.warning ? [updated.warning] : []),
+              ...(remainingCleanupHashes.length ? ['previous-version-cleanup-pending'] : []),
+            ])];
+            log(`updated app "${updated.app?.name ?? msg.name}" to a newer dweb version`);
+            return {
+              ok: true,
+              app: updated.app,
+              ...(updated.fork ? { fork: updated.fork } : {}),
+              cleanupHashes,
+              pendingUnserveHashes: remainingCleanupHashes,
+              ...(remainingCleanupHashes.length ? { cleanupPending: true } : {}),
+              ...(warnings.length ? { warning: warnings[0], warnings } : {}),
+            };
+          }));
           return;
         }
         case 'dweb/base-host/stop': {

@@ -131,6 +131,17 @@ const makeRecorder = (ctx, state) => {
 };
 
 async function runState(ctx, state, results) {
+  // why: real VM boot needs the browser's cross-origin isolation guarantees;
+  // a private profile keeps this state independent of the shared fixture browser.
+  if (state.isolatedWebSecurity === true) {
+    const isolated = await launchPeerd({ extensionDir: ctx.extensionDir, enforceWebSecurity: true });
+    try {
+      await unlockAndReady(isolated.page);
+      await freezeAnimations(isolated);
+      await runState(isolated, { ...state, isolatedWebSecurity: false }, results);
+    } finally { await isolated.close(); }
+    return;
+  }
   const rec = makeRecorder(ctx, state);
   if (state.responder) ctx.setModelResponder(state.responder);
   try {
@@ -161,7 +172,7 @@ async function main() {
   const postUnlock = states.filter((s) => s.phase === 'post-unlock').sort((a, b) =>
     postUnlockPriority(a) - postUnlockPriority(b));
   const results = [];
-  const ctx = await launchPeerd({ extensionDir: EXTENSION_DIR });
+  const ctx = await launchPeerd({ extensionDir: EXTENSION_DIR, enforceWebSecurity: process.argv.includes('--enforce-web-security') });
   try {
     await freezeAnimations(ctx);
     for (const s of preUnlock) await runState(ctx, s, results);

@@ -246,13 +246,15 @@ export const createKernelColdReceipts = ({
           throw new Error('kernel-cold-webrequest-options-invalid');
         }
         const dispatch = (/** @type {any[]} */ ...args) => {
-          const receipt = capture(key, args);
           let result;
           try { result = listener(...args); }
           catch (error) {
+            void capture(key, args)?.catch(() => {});
             try { globalThis.reportError?.(error); } catch { /* reporting only */ }
             return undefined;
           }
+          // why: an immediate decision has no pending work to recover.
+          const receipt = typeof result?.then === 'function' ? capture(key, args) : null;
           if (receipt) {
             void receipt.then((entry) => Promise.resolve(result)
               .then(() => settle(entry.id), () => {})).catch(() => {});

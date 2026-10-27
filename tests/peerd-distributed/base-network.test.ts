@@ -38,6 +38,52 @@ const clique = async (n: number) => {
   return peers;
 };
 
+test('an isolated seeder reads the original publisher bytes locally and honors revocation', async () => {
+  const denied = new Set<string>();
+  const publisher = await spawn('publisher');
+  const seeder = await spawn('isolated-seeder', { userBlocked: (did: string) => denied.has(did) });
+  try {
+    const shared = await publisher.base.publishApp({ name: 'offline seed', entry: 'index.html',
+      files: { 'index.html': '<h1>Original publisher</h1>', 'module.wasm': new Uint8Array([0,97,115,109,1,0,0,0]) } });
+    const original = await publisher.base.fetchApp(shared.uri);
+    await seeder.base.seedApp(original);
+    publisher.base.close(); publisher.mesh.close();
+    expect(seeder.mesh.peers()).toHaveLength(0);
+    const local = await seeder.base.fetchApp(shared.uri);
+    expect(local.payload).toEqual(original.payload);
+    expect(local.manifest.publisher).toBe(publisher.identity.did);
+    expect(local.providers).toEqual([seeder.identity.did]);
+    expect(local.verifiedContributors).toEqual([]);
+    const substituted = shared.uri.replace(publisher.identity.did, seeder.identity.did);
+    await expect(seeder.base.fetchApp(substituted)).rejects.toThrow('publisher');
+    const heldChunk = seeder.base.node.content.getChunk(original.manifest.chunks[0].hash)!;
+    heldChunk[0] ^= 1;
+    await expect(seeder.base.fetchApp(shared.uri)).rejects.toThrow('chunk verification failed');
+    heldChunk[0] ^= 1;
+    denied.add(publisher.identity.did);
+    await expect(seeder.base.fetchApp(shared.uri)).rejects.toThrow('publisher-user-blocked');
+    denied.clear();
+    await seeder.base.unshareApp({ publisher: publisher.identity.did, hash: shared.hash });
+    await expect(seeder.base.fetchApp(shared.uri, { timeoutMs: 100 })).rejects.toThrow();
+  } finally { for (const peer of [publisher, seeder]) { peer.base.close(); peer.mesh.close(); } }
+});
+
+test('local seeded reads reject a forged signature even when the address matches its hash', async () => {
+  const publisher = await spawn('publisher');
+  const seeder = await spawn('seeder');
+  try {
+    const shared = await publisher.base.publishApp({ name: 'signature test', entry: 'index.html', files: { 'index.html': 'test' } });
+    const original = await publisher.base.fetchApp(shared.uri);
+    const forged = structuredClone(original.manifest);
+    forged.sig = (forged.sig[0] === 'A' ? 'B' : 'A') + forged.sig.slice(1);
+    // The low-level content store is not a signature authority. The local read
+    // boundary must verify even when an internal caller supplied the bytes.
+    const hash = await seeder.base.seedApp({ manifest: forged, payload: original.payload });
+    const uri = shared.uri.replace(shared.hash, hash);
+    await expect(seeder.base.fetchApp(uri)).rejects.toThrow('signature invalid');
+  } finally { for (const peer of [publisher, seeder]) { peer.base.close(); peer.mesh.close(); } }
+});
+
 describe('base network — the always-on lobby + sub-protocols', () => {
   test('unsupported discovery rollout profiles fail before acquiring mesh resources', async () => {
     const identity = await generateIdentity();
@@ -140,6 +186,57 @@ describe('base network — the always-on lobby + sub-protocols', () => {
 
 
 describe('provider reachability and leases', () => {
+  test('an unlinked newcomer fetches from a surviving seeder across publisher lease expiry', async () => {
+    let clock = 1000;
+    const publisher = await spawn('publisher', { now: () => clock });
+    const seeder = await spawn('seeder', { now: () => clock });
+    const index = await spawn('index', { now: () => clock });
+    const readers: Awaited<ReturnType<typeof spawn>>[] = [];
+    try {
+      await link(publisher, seeder);
+      await link(publisher, index);
+      await link(seeder, index);
+      const { uri } = await publisher.base.publishApp({
+        name: 'surviving seed', entry: 'index.html', files: { 'index.html': 'publisher-independent bytes' },
+      });
+      await publisher.base.announceProvider(uri);
+      const original = await seeder.base.fetchApp(uri, { timeoutMs: 500 });
+      await seeder.base.seedApp(original);
+      await seeder.base.announceProvider(uri);
+      publisher.base.close();
+      // why: exercise the signed provider store and renewal owner together,
+      // beyond multiple original leases, without a wall-clock hour-long test.
+      for (let round = 0; round < 6; round++) {
+        clock += 31 * 60_000;
+        await seeder.base.refreshProviders();
+        const providers = await index.base.findProviders(uri);
+        expect(providers).toContain(seeder.identity.did);
+        if (round > 0) expect(providers).not.toContain(publisher.identity.did);
+      }
+      const calls: any[] = [];
+      let reader: Awaited<ReturnType<typeof spawn>>;
+      reader = await spawn('newcomer', { now: () => clock, dial: async (contact: any) => {
+        calls.push(contact);
+        if (contact.did !== seeder.identity.did || contact.hints?.broker !== index.identity.did) return false;
+        await link(reader, seeder);
+        return true;
+      } });
+      readers.push(reader);
+      await link(reader, index);
+      // why: force provider discovery to carry the usable referral rather
+      // than accidentally finding the seeder through FIND_NODE routing.
+      index.base.node.dht.routingTable.remove(seeder.identity.did);
+      expect(reader.mesh.peers().some((peer: any) => peer.did === seeder.identity.did)).toBe(false);
+      const fetched = await reader.base.fetchApp(uri, { timeoutMs: 500 });
+      expect(fetched.manifest).toEqual(original.manifest);
+      expect(fetched.payload).toEqual(original.payload);
+      expect(calls.some(contact => contact.did === seeder.identity.did
+        && contact.hints?.broker === index.identity.did)).toBe(true);
+    } finally {
+      for (const peer of [publisher, seeder, index, ...readers]) peer.base.close();
+    }
+  });
+
   test('dials a discovered provider through the peer supplying its referral', async () => {
     const publisher = await spawn('publisher');
     const broker = await spawn('broker');
@@ -473,4 +570,103 @@ test('local recovery yields the publication lane even when unrelated peers are l
     recovering = false;
     expect((await publisher.base.fetchApp(shared.uri)).manifest.publisher).toBe(publisher.identity.did);
   } finally { publisher.base.close(); seeder.base.close(); }
+});
+
+
+test('recent missing-provider evidence excludes lookup errors and clears on retry, policy and close', async () => {
+  let time = 100;
+  const publisher = await spawn('publisher');
+  const reader = await spawn('reader', { now: () => time });
+  try {
+    const shared = await publisher.base.publishApp({ name: 'retry', entry: 'index.html', files: { 'index.html': 'retry' } });
+    const { card } = await publisher.base.publishMeta({ slug: 'retry', name: 'retry', head: {
+      version_id: shared.hash, content_addr: shared.uri, size: shared.packedBytes,
+    } });
+    await reader.base.discovery.ingest(card);
+    const evidence = () => reader.base.heardDwapps()[0]?.retrieval;
+    expect(evidence()).toBeNull();
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow('no peer is serving');
+    expect(evidence()?.outcome).toBe('no-provider-found');
+    time += 30_000;
+    expect(evidence()).toBeNull();
+    reader.base.node.dht.findProviderContacts = async () => { throw new Error('lookup failed'); };
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow();
+    expect(evidence()).toBeNull();
+    reader.base.node.dht.findProviderContacts = async (_key: string, options?: { onQueryFailure?: () => void }) => { options?.onQueryFailure?.(); return []; };
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow();
+    expect(evidence()).toBeNull();
+    reader.base.node.dht.findProviderContacts = async () => [];
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow();
+    expect(evidence()).not.toBeNull();
+    reader.base.enforceUserPolicy();
+    expect(evidence()).toBeNull();
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow();
+    const original = await publisher.base.fetchApp(shared.uri);
+    await reader.base.seedApp(original);
+    expect((await reader.base.fetchApp(shared.uri)).payload).toEqual(original.payload);
+    expect(evidence()).toBeNull();
+    await reader.base.unshareApp({ publisher: publisher.identity.did, hash: shared.hash });
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow();
+    expect(evidence()).not.toBeNull();
+    reader.base.close();
+    expect(evidence()).toBeNull();
+  } finally { publisher.base.close(); reader.base.close(); }
+});
+
+test('caller cancellation aborts lookup without recording missing providers', async () => {
+  const reader = await spawn('cancel lookup'); const publisher = await spawn('publisher');
+  const ac = new AbortController(); let lookupSignal: AbortSignal | undefined;
+  let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+  try {
+    const shared = await publisher.base.publishApp({ name: 'cancel lookup', entry: 'index.html', files: { 'index.html': 'test' } });
+    const { card } = await publisher.base.publishMeta({ slug: 'cancel-lookup', name: 'cancel lookup', head: { version_id: shared.hash, content_addr: shared.uri, size: shared.packedBytes } });
+    await reader.base.discovery.ingest(card);
+    reader.base.node.dht.findProviderContacts = async (_key: string, { signal }: any) => {
+      lookupSignal = signal; entered();
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+      return [];
+    };
+    const outcome = reader.base.fetchApp(shared.uri, { signal: ac.signal }).catch(error => error);
+    await started; ac.abort();
+    expect((await outcome).name).toBe('AbortError');
+    expect(lookupSignal?.aborted).toBe(true);
+    expect(reader.base.heardDwapps()[0]?.retrieval).toBeNull();
+    reader.base.node.dht.findProviderContacts = async () => [];
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow('no peer');
+  } finally { for (const peer of [reader, publisher]) { peer.base.close(); peer.mesh.close(); } }
+});
+
+test('caller cancellation aborts active provider dials without starting queued referrals', async () => {
+  const contacts = await Promise.all(Array.from({ length: 8 }, () => generateIdentity()));
+  const signals: AbortSignal[] = []; const ac = new AbortController();
+  let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+  const reader = await spawn('cancel dials', { dial: async (_contact: unknown, { signal }: { signal: AbortSignal }) => {
+    signals.push(signal); if (signals.length === 3) entered();
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+    return false;
+  } });
+  reader.base.node.dht.findProviderContacts = async () => contacts;
+  try {
+    const outcome = reader.base.fetchApp(`peerd://${contacts[0].did}/${'0'.repeat(64)}`, { signal: ac.signal }).catch(error => error);
+    await started; ac.abort();
+    expect((await outcome).name).toBe('AbortError');
+    expect(signals).toHaveLength(3);
+    expect(signals.every(signal => signal.aborted)).toBe(true);
+  } finally { reader.base.close(); reader.mesh.close(); }
+}, 2000);
+
+test('cancelled linked retrieval does not fall through to DHT and permits a fresh retry', async () => {
+  const publisher = await spawn('publisher'); const reader = await spawn('reader');
+  const ac = new AbortController(); let lookups = 0;
+  try {
+    await link(reader, publisher);
+    const shared = await publisher.base.publishApp({ name: 'cancel transfer', entry: 'index.html', files: { 'index.html': 'retry' } });
+    reader.base.node.dht.findProviderContacts = async () => { lookups++; return []; };
+    await expect(reader.base.fetchApp(shared.uri, { signal: ac.signal,
+      onProgress: () => ac.abort() })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(lookups).toBe(0);
+    const retry = await reader.base.fetchApp(shared.uri);
+    expect(retry.payload.byteLength).toBe(retry.manifest.size);
+    expect(reader.mesh.hasLink(publisher.identity.did)).toBe(true);
+  } finally { for (const peer of [reader, publisher]) { peer.base.close(); peer.mesh.close(); } }
 });

@@ -20,6 +20,11 @@
 // package. Please recharge." on HTTP 429 (NOT 402), so 'insufficient balance'
 // and 'recharge' are needed or a spent GLM account gets 3 pointless retries
 // then a misleading generic 429 with no failover.
+// why no bare 'billing', 'quota' or 'budget': transient throttles carry them
+// too (OpenAI's free-tier per-minute 429 links /account/billing; Google-routed
+// OpenRouter throttles say "quota"). OpenAI's real quota stop always carries
+// insufficient_quota, and its billing stops say billing_not_active or
+// "billing hard limit".
 const HARD_LIMIT_NEEDLES = Object.freeze([
   'credit balance',
   'out of credit',
@@ -28,15 +33,14 @@ const HARD_LIMIT_NEEDLES = Object.freeze([
   'insufficient_quota',
   'insufficient funds',
   'recharge',
-  'billing',
+  'billing_not_active',
+  'billing hard limit',
   'payment required',
   'spending limit',
   'spend limit',
   'monthly limit',
   'usage limit',
   'plan limit',
-  'quota',
-  'budget',
 ]);
 
 /**

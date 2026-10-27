@@ -8,6 +8,7 @@ import { appSeedHandoff, decodeAppSeedHandoff } from '../../extension/shared/app
 import { packBundle } from '../../extension/shared/bundle/bundle.js';
 import { buildManifest } from '../../extension/peerd-distributed/content/manifest.js';
 import { generateIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
+import { encodeDidKey } from '../../extension/shared/address/did.js';
 
 const offscreenSender = { url: 'moz-extension://peerd/offscreen/offscreen.html' };
 
@@ -1811,6 +1812,101 @@ test('policy snapshot is host-only and a persisted user ban refuses detached App
   expect(created).toBe(0);
 });
 
+const peer = (n: number) => encodeDidKey(new Uint8Array(32).fill(n));
+type StoredPolicy = { v: number, revision: number, blocked: string[] };
+type HostMessage = { type: string, policy?: StoredPolicy };
+const policyStore = () => {
+  let value: StoredPolicy | null = null;
+  let writes = 0;
+  return {
+    kv: { get: async () => structuredClone(value), set: async (_key: string, next: StoredPolicy) => { writes++; value = structuredClone(next); } },
+    stored: () => value, writes: () => writes,
+  };
+};
+
+test('Home blocks, lists and unblocks makers in the durable policy, with no host and the network setting off', async () => {
+  const store = policyStore();
+  const sent: unknown[] = [];
+  const { deps } = baseDeps({
+    kv: store.kv, settingsStore: { get: () => ({ dwebEnabled: false }) },
+    browser: { runtime: { getContexts: async () => [], sendMessage: async (message: unknown) => { sent.push(message); return { ok: true }; } } },
+  });
+  const routes = makeDwebRoutes(deps);
+  expect(await routes['dweb/blocked-peers']()).toEqual({ ok: true, blocked: [] });
+  expect(await routes['dweb/peer-block']({ did: peer(2) })).toMatchObject({ ok: true, durable: true, inactive: true, revision: 1 });
+  expect(await routes['dweb/peer-block']({ did: peer(1) })).toMatchObject({ ok: true, durable: true, revision: 2 });
+  expect(await routes['dweb/blocked-peers']()).toEqual({ ok: true, blocked: [peer(1), peer(2)].sort() });
+  expect(await routes['dweb/peer-unblock']({ did: peer(2) })).toMatchObject({ ok: true, durable: true, revision: 3 });
+  expect(await routes['dweb/blocked-peers']()).toEqual({ ok: true, blocked: [peer(1)] });
+  // No host runs, so the block neither messaged nor started one.
+  expect(sent).toEqual([]);
+});
+
+test('a Home block reaches a live host as the stored policy; a malformed did or a locked vault writes nothing', async () => {
+  const store = policyStore();
+  let locked = false;
+  const sent: HostMessage[] = [];
+  const { deps } = baseDeps({
+    kv: store.kv, vault: { isLocked: () => locked },
+    browser: { runtime: {
+      getContexts: async () => [{ contextType: 'OFFSCREEN_DOCUMENT' }],
+      sendMessage: async (message: HostMessage) => { sent.push(message); return { ok: true, revision: message.policy?.revision }; },
+    } },
+  });
+  const routes = makeDwebRoutes(deps);
+  expect(await routes['dweb/peer-block']({ did: peer(3) })).toMatchObject({ ok: true, durable: true, revision: 1 });
+  expect(sent).toEqual([{ type: 'dweb/base-host/peer-policy', policy: { v: 1, revision: 1, blocked: [peer(3)] } }]);
+  // The storage arm refuses their App, as it does after the agent's dweb_block.
+  let created = 0;
+  const storage = makeDwebRoutes({ ...deps, appClient: { ...deps.appClient, create: async () => { created++; return { id: 'unexpected' }; } } });
+  expect(await storage['dweb/app-install']({ appId: 'app-blocked123', dweb: { publisher: peer(3) }, publicationGeneration: 1 }, offscreenSender))
+    .toMatchObject({ ok: false, error: 'publisher-user-blocked' });
+  expect(created).toBe(0);
+  for (const did of [undefined, 7, 'did:key:forged', `${peer(4)} `, peer(4).toUpperCase()]) {
+    expect(await routes['dweb/peer-block']({ did })).toEqual({ ok: false, error: 'invalid-peer-did', outcomeKnown: true });
+  }
+  locked = true;
+  expect(await routes['dweb/peer-unblock']({ did: peer(3) })).toEqual({ ok: false, error: 'vault-locked' });
+  expect(await routes['dweb/blocked-peers']()).toEqual({ ok: false, error: 'vault-locked' });
+  expect(store.writes()).toBe(1);
+  expect(store.stored()?.blocked).toEqual([peer(3)]);
+  expect(sent).toHaveLength(1);
+});
+
+test('a Home block retires the agent consent for that maker before the host hears the policy, and an unblock never restores it', async () => {
+  const store = policyStore();
+  // The agent's standing A2A approvals, as dweb_block's revocation sees them.
+  const approved = new Set([peer(6), peer(7)]);
+  const events: string[] = [];
+  const { deps } = baseDeps({
+    kv: store.kv,
+    revokePeer: async (did: string) => { approved.delete(did); events.push(`revoke ${did}`); },
+    browser: { runtime: {
+      getContexts: async () => [{ contextType: 'OFFSCREEN_DOCUMENT' }],
+      sendMessage: async (message: HostMessage) => { events.push(message.type); return { ok: true, revision: message.policy?.revision }; },
+    } },
+  });
+  const routes = makeDwebRoutes(deps);
+  expect(await routes['dweb/peer-block']({ did: peer(6) })).toMatchObject({ ok: true, durable: true, revision: 1 });
+  expect(events).toEqual([`revoke ${peer(6)}`, 'dweb/base-host/peer-policy']);
+  expect([...approved]).toEqual([peer(7)]);
+  expect(await routes['dweb/peer-unblock']({ did: peer(6) })).toMatchObject({ ok: true, durable: true, revision: 2 });
+  expect(events).toEqual([`revoke ${peer(6)}`, 'dweb/base-host/peer-policy', 'dweb/base-host/peer-policy']);
+  expect([...approved]).toEqual([peer(7)]);
+});
+
+test('a Home block is bound to the publication generation of its click and never spends a retired one', async () => {
+  const store = policyStore();
+  let generation = 1;
+  const { deps } = baseDeps({
+    kv: { ...store.kv, get: async () => { generation++; return store.kv.get(); } },
+    dwebPublicationGeneration: () => generation,
+    browser: { runtime: { getContexts: async () => [], sendMessage: async () => ({ ok: true }) } },
+  });
+  expect(await makeDwebRoutes(deps)['dweb/peer-block']({ did: peer(5) })).toMatchObject({ ok: false, outcomeKnown: false });
+  expect(store.writes()).toBe(0);
+});
+
 test('host policy projects malformed discovery values false without invalidating peer bans', async () => {
   for (const enabled of [true, false, undefined, null, 'true', 1]) {
     const { deps } = baseDeps({ settingsStore: { get: () => ({ dwebEnabled: true, dwebDiscoveryEnabled: enabled }) } });
@@ -1828,4 +1924,42 @@ test('cold discovery lookup preserves the publisher namespace for the DHT fallba
   expect(sent).toEqual([{
     type: 'dweb/base-host/find', dwappId: 'app-id', publisherDid: 'publisher-did', slug: 'shared-app',
   }]);
+});
+
+test('install controls bypass the occupied publication lane without acquiring a new host', async () => {
+  const address = `dwapp://content/z6MkeTG3bFFSLYVU7VqhgZxqr6YzpaGrQtFMh1uvqGy1vDnP/${'0'.repeat(64)}`;
+  let release!: () => void; const occupied = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+  let acquisitions = 0; const messages: any[] = [];
+  const { deps } = baseDeps({
+    withDwebPublication: async () => { entered(); await occupied; return { ok: true }; },
+    ensureDwebFeature: async () => { acquisitions++; },
+    browser: { runtime: { sendMessage: async (message: any) => { messages.push(message); return { ok: true, attempt: { id: 'active' } }; } } },
+  });
+  const routes = makeDwebRoutes(deps);
+  const install = routes['dweb/base/install']({ uri: 'peerd://pending' });
+  await started;
+  try {
+    expect((await within(routes['dweb/base/install-status']({ address }))).ok).toBe(true);
+    expect((await within(routes['dweb/base/cancel-install']({ address, attemptId: 'active', unrelated: 'discard' }))).ok).toBe(true);
+    expect(acquisitions).toBe(0);
+    expect(messages).toEqual([
+      { type: 'dweb/base-host/install-status', address },
+      { type: 'dweb/base-host/cancel-install', address, attemptId: 'active' },
+    ]);
+  } finally { release(); await install; }
+});
+
+test('install controls refuse missing attempt, disabled network and locked vault before host IO', async () => {
+  const address = 'bounded-address';
+  for (const overrides of [{}, { DWEB_ENABLED: false }, { vault: { isLocked: () => true } }]) {
+    const { deps, sent } = baseDeps(overrides); const routes = makeDwebRoutes(deps);
+    expect((await routes['dweb/base/cancel-install']({ address })).ok).toBe(false);
+    expect(sent).toHaveLength(0);
+    if ('DWEB_ENABLED' in overrides || 'vault' in overrides) {
+      expect((await routes['dweb/base/install-status']({ address })).ok).toBe(false);
+      expect((await routes['dweb/base/cancel-install']({ address, attemptId: 'active' })).ok).toBe(false);
+      expect(sent).toHaveLength(0);
+    }
+  }
 });

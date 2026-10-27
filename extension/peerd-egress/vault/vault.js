@@ -46,8 +46,8 @@
 // Auto-lock
 // ---------
 // Idle auto-lock is ON by default (DEFAULT_AUTO_LOCK_MS, 45min), reset on
-// every `touch()`. `setSecret`/`getSecret` touch automatically; the SW also
-// touches on user-initiated messages. The SW applies the user's persisted
+// every `touch()`. Secret access and admitted model calls reset the timer.
+// The SW applies the user's persisted
 // `vaultAutoLockMs` setting via setAutoLockMs() after async settings load
 // (0 = never). Re-unlock is cheap — a single Touch ID / Windows Hello tap
 // once a passkey is enrolled (unlockWithPrf). The default bounds how long

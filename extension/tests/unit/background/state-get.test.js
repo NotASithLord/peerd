@@ -110,7 +110,7 @@ describe('background/state-get — one-shot snapshot route', () => {
 
   it('reports one actor execution capability in both locked and unlocked state', async () => {
     const { state } = await getState();
-    expect(['available', 'unsupported', 'temporarily_unavailable'].includes(state.capabilities.actorExecution.status)).toBe(true);
+    expect(['not-started', 'available', 'unsupported', 'temporarily_unavailable'].includes(state.capabilities.actorExecution.status)).toBe(true);
     expect(typeof state.capabilities.actorExecution.retryable).toBe('boolean');
     if (state.capabilities.actorExecution.status === 'available') {
       expect(['offscreen-document-worker', 'background-page-worker'].includes(state.capabilities.actorExecution.host ?? '')).toBe(true);

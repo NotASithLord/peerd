@@ -369,6 +369,12 @@
       try {
         new WebAssembly.Module(Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0]));
         runtimeFeatures.push('wasm-core');
+        try {
+          // Same import-free v128.const probe as shared/app-runtime.js;
+          // this opaque realm must qualify independently of the parent.
+          new WebAssembly.Module(Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 10, 23, 1, 21, 0, 253, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 26, 11]));
+          runtimeFeatures.push('wasm-simd');
+        } catch (_e) { /* SIMD is optional; core remains available */ }
       } catch { /* unavailable requirements are refused by the trusted parent */ }
       port.postMessage({ type: 'runner-ready', runtimeFeatures });
     });

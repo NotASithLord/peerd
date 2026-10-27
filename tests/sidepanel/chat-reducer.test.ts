@@ -115,6 +115,15 @@ describe('reduceChat', () => {
     expect(reduceChat(streamingOn, { type: 'turn/streaming', sessionId: 'bg', streaming: false })).toBe(streamingOn);
   });
 
+  test('turn/state carries the session title and keeps it when a later push omits it', () => {
+    const titled = reduceChat(INITIAL_STATE, {
+      type: 'turn/state', session: { sessionId: 's1', messages: [{ id: 'm1' }], title: 'Plan a weekend trip' },
+    });
+    expect(titled.session.title).toBe('Plan a weekend trip');
+    const later = reduceChat(titled, { type: 'turn/state', session: { sessionId: 's1', messages: [{ id: 'm1' }, { id: 'm2' }] } });
+    expect(later.session.title).toBe('Plan a weekend trip');
+  });
+
   test('a scoped system note appears only in its owning session', () => {
     const viewed = withSession('viewed');
     const matching = reduceChat(viewed, {
@@ -140,6 +149,20 @@ describe('reduceChat', () => {
     expect(reduceChat(INITIAL_STATE, {
       type: 'turn/system-note', sessionId: 'other', text: 'Private recovery note',
     })).toBe(INITIAL_STATE);
+  });
+
+  test('cold Goal reasons hydrate once, stay scoped and clear with their receipt', () => {
+    const note = { id: 'goal-end-1', text: 'Goal run stopped (needs verification).', at: 1 };
+    const snapshot = { type: 'state', state: { session: { sessionId: 'viewed', messages: [], goalStopNote: note } } };
+    const fresh = reduceChat(INITIAL_STATE, snapshot);
+    expect(fresh.notices).toEqual([{ id: note.id, text: note.text, sessionId: 'viewed', action: null }]);
+    const repeated = reduceChat(fresh, snapshot);
+    expect(repeated.notices).toHaveLength(1);
+    expect(reduceChat(repeated, { type: 'turn/system-note', ...note, sessionId: 'viewed' })).toBe(repeated);
+    const other = reduceChat(repeated, { type: 'state', state: { session: { sessionId: 'other', messages: [] } } });
+    expect(other.notices).toHaveLength(0);
+    expect(reduceChat(other, snapshot).notices).toHaveLength(1);
+    expect(reduceChat(fresh, { type: 'state', state: { session: { sessionId: 'viewed', messages: [], goalStopNote: null } } }).notices).toHaveLength(0);
   });
 
   test('an unscoped system note remains visible for current-chat UI feedback', () => {
@@ -251,6 +274,27 @@ describe('reduceChat', () => {
     const switched = reduceChat(halted, { type: 'state', state: { session: { sessionId: 'B', messages: [] } } });
     expect(switched.cost.limitReached).toBe(false);
     expect(switched.lastError).toBe(null);
+  });
+
+  test('a failed turn keeps its error banner through the trailing turn/state; the next send or a chat switch clears it', () => {
+    const raw = "Provider 'ollama' HTTP 401: {\"error\":{\"type\":\"authentication_error\"}}";
+    const messages = [{ id: 'u1', role: 'user', content: 'hi' }, { id: 'a1', role: 'assistant', content: '', streaming: true }];
+    const live = reduceChat(withSession('A', messages), { type: 'turn/streaming', sessionId: 'A', streaming: true });
+    // the port order of a failed turn: error, the loop's final snapshot, stop, streaming:false
+    const errored = reduceChat(live, { type: 'turn/error', sessionId: 'A', messageId: 'a1', error: raw });
+    const snapshot = reduceChat(errored, { type: 'turn/state', session: { sessionId: 'A',
+      messages: [messages[0], { ...messages[1], streaming: false, error: raw }] } });
+    const settled = reduceChat(reduceChat(snapshot, { type: 'turn/stop', sessionId: 'A', messageId: 'a1' }),
+      { type: 'turn/streaming', sessionId: 'A', streaming: false });
+    expect(settled.streaming).toBe(false);
+    expect(settled.lastError).toBe(raw);
+
+    // a background chat's send leaves the viewed banner alone
+    expect(reduceChat(settled, { type: 'turn/streaming', sessionId: 'B', streaming: true }).lastError).toBe(raw);
+    // the next send in this chat clears it
+    expect(reduceChat(settled, { type: 'turn/streaming', sessionId: 'A', streaming: true }).lastError).toBe(null);
+    // so does switching chats
+    expect(reduceChat(settled, { type: 'state', state: { session: { sessionId: 'B', messages: [] } } }).lastError).toBe(null);
   });
 
   test('async-tasks/update keys the snapshot by parent session', () => {
@@ -1276,5 +1320,52 @@ describe('reduceChat — agent-tab anchoring by message_actor turn', () => {
   test('an unknown/late parentToolUseId falls back to wall-clock (no crash)', () => {
     const s = reduceChat(convo(), tab({ parentToolUseId: 'tu-not-in-view-yet' }));
     expect(s.agentTabEvents[0].turnId).toBe('u3');        // graceful fallback
+  });
+});
+
+
+describe('streaming hydration', () => {
+  const liveProjection = (sessionId: string) => {
+    const state = projected(2);
+    return { ...state, vault: { ...state.vault, locked: false, unlockedAt: 1 },
+      profile: INITIAL_STATE.profile, session: { ...state.session, sessionId } };
+  };
+  test('a chat switch clears streaming before its own live pulse', () => {
+    const running = reduceChat(withSession('a'), { type: 'turn/streaming', sessionId: 'a', streaming: true });
+    const switched = reduceChat(running, { type: 'state', state: liveProjection('b') });
+    expect(switched.streaming).toBe(false);
+    expect(reduceChat(switched, { type: 'turn/streaming', sessionId: 'a', streaming: true })).toBe(switched);
+    expect(reduceChat(switched, { type: 'turn/streaming', sessionId: 'b', streaming: true }).streaming).toBe(true);
+  });
+
+  test('an idle same-chat replay clears a missed Stop and rejects stale or foreign replays', () => {
+    const state = reduceChat({ ...withSession('a'), streaming: true }, {
+      type: 'state', state: liveProjection('a'),
+    });
+    const idle = reduceChat(state, { type: 'turn/streaming', sessionId: 'a', streaming: false,
+      replay: true, projection: state.projection });
+    expect(idle.streaming).toBe(false);
+    for (const projection of [undefined, { ...state.projection, generation: 1 },
+      { ...state.projection, generation: 3 }, { ...state.projection, authorityEpoch: 'retired-epoch' }]) {
+      expect(reduceChat(idle, { type: 'turn/streaming', sessionId: 'a', streaming: true,
+        replay: true, projection })).toBe(idle);
+    }
+    const stale = { ...liveProjection('a'), projection: { ...state.projection, generation: 1 } };
+    expect(reduceChat(idle, { type: 'state', state: stale })).toBe(idle);
+    expect(reduceChat(idle, { type: 'turn/streaming', sessionId: 'b', streaming: true,
+      replay: true, projection: state.projection })).toBe(idle);
+  });
+
+  test('a same-chat hydration pulse preserves the current turn tally', () => {
+    const state = { ...withSession('a'), streaming: true, cost: {
+      ...INITIAL_STATE.cost, turn: { cost: 3 },
+    } };
+    const hydrated = reduceChat(state, { type: 'state', state: liveProjection('a') });
+    expect(hydrated.streaming).toBe(true);
+    expect(reduceChat(hydrated, { type: 'turn/streaming', sessionId: 'a', streaming: true, replay: true, projection: hydrated.projection }).cost.turn).toEqual({ cost: 3 });
+    expect(reduceChat(hydrated, { type: 'turn/streaming', sessionId: 'a', streaming: true }).cost.turn).toBeNull();
+    expect(reduceChat(hydrated, { type: 'state', state: { ...liveProjection('b'),
+      projection: { ...liveProjection('b').projection, generation: 1 },
+    } })).toBe(hydrated);
   });
 });

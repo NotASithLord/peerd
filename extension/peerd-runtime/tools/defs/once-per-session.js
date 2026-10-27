@@ -37,7 +37,7 @@ const priorToolResultIndex = (
     for (const result of results) {
       if (result?.meta?.toolName !== toolName || typeof result?.content !== 'string'
           || !result.content.includes(marker)
-          || requireFullBody && result.content.includes('already-loaded="this session"')) {
+          || requireFullBody && (result.content.includes('already-loaded="this session"') || result.content.includes(' chars elided '))) {
         continue;
       }
       return index;

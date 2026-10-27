@@ -34,5 +34,20 @@ test('runtime extraction comes from the actual peerd.json bytes', () => {
 test('a visible namespace without compile support does not qualify the host', () => {
   const denied = { Module: class { constructor() { throw new Error('CSP'); } } } as unknown as typeof WebAssembly;
   expect(probeAppRuntime(denied)).toEqual([]);
-  expect(probeAppRuntime()).toEqual(['wasm-core']);
+  expect(probeAppRuntime()).toEqual(['wasm-core', 'wasm-simd']);
+});
+
+
+test('SIMD requires compilation support without excluding core-only engines', () => {
+  const coreOnly = { Module: class {
+    constructor(bytes: Uint8Array<ArrayBuffer>) {
+      if (bytes.includes(253)) throw new Error('SIMD not supported');
+      return new WebAssembly.Module(bytes);
+    }
+  } } as unknown as typeof WebAssembly;
+  const required = { ...core, requires: ['wasm-core', 'wasm-simd'] };
+  expect(probeAppRuntime(coreOnly)).toEqual(['wasm-core']);
+  expect(appRuntimeVerdict(required, probeAppRuntime(coreOnly))).toMatchObject({ status: 'unsupported', missing: ['wasm-simd'] });
+  expect(appRuntimeVerdict(required, probeAppRuntime()).status).toBe('supported');
+  expect(appRuntimeVerdict({ ...core, requires: ['wasm-threads'] }, probeAppRuntime()).status).toBe('unsupported');
 });

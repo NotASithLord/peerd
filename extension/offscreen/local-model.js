@@ -639,9 +639,7 @@ const museToolsPreamble = (tools) => {
  * @param {{ messages: readonly object[], system: string, tools?: readonly object[], maxTokens?: number, model?: string }} req
  * @param {(text: string) => void} onToken
  * @param {{ signal?: AbortSignal }} [opts]
- *   `signal` ends a muse generation early (the engine honors it per token,
- *   releasing its generation lease). The transformers path ignores it for now
- *   (v1 posture: runs to max_new_tokens).
+ *   Both engines stop decoding and release the generation lease after abort.
  */
 export const generateLocal = async (req, onToken, { signal } = {}) => {
   await detectDownloaded;
@@ -700,12 +698,18 @@ export const generateLocal = async (req, onToken, { signal } = {}) => {
       tools: req.tools && req.tools.length ? req.tools : undefined,
     });
     const inputs = await tokenizer(prompt);
+    if (signal?.aborted) return;
+    // why: let the decode loop release its KV cache on Stop.
+    const stopping = new t.InterruptableStoppingCriteria();
+    const interrupt = () => stopping.interrupt();
     const streamer = new t.TextStreamer(tokenizer, {
       skip_prompt: true,
       skip_special_tokens: true,
       callback_function: (/** @type {string} */ text) => { if (text) onToken(text); },
     });
-    await model.generate({ ...inputs, max_new_tokens: req.maxTokens ?? 512, do_sample: false, streamer });
+    signal?.addEventListener('abort', interrupt, { once: true });
+    try { await model.generate({ ...inputs, max_new_tokens: req.maxTokens ?? 512, do_sample: false, streamer, stopping_criteria: stopping }); }
+    finally { signal?.removeEventListener('abort', interrupt); }
   } finally {
     activeGenerations -= 1;
   }

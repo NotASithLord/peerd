@@ -21,7 +21,7 @@
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSocket } from 'node:dgram';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,7 +30,7 @@ import {
 } from '../acceptance/git-smart-http-fixture.mjs';
 import {
   rpc, evalIn, waitFor, sseText, sseToolCall, sseToolCalls, openExtPage, openWidePage, attach,
-  reloadReadyPanel,
+  reloadReadyPanel, resetSession, launchPeerd, unlockAndReady, freezeAnimations,
   sleep, setEmulatedTheme, PASSPHRASE, PANEL_METRICS, NARROW_PANEL_METRICS,
   NETWORK_GUARD_CONTROLLER_PORT, NETWORK_GUARD_OWNED_HOST,
   NETWORK_GUARD_UNRELATED_HOST, SITE_CLIENT_FIXTURE_TLS_PORT,
@@ -38,13 +38,19 @@ import {
 import { startWebFixtureServer } from './fixtures/web-suite.mjs';
 import { recordNetworkFloorVector, recordPrivateChildFloor, ordinaryProbeReached } from './network-floor-oracle.mjs';
 import { NOTEBOOK_FETCH_STATE } from './notebook-fetch-state.mjs';
+import { WEBVM_TERMINAL_STATE } from './webvm-terminal-state.mjs';
 import { WASMER_STATE } from './wasmer-state.mjs';
-import { STARTER_VISUAL_STATES } from './starter-visuals.mjs';
+import { STARTER_VISUAL_STATES, discoverSurface } from './starter-visuals.mjs';
 import { APP_RUNTIME_STATES } from './app-runtime-state.mjs';
+import { PERF_CHAT_NOTEBOOK_STATES } from './perf-chat-notebook-state.mjs';
+import { CHAT_ONBOARDING_STATES } from './chat-onboarding-state.mjs';
+import { HOME_SETTINGS_STATES } from './home-settings-state.mjs';
 import { IMMUTABLE_ADDRESS_VISUAL_STATES } from './immutable-address-visuals.mjs';
 import { CONSENT_LOCK_VISUAL_STATES } from './consent-lock-visuals.mjs';
 import { PEER_NETWORK_STATUS_STATES } from './peer-network-status-states.mjs';
 import { armVaultLockStages } from './vault-lock-stages.mjs';
+import { observeCatalogWorkerIdentity } from './catalog-worker-identity.mjs';
+import { createConsentDiagnostics, observeHosts } from './network-consent-cold.mjs';
 
 // A compact transcript probe shared by the functional states.
 const probe = (ctx) => evalIn(ctx.page, `(() => {
@@ -74,6 +80,105 @@ const clickAndSyncRedraw = (page, selector) => evalIn(page, `(async () => {
   return true;
 })()`, true);
 
+// Real key presses over CDP, the way a keyboard user drives a page. why
+// rawKeyDown for keys without text: a keyDown without `text` floods a second
+// keydown on macOS; Enter carries '\r' so native buttons activate.
+const KEY_CODES = {
+  Enter: { code: 'Enter', vk: 13, text: '\r' },
+  Escape: { code: 'Escape', vk: 27 },
+  Tab: { code: 'Tab', vk: 9 },
+};
+const pressKey = async (page, key) => {
+  const spec = KEY_CODES[key];
+  await page.send('Input.dispatchKeyEvent', {
+    type: spec.text ? 'keyDown' : 'rawKeyDown', key, code: spec.code, windowsVirtualKeyCode: spec.vk,
+    ...(spec.text ? { text: spec.text, unmodifiedText: spec.text } : {}),
+  });
+  await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: spec.code, windowsVirtualKeyCode: spec.vk });
+};
+// A real mouse click over CDP: the user gesture Chrome requires before a page
+// may open the side panel, which a scripted element.click() does not carry.
+const realClick = async (page, selector) => {
+  const point = await evalIn(page, `(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) return null;
+    el.scrollIntoView({ block: 'center' });
+    const r = el.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  })()`);
+  if (!point) throw new Error(`realClick: ${selector} not found`);
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
+  await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
+};
+
+// why: Home owns Chat only while no side-panel port is connected (single-homed
+// chat). Retire the panel document to release its port before a Home scenario,
+// then put the live panel back for the states that follow.
+const releasePanelDocument = async (ctx) => {
+  await ctx.page.send('Page.navigate', { url: 'about:blank' });
+  const released = await waitFor(() => evalIn(ctx.page, `location.href === 'about:blank'`).catch(() => false),
+    { budgetMs: 5_000, pollMs: 50 });
+  if (!released) throw new Error('the side-panel document did not release its port');
+};
+const awaitLivePanel = async (ctx) => {
+  const restored = await waitFor(() => evalIn(ctx.page,
+    `document.documentElement.dataset.peerdBootStage === 'app-ready' && !!document.querySelector('.input-bar textarea')`).catch(() => false),
+  { budgetMs: 20_000, pollMs: 80 });
+  if (!restored) throw new Error('the live side panel did not restore');
+};
+const restorePanelDocument = async (ctx, panelUrl) => {
+  await ctx.page.send('Page.navigate', { url: panelUrl });
+  await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
+  await awaitLivePanel(ctx);
+};
+
+// why: DOM attributes alone do not prove the name Chrome exposes to users.
+const checkAccessibleNames = async (page, rec, label, expected) => {
+  const { root } = await page.send('DOM.getDocument');
+  const controls = [];
+  for (const [selector, name, role = 'button'] of expected) {
+    const { nodeId } = await page.send('DOM.querySelector', { nodeId: root.nodeId, selector });
+    if (!nodeId) throw new Error(`accessible control is missing: ${selector}`);
+    const { nodes } = await page.send('Accessibility.getPartialAXTree', { nodeId, fetchRelatives: false });
+    controls.push({ selector, expected: name, expectedRole: role, name: nodes?.[0]?.name?.value, role: nodes?.[0]?.role?.value });
+  }
+  if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe(`base ${label}`, controls);
+  else rec.check(label, controls.every((control) => control.name === control.expected && control.role === control.expectedRole), JSON.stringify(controls));
+};
+
+const pressNativeKey = async (page, key, shiftKey = false) => {
+  const event = { key, code: key, windowsVirtualKeyCode: key === 'Tab' ? 9 : 27, modifiers: shiftKey ? 8 : 0 };
+  await page.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...event });
+  await page.send('Input.dispatchKeyEvent', { type: 'keyUp', ...event });
+};
+
+// Layout checks for the vault gate states. why checks: the visual lane only
+// reports, so a check is the gate. On the merge base a failed check is a
+// note, because that render only supplies the "before" picture.
+const checkGateLayout = (rec, name, pass, detail) => {
+  if (process.env.PEERD_VISUAL_BASE_RENDER === '1' && !pass) rec.observe(`merge-base: ${name}`, detail);
+  else rec.check(name, pass, JSON.stringify(detail));
+};
+const gateBox = (page) => evalIn(page, `(() => {
+  const rect = document.querySelector('.gate-card').getBoundingClientRect();
+  return { left: rect.left, top: rect.top, width: rect.width, height: rect.height, vw: innerWidth, vh: innerHeight };
+})()`);
+// One readable column, centered, in the upper third of the tab.
+const inGateColumn = (box) => box.width <= 440 && Math.abs(box.left + box.width / 2 - box.vw / 2) <= 1
+  && box.top >= box.vh * 0.15 && box.top <= box.vh / 3;
+// why read the styles: the visual lane hides the code stream, so no capture
+// shows it if it runs under the gate text again. The gate covers the stream
+// with a border image in the page color (sidepanel/styles.css).
+const gateBackdrop = (page) => evalIn(page, `(() => {
+  const card = document.querySelector('.gate-card');
+  if (!card) return null;
+  const style = getComputedStyle(card);
+  const color = getComputedStyle(document.body).backgroundColor;
+  return { image: style.borderImageSource, slice: style.borderImageSlice, color,
+    covers: style.borderImageSource.includes(color) && style.borderImageSlice.includes('fill') };
+})()`);
+
 // why: these scenarios model a user who already made a network choice. Keep
 // the choice local to their fixtures; fresh-profile consent oracles stay untouched.
 const chooseFixtureNetwork = async (ctx, enabled) => {
@@ -98,6 +203,27 @@ const chooseFixtureNetwork = async (ctx, enabled) => {
     } finally { await home.close(); }
   }
 };
+
+const submitActorStopMessage = async (page, text) => {
+  await page.send('Page.bringToFront');
+  await evalIn(page, `(() => {
+    'use strict';
+    const input = document.querySelector('form.input-bar textarea');
+    if (!input || input.disabled) throw new Error('composer is unavailable');
+    input.focus(); input.select();
+  })()`);
+  await page.send('Input.insertText', { text });
+  const ready = await waitFor(() => evalIn(page,
+    `!!document.querySelector('form.input-bar button.send-btn:not(:disabled)')`), { budgetMs: 5_000 });
+  if (!ready || !await clickAndSyncRedraw(page, 'form.input-bar button.send-btn')) throw new Error('composer send is unavailable');
+};
+
+// why: a first send can stay behind as the fresh-chat draft. Remove only this
+// fixture's own texts so a later state starts with an empty composer.
+const clearActorStopDraft = (page, texts) => evalIn(page, `(() => {
+  'use strict';
+  if (${JSON.stringify(texts)}.includes(localStorage.getItem('peerd.draft.new'))) localStorage.removeItem('peerd.draft.new');
+})()`).catch(() => {});
 
 const SMOKE_TEXT = 'e2e-smoke-ok';
 const TRANSFER_EXPORT_VERSION = 2;
@@ -171,6 +297,8 @@ const siteClientConfirmation = (page, budgetMs = 90_000) => waitFor(() => evalIn
   if (modal?.querySelector('h3')?.textContent !== 'Confirm site client') return null;
   return {
     title: modal.querySelector('h3').textContent,
+    role: modal.getAttribute('role'), titleId: modal.getAttribute('aria-labelledby'),
+    rejectFocused: document.activeElement === modal.querySelector('[data-confirm-reject]'),
     code: modal.querySelector('[aria-label="Proposed site-client code"]')?.textContent,
     endpoints: modal.querySelector('[aria-label="Proposed site-client endpoints"]')?.textContent,
     contracts: modal.querySelector('[aria-label="Proposed site-client contracts"]')?.textContent,
@@ -393,7 +521,7 @@ let lockDelegated = false;
 let lockReportBody = '';
 let lockFixtureUrl = '';
 
-const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPanel = false }) => {
+const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPanel = false, rename = false }) => {
   await chooseFixtureNetwork(ctx, false);
   const options = await openExtPage(ctx, 'options/options.html');
   let imported;
@@ -426,7 +554,39 @@ const captureHomeLibraryGit = async (ctx, rec, { visualName, metrics, revealPane
       `!!document.querySelector(${JSON.stringify(cardSelector)})`),
     { budgetMs: 20_000, pollMs: 80 });
     rec.check('visual fixture App appears in the Library', !!appReady);
+    await checkAccessibleNames(page, rec, 'Library glyph controls expose their actions and App name', [
+      ['.library-star:not(.library-card .library-star)', 'Show favorites only'], ['.library-refresh', 'Refresh'],
+      [`${cardSelector} .library-star`, 'Favorite Versioned App'], [`${cardSelector} .library-kebab`, 'More actions for Versioned App'],
+    ]);
     await evalIn(page, `document.querySelector(${JSON.stringify(cardSelector)})?.querySelector('.library-kebab')?.click()`);
+    if (rename) {
+      await waitFor(() => evalIn(page, `!!document.querySelector(${JSON.stringify(`${cardSelector} .library-menu-item`)})`),
+        { budgetMs: 5_000, pollMs: 50 });
+      await evalIn(page, `[...document.querySelector(${JSON.stringify(cardSelector)}).querySelectorAll('.library-menu-item')]
+        .find((button) => button.textContent === 'Rename')?.click()`);
+      const field = await waitFor(() => evalIn(page, `(() => {
+        const input = document.querySelector(${JSON.stringify(`${cardSelector} input`)});
+        return input ? { label: input.getAttribute('aria-label'), selected: input.selectionEnd - input.selectionStart,
+          value: input.value, focused: document.activeElement === input } : null;
+      })()`), { budgetMs: 5_000, pollMs: 50 });
+      rec.check('Library opens the real rename field', field?.focused === true && field.value === 'Versioned App');
+      if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') {
+        rec.check('the rename field has a name and selects the current App name',
+          field?.label === 'Rename Versioned App' && field.selected === field.value.length, JSON.stringify(field));
+      }
+      await rec.visualPage(visualName, page, { beforeShot: () => evalIn(page, `(() => {
+        const meta = document.querySelector(${JSON.stringify(`${cardSelector} .library-meta`)})?.firstChild;
+        if (meta?.nodeType === 3) meta.nodeValue = 'just now';
+      })()`) });
+      await pressKey(page, 'Escape');
+      if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') {
+        const restored = await waitFor(() => evalIn(page,
+          `document.activeElement === document.querySelector(${JSON.stringify(`${cardSelector} .library-kebab`)})`),
+        { budgetMs: 3_000, pollMs: 50 });
+        rec.check('Escape returns focus to the App actions button', !!restored);
+      }
+      return;
+    }
     const historyActionReady = await waitFor(() => evalIn(page, `!![...document.querySelector(${JSON.stringify(cardSelector)})?.querySelectorAll('.library-menu-item') ?? []].find((button) => button.textContent === 'History & Git')`),
       { budgetMs: 5_000, pollMs: 50 });
     rec.check('visual fixture exposes the History and Git action', !!historyActionReady);
@@ -548,6 +708,9 @@ export const STATES = [
   ...STARTER_VISUAL_STATES,
   ...PEER_NETWORK_STATUS_STATES,
   ...APP_RUNTIME_STATES,
+  ...PERF_CHAT_NOTEBOOK_STATES,
+  ...CHAT_ONBOARDING_STATES,
+  ...HOME_SETTINGS_STATES,
   WASMER_STATE,
   {
     name: 'pacing-wait-stop', kind: 'functional', phase: 'post-unlock',
@@ -617,7 +780,236 @@ export const STATES = [
   {
     name: 'initial-screen', kind: 'visual', phase: 'pre-unlock',
     responder: null,
-    async run(ctx, rec) { await rec.visual('initial-screen'); },
+    async run(ctx, rec) {
+      const backdrop = await waitFor(() => gateBackdrop(ctx.page), { budgetMs: 10_000, pollMs: 50 });
+      checkGateLayout(rec, 'the code stream stays off the gate text', !!backdrop?.covers, backdrop);
+      await rec.visual('initial-screen');
+    },
+  },
+
+  // --- visual (WIDE): the first-run vault gate on a cold Home tab -----------
+  // A cold Home tab gets the gate straight from the vault shell, laid out over
+  // the whole tab, so the panel capture above does not cover it. Pre-unlock:
+  // the gate shows its first-run choices only before a vault exists.
+  {
+    name: 'home-first-run-gate', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'home/home.html', { ready: '.gate-card' });
+      try {
+        // why wait for the label: the capability probe runs after the worker
+        // answers and can change the copy. Capture only its settled form.
+        const settled = await waitFor(() => evalIn(page, `(() => {
+          const button = document.querySelector('.gate-card button:not(.secondary):not(.linklike)');
+          const label = button && !button.disabled ? button.textContent : '';
+          return label && !/^Preparing|^Create vault with passkey$/.test(label) ? label : null;
+        })()`), { budgetMs: 15_000, pollMs: 50 });
+        rec.check('a cold Home tab shows the settled first-run vault gate', !!settled, String(settled));
+        const box = await gateBox(page);
+        checkGateLayout(rec, 'the gate is one centered column in the upper third of the tab', inGateColumn(box), box);
+        const stream = await waitFor(() => evalIn(page, `(() => {
+          const canvas = document.querySelector('canvas.code-stream');
+          return canvas && { mask: getComputedStyle(canvas).maskImage };
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        const backdrop = await gateBackdrop(page);
+        checkGateLayout(rec, 'the code stream stays off the gate text',
+          !!stream && stream.mask !== 'none' && !!backdrop?.covers, { ...stream, ...backdrop });
+        await rec.visualPage('home-first-run-gate', page);
+        // why a short tab: there, a space that shrinks to fit the content moved
+        // the column when the form or an error showed. A fixed 22vh space
+        // pushed the form off the tab. The capture above is too tall to show
+        // this. The two passphrases differ, so the form writes nothing.
+        await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 650, deviceScaleFactor: 1, mobile: false });
+        const boxes = [await waitFor(async () => {
+          const next = await gateBox(page);
+          return next.vh === 650 ? next : null;
+        }, { budgetMs: 5_000, pollMs: 50 })];
+        const boxWhen = (selector) => waitFor(async () => (await evalIn(page,
+          `!!document.querySelector(${JSON.stringify(selector)})`)) && gateBox(page), { budgetMs: 5_000, pollMs: 50 });
+        await clickAndSyncRedraw(page, '.gate-card button.linklike');
+        boxes.push(await boxWhen('#pass2'));
+        await evalIn(page, `(() => {
+          for (const [index, id] of ['pass', 'pass2'].entries()) {
+            const input = document.getElementById(id);
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'passphrase-' + index);
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          return true;
+        })()`);
+        await clickAndSyncRedraw(page, '.gate-card form button[type="submit"]');
+        boxes.push(await boxWhen('.gate-msg'));
+        const mismatch = boxes[2];
+        checkGateLayout(rec, 'on a short tab the gate keeps one place when its content changes',
+          boxes.every((box) => box && Math.abs(box.top - boxes[0].top) <= 1), boxes);
+        checkGateLayout(rec, 'on a short tab the passphrase form with an error fits',
+          !!mismatch && mismatch.top + mismatch.height <= mismatch.vh, mismatch);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  // --- visual (WIDE): an onboarding question step on Home -------------------
+  // Home shows each setup step in .options-gate (home.js). The question steps
+  // have the shortest lines, so they show if the column keeps one width from
+  // step to step. Render only: the real OnboardingGate in the real Home page
+  // and stylesheets, with replies that write nothing.
+  {
+    name: 'home-onboarding-question', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'home/home.html', { ready: '.gate-card' });
+      try {
+        await evalIn(page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { OnboardingGate } = await import('/sidepanel/components/onboarding-view.js');
+          const state = {
+            vault: { initialized: true, locked: false },
+            profile: { onboardingComplete: false, peerName: 'peerd' },
+            settings: { dwebChoiceMade: true },
+          };
+          window.__onboardingSends = [];
+          const send = async (message) => {
+            window.__onboardingSends.push(message.type);
+            return message.type === 'provider/status' ? { ok: true, providers: [] } : { ok: false };
+          };
+          m.mount(document.getElementById('app'), { view: () =>
+            m('.options-gate', m(OnboardingGate, { state, send, reconcileState: async () => {} })) });
+        })()`, true);
+        await waitFor(() => evalIn(page, `!!document.querySelector('.onboarding-skip')`), { budgetMs: 5_000, pollMs: 50 });
+        await clickAndSyncRedraw(page, '.onboarding-skip');
+        await waitFor(() => evalIn(page, `!!document.querySelector('.peer-name-input')`), { budgetMs: 5_000, pollMs: 50 });
+        await clickAndSyncRedraw(page, '.onboarding-actions button:not(.onboarding-skip)');
+        const step = await waitFor(() => evalIn(page, `(() => {
+          const card = document.querySelector('.options-gate .onboarding-card');
+          return document.querySelector('#onb-call') && card ? {
+            question: document.querySelector('.onb-ask')?.textContent,
+            sends: window.__onboardingSends,
+            width: card.getBoundingClientRect().width,
+            vw: innerWidth,
+          } : null;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the first question step renders in the Home gate and writes nothing',
+          step?.question === 'What should I call you?'
+            && step.sends.every((type) => type === 'provider/status'), JSON.stringify(step));
+        checkGateLayout(rec, 'the question step keeps the full gate column width',
+          !!step && step.width === Math.min(420, step.vw - 32), step);
+        await rec.visualPage('home-onboarding-question', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  // --- visual (WIDE): the vault gate after a lock on an open Home tab -------
+  // An open Home tab shows this gate in .options-gate (home.js), not through
+  // the vault shell, so the cold-tab state above does not cover it. Render
+  // only: an idle-lock snapshot, with replies that write nothing.
+  {
+    name: 'home-locked-gate', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'home/home.html', { ready: '.gate-card' });
+      try {
+        await evalIn(page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { VaultGate } = await import('/sidepanel/components/vault-gate.js');
+          const state = { hydrated: true, vault: { initialized: true, locked: true, unlockedAt: 0,
+            prfEnrolled: false, hasRecovery: false, lockReason: 'idle' } };
+          m.mount(document.getElementById('app'), { view: () =>
+            m('.options-gate', m(VaultGate, { state, send: async () => ({ ok: false }) })) });
+        })()`, true);
+        const box = await gateBox(page);
+        checkGateLayout(rec, 'the locked gate is one centered column in the upper third of the tab',
+          inGateColumn(box), box);
+        await rec.visualPage('home-locked-gate', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  // --- visual (WIDE): the vault gate error line on Home ---------------------
+  // No other state shows the gate's message line (a dot and a sentence).
+  // Render only: the locked snapshot above, and a reply that writes nothing.
+  // why this error: its message wraps in the column, and the dot must lead
+  // the first line.
+  {
+    name: 'home-gate-error', kind: 'visual', phase: 'pre-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'home/home.html', { ready: '.gate-card' });
+      try {
+        await evalIn(page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { VaultGate } = await import('/sidepanel/components/vault-gate.js');
+          const state = { hydrated: true, vault: { initialized: true, locked: true, unlockedAt: 0,
+            prfEnrolled: false, hasRecovery: false, lockReason: 'idle' } };
+          const send = async () => ({ ok: false, error: 'vault-authority-channel-lost' });
+          m.mount(document.getElementById('app'), { view: () =>
+            m('.options-gate', m(VaultGate, { state, send })) });
+          const input = document.getElementById('pass');
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'passphrase-0');
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`, true);
+        await clickAndSyncRedraw(page, '.gate-card form button[type="submit"]');
+        const message = await waitFor(() => evalIn(page, `(async () => {
+          const { default: m } = await import('/vendor/mithril/mithril.js');
+          m.redraw.sync();
+          return document.querySelector('.gate-msg')?.textContent ?? null;
+        })()`, true), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the Home gate shows its error line', /restarted before it could confirm/.test(String(message)),
+          String(message));
+        await rec.visualPage('home-gate-error', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+
+  {
+    name: 'composer-file-references', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const files = { 'index.html': '<!doctype html><title>Notes</title><main>Notes</main>',
+        'plain.md': 'Plain document body.', 'my notes.md': 'Document body with spaces.', 'docs/guide.md': 'Nested document body.' };
+      const requests = [];
+      let created = false;
+      ctx.setModelResponder((_index, request) => {
+        const body = JSON.parse(request.postData ?? Buffer.concat((request.postDataEntries ?? []).map((entry) => Buffer.from(entry.bytes ?? '', 'base64'))).toString());
+        const last = body.messages?.at(-1);
+        if (last?.role === 'user') requests.push(typeof last.content === 'string' ? last.content : (last.content ?? []).map((part) => part.text ?? '').join(''));
+        if (!created) { created = true; return { sse: sseToolCall('sandbox_create', { kind: 'app', name: 'Document notes', files }) }; }
+        return { sse: sseText('Document files are ready.') };
+      });
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create the document notes App.' });
+      if (sent?.ok !== true || !await waitFor(() => evalIn(ctx.page, `!document.querySelector('form.input-bar button.stop') && [...document.querySelectorAll('.message-assistant .bubble')].some((bubble) => bubble.textContent.includes('Document files are ready.'))`), { budgetMs: 30_000 })) throw new Error('the real App creation did not settle');
+      const listed = await rpc(ctx.page, { type: 'composer/files' });
+      rec.check('the real App picker lists all stored reference files', listed?.ok === true && ['plain.md', 'my notes.md', 'docs/guide.md'].every((path) => listed.files.some((file) => file.replace(/^\/+/, '') === path)), JSON.stringify(listed));
+      for (const [path, query] of [['plain.md', 'plain'], ['my notes.md', 'my'], ['docs/guide.md', 'guide']]) {
+        await ctx.page.send('Page.bringToFront');
+        await evalIn(ctx.page, `(() => { const input = document.querySelector('form.input-bar textarea'); input.focus(); input.select(); })()`);
+        await ctx.page.send('Input.insertText', { text: `@file:${query}` });
+        if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('#composer-palette .palette-option')`), { budgetMs: 10_000 })) throw new Error('the real file palette did not open');
+        if (path === 'my notes.md') await rec.visual('composer-file-references');
+        await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+        await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+        if (!await waitFor(() => evalIn(ctx.page, `(() => {
+          const input = document.querySelector('form.input-bar textarea');
+          return !document.querySelector('#composer-palette') && document.activeElement === input && input.selectionStart === input.value.length;
+        })()`), { budgetMs: 5_000 })) throw new Error('the file pick did not restore its caret');
+        await ctx.page.send('Input.insertText', { text: 'Summarize this file.' });
+        const before = requests.length;
+        if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar button.send-btn:not(:disabled)')`), { budgetMs: 5_000 })
+          || !await clickAndSyncRedraw(ctx.page, 'form.input-bar button.send-btn')) throw new Error('the file reference could not be sent');
+        if (!await waitFor(async () => {
+          if (requests.length <= before || (await probe(ctx)).busy) return false;
+          const messages = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.messages;
+          return messages?.at(-1)?.role === 'assistant' && messages.at(-1).streaming !== true;
+        }, { budgetMs: 30_000, pollMs: 50 })) throw new Error('the real reference send did not reach the model and settle');
+        const wire = requests.at(-1);
+        const state = (await rpc(ctx.page, { type: 'state/get' }))?.state;
+        const durable = state?.session?.messages?.filter((message) => message.role === 'user').at(-1)?.content;
+        rec.check(`${path} has a durable user message`, typeof durable === 'string');
+        if (baseRender) rec.observe(`merge-base ${path} expansion`, { wire, durable });
+        else rec.check(`${path} reaches the model and durable history as the exact file`, wire.includes(`<peerd_file path="${path}">`)
+          && wire.includes(files[path]) && !wire.includes('could not resolve') && durable.includes(files[path]), JSON.stringify({ wire, durable }));
+        if (path === 'my notes.md') await rec.visual('composer-file-expanded');
+      }
+    },
   },
 
   // --- functional: one full happy-path turn ----------------------------------
@@ -698,6 +1090,7 @@ export const STATES = [
     name: 'browser-network-floor', kind: 'functional', phase: 'post-unlock',
     responder: (_callIndex, request) => {
       const body = request?.postData ?? '';
+      const terminalMarker = `NETWORK-GUARD-SETTLED:${networkGuardActorTask}`;
       if (body.includes('<actor_agent>')) {
         if (networkGuardActorTurn > 0) {
           const results = toolResultsIn(body).join('\n');
@@ -723,13 +1116,15 @@ export const STATES = [
                 : `await page.goto(${JSON.stringify(networkGuardFixtureUrl)}); return await page.content();`,
             }) };
           }
-          return { sse: sseText('The network guard controller is ready.') };
+          return { sse: sseText(terminalMarker) };
         }
         if (turn === 0) return { sse: sseToolCall('navigate', { url: networkGuardFixtureUrl }) };
         if (turn === 1) return { sse: sseToolCall('read_page', {}) };
-        return { sse: sseText('The network guard controller is ready.') };
+        return { sse: sseText(terminalMarker) };
       }
-      if (networkGuardActorReady) networkGuardWakeSettled = true;
+      // why: the main turn can finish while its actor is still running. Only
+      // the current task's terminal reply proves that reintegration has begun.
+      if (body.includes(terminalMarker)) networkGuardWakeSettled = true;
       if (!networkGuardDelegated) {
         networkGuardDelegated = true;
         return { sse: sseToolCall('message_actor', {
@@ -1019,8 +1414,9 @@ export const STATES = [
         });
         rec.check('the web actor loaded the public controller',
           actorReady === true, networkGuardActorResult.slice(0, 2000));
-        await waitFor(async () => networkGuardWakeSettled && !(await probe(ctx)).busy,
+        const controllerSettled = await waitFor(async () => networkGuardWakeSettled && !(await probe(ctx)).busy,
           { budgetMs: 15_000, pollMs: 50 });
+        if (!controllerSettled) throw new Error('network controller terminal reply did not settle');
         const tabs = await evalIn(ctx.page, `chrome.tabs.query({}).then((items) => items.map(({ id, url, openerTabId }) => ({ id, url, openerTabId })))`, true);
         const drivenTab = tabs.find((tab) => tab.url?.startsWith(networkGuardFixtureUrl));
         const networkGuardDiagnostics = typeof drivenTab?.id === 'number'
@@ -1082,8 +1478,9 @@ export const STATES = [
           const completed = await waitFor(() => networkGuardTrustedChildComplete, {
             budgetMs: 30_000, pollMs: 100,
           });
-          await waitFor(async () => networkGuardWakeSettled && !(await probe(ctx)).busy,
+          const reintegrated = await waitFor(async () => networkGuardWakeSettled && !(await probe(ctx)).busy,
             { budgetMs: 15_000, pollMs: 50 });
+          if (!reintegrated) throw new Error(`${label} child terminal reply did not settle before the next fixture task`);
           await sleep(800);
           const tabsAfter = await evalIn(ctx.page, `chrome.tabs.query({}).then((tabs) =>
             tabs.map(({ id, openerTabId, url, pendingUrl, status }) =>
@@ -2062,20 +2459,1272 @@ export const STATES = [
 
   // --- visual: idle unlocked panel -------------------------------------------
   {
+    name: 'openrouter-host-catalog', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const model = 'z-ai/glm-5.1';
+      const createFixture = async (initialMode = 'valid') => {
+        let mode = initialMode, actorStarted = false, phase = 'chat';
+        const catalogs = [], requests = [], errors = [], workers = new Map();
+        const child = await launchPeerd({ extensionDir: ctx.extensionDir, resumeAuxiliaryWorkers: false, modelResponder: (_index, request) => {
+          requests.push({ at: performance.now(), url: request.url, body: JSON.parse(request.postData) });
+          if (request.postData.includes('<actor_agent>')) return { sse: sseText('CATALOG-ACTOR-DONE') };
+          if (phase === 'actor' && !actorStarted) { actorStarted = true; return { sse: sseToolCall('actor_create', { task: 'Return the catalog worker control.', tools: [] }) }; }
+          return { sse: sseText(phase === 'actor'
+            ? request.postData.includes('An actor you started earlier') ? 'CATALOG-ACTOR-REPORT' : 'CATALOG-ACTOR-QUEUED'
+            : 'CATALOG-REPLY') };
+        } });
+        let browser, identity;
+        const close = async () => {
+          try {
+            if (identity) {
+              const evidence = await identity.close();
+              rec.observe('catalog worker identity and cleanup', evidence);
+              const clean = evidence.errors.length === 0
+                && evidence.commands.every((command) => command.status === 'complete')
+                && evidence.workers.every((worker) => worker.released || worker.destroyed);
+              rec.check('catalog worker identity observer closes without errors', clean);
+              if (!clean) throw new Error('catalog worker identity or cleanup failed');
+            }
+          } finally { browser?.close(); await child.close(); }
+        };
+        try {
+          const version = await fetch(`http://127.0.0.1:${child.port}/json/version`).then((reply) => reply.json());
+          browser = await attach(version.webSocketDebuggerUrl);
+          const { sessionId } = await browser.send('Target.attachToTarget', { targetId: child.sw.targetId, flatten: true });
+          browser.on((method, params, message) => {
+            if (['Target.targetCreated', 'Target.targetInfoChanged'].includes(method) && params.targetInfo.type === 'worker') {
+              const target = params.targetInfo;
+              workers.set(target.targetId, { ...(workers.get(target.targetId) ?? {}), ...target });
+            }
+            if (method === 'Target.targetDestroyed' && workers.has(params.targetId)) workers.get(params.targetId).destroyed = true;
+            if (method !== 'Fetch.requestPaused' || message.sessionId !== sessionId) return;
+            const { request, requestId } = params;
+            if (request.url !== 'https://openrouter.ai/api/v1/models') { errors.push('unexpected catalog endpoint'); return; }
+            catalogs.push({ at: performance.now(), method: request.method, mode });
+            if (mode === 'hold') return;
+            const data = mode === 'invalid' ? { data: null } : { data: [{ id: model, context_length: 256_000, top_provider: { context_length: 200_000 } }] };
+            void browser.send('Fetch.fulfillRequest', { requestId, responseCode: 200,
+              responseHeaders: [{ name: 'content-type', value: 'application/json' }],
+              body: Buffer.from(JSON.stringify(data)).toString('base64') }, sessionId).catch((error) => errors.push(String(error)));
+          });
+          await browser.send('Target.setDiscoverTargets', { discover: true });
+          await browser.send('Fetch.enable', { patterns: [{ urlPattern: 'https://openrouter.ai/api/v1/models' }] }, sessionId);
+          await unlockAndReady(child.page);
+          identity = await observeCatalogWorkerIdentity(child, browser);
+          const key = await rpc(child.page, { type: 'provider/setKey', provider: 'openrouter', plaintext: 'sk-or-v1-e2e-catalog-wire-only', activate: false });
+          const settings = await rpc(child.page, { type: 'settings/update', patch: { providerName: 'openrouter', providerModel: model, autoMemoryEnabled: false } });
+          if (!key?.ok || !settings?.ok) throw new Error('OpenRouter wire fixture refused');
+          return { child, catalogs, requests, errors, workers, identity, setMode: (next) => { mode = next; },
+            setPhase: (next) => { phase = next; }, close };
+        } catch (error) { await close(); throw error; }
+      };
+      const send = async (fixture, text) => {
+        const page = fixture.child.page;
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('form.input-bar textarea')`))) throw new Error('catalog composer did not mount');
+        await evalIn(page, `(() => { 'use strict'; const input = document.querySelector('form.input-bar textarea');
+          input.value = ${JSON.stringify(text)}; input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        if (!await waitFor(() => evalIn(page, `document.querySelector('.send-btn')?.disabled === false`))) throw new Error('catalog composer stayed disabled');
+        await clickAndSyncRedraw(page, '.send-btn');
+      };
+      const settled = (fixture, text, budgetMs = 20_000) => waitFor(() => evalIn(fixture.child.page,
+        `${JSON.stringify(text)} === [...document.querySelectorAll('.message-assistant .bubble')].at(-1)?.textContent.trim()
+          && !document.querySelector('form.input-bar button.stop')`), { budgetMs, pollMs: 50 });
+      const nativeHeaps = (fixture, targets, role, retired) => {
+        const evidence = fixture.identity.snapshot();
+        const parent = evidence.parents.length === 1 ? evidence.parents[0] : null;
+        const workers = targets.map((target) => evidence.workers.filter((worker) => worker.targetId === target.targetId));
+        const ok = !!parent && evidence.errors.length === 0 && workers.length > 0
+          && workers.every((matches) => matches.length === 1 && matches.every((worker) =>
+            worker.parentTargetId === parent.target.targetId && worker.targetInfo.parentId === parent.target.targetId
+            && worker.parentSessionId === parent.parentSessionId && worker.targetInfo.type === 'worker'
+            && worker.native?.href === `chrome-extension://${fixture.child.sw.id}/offscreen/${role}-worker.js`
+            && worker.native.name === (role === 'controller' ? 'peerd-controller' : '')
+            && worker.native.constructorName === 'DedicatedWorkerGlobalScope' && !worker.error && worker.released
+            && (!retired || worker.destroyed === true)));
+        return { ok, parent, workers: workers.flat() };
+      };
+      const warm = await createFixture();
+      try {
+        const sessions = [], controllerHeaps = [];
+        for (let index = 0; index < 3; index += 1) {
+          if (index) await resetSession(warm.child);
+          // why: each validated turn creates a model client. Other controller work can overlap.
+          const beforeRequests = warm.requests.length;
+          const text = `Catalog chat ${index + 1}.`;
+          await send(warm, text);
+          if (!await settled(warm, 'CATALOG-REPLY')) throw new Error('fresh OpenRouter chat did not settle');
+          const state = await rpc(warm.child.page, { type: 'state/get' });
+          if (!state?.ok || !state.state.session.sessionId) throw new Error('catalog chat identity is missing');
+          sessions.push(state.state.session.sessionId);
+          const heaps = warm.identity.snapshot().workers.filter((worker) =>
+            worker.native?.href === `chrome-extension://${warm.child.sw.id}/offscreen/controller-worker.js`);
+          const native = nativeHeaps(warm, heaps, 'controller', false);
+          rec.observe(`chat ${index + 1} observed controller lifecycle`, heaps);
+          const request = warm.requests[beforeRequests];
+          rec.check(`chat ${index + 1} has exact native controller identity and one model call`, native.ok
+            && warm.requests.length === beforeRequests + 1 && Array.isArray(request?.body?.messages)
+            && request.body.messages.some((message) => message.role === 'user'
+              && JSON.stringify(message.content ?? '').includes(text)), JSON.stringify(native));
+          if (!native.ok) throw new Error('controller heap native identity is missing');
+          controllerHeaps.push(...heaps.map((worker) => worker.targetId));
+        }
+        warm.setPhase('actor');
+        await send(warm, 'Start the catalog actor.');
+        if (!await settled(warm, 'CATALOG-ACTOR-REPORT', 30_000)) throw new Error('catalog actor did not return through the real wake');
+        const actorHeaps = warm.identity.snapshot().workers.filter((worker) =>
+          worker.native?.href === `chrome-extension://${warm.child.sw.id}/offscreen/actor-worker.js`);
+        const actorIdentity = nativeHeaps(warm, actorHeaps, 'actor', false);
+        rec.check('the isolated actor has exact native worker and parent identity', actorIdentity.ok, JSON.stringify(actorIdentity));
+        if (!actorIdentity.ok) throw new Error('actor heap native identity is missing');
+        const audit = await rpc(warm.child.page, { type: 'audit/list', limit: 800 });
+        if (!audit?.ok || !Array.isArray(audit.entries)) throw new Error('catalog actor audit refused');
+        const isolation = actorIsolationEvidence(audit.entries);
+        rec.check('three real chats and a fresh isolated actor use the model path', new Set(sessions).size === 3
+          && new Set(controllerHeaps).size >= 1 && actorHeaps.length >= 1 && isolation.exactProof,
+        JSON.stringify({ sessions, controllerHeaps, actorHeaps, isolation }));
+        rec.check('all inference stays on the intercepted OpenRouter wire', warm.requests.length >= 6
+          && warm.requests.every((request) => request.url === 'https://openrouter.ai/api/v1/chat/completions' && request.body.model === model));
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base catalog GETs across real chats and the actor', warm.catalogs);
+        else rec.check('all real chats and the isolated actor share one valid host catalog', warm.catalogs.length === 1 && warm.catalogs[0].method === 'GET');
+        await rec.visualPage('openrouter-host-catalog', warm.child.page);
+        warm.setMode('hold'); warm.setPhase('chat');
+        const before = warm.catalogs.length;
+        await send(warm, 'Reuse the warm model catalog while its endpoint is held.');
+        const reused = await settled(warm, 'CATALOG-REPLY', 3_000);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base warm catalog hold', { reused, requests: warm.catalogs.length - before });
+        else rec.check('the warm cache avoids the held endpoint and completes the model turn', reused === true && warm.catalogs.length === before);
+        await rec.visualPage('openrouter-warm-held', warm.child.page);
+        if (!reused && !(await rpc(warm.child.page, { type: 'agent/stop' }))?.ok) throw new Error('held catalog Stop refused');
+        rec.check('catalog fixture has no interception error', warm.errors.length === 0, JSON.stringify(warm.errors));
+      } finally { await warm.close(); }
+      for (const mode of ['invalid', 'hold']) {
+        const fresh = await createFixture(mode);
+        try {
+          await send(fresh, `Use the static fallback after the first ${mode} metadata read.`);
+          const completed = await settled(fresh, 'CATALOG-REPLY', mode === 'hold' ? 12_000 : 5_000);
+          const elapsedMs = fresh.requests[0] && fresh.catalogs[0] ? fresh.requests[0].at - fresh.catalogs[0].at : null;
+          if (process.env.PEERD_VISUAL_BASE_RENDER === '1' && mode === 'hold') rec.observe('base stalled first catalog', { completed, elapsedMs });
+          else rec.check(`${mode} first metadata leaves inference available within its bounded deadline`, completed === true
+            && fresh.catalogs.length === 1 && fresh.requests.length === 1
+            && elapsedMs !== null && elapsedMs < (mode === 'hold' ? 11_000 : 5_000), JSON.stringify({ elapsedMs, catalogs: fresh.catalogs }));
+          await rec.visualPage(`openrouter-first-${mode}`, fresh.child.page);
+          if (!completed && !(await rpc(fresh.child.page, { type: 'agent/stop' }))?.ok) throw new Error('stalled first metadata Stop refused');
+          rec.check(`${mode} catalog interception stays local`, fresh.errors.length === 0, JSON.stringify(fresh.errors));
+        } finally { await fresh.close(); }
+      }
+    },
+  },
+  {
+    name: 'invalid-tool-arguments', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const requests = [];
+      const ids = ['runtime-broken-json', 'runtime-null-json', 'runtime-valid-object'];
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir, modelResponder: (index, request) => {
+        requests.push({ url: request.url, body: JSON.parse(request.postData) });
+        if (index > 0) return { sse: sseText('ARGUMENTS-CHECKED') };
+        const calls = ['{"url":"unterminated', 'null', '{}'].map((argumentsText, offset) => ({
+          index: offset, id: ids[offset], type: 'function', function: { name: 'open_tab', arguments: argumentsText },
+        }));
+        return { sse: [
+          `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: calls } }] })}`,
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] })}`,
+          'data: [DONE]', '',
+        ].join('\n\n') };
+      } });
+      try {
+        await unlockAndReady(child.page);
+        const key = await rpc(child.page, { type: 'provider/setKey', provider: 'openai', plaintext: 'sk-e2e-runtime-wire-only', activate: false });
+        const settings = await rpc(child.page, { type: 'settings/update', patch: { providerName: 'openai', providerModel: 'gpt-4.1-mini', autoMemoryEnabled: false } });
+        if (!key?.ok || !settings?.ok) throw new Error('OpenAI fixture selection refused');
+        const beforeTabs = await evalIn(child.page, `chrome.tabs.query({}).then((tabs) => tabs.map(({ id, url }) => ({ id, url })))`, true);
+        const beforeAudit = await rpc(child.page, { type: 'audit/list', limit: 800 });
+        if (!beforeAudit?.ok || !Array.isArray(beforeAudit.entries)) throw new Error('audit read refused');
+        const priorIds = new Set(beforeAudit.entries.map((entry) => entry.id));
+        if (!await waitFor(() => evalIn(child.page, `!!document.querySelector('.input-bar textarea')`))) throw new Error('composer did not mount');
+        await evalIn(child.page, `(() => { 'use strict';
+          const input = document.querySelector('.input-bar textarea'); input.value = 'Open the task tabs with the supplied arguments.';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        if (!await waitFor(() => evalIn(child.page, `document.querySelector('.send-btn')?.disabled === false`))) throw new Error('composer is not ready');
+        await clickAndSyncRedraw(child.page, '.send-btn');
+        const session = await waitFor(async () => {
+          const reply = await rpc(child.page, { type: 'state/get' });
+          return reply?.ok && reply.state?.session?.messages?.some((message) => message.role === 'assistant' && message.content === 'ARGUMENTS-CHECKED' && message.streaming === false) ? reply.state.session : null;
+        }, { budgetMs: 30_000, pollMs: 80 });
+        if (!session) throw new Error('OpenAI argument probe did not settle');
+        const afterTabs = await evalIn(child.page, `chrome.tabs.query({}).then((tabs) => tabs.map(({ id, url }) => ({ id, url })))`, true);
+        const added = afterTabs.filter((tab) => !beforeTabs.some((prior) => prior.id === tab.id));
+        const results = session.messages.flatMap((message) => message.toolResults ?? []);
+        const valid = results.find((result) => result.tool_use_id === ids[2]);
+        const receiptId = Number(valid?.content.match(/"tabId"\s*:\s*(\d+)/)?.[1]);
+        rec.check('the valid sibling opens its real task tab', valid?.is_error === false && added.some((tab) => tab.id === receiptId), JSON.stringify({ added, valid }));
+        rec.check('the existing tab URLs stay exact', beforeTabs.every((prior) => afterTabs.some((tab) => tab.id === prior.id && tab.url === prior.url)));
+        rec.check('the real OpenAI adapter receives two model responses', requests.length === 2
+          && requests.every((request) => request.url === 'https://api.openai.com/v1/chat/completions'));
+        const replay = requests[1]?.body.messages ?? [];
+        const uses = session.messages.flatMap((message) => message.toolUses ?? []);
+        const audit = await rpc(child.page, { type: 'audit/list', limit: 800 });
+        if (!audit?.ok || !Array.isArray(audit.entries)) throw new Error('settled audit read refused');
+        const entries = audit.entries.filter((entry) => !priorIds.has(entry.id));
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base invalid effects', { added, results, entries });
+        else {
+          rec.check('both invalid calls have known error results and no target effect', added.length === 1 && ids.slice(0, 2).every((id) => {
+            const result = results.find((candidate) => candidate.tool_use_id === id);
+            return result?.is_error === true && result.outcomeKnown !== false && result.content.startsWith('invalid_arguments:')
+              && replay.some((message) => message.role === 'tool' && message.tool_call_id === id && message.content === result.content)
+              && JSON.stringify(uses.find((use) => use.id === id)?.input) === '{}';
+          }), JSON.stringify(results));
+          const audited = entries.filter((entry) => ids.includes(entry.details?.callId));
+          rec.check('host audit records two known failures and only one execution', audited.length === 3
+            && ids.slice(0, 2).every((id) => audited.some((entry) => entry.type === 'tool_failed'
+              && entry.details.callId === id && entry.details.tool === 'open_tab'
+              && entry.details.outcome === 'semantic-failure' && entry.details.performed === false && entry.details.outcomeKnown === true))
+            && audited.some((entry) => entry.type === 'tool_executed' && entry.details.callId === ids[2]
+              && entry.details.tool === 'open_tab' && entry.details.operation === 'turn.page.open-tab'
+              && entry.details.performed === true && entry.details.outcomeKnown === true), JSON.stringify(audited));
+        }
+        if (!await waitFor(() => evalIn(child.page, `document.querySelectorAll('.tool-call').length === 3`))) throw new Error('tool cards did not render');
+        await rec.visualPage('invalid-tool-arguments', child.page);
+        await clickAndSyncRedraw(child.page, '.tool-call-header');
+        await rec.visualPage('invalid-arguments-detail', child.page);
+      } finally { await child.close(); }
+    },
+  },
+  {
+    name: 'instruction-paging', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const skillName = 'e2e-instruction-paging';
+      const skillBody = Array.from({ length: 120 }, (_, index) => `Step ${index + 1}: ${'Keep this instruction. '.repeat(20).trimEnd()}`).join('\n');
+      const memoryBody = Array.from({ length: 300 }, (_, index) => `Note ${index + 1}: ${'Keep this durable note. '.repeat(2).trimEnd()}`).join('\n');
+      const pages = { load_skill: [], read_memory: [] };
+      let stage = 'load_skill';
+      let modelCalls = 0;
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir, modelResponder: (_index, request) => {
+        if (++modelCalls > 10) return { sse: sseText('PAGING-PROBE-FAILED') };
+        const body = JSON.parse(request.postData);
+        const previous = body.messages.filter((message) => message.role === 'tool').at(-1);
+        if (previous) {
+          const call = body.messages.flatMap((message) => message.tool_calls ?? []).find((candidate) => candidate.id === previous.tool_call_id);
+          if (!call || !Object.hasOwn(pages, call.function.name)) throw new Error('unexpected paging result');
+          pages[call.function.name].push(previous.content);
+          const next = previous.content.match(/next: (.+)\.$/m);
+          if (next) return { sse: sseToolCall(call.function.name, JSON.parse(next[1])) };
+          stage = call.function.name === 'load_skill' ? 'read_memory' : 'done';
+        }
+        return { sse: stage === 'done' ? sseText('ALL-INSTRUCTIONS-READ')
+          : sseToolCall(stage, stage === 'load_skill' ? { name: skillName } : { scope: 'user' }) };
+      } });
+      let options;
+      try {
+        await unlockAndReady(child.page);
+        const key = await rpc(child.page, { type: 'provider/setKey', provider: 'openai', plaintext: 'sk-e2e-runtime-wire-only', activate: false });
+        const settings = await rpc(child.page, { type: 'settings/update', patch: { providerName: 'openai', providerModel: 'gpt-4.1-mini', autoMemoryEnabled: false } });
+        if (!key?.ok || !settings?.ok) throw new Error('paging provider selection refused');
+        options = await openWidePage(child, 'options/options.html#!/skills');
+        if (!await waitFor(() => evalIn(options, `!!document.querySelector('.skills-install textarea')`))) throw new Error('skill editor did not mount');
+        await evalIn(options, `(() => { 'use strict';
+          const input = document.querySelector('.skills-install textarea');
+          input.value = ${JSON.stringify(`---\nname: ${skillName}\ndescription: Check every instruction through bounded pages.\n---\n${skillBody}`)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        await clickAndSyncRedraw(options, '.skills-install button');
+        if (!await waitFor(async () => {
+          const result = await rpc(options, { type: 'skills/list' });
+          return result?.ok && result.skills?.some((skill) => skill.name === skillName);
+        })) throw new Error('long skill did not install');
+        await options.close();
+        options = await openWidePage(child, 'options/options.html#!/memory');
+        if (!await waitFor(() => evalIn(options, `!!document.querySelector('.memory-actions')`))) throw new Error('memory view did not mount');
+        await evalIn(options, `(() => { 'use strict';
+          [...document.querySelectorAll('.memory-actions button')].find((button) => button.textContent === 'New user note')?.click();
+        })()`);
+        if (!await waitFor(() => evalIn(options, `!![...document.querySelectorAll('.memory-card')].find((card) => card.querySelector('.memory-scope')?.textContent.startsWith('User'))`))) throw new Error('user memory editor did not mount');
+        await evalIn(options, `(() => { 'use strict';
+          const card = [...document.querySelectorAll('.memory-card')].find((element) => element.querySelector('.memory-scope')?.textContent.startsWith('User'));
+          const input = card.querySelector('textarea'); input.value = ${JSON.stringify(memoryBody)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        if (!await waitFor(() => evalIn(options, `[...document.querySelectorAll('.memory-card-actions button')].find((button) => button.textContent === 'Save')?.disabled === false`))) throw new Error('memory draft did not become ready');
+        await evalIn(options, `[...document.querySelectorAll('.memory-card-actions button')].find((button) => button.textContent === 'Save').click()`);
+        if (!await waitFor(async () => {
+          const result = await rpc(options, { type: 'memory/export' });
+          return result?.ok && result.payload?.docs?.some((doc) => doc.kind === 'user' && doc.body === memoryBody);
+        })) throw new Error('long memory did not save');
+        await child.page.send('Page.bringToFront');
+        await evalIn(child.page, `(() => { 'use strict';
+          const input = document.querySelector('.input-bar textarea'); input.value = 'Read the complete paging skill and user memory.';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        if (!await waitFor(() => evalIn(child.page, `document.querySelector('.send-btn')?.disabled === false`))) throw new Error('paging composer is not ready');
+        await clickAndSyncRedraw(child.page, '.send-btn');
+        const finished = await waitFor(async () => {
+          const reply = await rpc(child.page, { type: 'state/get' });
+          return reply?.ok && reply.state?.session?.messages?.some((message) => message.role === 'assistant' && message.content === 'ALL-INSTRUCTIONS-READ' && message.streaming === false);
+        }, { budgetMs: 45_000, pollMs: 80 });
+        if (!finished) throw new Error(`instruction paging did not settle: ${modelCalls} calls`);
+        rec.check('both reads return real nonempty model tool bytes', pages.load_skill.length > 0 && pages.read_memory.length > 0);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base instruction pages', pages);
+        else {
+          rec.check('every skill byte reaches the model through intact bounded pages', pages.load_skill.length > 1
+            && pages.load_skill.every((page) => page.length <= 18_000 && !page.includes(' chars elided '))
+            && pages.load_skill.map((page) => page.match(/\n\n([\s\S]*)\n<\/skill>/)?.[1]).join('') === skillBody);
+          rec.check('every memory byte reaches the model through intact bounded pages', pages.read_memory.length > 1
+            && pages.read_memory.every((page) => page.length <= 18_000 && !page.includes(' chars elided '))
+            && pages.read_memory.map((page) => page.replace(/\n\[paging\][^\n]*$/, '')).join('') === memoryBody);
+        }
+        for (const name of ['load_skill', 'read_memory']) for (const edge of ['first', 'last']) {
+          await evalIn(child.page, `(() => { 'use strict';
+            const cards = [...document.querySelectorAll('.tool-call')].filter((card) => card.querySelector('.tool-name')?.textContent === ${JSON.stringify(name)});
+            const card = cards[${edge === 'first' ? '0' : 'cards.length - 1'}];
+            if (!card) throw new Error('paging card is missing');
+            const header = card.querySelector('.tool-call-header'); if (header.getAttribute('aria-expanded') !== 'true') header.click();
+          })()`);
+          await rec.visualPage(name === 'load_skill' && edge === 'first' ? 'instruction-paging' : `instruction-${name}-${edge}`, child.page, { beforeShot: (page) => evalIn(page, `(() => { 'use strict';
+            const cards = [...document.querySelectorAll('.tool-call')].filter((card) => card.querySelector('.tool-name')?.textContent === ${JSON.stringify(name)});
+            const card = cards[${edge === 'first' ? '0' : 'cards.length - 1'}]; card.scrollIntoView({ block: 'start' });
+            const content = card.querySelector('.tool-result-content'); if (content) content.scrollTop = ${edge === 'first' ? '0' : 'content.scrollHeight'};
+          })()`) });
+        }
+      } finally { if (options) await options.close(); await child.close(); }
+    },
+  },
+  {
+    name: 'actor-stop-transcripts', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      let childCalls = 0;
+      let spawned = false;
+      let parentWaiting = false;
+      const tasks = [1, 2, 3].map((index) => `Stop transcript fixture ${index}: retain this task after reload.`);
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir, modelResponder: async (_index, request) => {
+        if (request.postData.includes('<actor_agent>')) { childCalls++; await gate; return { sse: sseText('LATE-CHILD-REPLY') }; }
+        if (!spawned) { spawned = true; return { sse: sseToolCalls(tasks.map((task) => ({ name: 'actor_create', args: { task, tools: [] } }))) }; }
+        parentWaiting = true; await gate; return { sse: sseText('LATE-PARENT-REPLY') };
+      } });
+      try {
+        await unlockAndReady(child.page);
+        if (!await waitFor(() => evalIn(child.page, `!!document.querySelector('.input-bar textarea')`))) throw new Error('actor composer did not mount');
+        await evalIn(child.page, `(() => { 'use strict';
+          const input = document.querySelector('.input-bar textarea'); input.value = 'Start three actors, then let me stop them.';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        if (!await waitFor(() => evalIn(child.page, `document.querySelector('.send-btn')?.disabled === false`))) throw new Error('actor composer is not ready');
+        await clickAndSyncRedraw(child.page, '.send-btn');
+        if (!await waitFor(() => childCalls === 3 && parentWaiting, { budgetMs: 30_000, pollMs: 50 })) throw new Error('three actors did not reach the model');
+        const state = await rpc(child.page, { type: 'state/get' });
+        const parentId = state?.state?.session?.sessionId;
+        if (!parentId) throw new Error('actor parent session is missing');
+        if (!await clickAndSyncRedraw(child.page, 'form.input-bar button.stop')) throw new Error('real Stop control is missing');
+        const evidence = await waitFor(async () => {
+          const audit = await rpc(child.page, { type: 'audit/list', limit: 800 });
+          if (!audit?.ok || !Array.isArray(audit.entries)) throw new Error('actor audit read refused');
+          const entries = audit.entries.filter((entry) => entry.details?.parentSessionId === parentId);
+          const ids = [...new Set(entries.filter((entry) => entry.type === 'actor_spawned').map((entry) => entry.details.actorSessionId))];
+          return ids.length === 3 && ids.every((id) => entries.some((entry) => entry.details?.actorSessionId === id
+            && ['actor_completed', 'actor_persistence_failed'].includes(entry.type))) ? { ids, entries } : null;
+        }, { budgetMs: 20_000, pollMs: 80 });
+        if (!evidence) throw new Error('stopped actors did not settle');
+        const sessions = await Promise.all(evidence.ids.map(async (sessionId) => {
+          const reply = await rpc(child.page, { type: 'session/get', sessionId });
+          if (!reply?.ok || !Array.isArray(reply.session?.messages) || reply.session.parentSessionId !== parentId) throw new Error('child transcript read refused');
+          return reply.session;
+        }));
+        const messageIds = sessions.flatMap((session) => session.messages.map((message) => message.id));
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base stopped transcripts', { sessions, entries: evidence.entries });
+        else rec.check('all three Stop fallbacks persist with six distinct IDs', sessions.every((session) => session.messages.length === 2
+          && session.messages[0].content === session.task) && new Set(messageIds).size === 6
+          && !evidence.entries.some((entry) => entry.type === 'actor_persistence_failed'), JSON.stringify({ sessions, entries: evidence.entries }));
+        release();
+        await reloadReadyPanel(child, { expectedSessionId: parentId });
+        if (!await waitFor(() => evalIn(child.page, `document.querySelectorAll('.tool-call.tool-actor').length === 3`))) throw new Error('reloaded actor cards are missing');
+        await evalIn(child.page, `document.querySelectorAll('.tool-call.tool-actor > .tool-call-header').forEach((button) => button.click())`);
+        const readable = sessions.filter((session) => session.messages.length > 0).length;
+        if (!await waitFor(() => evalIn(child.page, `document.querySelectorAll('.actor-transcript').length === ${readable}`))) throw new Error('actor transcript cards did not load');
+        if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') rec.check('all three saved tasks render after reload', await evalIn(child.page,
+          `${JSON.stringify(tasks)}.every((task) => [...document.querySelectorAll('.actor-transcript .bubble')].some((element) => element.textContent.trim() === task
+            && element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0 && getComputedStyle(element).visibility === 'visible'))`));
+        await rec.visualPage('actor-stop-transcripts', child.page);
+        await rec.visualPage('actor-stop-reopened-last', child.page, { beforeShot: (page) => evalIn(page,
+          `document.querySelectorAll('.tool-call.tool-actor')[2].scrollIntoView({ block: 'end' })`) });
+        // why: an async delivery can retry after the panel reload has finished.
+        await sleep(1_500);
+        rec.check('Stop prevents a later actor wake after the delivery retry interval', childCalls === 3 && child.modelCallCount() === 5);
+      } finally { release(); await child.close(); }
+    },
+  },
+  {
     name: 'idle-unlocked', kind: 'visual', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) { await rec.visual('idle-unlocked'); },
+  },
+  {
+    name: 'web-request-outcome-audit', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const received = [], sockets = new Set();
+      const origin = `https://${GIT_FIXTURE_HOST}`;
+      const server = createHttpsServer({ cert: GIT_FIXTURE_TLS_CERT, key: GIT_FIXTURE_TLS_KEY }, (request, response) => {
+        const chunks = [];
+        request.on('data', (chunk) => chunks.push(chunk));
+        request.on('error', () => {});
+        request.on('end', () => {
+          const receipt = { method: request.method, path: request.url, host: request.headers.host,
+            tls: request.socket.encrypted === true, body: Buffer.concat(chunks).toString(), header: request.headers['x-proof'] };
+          received.push(receipt);
+          if (request.url.startsWith('/provider-audit/ok-')) {
+            response.writeHead(200, { 'content-type': 'text/plain', 'cache-control': 'no-store' }); response.end('ok');
+          } else {
+            // why: close the HTTP socket; Bun exposes an inert reset method.
+            request.socket.destroy();
+          }
+        });
+      });
+      server.on('connection', (socket) => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+      await new Promise((resolve, reject) => { server.once('error', reject); server.listen(SITE_CLIENT_FIXTURE_TLS_PORT, '127.0.0.1', resolve); });
+      let active = null, actorCalls = 0, delegated = false;
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir, modelResponder: (_index, request) => {
+        if (request.postData.includes('<actor_agent>')) {
+          if (actorCalls++ === 0) return { sse: sseToolCall('page_code', { code: `return await page.fetch(${JSON.stringify(active.url)}, ${JSON.stringify(active.init)});` }) };
+          return { sse: sseText('RESET-ACTOR-DONE') };
+        }
+        const wake = JSON.parse(request.postData).messages.some((message) => message.role === 'user'
+          && typeof message.content === 'string' && message.content.includes('tool="message_actor"'));
+        if (wake) return { sse: sseText('RESET-PARENT-DONE') };
+        if (!delegated) { delegated = true; return { sse: sseToolCall('message_actor', { to: 'web', message: 'Make the exact requested fixture request once.' }) }; }
+        return { sse: sseText('RESET-PARENT-QUEUED') };
+      } }).catch(async (error) => {
+        for (const socket of sockets) socket.destroy();
+        await new Promise((resolve) => server.close(resolve));
+        throw error;
+      });
+      let notebook, activity;
+      try {
+        await unlockAndReady(child.page);
+        if (!(await rpc(child.page, { type: 'settings/update', patch: { autoMemoryEnabled: false, webActorActionSurface: 'code' } }))?.ok) throw new Error('request audit settings refused');
+        const auditBefore = await rpc(child.page, { type: 'audit/list', limit: 800 });
+        if (!auditBefore?.ok || !Array.isArray(auditBefore.entries)) throw new Error('initial request audit refused');
+        const priorIds = new Set(auditBefore.entries.map((entry) => entry.id));
+        const cases = [];
+        const requireNotebookChat = async () => {
+          const reply = await rpc(child.page, { type: 'state/get' });
+          if (reply?.ok !== true || reply.state?.session?.sessionId !== null) throw new Error('Notebook fixture requires an exact null chat');
+        };
+        const approveAndWait = async (operation, path, method, pathKind) => {
+          let done = false, failure = null, approvals = 0;
+          const pending = operation.then((value) => { done = true; return value; }, (error) => { done = true; failure = error; });
+          const finished = await waitFor(async () => {
+            for (const page of approvals === 0 ? [child.page, notebook].filter(Boolean) : []) {
+              const dialog = await evalIn(page, `(() => { 'use strict';
+                const button = [...document.querySelectorAll('.confirm-modal button')].find((node) => node.textContent.trim().toLowerCase() === 'allow once' && !node.disabled);
+                const modal = button?.closest('.confirm-modal');
+                return modal ? { text: modal.textContent, summary: modal.querySelector('.confirm-summary')?.textContent,
+                  origin: [...modal.querySelectorAll('p')].map((node) => node.textContent).find((text) => text.startsWith('On: ')) } : null;
+              })()`);
+              if (dialog) {
+                if (pathKind === 'notebook') await requireNotebookChat();
+                const host = new URL(origin).host;
+                const matchesDestination = pathKind === 'notebook'
+                  ? dialog.summary === `Allow the WebVM to send a POST request to ${host}? This can send data out of the browser.`
+                    && dialog.origin === `On: ${host}`
+                  : dialog.text.includes(origin);
+                const beforeApproval = received.filter((entry) => entry.path === path);
+                rec.check(`${method} ${path.split('?')[0]} waits for real consent before receipt`, method === 'POST' && approvals === 0
+                  && beforeApproval.length === 0 && matchesDestination, JSON.stringify({ pathKind, dialog, beforeApproval }));
+                if (method !== 'POST' || approvals || beforeApproval.length || !matchesDestination) throw new Error('request consent boundary did not hold');
+                await evalIn(page, `[...document.querySelectorAll('.confirm-modal button')].find((node) => node.textContent.trim().toLowerCase() === 'allow once' && !node.disabled).click()`);
+                approvals += 1;
+                break;
+              }
+            }
+            return done && (await Promise.all([child.page, notebook].filter(Boolean).map((page) =>
+              evalIn(page, `!document.querySelector('.confirm-modal')`)))).every(Boolean);
+          }, { budgetMs: 45_000, pollMs: 80 });
+          if (!finished) throw new Error('real request did not settle');
+          await pending;
+          if (failure) throw failure;
+          rec.check(`${method} uses its normal consent rule`, approvals === (method === 'POST' ? 1 : 0));
+        };
+        for (const pathKind of ['web', 'notebook']) {
+          if (pathKind === 'notebook') {
+            await resetSession(child);
+            await requireNotebookChat();
+            notebook = await openWidePage(child, 'engine-tabs/notebook-tab/index.html#provider-audit-notebook', { ready: '#notebook-app:not([hidden])' });
+          }
+          const command = (message) => evalIn(child.swConn, `(async () => {
+            const tab = (await chrome.tabs.query({})).find((candidate) => candidate.url?.endsWith('#provider-audit-notebook'));
+            if (!tab?.id) throw new Error('real Notebook tab is missing');
+            return chrome.tabs.sendMessage(tab.id, ${JSON.stringify({ notebookId: 'provider-audit-notebook', ...message })});
+          })()`, true);
+          if (pathKind === 'notebook' && !await waitFor(async () => (await command({ type: 'js/list-files' }))?.ok === true)) throw new Error('Notebook command host did not become ready');
+          for (const kind of ['ok', 'reset-get', 'reset-post']) {
+            const method = kind === 'reset-post' ? 'POST' : 'GET';
+            const path = `/provider-audit/${kind}-${pathKind}?private=query-canary`;
+            const init = { method, headers: { 'x-proof': 'header-canary' }, ...(method === 'POST' ? { body: 'body-canary' } : {}) };
+            active = { url: origin + path, init }; actorCalls = 0; delegated = false;
+            let operation;
+            if (pathKind === 'web') {
+              await resetSession(child);
+              operation = (async () => {
+                const sent = await rpc(child.page, { type: 'agent/send', text: `Make one ${method} request to the test fixture.` });
+                if (!sent?.ok) throw new Error('real web request send refused');
+                if (!await waitFor(() => evalIn(child.page, `document.body.textContent.includes('RESET-PARENT-DONE') && !document.querySelector('form.input-bar button.stop')`), { budgetMs: 40_000, pollMs: 80 })) throw new Error('web actor did not return its terminal report');
+              })();
+            } else {
+              await requireNotebookChat();
+              operation = command({ type: 'js/eval', timeoutMs: 40_000,
+                code: `try { const response = await peerd.egress.fetch(${JSON.stringify(active.url)}, ${JSON.stringify(init)}); return { ok: response.ok, status: response.status }; }
+                  catch (error) { return { unknown: true, name: error.name }; }` }).then((result) => {
+                const value = result?.result?.value;
+                if (!result?.ok || !value || (kind === 'ok' ? value.ok !== true || value.status !== 200 : value.unknown !== true)) throw new Error('Notebook eval did not return its real request outcome');
+              });
+            }
+            await approveAndWait(operation, path, method, pathKind);
+            const receipts = received.filter((entry) => entry.path === path);
+            rec.check(`${pathKind} ${kind} reaches the real HTTPS server with the full request`, receipts.length >= 1
+              && receipts.every((entry) => entry.tls === true && entry.host === new URL(origin).host
+                && entry.method === method && entry.header === 'header-canary'
+                && entry.body === (method === 'POST' ? 'body-canary' : '')), JSON.stringify(receipts));
+            cases.push({ pathKind, kind, method, path: path.split('?')[0] });
+          }
+        }
+        const entries = await waitFor(async () => {
+          const audit = await rpc(child.page, { type: 'audit/list', limit: 800 });
+          if (!audit?.ok || !Array.isArray(audit.entries)) throw new Error('settled request audit refused');
+          const rows = audit.entries.filter((entry) => !priorIds.has(entry.id) && entry.type === 'web_fetch' && entry.details?.origin === origin);
+          return process.env.PEERD_VISUAL_BASE_RENDER === '1' || rows.length >= cases.length ? rows : null;
+        });
+        if (!entries) throw new Error('request audit rows did not settle');
+        rec.observe('actual HTTPS receipt and audit evidence', { received, entries });
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base unaudited reset requests', cases);
+        else rec.check('every received request has one safe method and path outcome row', cases.every((item) => {
+          const rows = entries.filter((entry) => entry.details.path === item.path);
+          return rows.length === 1 && rows[0].details.method === item.method
+            && (item.kind === 'ok' ? rows[0].details.outcome === undefined : rows[0].details.outcome === 'unknown');
+        }) && !['query-canary', 'body-canary', 'header-canary'].some((value) => JSON.stringify(entries).includes(value)));
+        activity = await openWidePage(child, 'options/options.html#!/activity');
+        if (!await waitFor(() => evalIn(activity, `!!document.querySelector('.log-filter-level')`))) throw new Error('real Activity did not load');
+        await evalIn(activity, `(() => { 'use strict'; const input = document.querySelector('.log-filter-query');
+          input.value = ${JSON.stringify(origin)}; input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await rec.visualPage('web-request-audit-all', activity);
+        await evalIn(activity, `(() => { 'use strict'; const select = document.querySelector('.log-filter-level');
+          select.value = 'warn'; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+        if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') {
+          const visible = await waitFor(() => evalIn(activity, `[...document.querySelectorAll('.log-row')].filter((row) => row.querySelector('.log-label')?.textContent === 'web request').length === 4`));
+          rec.check('real Activity Issues names all four unknown GET and POST destinations', visible === true
+            && await evalIn(activity, `[...document.querySelectorAll('.log-row')].filter((row) => row.querySelector('.log-label')?.textContent === 'web request').every((row) => row.textContent.includes('unknown') && /GET|POST/.test(row.textContent))`));
+        }
+        rec.check('Activity displays no private request bytes', await evalIn(activity, `!['query-canary', 'body-canary', 'header-canary'].some((value) => document.body.textContent.includes(value))`));
+        await rec.visualPage('web-request-outcome-audit', activity);
+      } finally {
+        if (activity) await activity.close(); if (notebook) await notebook.close(); await child.close();
+        for (const socket of sockets) socket.destroy();
+        await new Promise((resolve) => server.close(resolve));
+      }
+    },
+  },
+
+  {
+    name: 'spend-limit-admission', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('The first model reply crosses the spend limit.') }),
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const initial = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings;
+      if (!initial?.providerModel) throw new Error('the current model is unavailable');
+      const pricingOverrides = { ...initial.pricingOverrides,
+        [initial.providerModel]: { input: 1_000_000, output: 1_000_000 } };
+      const settings = await openWidePage(ctx, 'options/options.html#!/costs', {
+        ready: 'input[aria-label="Session spend limit in US dollars"]',
+      });
+      const view = () => evalIn(ctx.page, `(async () => {
+        'use strict';
+        (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
+        return { banner: document.querySelector('.error-banner')?.innerText ?? '',
+          settings: !!document.querySelector('.error-banner button'),
+          halted: !!document.querySelector('.cost-chip--halt'),
+          unknown: document.body.innerText.includes('Turn outcome unknown'),
+          busy: !!document.querySelector('form.input-bar button.stop, .message-assistant.streaming') };
+      })()`, true);
+      const send = async (text) => {
+        const before = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.messages?.length ?? 0;
+        await ctx.page.send('Page.bringToFront');
+        await evalIn(ctx.page, `(() => {
+          'use strict';
+          const input = document.querySelector('form.input-bar textarea');
+          if (!input || input.disabled) throw new Error('composer is unavailable');
+          input.focus(); input.select();
+        })()`);
+        await ctx.page.send('Input.insertText', { text });
+        if (!await waitFor(() => evalIn(ctx.page,
+          `!!document.querySelector('form.input-bar button.send-btn:not(:disabled)')`), { budgetMs: 5_000 })
+          || !await clickAndSyncRedraw(ctx.page, 'form.input-bar button.send-btn')) throw new Error('composer send is unavailable');
+        const state = await waitFor(async () => {
+          const next = (await rpc(ctx.page, { type: 'state/get' }))?.state;
+          const messages = next?.session?.messages ?? [];
+          return messages.length >= before + 2 && messages.at(-1)?.role === 'assistant'
+            && messages.at(-1)?.streaming !== true && !(await view()).busy ? next : null;
+        }, { budgetMs: 30_000, pollMs: 50 });
+        if (!state) throw new Error('the real send did not settle with a durable reply');
+        return state;
+      };
+      const checkKnownHalt = async (name, state) => {
+        const rendered = await view();
+        if (baseRender) rec.observe(`merge-base ${name}`, { rendered, cost: state.session.cost,
+          messages: state.session.messages.map(({ role, stopReason, errorCode, outcomeKnown }) => ({ role, stopReason, errorCode, outcomeKnown })) });
+        else {
+          rec.check(`${name} keeps the spend notice and Settings action`, rendered.banner.includes('Spend limit reached')
+            && rendered.settings && rendered.halted && !rendered.busy, JSON.stringify(rendered));
+          rec.check(`${name} stays known`, !rendered.unknown && state.session.messages.every((message) =>
+            message.outcomeKnown !== false && !message.error), JSON.stringify(state.session.messages.at(-1)));
+        }
+      };
+      const readAudit = async () => {
+        const reply = await rpc(ctx.page, { type: 'audit/list', limit: 800 });
+        if (reply?.ok !== true || !Array.isArray(reply.entries)) throw new Error('the tool audit is unavailable');
+        return reply.entries;
+      };
+      let pendingTool = false;
+      ctx.setModelResponder(() => ({ sse: pendingTool
+        ? sseToolCall('script', { code: 'return 6 * 7;' }, { text: 'The spend halt must stop this pending computation.' })
+        : sseText('The first model reply crosses the spend limit.') }));
+      try {
+        const updated = await rpc(settings, { type: 'settings/update', patch: { pricingOverrides } });
+        if (updated?.ok !== true) throw new Error('the fixture rate did not save');
+        await evalIn(settings, `(() => {
+          'use strict';
+          const input = document.querySelector('input[aria-label="Session spend limit in US dollars"]');
+          input.value = '1'; input.dispatchEvent(new Event('change', { bubbles: true }));
+        })()`);
+        if (!await waitFor(async () => (await rpc(settings, { type: 'state/get' }))?.state?.settings?.spendLimitUsd === 1,
+          { budgetMs: 10_000 })) throw new Error('the real Settings cap did not save');
+        const totalBefore = await rpc(ctx.page, { type: 'cost/total' });
+        const first = await send('Answer once, then honor this chat spend limit.');
+        rec.check('one admitted model call records the fixture price in the real ledger',
+          ctx.modelCallCount() === 1 && first.session.cost?.cost === 3, JSON.stringify(first.session.cost));
+        await checkKnownHalt('the settled crossing', first);
+        await rec.visual('spend-limit-admission');
+        for (const text of ['Try this chat again.', 'Check the same limit once more.']) {
+          const priorCalls = ctx.modelCallCount(), priorCost = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.cost?.cost;
+          const refused = await send(text);
+          if (baseRender) rec.observe('merge-base repeated send', { calls: ctx.modelCallCount() - priorCalls,
+            priorCost, cost: refused.session.cost?.cost });
+          else {
+            rec.check('an over-cap composer send makes no extra model call or ledger charge',
+              ctx.modelCallCount() === priorCalls && refused.session.cost?.cost === priorCost);
+            rec.check('the refused message has a durable factual reply', refused.session.messages.at(-2)?.content === text
+              && refused.session.messages.at(-1)?.content.includes('This message was not sent to the model.'));
+          }
+          await checkKnownHalt('the settled refusal', refused);
+        }
+        const totalAfter = await rpc(ctx.page, { type: 'cost/total' });
+        if (!baseRender) rec.check('the aggregate real ledger also keeps only one fixture charge',
+          totalBefore?.ok && totalAfter?.ok && totalAfter.usd - totalBefore.usd === 3, JSON.stringify({ totalBefore, totalAfter }));
+        await rec.visual('spend-limit-refused-send');
+        await resetSession(ctx);
+        pendingTool = true;
+        const callsBefore = ctx.modelCallCount();
+        const auditsBefore = new Set((await readAudit()).map((entry) => entry.id));
+        const stopped = await send('Start a fresh chat and stop before its pending computation.');
+        rec.check('a fresh chat still admits one model call', ctx.modelCallCount() === callsBefore + 1 && stopped.session.cost?.cost === 3);
+        const toolEffects = (await readAudit()).filter((entry) => !auditsBefore.has(entry.id)
+          && entry.type === 'tool_executed' && entry.details?.tool === 'script');
+        rec.check('usage-time halt never dispatches the pending computation', toolEffects.length === 0
+          && !stopped.session.messages.some((message) => message.toolResults?.length), JSON.stringify(toolEffects));
+        await checkKnownHalt('the pending-tool halt', stopped);
+        if (!baseRender) rec.check('the usage-time halt is a known aborted assistant',
+          stopped.session.messages.at(-1)?.stopReason === 'aborted');
+        await rec.visual('spend-limit-pending-tool');
+      } finally {
+        await rpc(ctx.page, { type: 'agent/stop' });
+        const restored = await rpc(settings, { type: 'settings/update', patch: {
+          spendLimitUsd: initial.spendLimitUsd ?? 0, pricingOverrides: initial.pricingOverrides ?? {},
+        } });
+        await settings.close();
+        if (restored?.ok !== true) throw new Error('the original cost settings did not restore');
+      }
+    },
+  },
+
+  // --- visual: local send follows while another reader keeps its place -------
+  {
+    name: 'own-send-scroll', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText(Array.from({ length: 10 }, (_, index) =>
+      `History paragraph ${index + 1}. Keep this earlier context available while reading.`).join('\n\n')) }),
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const ownText = 'Send from this reading surface.';
+      const delayedReply = 'The delayed reply arrived. Keep the earlier reading position.';
+      let other, waiting = false, complete = false, releaseReply = () => {};
+      const view = (page) => evalIn(page, `(async () => {
+        'use strict';
+        (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
+        const list = document.querySelector('.message-list');
+        if (!list) return null;
+        const bubble = [...list.querySelectorAll('.message-user .bubble')].at(-1);
+        const bounds = list.getBoundingClientRect(), message = bubble?.getBoundingClientRect();
+        return { user: bubble?.textContent, top: list.scrollTop,
+          bottom: list.scrollHeight - list.scrollTop - list.clientHeight,
+          overflow: list.scrollHeight - list.clientHeight,
+          visible: !!message && message.top >= bounds.top - 1 && message.bottom <= bounds.bottom + 1,
+          reply: [...list.querySelectorAll('.message-assistant .bubble')].at(-1)?.textContent,
+          busy: !!list.querySelector('.message-assistant.streaming') || !!document.querySelector('form.input-bar button.stop'),
+        };
+      })()`, true);
+      const submit = async (page, text) => {
+        await page.send('Page.bringToFront');
+        await evalIn(page, `(() => {
+          'use strict';
+          const input = document.querySelector('form.input-bar textarea');
+          if (!input || input.disabled) throw new Error('composer is unavailable');
+          input.focus(); input.select();
+        })()`);
+        await page.send('Input.insertText', { text });
+        const enabled = await waitFor(() => evalIn(page,
+          `!!document.querySelector('form.input-bar button.send-btn:not(:disabled)')`), { budgetMs: 5_000 });
+        if (!enabled || !await clickAndSyncRedraw(page, 'form.input-bar button.send-btn')) throw new Error('composer send is unavailable');
+      };
+      const settled = async (page, text, reply) => {
+        const ready = await waitFor(async () => {
+          const state = await view(page);
+          return state?.user === text && state.reply?.includes(reply) && !state.busy;
+        }, { budgetMs: 20_000, pollMs: 50 });
+        if (!ready) throw new Error(`scroll turn did not settle: ${text}`);
+      };
+      const readFromTop = async (page) => {
+        await page.send('Page.bringToFront');
+        await evalIn(page, `new Promise((resolve, reject) => {
+          'use strict';
+          const list = document.querySelector('.message-list');
+          if (!list || list.scrollHeight - list.clientHeight <= 300) throw new Error('history does not overflow');
+          let timer;
+          const moved = () => {
+            if (list.scrollTop !== 0) { list.scrollTop = 0; return; }
+            clearTimeout(timer); list.removeEventListener('scroll', moved); resolve(true);
+          };
+          timer = setTimeout(() => { list.removeEventListener('scroll', moved); reject(new Error('native reader scroll did not arrive')); }, 3_000);
+          list.addEventListener('scroll', moved);
+          list.scrollTop = list.scrollTop === 0 ? list.scrollHeight : 0;
+        })`, true);
+      };
+      try {
+        for (const index of [1, 2]) {
+          const text = `Keep earlier turn ${index} in this chat.`;
+          await submit(ctx.page, text);
+          await settled(ctx.page, text, 'History paragraph 10.');
+        }
+        rec.check('reading history comes from two real composer turns', ctx.modelCallCount() === 2);
+        other = await openWidePage(ctx, 'sidepanel/sidepanel.html', { metrics: PANEL_METRICS, ready: '.message-list' });
+        await settled(other, 'Keep earlier turn 2 in this chat.', 'History paragraph 10.');
+        const { targetInfo } = await other.send('Target.getTargetInfo');
+        rec.observe('second real side-panel document', { targetId: targetInfo.targetId, url: await evalIn(other, 'location.href') });
+        await readFromTop(ctx.page);
+        await readFromTop(other);
+        ctx.setModelResponder(async () => {
+          await new Promise((resolve) => { releaseReply = resolve; waiting = true; });
+          waiting = false;
+          return { sse: sseText(delayedReply) };
+        });
+        await submit(ctx.page, ownText);
+        const started = await waitFor(async () => {
+          const [own, foreign] = await Promise.all([view(ctx.page), view(other)]);
+          return waiting && ctx.modelCallCount() === 1 && own?.user === ownText
+            && foreign?.user === ownText && own.busy && foreign.busy;
+        }, { budgetMs: 20_000, pollMs: 50 });
+        if (!started) throw new Error('delayed model request did not reach both real surfaces');
+        await rec.visualPage('own-send-scroll', ctx.page, { beforeShot: async (_page, theme) => {
+          const [own, foreign] = await Promise.all([view(ctx.page), view(other)]);
+          rec.check(`foreign send keeps the reader in place (${theme})`, foreign?.top === 0, JSON.stringify(foreign));
+          if (baseRender) rec.observe(`merge-base own-send position (${theme})`, own);
+          else rec.check(`own send keeps its bubble visible (${theme})`, own?.bottom < 2 && own.visible, JSON.stringify(own));
+        } });
+        await readFromTop(ctx.page);
+        const [reading, otherReading] = await Promise.all([view(ctx.page), view(other)]);
+        rec.check('a reader can leave the live edge during a real delayed model call',
+          waiting && reading?.busy && otherReading?.busy && reading.top === 0 && otherReading.top === 0);
+        releaseReply();
+        await settled(ctx.page, ownText, delayedReply);
+        await settled(other, ownText, delayedReply);
+        complete = true;
+        await rec.visualPage('own-send-scroll-reader', ctx.page, { beforeShot: async (_page, theme) => {
+          const [own, foreign] = await Promise.all([view(ctx.page), view(other)]);
+          rec.check(`reply and settlement keep both readers in place (${theme})`,
+            own?.top === 0 && foreign?.top === 0 && !own.busy && !foreign.busy, JSON.stringify({ own, foreign }));
+        } });
+      } finally {
+        releaseReply();
+        if (!complete) await rpc(ctx.page, { type: 'agent/stop' });
+        if (other) await other.close();
+        await setEmulatedTheme(ctx.page, 'light');
+      }
+    },
+  },
+
+  {
+    name: 'actors-stop-hydration', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('This chat is idle.') }),
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const held = [], requests = [];
+      let owner = null;
+      const view = () => evalIn(ctx.page, `(async () => {
+        'use strict';
+        (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
+        return { user: [...document.querySelectorAll('.message-user .bubble')].at(-1)?.textContent,
+          stop: !!document.querySelector('form.input-bar button.stop'),
+          streaming: !!document.querySelector('.message-assistant.streaming'), text: document.body.innerText };
+      })()`, true);
+      const checkStop = async (name, expected) => {
+        if (!baseRender) await waitFor(async () => (await view())?.stop === expected,
+          { budgetMs: 5_000, pollMs: 50 });
+        const current = await view();
+        if (baseRender) rec.observe(`merge-base ${name}`, current);
+        else rec.check(name, current?.stop === expected, JSON.stringify(current));
+      };
+      const switchTo = async (sessionId, text) => {
+        const reply = await rpc(ctx.page, { type: 'session/switch', sessionId });
+        if (!reply?.ok || !await waitFor(async () => (await view())?.user === text,
+          { budgetMs: 10_000, pollMs: 50 })) throw new Error('chat switch did not mount its owner');
+      };
+      try {
+        await submitActorStopMessage(ctx.page, 'Keep this chat idle.');
+        if (!await waitFor(async () => (await view())?.text.includes('This chat is idle.') && !(await view())?.streaming,
+          { budgetMs: 20_000 })) throw new Error('idle chat did not settle');
+        const idle = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId;
+        await resetSession(ctx);
+        ctx.setModelResponder(async (_index, request) => {
+          requests.push(request.postData);
+          await new Promise((resolve) => held.push(resolve));
+          return { sse: sseText('A stopped response must not appear.') };
+        });
+        await submitActorStopMessage(ctx.page, 'Wait for this model reply.');
+        if (!await waitFor(async () => held.length === 1 && (await view())?.stop,
+          { budgetMs: 20_000 })) throw new Error('the real model request did not start');
+        owner = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId;
+        const priorDocument = await evalIn(ctx.page, 'performance.timeOrigin');
+        await reloadReadyPanel(ctx, { expectedSessionId: owner });
+        rec.check('reload mounts a new document while the real request remains pending',
+          priorDocument !== await evalIn(ctx.page, 'performance.timeOrigin') && held.length === 1 && (await view())?.streaming);
+        await checkStop('the reopened owner keeps its Stop', true);
+        await rec.visualPage('actors-stop-hydration', ctx.page, { beforeShot: () => checkStop('reopened Stop survives each theme', true) });
+        await switchTo(idle, 'Keep this chat idle.');
+        await checkStop('an idle chat has no Stop from another owner', false);
+        await rec.visualPage('actors-stop-idle-chat', ctx.page, { beforeShot: () => checkStop('idle Stop stays absent in each theme', false) });
+        await switchTo(owner, 'Wait for this model reply.');
+        await checkStop('switching back restores the live owner Stop', true);
+        await submitActorStopMessage(ctx.page, 'Steer this pending reply.');
+        if (!await waitFor(() => held.length === 2, { budgetMs: 20_000 })) throw new Error('steer did not reach the model');
+        held[0]();
+        const superseded = await waitFor(async () => {
+          const state = (await rpc(ctx.page, { type: 'state/get' }))?.state;
+          return state?.session?.messages?.some((message) => message.stopReason === 'aborted')
+            && state.session.messages.at(-1)?.streaming === true;
+        }, { budgetMs: 15_000, pollMs: 50 });
+        rec.check('a real steer settles the old turn while its replacement stays live', !!superseded && requests.length === 2);
+        await checkStop('old settlement does not hide the replacement Stop', true);
+        await rec.visualPage('actors-stop-steered', ctx.page, { beforeShot: () => checkStop('steered Stop survives each theme', true) });
+        if ((await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId !== owner) throw new Error('Stop has the wrong chat owner');
+        if (await evalIn(ctx.page, `!!document.querySelector('form.input-bar button.stop')`)) {
+          await clickAndSyncRedraw(ctx.page, 'form.input-bar button.stop');
+        } else if (baseRender) await rpc(ctx.page, { type: 'agent/stop' });
+        else throw new Error('the replacement turn has no Stop');
+        held[1]();
+        if (!await waitFor(async () => !(await view())?.streaming, { budgetMs: 15_000 })) throw new Error('Stop did not settle the owner');
+        rec.check('Stop never renders either held reply', !(await view())?.text.includes('A stopped response must not appear.'));
+        await reloadReadyPanel(ctx, { expectedSessionId: owner });
+        rec.check('the finished owner reloads without a dead Stop', (await view())?.stop === false);
+      } finally {
+        if (owner) {
+          await rpc(ctx.page, { type: 'session/switch', sessionId: owner });
+          await rpc(ctx.page, { type: 'agent/stop' });
+        }
+        for (const release of held) release();
+        await setEmulatedTheme(ctx.page, 'light');
+        await clearActorStopDraft(ctx.page, ['Keep this chat idle.', 'Wait for this model reply.', 'Steer this pending reply.']);
+      }
+    },
+  },
+  {
+    name: 'actors-incomplete-reply', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('Ready.') }),
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      let spawned = 0, childCalls = 0, wakeCalls = 0, scriptResult = '';
+      const prior = new Set((await auditEntries(ctx)).map((entry) => entry.id));
+      ctx.setModelResponder((_index, request) => {
+        const body = request.postData ?? '';
+        if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
+          childCalls++;
+          if (childCalls === 1) return { sse: sseToolCall('script', { code: 'return 6 * 7;' }) };
+          scriptResult = toolResultsIn(body).at(-1) ?? '';
+          return { sse: sseText('') };
+        }
+        if (body.includes('An actor you started earlier')) {
+          wakeCalls++;
+          return { sse: sseText('The child ended without a final reply. Check its saved computation before retrying.') };
+        }
+        if (!spawned++) return { sse: sseToolCall('actor_create', {
+          task: 'Compute six times seven, then end without reply text.', tools: ['script'], sync: false,
+        }) };
+        return { sse: sseText('The isolated computation is running.') };
+      });
+      try {
+        await submitActorStopMessage(ctx.page, 'Delegate one computation and preserve its terminal report.');
+        const owner = await waitFor(async () => (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId,
+          { budgetMs: 10_000 });
+        const completed = await waitFor(async () => (await auditEntries(ctx)).find((entry) =>
+          !prior.has(entry.id) && entry.type === 'actor_completed'), { budgetMs: 30_000, pollMs: 100 });
+        if (!completed) throw new Error('the real child did not complete');
+        if (!baseRender && !await waitFor(() => evalIn(ctx.page,
+          `!!document.querySelector('.message-actor-reply.failed') && document.body.innerText.includes('Check its saved transcript before retrying.')`),
+        { budgetMs: 20_000, pollMs: 50 })) throw new Error('the child terminal report did not render');
+        if (!await waitFor(() => evalIn(ctx.page,
+          `!document.querySelector('.message-assistant.streaming') && !document.querySelector('form.input-bar button.stop')`),
+        { budgetMs: 15_000, pollMs: 50 })) {
+          rec.observe('unsettled terminal report', { spawned, childCalls, wakeCalls,
+            view: await evalIn(ctx.page, 'document.body.innerText'),
+            bundle: (await rpc(ctx.page, { type: 'session/debugBundle', sessionId: owner }))?.bundle });
+          throw new Error('the terminal report did not settle');
+        }
+        const bundle = (await rpc(ctx.page, { type: 'session/debugBundle', sessionId: owner }))?.bundle;
+        const child = bundle?.childSessions?.find((session) => session.kind === 'spawned');
+        const parentCall = bundle?.session?.messages?.flatMap((message) => message.toolUses ?? [])
+          .find((call) => call.name === 'actor_create');
+        const replies = bundle?.session?.messages?.filter((message) => message.actorReply) ?? [];
+        const scripts = (await auditEntries(ctx)).filter((entry) => !prior.has(entry.id)
+          && entry.type === 'tool_executed' && entry.details?.tool === 'script');
+        rec.check('the real child ran one computation and made two model calls', childCalls === 2 && scripts.length === 1 && scriptResult.includes('42'));
+        rec.check('the child transcript retains its exact computation call and result',
+          child?.messages?.some((message) => message.toolUses?.some((call) => call.name === 'script'))
+          && child.messages.some((message) => message.toolResults?.length === 1));
+        if (baseRender) rec.observe('merge-base incomplete delivery', { wakeCalls, replies, completion: completed.details });
+        else {
+          rec.check('the incomplete child wakes its exact parent once', wakeCalls === 1 && replies.length === 1 && typeof parentCall?.id === 'string'
+            && replies[0].actorReply.failed === true && replies[0].actorReply.parentToolUseId === parentCall?.id
+            && replies[0].id === replies[0].actorReply.actorDeliveryId);
+          rec.check('the parent receives a bounded factual report with no false Stop claim',
+            replies[0].content.length < 2_000 && !replies[0].content.includes('stopped before it produced a reply'));
+        }
+        await rec.visual('actors-incomplete-reply');
+      } finally {
+        await rpc(ctx.page, { type: 'agent/stop' });
+        await clearActorStopDraft(ctx.page, ['Delegate one computation and preserve its terminal report.']);
+      }
+    },
+  },
+  {
+    name: 'actor-cold-surfaces', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const observer = `(() => {
+        'use strict';
+        const evidence = globalThis.__actorColdEvidence = { states: [], requests: [] };
+        const runtime = chrome.runtime;
+        const connect = runtime.connect.bind(runtime), sendMessage = runtime.sendMessage.bind(runtime);
+        runtime.connect = (...args) => {
+          const port = connect(...args);
+          port.onMessage.addListener((message) => {
+            if (message?.type === 'state') evidence.states.push({
+              capability: message.state?.capabilities?.actorExecution,
+              projection: message.state?.projection,
+            });
+          });
+          return port;
+        };
+        runtime.sendMessage = (...args) => {
+          const message = args.find((value) => value && typeof value.type === 'string');
+          if (message) evidence.requests.push(message.type);
+          return sendMessage(...args);
+        };
+      })()`;
+      for (const surface of ['home', 'sidepanel']) {
+        let mainCalls = 0, childCalls = 0;
+        const fresh = await launchPeerd({ extensionDir: ctx.extensionDir,
+          panelPath: surface === 'home' ? 'home/home.html#chat' : 'sidepanel/sidepanel.html',
+          beforePanelNavigate: (page) => page.send('Page.addScriptToEvaluateOnNewDocument', { source: observer }),
+          modelResponder: (_index, request) => {
+            if (request.postData?.includes('<actor_agent>')) {
+              childCalls++; return { sse: sseText('The isolated cold-start computation is complete.') };
+            }
+            if (mainCalls++ === 0) return { sse: sseToolCall('actor_create', {
+              task: 'Compute six times seven without tools and report the result.', tools: [], sync: true,
+            }) };
+            return { sse: sseText('The first isolated actor is ready.') };
+          },
+        });
+        let options;
+        try {
+          const untouched = await rpc(fresh.page, { type: 'state/get' });
+          rec.check(`${surface} starts with a real fresh locked vault`, untouched?.ok
+            && untouched.state?.vault?.initialized === false && untouched.state.vault.locked === true);
+          const untouchedActor = untouched?.state?.capabilities?.actorExecution;
+          if (baseRender) rec.observe(`merge-base fresh locked ${surface} actor health`, untouchedActor);
+          else rec.check(`${surface} fresh locked state has exact neutral actor health`, untouchedActor?.status === 'not-started'
+            && untouchedActor.host === 'offscreen-document-worker' && untouchedActor.reason === null
+            && untouchedActor.retryable === false, JSON.stringify(untouchedActor));
+          const untouchedLease = await rpc(fresh.page, { type: 'bootstrap/ready' });
+          rec.check(`${surface} fresh locked state read keeps the controller revoked`, untouchedLease?.ok
+            && untouchedLease.featureLeases?.schema === 1
+            && untouchedLease.featureLeases.leases?.controller?.status === 'revoked', JSON.stringify(untouchedLease?.featureLeases));
+          await unlockAndReady(fresh.page);
+          if (surface === 'home') {
+            if (!await waitFor(() => evalIn(fresh.page, `!!document.querySelector('[data-network-choice="skip"]')`),
+              { budgetMs: 15_000, pollMs: 50 })) throw new Error('fresh Home did not offer its real network choice');
+            if (!await clickAndSyncRedraw(fresh.page, '[data-network-choice="skip"]')) throw new Error('Not now did not accept the real choice');
+            rec.check('fresh Home records the explicit network-off choice',
+              (await rpc(fresh.page, { type: 'state/get' }))?.state?.settings?.dwebEnabled === false);
+          }
+          await freezeAnimations(fresh);
+          await fresh.page.send('Emulation.setDeviceMetricsOverride', surface === 'home'
+            ? { width: 960, height: 900, deviceScaleFactor: 1, mobile: false } : PANEL_METRICS);
+          const ready = await waitFor(() => evalIn(fresh.page,
+            `document.querySelectorAll('.path-card[data-path]').length > 1`), { budgetMs: 20_000, pollMs: 50 });
+          if (!ready) throw new Error(`${surface} did not mount its real starter cards`);
+          const cold = (await rpc(fresh.page, { type: 'state/get' }))?.state?.capabilities?.actorExecution;
+          // why: provider projection can verify the host before the first unlocked state is published.
+          const safeHealth = ['not-started', 'available'].includes(cold?.status)
+            && cold.host === 'offscreen-document-worker' && cold.reason === null && cold.retryable === false;
+          const lease = await rpc(fresh.page, { type: 'bootstrap/ready' });
+          const controls = await evalIn(fresh.page, `(() => ({
+            banner: !!document.querySelector('.actor-isolation-banner'),
+            cards: [...document.querySelectorAll('.path-card[data-path]')].map((button) => ({
+              kind: button.dataset.path, disabled: button.disabled,
+            })),
+          }))()`);
+          if (baseRender) rec.observe(`merge-base cold ${surface}`, { cold, controls, leases: lease?.featureLeases });
+          else {
+            rec.check(`${surface} has exact safe actor health`, safeHealth, JSON.stringify(cold));
+            rec.check(`${surface} has enabled starters and no false pause`, !controls.banner
+              && controls.cards.length > 1 && controls.cards.every((card) => !card.disabled), JSON.stringify(controls));
+          }
+          const leases = lease?.featureLeases;
+          const validLeases = lease?.ok === true && leases?.schema === 1 && leases.leases !== null
+            && typeof leases.leases === 'object' && !Array.isArray(leases.leases)
+            && ['buildId', 'bootId', 'kernelEpoch'].every((key) => typeof leases[key] === 'string' && leases[key].length > 0);
+          const coldAudit = await rpc(fresh.page, { type: 'audit/list', limit: 100 });
+          rec.check(`${surface} cold setup starts no actor or model inference`, validLeases && (baseRender || safeHealth)
+            && fresh.modelCallCount() === 0 && coldAudit?.ok && Array.isArray(coldAudit.entries)
+            && !coldAudit.entries.some((entry) => ['actor_ran_isolated', 'actor_background_turn_refused', 'actor_completed'].includes(entry.type)),
+          JSON.stringify({ cold, lease, calls: fresh.modelCallCount(), audit: coldAudit }));
+          // why: unlocked provider projection uses the controller before actor work starts.
+          rec.observe(`${surface} provider readiness lease after unlock`, { before: untouchedLease?.featureLeases, after: leases });
+          await rec.visualPage(surface === 'home' ? 'actor-cold-surfaces' : `actor-cold-${surface}`, fresh.page);
+          if (surface === 'home') {
+            const before = await evalIn(fresh.page, 'globalThis.__actorColdEvidence.states.length');
+            options = await openWidePage(fresh, 'options/options.html#!/providers', { ready: '#runner-model' });
+            await evalIn(options, `document.querySelector('#runner-model').scrollIntoView({ block: 'center' })`);
+            const hint = await evalIn(options, `document.querySelector('#runner-model-status')?.textContent ?? null`);
+            if (baseRender) rec.observe('merge-base cold Providers hint', hint);
+            else rec.check('cold Providers has no false paused hint', hint === null, String(hint));
+            rec.check('real Providers inventory makes no model inference', fresh.modelCallCount() === 0);
+            await rec.visualPage('actor-cold-providers', options);
+            const published = await waitFor(() => evalIn(fresh.page,
+              `globalThis.__actorColdEvidence.states.slice(${before}).find((entry) => entry.capability?.status === 'available')`),
+            { budgetMs: 15_000, pollMs: 50 });
+            if (baseRender) rec.observe('merge-base inventory publication push', published ?? null);
+            else rec.check('live inventory publication pushes health to Home without a diagnostic state read',
+              published?.capability?.status === 'available' && published.capability.reason === null);
+          } else {
+            const before = await evalIn(fresh.page, `({ states: globalThis.__actorColdEvidence.states.length,
+              reads: globalThis.__actorColdEvidence.requests.filter((type) => type === 'state/get').length })`);
+            await evalIn(fresh.page, `(() => {
+              'use strict'; const input = document.querySelector('form.input-bar textarea'); input.focus(); input.select();
+            })()`);
+            await fresh.page.send('Input.insertText', { text: 'Start one isolated actor for this cold chat.' });
+            if (!await waitFor(() => evalIn(fresh.page, `!!document.querySelector('button.send-btn:not(:disabled)')`),
+              { budgetMs: 5_000 }) || !await clickAndSyncRedraw(fresh.page, 'button.send-btn')) throw new Error('the cold composer did not send');
+            const finished = await waitFor(() => evalIn(fresh.page,
+              `document.body.innerText.includes('The first isolated actor is ready.') && !document.querySelector('form.input-bar button.stop')`),
+            { budgetMs: 30_000, pollMs: 50 });
+            if (!finished) throw new Error('the first real actor did not settle');
+            const pushed = await evalIn(fresh.page, `({ states: globalThis.__actorColdEvidence.states.slice(${before.states}),
+              reads: globalThis.__actorColdEvidence.requests.filter((type) => type === 'state/get').length,
+              banner: !!document.querySelector('.actor-isolation-banner') })`);
+            const audit = await rpc(fresh.page, { type: 'audit/list', limit: 100 });
+            rec.check('the real first actor uses one verified dedicated worker', childCalls === 1 && fresh.modelCallCount() === 3
+              && audit?.ok && audit.entries?.some((entry) => entry.type === 'actor_ran_isolated'
+                && entry.details?.workerType === 'dedicated' && entry.details?.realmVerified === true));
+            rec.check('the first-use observation adds no state/get artifact', pushed.reads === before.reads, JSON.stringify(pushed));
+            if (baseRender) rec.observe('merge-base first-use publication', pushed);
+            else rec.check('live first-use publication clears the cold value and false pause',
+              pushed.states.some((entry) => entry.capability?.status === 'available') && !pushed.banner, JSON.stringify(pushed));
+            await rec.visualPage('actor-cold-first-use', fresh.page);
+          }
+        } finally { if (options) await options.close(); await fresh.close(); }
+      }
+    },
+  },
+
+  {
+    name: 'backup-network-policy', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const evidence = { schema: 1, phase: 'fresh', events: [], observerErrors: [] };
+      const diagnostic = createConsentDiagnostics(evidence, () => {});
+      const fresh = await launchPeerd({ extensionDir: ctx.extensionDir, panelPath: 'home/home.html', resumeAuxiliaryWorkers: false });
+      const directory = await mkdtemp(join(tmpdir(), 'peerd-backup-policy-'));
+      let observer;
+      const click = async (selector) => {
+        if (!await waitFor(() => evalIn(fresh.page, `!!document.querySelector(${JSON.stringify(selector)})`),
+          { budgetMs: 20_000 }) || !await clickAndSyncRedraw(fresh.page, selector)) throw new Error(`missing real control ${selector}`);
+      };
+      const exportBackup = async (mode, expectedDid = null) => {
+        evidence.phase = mode;
+        const start = { events: evidence.events.length,
+          hosts: await evalIn(fresh.swConn, 'globalThis.__backupHostCalls.length') };
+        const destination = await mkdtemp(join(directory, `${mode}-`));
+        const page = await openWidePage(fresh, 'options/options.html#!/transfer', { ready: '#exppass2' });
+        try {
+          await page.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: destination });
+          // Observe only result codes from the real private channel. Never
+          // retain the passphrase, exported payload, secrets or identity capsule.
+          await evalIn(page, `(() => {
+            'use strict';
+            globalThis.__backupReplyCodes = [];
+            navigator.serviceWorker.addEventListener('message', event => {
+              if (!event.isTrusted || event.data?.type !== 'private-transfer/channel' || event.ports.length !== 1) return;
+              event.ports[0].addEventListener('message', response => {
+                const data = response.data;
+                if (data?.type !== 'private-transfer/response') return;
+                const code = data.reply?.error ?? data.error;
+                globalThis.__backupReplyCodes.push({ transportOk: data.ok === true, ok: data.reply?.ok === true,
+                  error: typeof code === 'string' && /^[a-z0-9-]{1,100}$/.test(code) ? code : code == null ? null : 'non-code-error' });
+              });
+            });
+            for (const id of ['exppass', 'exppass2']) {
+              const input = document.getElementById(id); input.value = ${JSON.stringify(PASSPHRASE)};
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+          })()`);
+          if (!await clickAndSyncRedraw(page, '.transfer-section > div > button')) throw new Error('Download backup is missing');
+          const status = await waitFor(() => evalIn(page, `(() => {
+            const status = document.querySelector('.transfer-status');
+            return status ? { text: status.textContent, success: status.classList.contains('transfer-status--success'),
+              retained: document.querySelector('#exppass').value.length > 0 && document.querySelector('#exppass2').value.length > 0,
+              enabled: [...document.querySelectorAll('.transfer-section button')].some((button) => button.textContent === 'Download backup' && !button.disabled) } : null;
+          })()`), { budgetMs: 60_000, pollMs: 100 });
+          if (!status?.enabled) throw new Error(`backup ${mode} did not settle`);
+          let payload, inspected;
+          if (status.success) {
+            payload = await waitFor(async () => {
+              const names = (await readdir(destination)).filter((name) => name.endsWith('.json'));
+              return names.length === 1 ? readFile(join(destination, names[0]), 'utf8').then(JSON.parse).catch(() => null) : null;
+            }, { budgetMs: 15_000, pollMs: 50 });
+            if (!payload) throw new Error(`backup ${mode} reported success without a real JSON download`);
+            inspected = await privateTransferRpc(page, { type: 'transfer/inspectImport', payload });
+            if (inspected?.ok !== true) throw new Error(`backup ${mode} could not inspect its actual download`);
+          }
+          rec.observe(`settled backup receipt ${mode}`, { status, codes: await evalIn(page, 'globalThis.__backupReplyCodes'), files: await readdir(destination),
+            format: payload?.format ?? null, summary: inspected?.summary ?? null });
+          await observer.barrier();
+          const events = evidence.events.slice(start.events);
+          const hosts = await evalIn(fresh.swConn, 'globalThis.__backupHostCalls.slice(' + start.hosts + ')');
+          const files = await readdir(destination);
+          const identity = payload?.dweb?.identityRecord;
+          const off = mode !== 'identity-on';
+          const noHost = hosts.length === 0 && !events.some((event) => event.href?.includes('/offscreen/offscreen.html'));
+          const noTransport = !events.some((event) => ['WebSocket', 'RTCPeerConnection', 'native-websocket'].includes(event.kind));
+          const result = { status, files, hosts, noHost, noTransport, did: identity?.did ?? null,
+            format: payload?.format ?? null, summary: inspected?.summary ?? null };
+          rec.observe(`actual backup ${mode}`, result);
+          if (baseRender && off) rec.observe(`merge-base backup ${mode}`, result);
+          else if (expectedDid && off) {
+            rec.check('identity-off refuses the download with distinct network guidance', !status.success && status.retained
+              && files.length === 0 && status.text.includes('Turn it on in Settings > Decentralized web')
+              && status.text.includes('Nothing was downloaded'));
+          } else {
+            rec.check(`${mode} downloads an inspectable real backup`, status.success && payload?.format === 'peerd-export');
+            if (!status.success || inspected?.ok !== true) throw new Error(`backup ${mode} refused; see settled backup receipt for result codes`);
+            rec.check(`${mode} includes only the expected identity`, expectedDid
+              ? identity?.did === expectedDid && typeof identity.capsule === 'string' && identity.capsule.length > 0
+                && inspected.summary?.hasIdentityRecord === true && inspected.summary.identityDid === expectedDid
+              : !identity && inspected.summary?.hasIdentityRecord === false);
+          }
+          if (!baseRender && off) rec.check(`${mode} constructs no host or network transport`, noHost && noTransport);
+          rec.check(`${mode} export makes no model inference`, fresh.modelCallCount() === 0);
+          await rec.visualPage(mode === 'no-choice' ? 'backup-network-policy' : `backup-${mode}`, page);
+        } finally { await page.close(); }
+      };
+      try {
+        const initial = await rpc(fresh.page, { type: 'state/get' });
+        rec.check('backup policy starts in a real fresh vault', initial?.ok && initial.state?.vault?.initialized === false);
+        const existing = await evalIn(fresh.page, 'chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] })', true);
+        if (!Array.isArray(existing) || existing.length) throw new Error('a host exists before backup observation');
+        await evalIn(fresh.swConn, `(() => {
+          'use strict';
+          globalThis.__backupHostCalls = [];
+          const createDocument = chrome.offscreen.createDocument.bind(chrome.offscreen);
+          chrome.offscreen.createDocument = (...args) => {
+            globalThis.__backupHostCalls.push({ url: args[0]?.url,
+              stack: new Error('backup host creation').stack?.slice(0, 3000) }); return createDocument(...args);
+          };
+        })()`);
+        observer = await observeHosts(fresh, evidence, diagnostic, () => {});
+        const initialized = await rpc(fresh.page, { type: 'vault/initialize', passphrase: PASSPHRASE }, { timeoutMs: 120_000 });
+        if (initialized?.ok !== true) throw new Error('the fresh backup vault did not initialize');
+        const noChoice = (await rpc(fresh.page, { type: 'state/get' }))?.state?.settings;
+        rec.check('fresh backup has no inherited network choice', noChoice?.dwebChoiceMade === false && noChoice.dwebEnabled === false);
+        await exportBackup('no-choice');
+        await click('.onboarding-skip');
+        await click('[data-network-choice=skip]');
+        for (const field of ['.peer-name-input', '#onb-call', '#onb-notes']) {
+          if (!await waitFor(() => evalIn(fresh.page, `!!document.querySelector(${JSON.stringify(field)})`),
+            { budgetMs: 20_000 })) throw new Error(`missing personal setup ${field}`);
+          await click('.onboarding-skip');
+        }
+        const off = (await rpc(fresh.page, { type: 'state/get' }))?.state?.settings;
+        rec.check('Not now is a real persisted off choice', off?.dwebChoiceMade === true && off.dwebEnabled === false);
+        await exportBackup('no-identity-off');
+        evidence.phase = 'explicit-enable';
+        await evalIn(fresh.page, `location.hash = 'discover'`);
+        await click('[data-network-choice=enable]');
+        const readback = { choice: null, ready: null, info: null };
+        const saved = await waitFor(async () => {
+          const reply = await rpc(fresh.page, { type: 'state/get' });
+          readback.choice = { ok: reply?.ok, dwebChoiceMade: reply?.state?.settings?.dwebChoiceMade,
+            dwebEnabled: reply?.state?.settings?.dwebEnabled };
+          return readback.choice.ok === true && readback.choice.dwebChoiceMade === true
+            && readback.choice.dwebEnabled === true;
+        }, { budgetMs: 30_000, pollMs: 100 });
+        rec.observe('explicit peer-network choice read-back', readback.choice);
+        if (!saved) throw new Error(`explicit network choice did not persist: ${JSON.stringify(readback)}`);
+        const running = await waitFor(async () => {
+          readback.ready = await rpc(fresh.page, { type: 'bootstrap/ready' });
+          if (readback.ready?.ok !== true || readback.ready.featureLeases?.leases?.dweb?.status !== 'active') return false;
+          readback.info = await rpc(fresh.page, { type: 'dweb/distributed/info' });
+          return readback.info?.ok === true && readback.info.running === true
+            && readback.info.did?.startsWith('did:key:');
+        }, { budgetMs: 60_000, pollMs: 100 });
+        rec.observe('native peer-network startup read-back', readback);
+        if (!running) throw new Error(`native network opt-in did not create the real identity: ${JSON.stringify(readback)}`);
+        const started = readback.info;
+        const signaled = await waitFor(() => evidence.events.some((event) => event.phase === 'explicit-enable'
+          && event.kind === 'WebSocket'), { budgetMs: 30_000, pollMs: 100 });
+        rec.check('explicit opt-in proves the native transport observer works', !!signaled);
+        await exportBackup('identity-on', started.did);
+        const disabled = await rpc(fresh.page, { type: 'settings/update', patch: { dwebEnabled: false } });
+        if (disabled?.ok !== true || disabled.settings?.dwebEnabled !== false) throw new Error('the peer network did not turn off');
+        await exportBackup('identity-off', started.did);
+      } finally {
+        rec.observe('backup host and transport evidence', evidence);
+        try { if (observer) await observer.close(); }
+        finally { await fresh.close(); await rm(directory, { recursive: true, force: true }); }
+      }
+    },
   },
 
   // --- functional: the goal-mode autonomous loop -----------------------------
   // Also covers the plan-of-record (todo_init/todo_check → the visible
   // TodoCard) and the sticky Goal toggle (lit "running" while the run drives,
   // not untoggled on send). The faked model plans, ticks one item, then ends
-  // the run — so the card renders 1/2 and the toggle reads running mid-flight.
+  // the run - so the card renders 1/2 and the toggle reads running mid-flight.
   {
     name: 'goal', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex) => {
-      if (callIndex === 0) return { delayMs: 200, sse: sseText('On it — planning the goal.') };
+      if (callIndex === 0) return { delayMs: 200, sse: sseText('On it - planning the goal.') };
       if (callIndex === 1) return { delayMs: 200, sse: sseToolCall('todo_init', { items: [
         { text: 'tidy the repo', validation: 'no stray files' },
         { text: 'verify the build', validation: 'tests pass' },
@@ -2088,7 +3737,7 @@ export const STATES = [
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'tidy the repo', goal: true });
       rec.check('goal run started', sent?.ok && sent.handled === 'goal', JSON.stringify(sent));
       const goalBarSeen = await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.goal-bar')`), { budgetMs: 10_000, pollMs: 50 });
-      // The Goal toggle is the run's state light — it must read "running", not
+      // The Goal toggle is the run's state light - it must read "running", not
       // fall back to unlit, the instant the run is live (the fix for "did it
       // even start?"). Best-effort snapshot while the run drives.
       const toggleRunning = await waitFor(
@@ -2103,7 +3752,7 @@ export const STATES = [
         })()`),
         { budgetMs: 8_000, pollMs: 50 });
       // The plan-of-record card appears once todo_init lands and ticks to 1/2
-      // after todo_check — the visible checklist that answers "is it working?".
+      // after todo_check - the visible checklist that answers "is it working?".
       const todoSeen = await waitFor(
         () => evalIn(ctx.page, `/1\\/2/.test(document.querySelector('.todo-card .todo-card-meta')?.textContent || '')`),
         { budgetMs: 30_000, pollMs: 50 });
@@ -2120,6 +3769,16 @@ export const STATES = [
       // The finished checklist stays as the run's receipt (does not vanish on end).
       const todoAfter = await evalIn(ctx.page, `!!document.querySelector('.todo-card')`);
       rec.check('TodoCard persists after the run as its receipt', !!todoAfter);
+      // The receipt must also survive a full 'state' push, which replaces the
+      // whole session: a Plan toggle is one such push.
+      await rpc(ctx.page, { type: 'permission/set', mode: 'plan' });
+      const planOn = await waitFor(() => evalIn(ctx.page,
+        `document.querySelector('.planact-mode[aria-pressed="true"]')?.textContent.trim() === 'Plan'`), { budgetMs: 8_000, pollMs: 50 });
+      const todoAfterPush = await evalIn(ctx.page, `!!document.querySelector('.todo-card')`);
+      rec.check('TodoCard survives the state push of a Plan toggle', !!planOn && todoAfterPush === true);
+      await rpc(ctx.page, { type: 'permission/set', mode: 'act' });
+      await waitFor(() => evalIn(ctx.page,
+        `document.querySelector('.planact-mode[aria-pressed="true"]')?.textContent.trim() === 'Act'`), { budgetMs: 8_000, pollMs: 50 });
       rec.check('submitted goal text round-trips as the first user message', !!out.userText && out.userText.includes('tidy the repo'), JSON.stringify(out.userText));
     },
   },
@@ -2129,9 +3788,9 @@ export const STATES = [
     name: 'personal-data', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
       if (callIndex === 0) return { sse: sseToolCall('script', { code: PDA_SCRIPT }) };
-      // call 1 carries the script tool result back — capture it for the assertion.
+      // call 1 carries the script tool result back - capture it for the assertion.
       if (callIndex === 1) pdaToolResultBody = (request && request.postData) || '';
-      return { sse: sseText('You spent $50.00 across 3 orders — computed on-device, nothing left your machine.') };
+      return { sse: sseText('You spent $50.00 across 3 orders - computed on-device, nothing left your machine.') };
     },
     async run(ctx, rec) {
       pdaToolResultBody = '';
@@ -2142,14 +3801,14 @@ export const STATES = [
       const calls = ctx.modelCallCount();
       rec.check('the agent ran the script tool loop (>=2 model calls)', calls >= 2, `model calls: ${calls}`);
       // the load-bearing proof: the sealed worker actually built + queried the
-      // OPFS index — the computed total/count only exist in the worker's result
+      // OPFS index - the computed total/count only exist in the worker's result
       // JSON, not in PDA_SCRIPT's source text or the code argument echoed back.
       // why parse, not substring-match the raw body: pdaToolResultBody is the
       // raw request postData, where the script result is a JSON string NESTED in
-      // the request JSON — so its quotes are escaped (\"total\":50) and a raw
+      // the request JSON - so its quotes are escaped (\"total\":50) and a raw
       // `"total":50` check never matches (this is why the check was red). Parse
       // the request, pull the tool-result message content (now unescaped), and
-      // assert the computed values live THERE — the load-bearing proof the
+      // assert the computed values live THERE - the load-bearing proof the
       // sealed worker built + queried the OPFS index (total/count exist only in
       // its result, not in PDA_SCRIPT's source or the echoed code arg).
       let pdaResult = '';
@@ -2158,7 +3817,7 @@ export const STATES = [
         pdaResult = (reqBody.messages || [])
           .map((m) => (typeof m.content === 'string' ? m.content : ''))
           .find((c) => c.includes('on-device OPFS index')) || '';
-      } catch { /* leave '' — the check fails with a clear detail */ }
+      } catch { /* leave '' - the check fails with a clear detail */ }
       rec.check('script REALLY computed on-device (computed total in tool result, not script source)',
         /"total"\s*:\s*50\b/.test(pdaResult) && /"count"\s*:\s*3\b/.test(pdaResult),
         `script tool result: ${pdaResult.slice(0, 200)}`);
@@ -2166,7 +3825,7 @@ export const STATES = [
     },
   },
 
-  // --- functional: HARVEST — the agent reads a real page, then indexes it ------
+  // --- functional: HARVEST - the agent reads a real page, then indexes it ------
   {
     name: 'harvest', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
@@ -2183,11 +3842,11 @@ export const STATES = [
           if (t === 0) return { sse: sseToolCall('page_code', {
             code: `const results = await Promise.all([page.goto(${JSON.stringify(`${harvestFixtureUrl}first`)}), page.goto(${JSON.stringify(harvestFixtureUrl)}), page.content()]); return results[2];`,
           }) };
-          return { sse: sseText('Order #1001 — Coffee Mug — $12.00; Order #1002 — Notebook — $8.50; Order #1003 — Pen Set — $15.00') };
+          return { sse: sseText('Order #1001 - Coffee Mug - $12.00; Order #1002 - Notebook - $8.50; Order #1003 - Pen Set - $15.00') };
         }
         if (t === 0) return { sse: sseToolCall('navigate', { url: harvestFixtureUrl }) };
         if (t === 1) return { sse: sseToolCall('read_page', {}) };
-        return { sse: sseText('Order #1001 — Coffee Mug — $12.00; Order #1002 — Notebook — $8.50; Order #1003 — Pen Set — $15.00') };
+        return { sse: sseText('Order #1001 - Coffee Mug - $12.00; Order #1002 - Notebook - $8.50; Order #1003 - Pen Set - $15.00') };
       }
       // ORCHESTRATOR: delegate the read to the web actor ONCE (it opens + reads the
       // page itself), end the turn (the ack says the reply lands later). When the
@@ -3055,6 +4714,8 @@ export const STATES = [
         await rec.shot('contract-details');
         await evalIn(ctx.page, `document.querySelector('[aria-label="Proposed site-client contracts"]').closest('details').open = false`);
 
+        rec.check('the live consent dialog keeps its title and safe initial focus', confirmation?.role === 'dialog'
+          && confirmation?.titleId === 'peerd-confirm-title' && confirmation?.rejectFocused === true, JSON.stringify(confirmation));
         const callsAtConfirmation = siteClientVertical.actorCalls;
         await sleep(500);
         const stillBlocked = await evalIn(ctx.page,
@@ -3264,6 +4925,116 @@ export const STATES = [
   },
 
 
+  // --- functional: Stop while a tool is running -------------------------------
+  // why: the loop saves the assistant message as streaming:false + 'tool_use'
+  // before it dispatches, and Stop cannot prove that the running tool also
+  // stopped. The card must still settle (outcome unknown), live and after a
+  // reload, instead of saying "running…" forever.
+  {
+    name: 'stop-during-tool', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex) => callIndex === 0
+      ? { sse: sseToolCall('script', { code: 'await new Promise((resolve) => setTimeout(resolve, 12000)); return 42;' }) }
+      : { sse: sseText('this-should-never-render') },
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const cardProbe = `(() => ({
+        busy: !!document.querySelector('form.input-bar button.stop'),
+        running: document.querySelector('.tool-call .tool-pending')?.textContent ?? null,
+        settled: document.querySelector('.tool-call .tool-cancelled')?.textContent ?? null,
+      }))()`;
+      await rpc(ctx.page, { type: 'agent/send', text: 'run a slow script' });
+      const running = await waitFor(async () => {
+        const view = await evalIn(ctx.page, cardProbe);
+        return view.busy && view.running ? view : null;
+      }, { budgetMs: 15_000, pollMs: 100 });
+      rec.check('the tool card says running while the script runs',
+        running?.running === 'running…', JSON.stringify(running));
+      const stopped = await rpc(ctx.page, { type: 'agent/stop' });
+      rec.check('agent/stop accepted', !!stopped?.ok);
+      let out = null;
+      await waitFor(async () => {
+        out = await evalIn(ctx.page, cardProbe);
+        return !out.busy && (baseRender || !out.running) ? out : null;
+      }, { budgetMs: 15_000, pollMs: 100 });
+      if (baseRender) rec.observe('merge-base stopped tool card', out);
+      else rec.check('Stop settles the tool card as outcome unknown',
+        out?.busy === false && out?.running === null && out?.settled === 'outcome unknown',
+        JSON.stringify(out));
+      rec.check('Stop makes exactly one model call', ctx.modelCallCount() === 1, String(ctx.modelCallCount()));
+      const sessionId = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId ?? null;
+      await reloadReadyPanel(ctx, { expectedSessionId: sessionId });
+      const persisted = await waitFor(async () => {
+        const view = await evalIn(ctx.page, cardProbe);
+        return (baseRender ? !view.busy : view.settled) ? view : null;
+      }, { budgetMs: 15_000, pollMs: 100 });
+      if (baseRender) rec.observe('merge-base reloaded tool card', persisted);
+      else rec.check('the settled card survives a panel reload',
+        persisted?.running === null && persisted?.settled === 'outcome unknown',
+        JSON.stringify(persisted));
+      await clickAndSyncRedraw(ctx.page, '.tool-call .tool-call-header');
+      if (!baseRender) rec.check('the expanded card tells the user to check before retrying',
+        await evalIn(ctx.page, `document.querySelector('.tool-call .tool-result')?.textContent
+          .includes('Check the session before retrying.')`));
+      await rec.shot('settled-tool-card');
+    },
+  },
+
+  // why: the visual lane runs only visual states. Reuse the live Stop flow.
+  {
+    name: 'stopped-tool-card', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      const state = STATES.find(state => state.name === 'stop-during-tool');
+      ctx.setModelResponder(state.responder);
+      await state.run(ctx, rec);
+      await rec.visual('stopped-tool-card');
+    },
+  },
+  {
+    name: 'tool-call-output-limit', kind: 'visual', phase: 'post-unlock',
+    responder: call => ({ sse: call > 0 ? sseText('I will split the work into smaller calls.') : [
+      `data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: '', tool_calls: [{
+        index: 0, id: 'call_e2e_cut', type: 'function',
+        'function': { name: 'sandbox_create', 'arguments': '{"kind":"app","name":"Budget tracker","html":"<!doctype html>' },
+      }] } }] })}`,
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}`,
+      'data: [DONE]', '',
+    ].join('\n\n') + '\n\n' }),
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      await evalIn(ctx.page, `chrome.tabs.query({ currentWindow: true }).then(tabs => { const tab = tabs.find(tab => tab.url === 'about:blank'); return tab && !tab.active ? chrome.tabs.update(tab.id, { active: true }) : null; })`, true);
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Build a budget tracker App.' });
+      rec.check('the App request is accepted', sent?.ok === true);
+      const settled = await waitFor(async () => {
+        const state = await rpc(ctx.page, { type: 'state/get' });
+        const messages = state?.state?.session?.messages ?? [];
+        const final = messages.at(-1);
+        const idle = await evalIn(ctx.page, `!document.querySelector('form.input-bar button.stop')
+          && !document.querySelector('.message-assistant.streaming, .wordmark--exit, .wordmark--gone, .channel-badge.is-exiting')`);
+        return idle && (final?.content === 'I will split the work into smaller calls.'
+          || (baseRender && final?.stopReason === 'max_tokens'))
+          ? { sessionId: state.state.session.sessionId, messages } : null;
+      }, { budgetMs: 20_000, pollMs: 100 });
+      if (!settled) throw new Error('The cut tool call did not settle');
+      const cut = settled.messages.find(message => message.stopReason === 'max_tokens');
+      const result = settled.messages.flatMap(message => message.toolResults ?? [])
+        .find(result => result.tool_use_id === cut?.toolUses?.[0]?.id);
+      if (baseRender) rec.observe('merge-base cut call', { calls: ctx.modelCallCount(), result });
+      else {
+        rec.check('the cut call gets a known not-run result and a smaller-call hint',
+          result?.is_error && result?.outcomeKnown === true && result?.content?.startsWith('not_run:')
+            && result.content.includes('Split the work into smaller calls'), JSON.stringify(result));
+        rec.check('the model continues once without dispatching the cut call', ctx.modelCallCount() === 2);
+        rec.check('the finished cut call has no running label',
+          await evalIn(ctx.page, `!document.querySelector('.tool-call .tool-pending')`));
+      }
+      const entries = await auditEntries(ctx);
+      rec.check('the incomplete App call never executes', !entries.some(entry => entry.sessionId === settled.sessionId
+        && entry.type === 'tool_executed' && entry.details?.tool === 'sandbox_create'));
+      await clickAndSyncRedraw(ctx.page, '.tool-call .tool-call-header');
+      await rec.visual('tool-call-output-limit');
+    },
+  },
+
   // --- functional: a provider error surfaces + idles --------------------------
   {
     name: 'error', kind: 'functional', phase: 'post-unlock',
@@ -3282,6 +5053,135 @@ export const STATES = [
       const chip = await evalIn(ctx.page,
         `document.querySelector('.message-assistant .failure-kind-chip')?.textContent ?? null`);
       rec.check("the failure-class chip renders and reads 'provider'", chip === 'provider', JSON.stringify(chip));
+    },
+  },
+
+  // Core-to-render proof. The live controller can refuse these causes earlier.
+  {
+    name: 'error-copy-causes', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      const page = await openExtPage(ctx, 'tests/fixtures/actor-isolation.html');
+      const callsBefore = ctx.modelCallCount();
+      try {
+        await page.send('Emulation.setDeviceMetricsOverride', { width: 960, height: 900, deviceScaleFactor: 1, mobile: false });
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('.chat-view')`), { budgetMs: 8000 })) throw new Error('The shared fixture did not mount');
+        const result = await evalIn(page, `(async () => {
+          'use strict';
+          const { default: m } = await import('/vendor/mithril/mithril.js');
+          const { default: browser } = await import('/shared/browser-api.js');
+          const { idb } = await import('/peerd-egress/index.js');
+          const { createSessionStore, makeTurnSlots, makeTurnAuthorityDriver, SessionNotFoundError } = await import('/peerd-runtime/index.js');
+          const { listProviderModels, listProviders, providerFailureCode, UnknownProviderError } = await import('/peerd-provider/controller.js');
+          const { INITIAL_STATE, reduceChat } = await import('/sidepanel/chat-reducer.js');
+          const { ChatView } = await import('/sidepanel/components/chat-view.js');
+          const sessions = createSessionStore({ idb });
+          const survivor = await sessions.create({ provider: 'ollama' });
+          globalThis.__errorCopyCleanup = () => idb.del('sessions', survivor.sessionId);
+          const missingId = crypto.randomUUID();
+          const attempts = { model: 0, tool: 0 };
+          const events = [];
+          const providers = listProviders();
+          const states = [survivor.sessionId, missingId].map(sessionId => ({
+            ...INITIAL_STATE, hydrated: true,
+            vault: { ...INITIAL_STATE.vault, initialized: true, locked: false },
+            session: { ...INITIAL_STATE.session, sessionId },
+            providers: { current: 'ollama', hasKey: true, model: '' },
+            settings: { ...INITIAL_STATE.settings, voiceOnboardingDismissed: true },
+          }));
+          const host = document.getElementById('app');
+          m.mount(host, null);
+          host.style.cssText = 'display:flex;flex-direction:row;gap:24px;justify-content:center;padding:24px';
+          const send = message => {
+            if (message.type === 'models/options') return browser.runtime.sendMessage(message);
+            attempts.tool++; throw new Error('The error fixture has no mutation authority');
+          };
+          m.mount(host, { view: () => states.map(state => m('section', {
+            style: 'width:400px;height:850px;display:flex;flex-direction:column',
+          }, m(ChatView, { state, send, voiceManager: null }))) });
+          const causes = [];
+          for (const [index, state] of states.entries()) {
+            const driver = makeTurnAuthorityDriver({
+              vault: { isLocked: () => false }, sessions, turnSlots: makeTurnSlots(),
+              sessionCache: { sessionGet: async () => null, sessionSet: async () => {} },
+              resolvePermission: async () => ({ mode: 'act', confirmActions: false }),
+              memory: { loadAlwaysLoaded: async () => ({ text: '' }) },
+              browser: { tabs: { query: async () => [] } },
+              skillRegistry: { describeForPrompt: async () => '' },
+              settingsStore: { get: () => ({ spendLimitUsd: 0 }) },
+              DWEB_ENABLED: false, dwebEngagedSessions: new Set(),
+              projectToolDescriptors: async () => ({ tools: [], operations: [] }),
+              uiConnected: () => true,
+              uiPorts: { broadcast: message => {
+                events.push(message);
+                states.forEach((value, position) => { states[position] = reduceChat(value, message); });
+                m.redraw.sync();
+              } },
+              auditLog: { append: async () => {} }, trimEnricher: { drain: async () => {} },
+              runUserTurn: async function* (context) {
+                try {
+                  if (index === 0) await listProviderModels('not-registered', {
+                    modelEgress: { readModelInventory: async () => {
+                      attempts.model++; throw new Error('The error fixture has no model authority');
+                    } },
+                  });
+                  else await sessions.appendMessage(context.sessionId, {
+                    id: crypto.randomUUID(), role: 'user', content: context.userText, when: Date.now(),
+                  });
+                } catch (cause) {
+                  causes.push(cause.name);
+                  // Use the controller's real bounded provider-code projection.
+                  const code = providerFailureCode(cause);
+                  if (code) cause.code = code;
+                  throw cause;
+                }
+              },
+            });
+            await driver.runAgentTurn({ sessionId: state.session.sessionId, userText: 'Check this unavailable chat configuration.' });
+          }
+          m.redraw.sync();
+          return {
+            causes, attempts, errors: events.filter(event => event.type === 'turn/error'),
+            idle: states.every(state => !state.streaming),
+            codes: states.map(state => state.lastError),
+            registryIntact: JSON.stringify(listProviders()) === JSON.stringify(providers) && providers.length > 0,
+            survivorIntact: JSON.stringify(await sessions.get(survivor.sessionId)) === JSON.stringify(survivor),
+            missingAbsent: await sessions.get(missingId) === undefined,
+            types: [UnknownProviderError.errorName, SessionNotFoundError.errorName],
+            text: [...document.querySelectorAll('.error-banner > span')].map(node => node.textContent),
+            settingsActions: [...document.querySelectorAll('.error-banner button')].map(node => node.textContent.trim()),
+          };
+        })()`, true);
+        rec.check('real registry and session producers fail through the driver',
+          JSON.stringify(result.causes) === JSON.stringify(result.types) && result.errors.length === 2,
+          JSON.stringify(result));
+        rec.check('both owner errors remain scoped and settle idle', result.idle
+          && JSON.stringify(result.codes) === JSON.stringify(['unknown-provider', 'session-not-found']), JSON.stringify(result.codes));
+        rec.check('registry and durable chat stay intact; missing chat stays absent', result.registryIntact && result.survivorIntact && result.missingAbsent);
+        rec.check('error production invokes no model or tool effect', result.attempts.model === 0 && result.attempts.tool === 0 && ctx.modelCallCount() === callsBefore);
+        rec.check('only the existing provider Settings action renders', JSON.stringify(result.settingsActions) === JSON.stringify(['Open settings']));
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('merge-base error text', result.text);
+        else rec.check('both banners state only what their actual causes prove', JSON.stringify(result.text) === JSON.stringify([
+          'The selected provider is unavailable. Choose another provider in Settings.',
+          'This chat is unavailable. Open another chat or start a new one.',
+        ]), JSON.stringify(result.text));
+        await rec.visualPage('error-copy-causes', page, { beforeShot: async (surface, theme) => {
+          const frame = await evalIn(surface, `(() => {
+            'use strict';
+            return { width: innerWidth, height: innerHeight,
+              banners: [...document.querySelectorAll('.error-banner')].map(node => {
+                const { top, right, bottom, left, width, height } = node.getBoundingClientRect();
+                return { text: node.querySelector('span')?.textContent, visible: node.checkVisibility(),
+                  top, right, bottom, left, width, height };
+              }) };
+          })()`, true);
+          rec.check(`both error banners stay in frame (${theme})`, frame.banners.length === 2
+            && frame.banners.every(row => row.visible && row.width > 0 && row.height > 0
+              && row.top >= 0 && row.left >= 0 && row.right <= frame.width && row.bottom <= frame.height), JSON.stringify(frame));
+        } });
+      } finally {
+        try { await evalIn(page, `globalThis.__errorCopyCleanup?.()`, true); }
+        finally { page.close(); }
+      }
     },
   },
 
@@ -3538,6 +5438,222 @@ export const STATES = [
     },
   },
 
+  // --- functional: the first send keeps the pending permission choice --------
+  {
+    name: 'pending-chat-permissions', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const extension = process.argv.find(argument => argument.startsWith('--extension='))?.slice('--extension='.length);
+      const files = Object.fromEntries(await Promise.all(['index.html', 'app.js'].map(async name => [name,
+        await readFile(extension ? join(extension, 'peerd-engine/starters/csv-lab', name)
+          : new URL(`../../extension/peerd-engine/starters/csv-lab/${name}`, import.meta.url), 'utf8'),
+      ])));
+      const inspect = async () => {
+        const current = await rpc(ctx.page, { type: 'state/get' });
+        const listed = await rpc(ctx.page, { type: 'apps/list' });
+        if (current?.ok !== true || listed?.ok !== true || !Array.isArray(listed.apps)) {
+          throw new Error('The real permission or App state is unavailable');
+        }
+        const sessionId = current.state?.session?.sessionId ?? null;
+        const durable = sessionId ? await rpc(ctx.page, { type: 'session/get', sessionId }) : null;
+        if (sessionId && durable?.session?.sessionId !== sessionId) throw new Error('The durable chat is unavailable');
+        const ui = await evalIn(ctx.page, `(async () => {
+          'use strict';
+          const { default: m } = await import('/vendor/mithril/mithril.js');
+          m.redraw.sync();
+          const input = document.querySelector('form.input-bar textarea');
+          return {
+            mode: document.querySelector('.planact-mode[aria-pressed="true"]')?.textContent.trim().toLowerCase(),
+            confirmActions: document.querySelector('.planact-confirm')?.getAttribute('aria-pressed') === 'true',
+            busy: !!document.querySelector('form.input-bar button.stop, .message-assistant.streaming'),
+            input: input ? { value: input.value, disabled: input.disabled, focused: document.activeElement === input } : null,
+            deliveryFence: [...document.querySelectorAll('form.input-bar button')].some(button =>
+              ['Check delivery', 'Checking…', 'I checked; allow a new message'].includes(button.textContent)),
+            prompt: document.querySelector('.confirm-modal') ? {
+              title: document.querySelector('.confirm-modal h3')?.textContent,
+              summary: document.querySelector('.confirm-modal .confirm-summary')?.textContent,
+            } : null,
+          };
+        })()`, true);
+        return { ui, composer: current.state?.composer, permission: current.state?.session?.permission, session: durable?.session ?? null,
+          apps: listed.apps, appIds: listed.apps.map(app => app.id).sort() };
+      };
+      const matches = (permission, mode, confirmActions) => permission?.mode === mode
+        && permission?.confirmActions === confirmActions;
+      let previousSessionId = null;
+      let completedPlan = null;
+      for (const mode of ['plan', 'act']) {
+        const confirmActions = mode === 'act';
+        rec.check(`${mode}: the real New chat control is available`,
+          await clickAndSyncRedraw(ctx.page, 'button[aria-label="New chat"]'));
+        const fresh = await waitFor(async () => {
+          const value = await inspect();
+          return !value.session && matches(value.ui, 'act', false)
+            && matches(value.permission, 'act', false) ? value : null;
+        }, { budgetMs: 15_000, pollMs: 80 });
+        rec.check(`${mode}: an untouched new chat has the independent Act and Confirm-off default`, !!fresh);
+        if (!fresh) throw new Error('The fresh chat default did not settle');
+        const selector = mode === 'plan'
+          ? '.planact-mode:first-child:not(:disabled)' : '.planact-confirm[aria-pressed="false"]:not(:disabled)';
+        if (!await clickAndSyncRedraw(ctx.page, selector)) throw new Error('The permission control is unavailable');
+        const selected = await waitFor(async () => {
+          const value = await inspect();
+          return !value.session && matches(value.ui, mode, confirmActions)
+            && matches(value.permission, mode, confirmActions) ? value : null;
+        }, { budgetMs: 10_000, pollMs: 80 });
+        rec.check(`${mode}: the real controls set the pending kernel permission before a chat exists`, !!selected);
+        if (!selected) throw new Error('The pending permission did not settle');
+        if (mode === 'act' && (!completedPlan?.known || completedPlan.readModelCalls() !== 2)) {
+          throw new Error('The prior Plan turn has no known complete receipt');
+        }
+        let beforeSend;
+        const ready = await waitFor(async () => {
+          beforeSend = await inspect();
+          return !beforeSend.session && matches(beforeSend.permission, mode, confirmActions)
+            && matches(beforeSend.ui, mode, confirmActions) && beforeSend.composer?.canSend === true
+            && !beforeSend.ui.busy && !beforeSend.ui.deliveryFence && beforeSend.ui.input?.disabled === false
+            && (beforeSend.ui.input.value === '' || mode === 'act' && beforeSend.ui.input.value === completedPlan.text);
+        }, { budgetMs: 15_000, pollMs: 80 });
+        if (!ready) {
+          rec.observe(`${mode}: the composer did not become ready and empty`, beforeSend);
+          throw new Error('The real composer did not become ready and empty');
+        }
+        if (beforeSend.ui.input.value) {
+          // why: only this completed fixture can be removed. Other drafts keep their custody.
+          if (completedPlan.readModelCalls() !== 2) throw new Error('The prior Plan turn resumed before fixture cleanup');
+          rec.observe('act: exact completed Plan text before fixture cleanup', {
+            ui: beforeSend.ui, permission: beforeSend.permission, composer: beforeSend.composer,
+            priorSessionId: completedPlan.sessionId, priorCallId: completedPlan.callId,
+            priorKnown: completedPlan.known, priorModelCalls: completedPlan.readModelCalls(),
+          });
+          await evalIn(ctx.page, `(() => {
+            'use strict';
+            const input = document.querySelector('form.input-bar textarea');
+            const fenced = [...document.querySelectorAll('form.input-bar button')].some(button =>
+              ['Check delivery', 'Checking…', 'I checked; allow a new message'].includes(button.textContent));
+            if (!input || input.disabled || fenced || input.value !== ${JSON.stringify(completedPlan.text)}) {
+              throw new Error('The completed fixture text changed before cleanup');
+            }
+            input.focus(); input.select();
+          })()`);
+          if (completedPlan.readModelCalls() !== 2) throw new Error('The prior Plan turn resumed before the cleanup keys');
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+          const afterClear = await inspect();
+          rec.observe('act: composer after exact completed fixture cleanup', {
+            ui: afterClear.ui, permission: afterClear.permission, composer: afterClear.composer,
+            sessionId: afterClear.session?.sessionId ?? null, priorModelCalls: completedPlan.readModelCalls(),
+          });
+          if (afterClear.session || !matches(afterClear.permission, mode, confirmActions)
+            || !matches(afterClear.ui, mode, confirmActions) || afterClear.composer?.canSend !== true
+            || afterClear.ui.busy || afterClear.ui.deliveryFence || afterClear.ui.input?.disabled !== false
+            || afterClear.ui.input.value !== '' || completedPlan.readModelCalls() !== 2) {
+            throw new Error('The real keys did not leave the fresh composer empty with unchanged permission');
+          }
+        }
+        const name = `Pending permission ${mode}`;
+        const args = { kind: 'app', name, files };
+        const sentText = `Create the packaged CSV Lab App named ${name}.`;
+        const replyText = `PENDING-PERMISSION-${mode.toUpperCase()}-SETTLED`;
+        let modelCalls = 0;
+        ctx.setModelResponder(index => {
+          modelCalls += 1;
+          return { sse: index === 0 ? sseToolCall('sandbox_create', args) : sseText(replyText) };
+        });
+        await evalIn(ctx.page, `(async () => {
+          'use strict';
+          const { default: m } = await import('/vendor/mithril/mithril.js');
+          const input = document.querySelector('form.input-bar textarea');
+          if (!input || input.value) throw new Error('The real composer is missing or has a draft');
+          input.value = ${JSON.stringify(sentText)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          m.redraw.sync();
+          input.closest('form').requestSubmit();
+          m.redraw.sync();
+        })()`, true);
+        const outcome = async () => {
+          const value = await inspect();
+          const calls = (value.session?.messages ?? []).flatMap(message => message.toolUses ?? [])
+            .filter(call => call.name === 'sandbox_create' && call.input?.name === name);
+          const call = calls[0];
+          const result = (value.session?.messages ?? []).flatMap(message => message.toolResults ?? [])
+            .find(result => result.tool_use_id === call?.id);
+          return { ...value, calls, call, result };
+        };
+        const decision = await waitFor(async () => {
+          const value = await outcome();
+          return value.call && (value.ui.prompt || value.result) ? value : null;
+        }, { budgetMs: 30_000, pollMs: 80 });
+        if (!decision) throw new Error('The real App call did not reach a prompt or result');
+        if (mode === 'act') await rec.shot('confirm-decision');
+        if (decision.ui.prompt) {
+          rec.check(`${mode}: the native prompt names the exact App authority`,
+            decision.ui.prompt.title === 'Confirm action' && decision.ui.prompt.summary?.includes('Create an App'),
+            JSON.stringify(decision.ui.prompt));
+          if (!await clickAndSyncRedraw(ctx.page, '.confirm-modal [data-confirm-reject]')) {
+            throw new Error('The real Reject control is unavailable');
+          }
+        }
+        const settled = await waitFor(async () => {
+          const value = await outcome();
+          return value.result && !value.ui.busy && !value.ui.prompt
+            && value.session.messages.some(message => message.role === 'assistant' && message.content === replyText)
+            ? value : null;
+        }, { budgetMs: 40_000, pollMs: 80 });
+        if (!settled) throw new Error('The correlated App result did not settle');
+        const completeCall = modelCalls === 2 && settled.calls.length === 1 && typeof settled.call.id === 'string'
+            && typeof settled.session.sessionId === 'string' && settled.session.sessionId !== previousSessionId
+            && settled.call.input.kind === 'app' && JSON.stringify(settled.call.input.files) === JSON.stringify(files)
+            && settled.result.tool_use_id === settled.call.id
+            && settled.session.messages.flatMap(message => message.toolUses ?? []).length === 1
+            && settled.session.messages.flatMap(message => message.toolResults ?? []).length === 1
+            && settled.session.messages.filter(message => message.role === 'user' && message.content === sentText).length === 1;
+        rec.check(`${mode}: the first turn has one complete valid App call and its exact result`, completeCall,
+          JSON.stringify({ modelCalls, sessionId: settled.session.sessionId, callId: settled.call.id }));
+        if (mode === 'plan') {
+          let created = null;
+          if (baseRender && settled.result.is_error === false) {
+            try { created = JSON.parse(settled.result.content.split('\n\n')[0]); } catch {}
+          }
+          const knownRefusal = !decision.ui.prompt && settled.result.is_error === true
+            && settled.result.meta?.gates?.some(gate => gate.name === 'persona' && gate.allowed === false && /plan/i.test(gate.reason));
+          const knownAddition = created?.kind === 'app' && created.name === name && typeof created.id === 'string'
+            && settled.apps.some(app => app.id === created.id && app.name === name)
+            && !selected.appIds.includes(created.id) && settled.appIds.length === selected.appIds.length + 1
+            && selected.appIds.every(id => settled.appIds.includes(id));
+          completedPlan = { text: sentText, sessionId: settled.session.sessionId, callId: settled.call.id,
+            readModelCalls: () => modelCalls, known: completeCall && settled.result.outcomeKnown !== false
+              && !/outcome (?:is )?unknown|unconfirmed/i.test(settled.result.content)
+              && (baseRender ? knownAddition : knownRefusal) };
+        }
+        const evidence = { permission: settled.permission, ui: settled.ui,
+          durable: { mode: settled.session.permissionMode, confirmActions: settled.session.confirmActions },
+          beforeAppIds: selected.appIds, afterAppIds: settled.appIds, prompted: !!decision.ui.prompt,
+          callId: settled.call.id, result: { tool_use_id: settled.result.tool_use_id,
+            is_error: settled.result.is_error, content: String(settled.result.content).slice(0, 600) } };
+        // why: BASE must show its real permission loss and App outcome. Only the fixed expectations differ.
+        if (baseRender) rec.observe(`${mode}: merge-base permission and App outcome`, evidence);
+        else {
+          rec.check(`${mode}: the durable chat keeps the selected permission`,
+            matches(evidence.durable, mode, confirmActions), JSON.stringify(evidence.durable));
+          rec.check(`${mode}: the kernel and controls keep the selected permission`,
+            matches(settled.permission, mode, confirmActions) && matches(settled.ui, mode, confirmActions));
+          rec.check(`${mode}: no App is created`, JSON.stringify(selected.appIds) === JSON.stringify(settled.appIds),
+            JSON.stringify({ before: selected.appIds, after: settled.appIds }));
+          rec.check(mode === 'plan' ? 'Plan refuses the first App write without a prompt'
+            : 'Confirm prompts and real Reject refuses the first App write', settled.result.is_error === true
+              && (mode === 'plan' ? !decision.ui.prompt && settled.result.meta?.gates?.some(gate =>
+                gate.name === 'persona' && gate.allowed === false && /plan/i.test(gate.reason))
+                : !!decision.ui.prompt && /declin|reject/i.test(settled.result.content)
+                  && !/outcome (?:is )?unknown/i.test(settled.result.content)), JSON.stringify(settled.result));
+        }
+        await rec.shot(`${mode === 'plan' ? 'plan' : 'confirm'}-settled`);
+        previousSessionId = settled.session.sessionId;
+      }
+    },
+  },
+
   // --- functional: vault lock → gate, unlock → ready (restores unlocked) ------
   {
     name: 'vault-lock', kind: 'functional', phase: 'post-unlock',
@@ -3570,6 +5686,104 @@ export const STATES = [
         try { rec.observe('lock stages final', await diagnostics.read()); }
         finally { await diagnostics.remove(); }
       }
+    },
+  },
+
+  {
+    name: 'vault-passphrase-error', kind: 'functional', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const readGate = () => evalIn(ctx.page, `(() => {
+        'use strict';
+        const field = document.querySelector('#pass');
+        const error = document.querySelector('.gate-msg');
+        const live = error?.closest('[aria-live], [role="alert"], [role="status"]');
+        return {
+          composer: !!document.querySelector('form.input-bar'),
+          field: field ? { disabled: field.disabled, readOnly: field.readOnly,
+            invalid: field.getAttribute('aria-invalid'), describedBy: field.getAttribute('aria-describedby') } : null,
+          error: error ? { text: error.textContent, id: error.id, visible: error.checkVisibility(),
+            live: live?.getAttribute('role') === 'alert' || ['polite', 'assertive'].includes(live?.getAttribute('aria-live')),
+            linked: !!error.id && field?.getAttribute('aria-describedby')?.split(/\\s+/).includes(error.id)
+              && document.getElementById(error.id) === error } : null,
+          focused: document.activeElement === field,
+          activeTag: document.activeElement?.tagName,
+        };
+      })()`);
+      const requireLocked = async label => {
+        const authority = await waitFor(async () => {
+          const reply = await rpc(ctx.page, { type: 'state/get' }, { timeoutMs: 5000 });
+          rec.observe(`${label}: locked authority`, reply);
+          return reply?.ok === true && reply.state?.vault?.locked === true ? reply : null;
+        }, { budgetMs: 30_000, pollMs: 100 });
+        if (!authority) throw new Error(`PROBE-GAP: ${label} has no ready locked authority. No passphrase was submitted.`);
+        return authority;
+      };
+      const submit = async text => {
+        const editable = await evalIn(ctx.page, `(() => {
+          'use strict';
+          const field = document.querySelector('#pass');
+          if (!(field instanceof HTMLInputElement) || field.disabled || field.readOnly) return false;
+          field.focus();
+          field.select();
+          return true;
+        })()`);
+        if (!editable) throw new Error('PROBE-GAP: The real passphrase field is not editable.');
+        await ctx.page.send('Input.insertText', { text });
+        await ctx.page.send('Input.dispatchKeyEvent', {
+          type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r',
+        });
+        await ctx.page.send('Input.dispatchKeyEvent', {
+          type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13,
+        });
+      };
+      if (!await clickAndSyncRedraw(ctx.page, 'button[aria-label="Lock the vault"]')) {
+        throw new Error('The real Lock control is unavailable.');
+      }
+      await requireLocked('wrong passphrase');
+      if (!await waitFor(async () => {
+        const gate = await readGate();
+        return gate.field && !gate.field.disabled && !gate.field.readOnly;
+      }, { budgetMs: 10_000 })) throw new Error('The locked passphrase field did not become ready.');
+      await submit(`${PASSPHRASE}-wrong`);
+      const wrong = await waitFor(async () => {
+        const gate = await readGate();
+        return gate.error?.text === 'That passphrase is wrong.' && !gate.field?.disabled && !gate.field?.readOnly
+          ? gate : null;
+      }, { budgetMs: 30_000, pollMs: 50 });
+      rec.check('the real wrong passphrase returns the expected visible refusal',
+        wrong?.error?.visible === true && !wrong.composer, JSON.stringify(wrong));
+      if (!wrong) throw new Error('The single wrong-passphrase attempt did not return its known refusal.');
+      if (baseRender) rec.observe('merge-base wrong-passphrase accessibility', wrong);
+      else {
+        rec.check('the visible wrong-passphrase error is a live alert', wrong.error.live, JSON.stringify(wrong.error));
+        rec.check('the invalid field describes its exact visible error',
+          wrong.field.invalid === 'true' && wrong.error.linked, JSON.stringify(wrong));
+        rec.check('wrong-passphrase refusal keeps focus on the recovery field', wrong.focused, JSON.stringify(wrong));
+      }
+      await rec.visual('vault-passphrase-error');
+      // why: Qualify the next single attempt without replaying any unlock.
+      await requireLocked('corrected passphrase');
+      await submit(PASSPHRASE);
+      const ready = await waitFor(() => evalIn(ctx.page, `(() => {
+        'use strict';
+        const field = document.querySelector('form.input-bar textarea');
+        if (!(field instanceof HTMLTextAreaElement)) return null;
+        return { focused: document.activeElement === field,
+          editable: !field.disabled && !field.readOnly,
+          activeTag: document.activeElement?.tagName,
+          visible: document.visibilityState, documentFocused: document.hasFocus() };
+      })()`), { budgetMs: 30_000 });
+      rec.observe('successful unlock immediate composer focus', ready);
+      const accepted = await rpc(ctx.page, { type: 'state/get' }, { timeoutMs: 5000 });
+      rec.check('one corrected keyboard attempt unlocks the real vault', !!ready
+        && accepted?.ok === true && accepted.state?.vault?.locked === false
+        && (baseRender || (ready.focused === true && ready.editable)), JSON.stringify({ ready, accepted }));
+      if (!ready || accepted?.ok !== true || accepted.state?.vault?.locked !== false) {
+        throw new Error('The single corrected-passphrase attempt did not prove an unlocked vault.');
+      }
+      await rec.shot('retry-ready');
     },
   },
 
@@ -4348,17 +6562,22 @@ export const STATES = [
         }, { budgetMs: 15_000, pollMs: 50 });
         rec.check('Discover enable persists only network participation, not agent work',
           optedIn?.dwebEnabled === true && optedIn.dwebAgentEnabled === false, JSON.stringify(optedIn));
+        // Discover reads status once the choice lands: connected, looking or offline.
+        const statusLine = '.disc-status-live[role="status"], .disc-empty-waiting [role="status"]';
         const statusVisible = await waitFor(() => evalIn(page,
-          `!!document.querySelector('.peer-network-status [role="status"]')`),
+          `!!document.querySelector(${JSON.stringify(statusLine)})`),
         { budgetMs: 15_000, pollMs: 50 });
         const consentUi = await evalIn(page, `({
-          status: document.querySelector('.peer-network-status [role="status"]')?.textContent?.slice(0, 300) ?? null,
-          turnOffEnabled: !![...document.querySelectorAll('.onboarding-actions button')]
-            .find(button => button.textContent === 'Turn off' && !button.disabled),
+          status: document.querySelector(${JSON.stringify(statusLine)})?.textContent?.trim().slice(0, 300) ?? null,
+          enableOffered: !!document.querySelector('[data-network-choice="enable"]'),
+          controls: [...document.querySelectorAll('.disc-home button')].filter(button => !button.disabled)
+            .map(button => button.textContent.trim()),
           body: document.body.innerText.slice(0, 3000),
         })`);
         rec.check('connection status is separate from saved consent and leaves controls usable',
-          !!statusVisible && consentUi.turnOffEnabled, JSON.stringify(consentUi));
+          !!statusVisible && !consentUi.enableOffered && consentUi.controls.length > 0
+            && /^(Connected to \d+ (people|person)|Looking for people who share apps…|Peer network is offline)$/.test(consentUi.status ?? ''),
+          JSON.stringify(consentUi));
         await rec.shotPage('discover-network-enabled', page);
         await page.send('Page.reload', { ignoreCache: true });
         await waitFor(() => evalIn(page, `!!document.querySelector('.home-rail')`),
@@ -4368,17 +6587,24 @@ export const STATES = [
           reloaded?.state?.settings?.dwebEnabled === true
             && reloaded.state.settings.dwebChoiceMade === true
             && reloaded.state.settings.dwebAgentEnabled === false, JSON.stringify(reloaded?.state?.settings));
-        await evalIn(page, `location.hash = 'discover'`);
-        await waitFor(() => evalIn(page, `!!document.querySelector('.onboarding-actions button.secondary')`),
-          { budgetMs: 15_000, pollMs: 50 });
-        await clickAndSyncRedraw(page, '.onboarding-actions button.secondary');
+        // Discover only enables. Turning off lives in Settings and the Network view.
+        await evalIn(page, `location.hash = 'network'`);
+        const stopOffered = await waitFor(() => evalIn(page, `[...document.querySelectorAll('button.peerd-net-btn')]
+          .some(button => button.textContent === 'Stop the network' && !button.disabled)`),
+        { budgetMs: 30_000, pollMs: 50 });
+        rec.check('the Network view offers Stop the network while on', !!stopOffered);
+        // why replace confirm: Stop first asks in a blocking dialog. Answer yes, as the user would.
+        await evalIn(page, `(() => {
+          window.confirm = () => true;
+          [...document.querySelectorAll('button.peerd-net-btn')].find(button => button.textContent === 'Stop the network')?.click();
+        })()`);
         const disabled = await waitFor(async () => {
           const r = await rpc(page, { type: 'state/get' });
           const host = await rpc(page, { type: 'bootstrap/ready' });
           return r?.state?.settings?.dwebEnabled === false
             && !['starting', 'active'].includes(host?.featureLeases?.leases?.dweb?.status);
         }, { budgetMs: 20_000, pollMs: 50 });
-        rec.check('Discover turn off revokes the network lease', !!disabled);
+        rec.check('Network view stop revokes the network lease', !!disabled);
 
       } finally { try { page.close(); } catch {} }
     },
@@ -4541,7 +6767,247 @@ export const STATES = [
     },
   },
 
+  {
+    name: 'starter-unknown-warning', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const base = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const phase2 = discoverSurface().phase2;
+      const applyLabel = phase2 ? 'Add to Library' : 'Apply: add local copy';
+      const warning = phase2
+        ? 'peerd is not sure the app was added. Check your Library before you add it again.'
+        : 'peerd could not confirm whether the starter was added. Check your Library before reviewing another copy.';
+      const title = 'Confirm actions: ON - asks when required. Reads and quick compute can run without asking.';
+      const modelCallsBefore = ctx.modelCallCount();
+      await chooseFixtureNetwork(ctx, false);
+      const before = await rpc(ctx.page, { type: 'state/get' });
+      const permission = before?.state?.session?.permission;
+      if (before?.ok !== true || before.state.session?.sessionId !== null
+          || !['plan', 'act'].includes(permission?.mode) || typeof permission?.confirmActions !== 'boolean') {
+        throw new Error('The original permission state is missing');
+      }
+      const appsBefore = await rpc(ctx.page, { type: 'apps/list' });
+      if (appsBefore?.ok !== true || !Array.isArray(appsBefore.apps)) throw new Error('The Library did not load');
+      const page = await openWidePage(ctx, 'tests/fixtures/starters.html?starter=csv-lab');
+      try {
+        const ready = await waitFor(() => evalIn(page, `(() => {
+          'use strict';
+          const apply = document.querySelector('.starter-review > button:first-of-type');
+          return apply?.textContent === ${JSON.stringify(applyLabel)} && !apply.disabled
+            && JSON.stringify(window.__starterFixtureCalls) === '["import/inspect"]';
+        })()`), { budgetMs: 8_000, pollMs: 80 });
+        if (!ready) throw new Error('The packaged starter inspection did not settle');
+        if (!await clickAndSyncRedraw(page, '.starter-review > button:first-of-type')) {
+          throw new Error('The starter Apply control is missing');
+        }
+        const unknown = await waitFor(() => evalIn(page, `(() => {
+          'use strict';
+          const alert = document.querySelector(${JSON.stringify(`.starter-review [role="${phase2 ? 'status' : 'alert'}"]`)});
+          if (!alert) return null;
+          return { text: alert.textContent, calls: window.__starterFixtureCalls,
+            apply: [...document.querySelectorAll('.starter-review button')]
+              .some(button => button.textContent === ${JSON.stringify(applyLabel)}) };
+        })()`), { budgetMs: 8_000, pollMs: 80 });
+        rec.observe('actual starter warning', unknown);
+        rec.check('one real inspection and one refused Apply leave no Apply control',
+          unknown?.apply === false
+            && JSON.stringify(unknown.calls) === '["import/inspect","import/apply"]', JSON.stringify(unknown));
+        rec.check('the starter outcome remains unconfirmed',
+          unknown?.text?.includes(phase2 ? 'not sure the app was added' : 'could not confirm') === true
+            && !unknown.text.includes('starter was not added'), JSON.stringify(unknown));
+        if (!base) rec.check('the starter warning gives no Refresh or replay assurance', unknown?.text === warning);
+        // why: this existing fixture inspects real packaged bytes but has no mutation authority.
+        await rec.visualPage('starter-unknown-warning', page);
+      } finally { await page.close(); }
+      await ctx.page.send('Page.bringToFront');
+      try {
+        if (permission.mode !== 'act') await clickAndSyncRedraw(ctx.page, '.planact-mode:last-child');
+        const actReady = await waitFor(async () => {
+          const current = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.permission;
+          return current?.mode === 'act' && current.confirmActions === permission.confirmActions
+            && await evalIn(ctx.page, `document.querySelector('.planact-confirm')?.disabled === false`);
+        }, { budgetMs: 8_000, pollMs: 80 });
+        if (!actReady) throw new Error('The actual Act control did not settle');
+        if (!permission.confirmActions) await clickAndSyncRedraw(ctx.page, '.planact-confirm');
+        const confirmed = await waitFor(async () => {
+          const current = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.permission;
+          return current?.mode === 'act' && current.confirmActions === true
+            && await evalIn(ctx.page, `document.querySelector('.planact-confirm')?.getAttribute('aria-pressed') === 'true'
+              && document.querySelector('.planact-confirm')?.disabled === false`);
+        }, { budgetMs: 8_000, pollMs: 80 });
+        if (!confirmed) throw new Error('The actual Confirm control did not settle');
+        const control = await evalIn(ctx.page, `(() => {
+          'use strict';
+          const button = document.querySelector('.planact-confirm');
+          return { text: button?.textContent, title: button?.title,
+            pressed: button?.getAttribute('aria-pressed'), disabled: button?.disabled };
+        })()`);
+        rec.observe('actual Confirm DOM title, not tooltip pixels', control);
+        rec.check('the real Confirm control is on and enabled',
+          control?.text === 'Confirm: on' && control.pressed === 'true' && control.disabled === false);
+        if (!base) rec.check('the Confirm title names the compute exception', control?.title === title);
+        await rec.visual('confirm-script-exception');
+      } finally {
+        const current = (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.permission;
+        if (current?.mode !== 'act') throw new Error('Permission restoration has no known Act state');
+        if (current.confirmActions !== permission.confirmActions) {
+          await clickAndSyncRedraw(ctx.page, '.planact-confirm');
+          const restored = await waitFor(async () =>
+            (await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.permission?.confirmActions === permission.confirmActions,
+          { budgetMs: 8_000, pollMs: 80 });
+          if (!restored) throw new Error('The original Confirm choice did not return');
+        }
+        if (permission.mode !== 'act') await clickAndSyncRedraw(ctx.page, '.planact-mode:first-child');
+        const restored = await waitFor(async () => {
+          const state = (await rpc(ctx.page, { type: 'state/get' }))?.state;
+          return state?.session?.permission?.mode === permission.mode
+            && state.session.permission.confirmActions === permission.confirmActions;
+        }, { budgetMs: 8_000, pollMs: 80 });
+        if (!restored) throw new Error('The original permission mode did not return');
+      }
+      const after = await rpc(ctx.page, { type: 'state/get' });
+      const appsAfter = await rpc(ctx.page, { type: 'apps/list' });
+      rec.check('the copy review creates no App, session or model request',
+        appsAfter?.ok === true && Array.isArray(appsAfter.apps)
+          && JSON.stringify(appsAfter.apps.map(app => app.id).sort()) === JSON.stringify(appsBefore.apps.map(app => app.id).sort())
+          && after?.state?.session?.sessionId === before.state.session.sessionId && ctx.modelCallCount() === modelCallsBefore);
+      rec.check('the real controls restore the original permission choice',
+        after?.state?.session?.permission?.mode === permission.mode
+          && after.state.session.permission.confirmActions === permission.confirmActions);
+    },
+  },
+
   // --- visual: a goal run mid-flight (goal bar + plan todo card) --------------
+  {
+    name: 'goal-ended-recovery', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir, modelResponder: () => ({ sse: sseText('Other chat ready.') }) });
+      try {
+        await unlockAndReady(child.page);
+        const settings = await rpc(child.page, { type: 'settings/update', patch: { autoMemoryEnabled: false } });
+        if (!settings?.ok) throw new Error('Goal fixture settings refused');
+        const panelUrl = await evalIn(child.page, 'location.href');
+        const send = async (text, goal = false) => {
+          if (!await waitFor(() => evalIn(child.page, `!!document.querySelector('form.input-bar textarea')`))) throw new Error('Goal composer did not mount');
+          if (goal && !await clickAndSyncRedraw(child.page, '.goal-toggle[aria-pressed="false"]')) throw new Error('Goal toggle did not arm');
+          await evalIn(child.page, `(() => { 'use strict';
+            const input = document.querySelector('form.input-bar textarea'); input.value = ${JSON.stringify(text)};
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+          })()`);
+          if (!await waitFor(() => evalIn(child.page, `document.querySelector('.send-btn')?.disabled === false`))) throw new Error('Goal composer stayed disabled');
+          await clickAndSyncRedraw(child.page, '.send-btn');
+        };
+        await send('Keep this separate chat open.');
+        const otherId = await waitFor(async () => {
+          const result = await rpc(child.page, { type: 'state/get' });
+          return result?.ok && result.state.session.messages.some((message) => message.content === 'Other chat ready.') ? result.state.session.sessionId : null;
+        });
+        if (!otherId) throw new Error('separate chat did not persist');
+        const reset = await rpc(child.page, { type: 'session/reset' });
+        if (!reset?.ok) throw new Error('fresh Goal chat refused');
+        let waiting = false;
+        child.setModelResponder(async (index) => {
+          if (index === 2) { waiting = true; await held; }
+          // why: exercise the turn cap with active work, independently of the
+          // separate guard that stops consecutive text-only continuations.
+          return { sse: index % 2 === 0
+            ? sseToolCall('read_memory', { scope: 'user' })
+            : sseText('Continue the requested work.') };
+        });
+        await send('Continue until the Goal turn limit stops this run.', true);
+        if (!await waitFor(() => waiting, { budgetMs: 20_000, pollMs: 50 })) throw new Error('Goal did not reach its held turn');
+        const running = await rpc(child.page, { type: 'state/get' });
+        const goalId = running?.state?.session?.sessionId;
+        const limit = await evalIn(child.page, `Number(document.querySelector('.goal-bar-meta')?.textContent.split(' / ')[1])`);
+        if (!goalId || goalId === otherId || !Number.isSafeInteger(limit) || limit < 3) throw new Error('Goal ownership or turn limit is missing');
+        if (!(await rpc(child.page, { type: 'session/switch', sessionId: otherId }))?.ok) throw new Error('switch away from Goal refused');
+        await child.page.send('Page.navigate', { url: 'about:blank' });
+        if (!await waitFor(() => evalIn(child.page, `location.href === 'about:blank'`))) throw new Error('panel document did not close');
+        release();
+        if (!await waitFor(() => child.modelCallCount() === limit * 2, { budgetMs: 60_000, pollMs: 80 })) throw new Error('closed Goal did not reach its real turn limit');
+        const completedModelCalls = child.modelCallCount();
+        await sleep(500);
+        await child.page.send('Page.navigate', { url: panelUrl });
+        await reloadReadyPanel(child, { expectedSessionId: otherId });
+        rec.check('the other chat does not show the Goal stop reason', await evalIn(child.page, `![...document.querySelectorAll('.notice-text')].some((node) => node.textContent.startsWith('Goal run stopped'))`));
+        if (!(await rpc(child.page, { type: 'session/switch', sessionId: goalId }))?.ok) throw new Error('return to Goal chat refused');
+        const readReason = async () => {
+          const result = await rpc(child.page, { type: 'state/get' });
+          if (!result?.ok || result.state?.session?.sessionId !== goalId) return null;
+          return { note: result.state.session.goalStopNote ?? null,
+            notices: await evalIn(child.page, `[...document.querySelectorAll('.notice-text')].map((node) => node.textContent).filter((text) => text.startsWith('Goal run stopped'))`) };
+        };
+        const returned = process.env.PEERD_VISUAL_BASE_RENDER === '1' ? await readReason()
+          : await waitFor(async () => { const value = await readReason(); return value?.note && value.notices.length === 1 ? value : null; });
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Goal end after close and switch', returned);
+        else rec.check('the returned Goal chat shows its exact durable reason once', returned?.notices.length === 1
+          && returned.note.text === `Goal run stopped after reaching the ${limit}-turn limit.`);
+        await rec.visualPage('goal-ended-returned', child.page);
+        await reloadReadyPanel(child, { expectedSessionId: goalId });
+        const reopened = await readReason();
+        if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') rec.check('a new panel document replays the same reason once', reopened?.note?.id === returned?.note?.id && reopened?.notices.length === 1);
+        const [otherSession, goalSession] = await Promise.all([otherId, goalId].map((sessionId) =>
+          rpc(child.page, { type: 'session/get', sessionId })));
+        if (otherSession?.session?.sessionId !== otherId || goalSession?.session?.sessionId !== goalId
+            || otherSession.session.provider !== goalSession.session.provider
+            || otherSession.session.model !== goalSession.session.model) throw new Error('cold chats have different provider inputs');
+        if (!(await rpc(child.page, { type: 'session/switch', sessionId: otherId }))?.ok) throw new Error('cold fixture chat switch refused');
+        const oldWorker = await child.stopServiceWorker();
+        const newWorker = await child.restartServiceWorker(oldWorker);
+        const posture = await rpc(child.page, { type: 'state/get' });
+        if (!posture?.ok) throw new Error('cold state read refused');
+        if (posture.state.vault.locked && !(await rpc(child.page, { type: 'vault/unlock', passphrase: PASSPHRASE }))?.ok) throw new Error('cold Goal vault unlock refused');
+        if (!await waitFor(() => evalIn(child.page, `!!document.querySelector('form.input-bar')`))) throw new Error('cold Goal panel did not mount');
+        // Finish provider work in the other chat before the first cold Goal projection.
+        await evalIn(child.page, `import('/vendor/mithril/mithril.js').then(({ default: m }) => m.mount(document.querySelector('#app'), null))`, true);
+        if (!(await rpc(child.page, { type: 'session/switch', sessionId: otherId }))?.ok) throw new Error('cold route preparation failed');
+        if (!(await rpc(child.page, { type: 'models/options', sessionId: otherId }))?.ok) throw new Error('cold model options failed');
+        const warm = await waitFor(async () => {
+          const value = await rpc(child.page, { type: 'state/get' });
+          return value?.ok && value.state.session.sessionId === otherId
+            && value.state.composer?.canSend === true ? value.state : null;
+        });
+        if (!warm) throw new Error('cold provider preparation failed');
+        const before = await rpc(child.page, { type: 'bootstrap/ready' });
+        const leases = before?.featureLeases;
+        const baseline = leases?.leases?.controller;
+        if (!before?.ok || leases?.schema !== 1 || typeof leases.kernelEpoch !== 'string'
+            || !leases.kernelEpoch || !Number.isSafeInteger(baseline?.generation)
+            || baseline.status !== 'revoked') throw new Error('cold provider preparation did not release its controller');
+        if (!(await rpc(child.page, { type: 'session/switch', sessionId: goalId }))?.ok) throw new Error('cold Goal chat switch refused');
+        const isolated = await rpc(child.page, { type: 'state/get' });
+        const after = await rpc(child.page, { type: 'bootstrap/ready' });
+        const controller = after?.featureLeases?.leases?.controller;
+        rec.check('cold Goal-note hydration does not acquire a controller', isolated?.ok === true
+          && isolated.state.session.sessionId === goalId
+          && isolated.state.composer.provider === warm.composer.provider
+          && isolated.state.composer.model === warm.composer.model
+          && isolated.state.composer.canSend === true
+          && (process.env.PEERD_VISUAL_BASE_RENDER === '1' || isolated.state.session.goalStopNote?.id === returned?.note?.id)
+          && after?.ok === true && after.featureLeases?.schema === 1
+          && after.featureLeases.kernelEpoch === leases.kernelEpoch
+          && controller?.generation === baseline.generation && controller?.status === baseline.status,
+        JSON.stringify({ before: before?.featureLeases, after: after?.featureLeases }));
+        await reloadReadyPanel(child, { expectedSessionId: goalId });
+        const restarted = process.env.PEERD_VISUAL_BASE_RENDER === '1' ? await readReason()
+          : await waitFor(async () => { const value = await readReason(); return value?.notices.length === 1 ? value : null; });
+        rec.check('worker restart preserves chat ownership without another model call',
+          newWorker.targetId !== oldWorker.targetId && child.modelCallCount() === completedModelCalls,
+          JSON.stringify({ completedModelCalls, afterRestartModelCalls: child.modelCallCount() }));
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Goal end after worker restart', restarted);
+        else rec.check('worker restart replays the durable reason once', restarted?.note?.id === returned?.note?.id && restarted?.notices.length === 1);
+        await rec.visualPage('goal-ended-recovery', child.page);
+        child.setModelResponder(() => ({ sse: sseText('The new user turn is complete.') }));
+        await send('Start a new user turn in this chat.');
+        if (!await waitFor(() => evalIn(child.page, `document.body.textContent.includes('The new user turn is complete.')`))) throw new Error('new user turn did not settle');
+        const cleared = await readReason();
+        rec.check('the next real user send clears the old Goal reason', cleared?.note === null && cleared?.notices.length === 0);
+      } finally { release(); await child.close(); }
+    },
+  },
   {
     name: 'goal-running', kind: 'visual', phase: 'post-unlock',
     // Set up the plan, tick one item, then HANG so the goal bar + todo card
@@ -4580,6 +7046,113 @@ export const STATES = [
     },
   },
 
+  {
+    name: 'composer-palette', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      try {
+        await evalIn(ctx.page, `(() => {
+          const input = document.querySelector('form.input-bar textarea');
+          input.focus(); input.value = '/'; input.setSelectionRange(1, 1);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        const listed = await waitFor(() => evalIn(ctx.page,
+          `!!document.querySelector('.command-palette')`), { budgetMs: 5_000, pollMs: 50 });
+        if (!listed) throw new Error('The slash palette did not render');
+        const builtins = await evalIn(ctx.page,
+          `JSON.stringify([...document.querySelectorAll('.palette-label')].slice(0, 3).map((el) => el.textContent))
+            === JSON.stringify(['/init', '/system', '/tools'])`);
+        if (baseRender) rec.observe('merge-base command list', { builtins });
+        else rec.check('the slash palette lists the three worker commands first', builtins);
+        await rec.visual('composer-palette-commands');
+        await evalIn(ctx.page, `(() => {
+          const input = document.querySelector('form.input-bar textarea');
+          input.value = '/zzzz'; input.setSelectionRange(5, 5);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        const empty = await waitFor(() => evalIn(ctx.page,
+          `document.querySelector('.palette-empty')?.textContent === 'No matching commands'`),
+        { budgetMs: 5_000, pollMs: 50 });
+        if (!empty) throw new Error('The no-match palette did not render');
+        const noMissingOption = await evalIn(ctx.page,
+          `!document.querySelector('form.input-bar textarea').hasAttribute('aria-activedescendant')`);
+        if (baseRender) rec.observe('merge-base empty option', { noMissingOption });
+        else rec.check('an empty palette names no missing active option', noMissingOption);
+        await rec.visual('composer-palette-no-match');
+        await ctx.page.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+        await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+        await evalIn(ctx.page, `import('/vendor/mithril/mithril.js').then(({ default: m }) => m.redraw.sync())`, true);
+        const escaped = await evalIn(ctx.page,
+          `!document.querySelector('.command-palette')
+            && document.querySelector('form.input-bar textarea').value === '/zzzz'`);
+        if (baseRender) rec.observe('merge-base Escape', { escaped });
+        else rec.check('Escape stays closed after keyup and keeps the draft', escaped);
+      } finally {
+        await evalIn(ctx.page, `(() => {
+          const input = document.querySelector('form.input-bar textarea');
+          input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+      }
+    },
+  },
+  {
+    name: 'reasoning-disclosure', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      try {
+        await evalIn(ctx.page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { MessageList } = await import('/sidepanel/components/message-list.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-reasoning';
+          // why fixed: the fixture must cover the live panel for the capture.
+          host.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);padding:14px;overflow:auto;';
+          document.body.appendChild(host);
+          m.mount(host, { view: () => m(MessageList, { messages: [{
+            id: 'reasoning-reply', role: 'assistant', content: 'The saved files are ready.',
+            thinking: 'I will check the saved files before I give the result.',
+          }] }) });
+          host.querySelector('.reasoning-header').focus();
+        })()`, true);
+        const nativeButton = await evalIn(ctx.page, `(() => {
+          const button = document.querySelector('#e2e-reasoning .reasoning-header');
+          return button.tagName === 'BUTTON' && button === document.activeElement
+            && button.getAttribute('aria-expanded') === 'false';
+        })()`);
+        if (baseRender) rec.observe('merge-base reasoning control', { nativeButton });
+        else rec.check('Reasoning is a focused native button with a collapsed state', nativeButton);
+        await rec.visual('reasoning-disclosure-focused');
+        // why click on the base: its disclosure is a div. Capture that same
+        // expanded content without requiring the branch's new keyboard path.
+        if (baseRender) await clickAndSyncRedraw(ctx.page, '#e2e-reasoning .reasoning-header');
+        else {
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' });
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+        }
+        const expanded = await waitFor(() => evalIn(ctx.page,
+          `!!document.querySelector('#e2e-reasoning .reasoning-body')`), { budgetMs: 3_000, pollMs: 50 });
+        if (baseRender) rec.check('the old disclosure opens for the expanded capture', !!expanded);
+        else rec.check('Enter opens Reasoning', !!expanded);
+        await rec.visual('reasoning-disclosure-expanded');
+        if (!baseRender) {
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32, text: ' ' });
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+          const collapsed = await waitFor(() => evalIn(ctx.page,
+            `document.querySelector('#e2e-reasoning .reasoning-header')?.getAttribute('aria-expanded') === 'false'`),
+          { budgetMs: 3_000, pollMs: 50 });
+          rec.check('Space closes Reasoning', !!collapsed);
+        }
+      } finally {
+        await evalIn(ctx.page, `(async () => {
+          const host = document.getElementById('e2e-reasoning');
+          if (host) { (await import('/vendor/mithril/mithril.js')).default.mount(host, null); host.remove(); }
+        })()`, true);
+      }
+    },
+  },
+
   // --- visual: a multi-exchange transcript (bubbles carry across turns) -------
   {
     name: 'multi-turn-transcript', kind: 'visual', phase: 'post-unlock',
@@ -4602,12 +7175,78 @@ export const STATES = [
   {
     name: 'busy-thinking', kind: 'visual', phase: 'post-unlock',
     // Hold before the first token so the pre-stream thinking state stays up;
-    // resetSession aborts the pending call before the next state.
+    // Stop and observe its terminal UI before handing the shared browser back.
     responder: () => ({ delayMs: 60_000, sse: sseText('…') }),
     async run(ctx, rec) {
-      await rpc(ctx.page, { type: 'agent/send', text: 'plan a fix for the failing test' });
-      await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar button.stop')`), { budgetMs: 10_000, pollMs: 50 });
-      await rec.visual('busy-thinking');
+      const sent = await rpc(ctx.page, { type: 'agent/send', text: 'plan a fix for the failing test' });
+      if (sent?.ok !== true) throw new Error(`Busy fixture turn refused: ${JSON.stringify(sent)}`);
+      try {
+        if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('form.input-bar button.stop')`), { budgetMs: 10_000, pollMs: 50 })) {
+          throw new Error('Busy fixture did not reach its live turn');
+        }
+        await rec.visual('busy-thinking');
+      } finally {
+        const stopped = await rpc(ctx.page, { type: 'agent/stop' });
+        if (stopped?.ok !== true) throw new Error(`Busy fixture Stop refused: ${JSON.stringify(stopped)}`);
+        if (!await waitFor(async () => !(await probe(ctx)).busy, { budgetMs: 20_000, pollMs: 50 })) {
+          throw new Error('Busy fixture did not publish its terminal turn state');
+        }
+      }
+    },
+  },
+
+  {
+    name: 'context-inspector-keyboard', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('CONTEXT-KEYBOARD-DONE') }),
+    async run(ctx, rec) {
+      const before = await rpc(ctx.page, { type: 'state/get' });
+      if (!before?.ok || !before.state?.settings) throw new Error('Context baseline read refused');
+      try {
+        if (!(await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true, autoMemoryEnabled: false } }))?.ok) throw new Error('Context dev mode refused');
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Capture this real model turn for the context inspector.' });
+        if (sent?.ok !== true) throw new Error(`Context fixture turn refused: ${JSON.stringify(sent)}`);
+        if (!await waitFor(() => evalIn(ctx.page, `document.querySelector('.message-assistant .bubble')?.textContent.trim() === 'CONTEXT-KEYBOARD-DONE' && !document.querySelector('form.input-bar button.stop')`))) throw new Error('Context turn did not settle');
+        const current = await rpc(ctx.page, { type: 'state/get' });
+        const snapshots = await rpc(ctx.page, { type: 'session/contextSnapshots', sessionId: current?.state?.session?.sessionId });
+        if (!snapshots?.ok || !snapshots.snapshots?.some((snapshot) => snapshot.label === 'main')) throw new Error('real model snapshot is missing');
+        const calls = ctx.modelCallCount();
+        await evalIn(ctx.page, `(() => { 'use strict'; const trigger = document.querySelector('.debug-export-btn'); trigger.focus(); trigger.click(); })()`);
+        if (!await waitFor(() => evalIn(ctx.page, `[...document.querySelectorAll('.debug-menu-item')].some((button) => button.textContent === 'context inspector')`))) throw new Error('real Context menu item is missing');
+        await evalIn(ctx.page, `[...document.querySelectorAll('.debug-menu-item')].find((button) => button.textContent === 'context inspector').click()`);
+        if (!await waitFor(() => evalIn(ctx.page, `[...document.querySelectorAll('.ctx-snap-label')].some((label) => label.textContent === 'main')`))) throw new Error('real Context snapshot did not render');
+        const dialog = await evalIn(ctx.page, `(() => { 'use strict'; const dialog = document.querySelector('.context-inspector');
+          return { role: dialog.getAttribute('role'), modal: dialog.getAttribute('aria-modal'), title: dialog.getAttribute('aria-labelledby'),
+            closeFocused: document.activeElement === dialog.querySelector('.ctx-close'), menuClosed: !document.querySelector('.debug-menu') }; })()`);
+        rec.check('Context opens its real snapshot with the debug menu closed', dialog.menuClosed);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Context dialog focus and name', dialog);
+        else rec.check('Context opens a named modal with Close focused', dialog.role === 'dialog' && dialog.modal === 'true'
+          && dialog.title === 'context-inspector-title' && dialog.closeFocused, JSON.stringify(dialog));
+        await checkAccessibleNames(ctx.page, rec, 'Context and Close expose their accessible names', [
+          ['.context-inspector', 'context inspector', 'dialog'], ['.context-inspector .ctx-close', 'Close'],
+        ]);
+        await evalIn(ctx.page, `document.querySelector('.context-inspector .ctx-snap-summary').click()`);
+        if (!await waitFor(() => evalIn(ctx.page, `document.querySelector('.context-inspector .ctx-snap')?.open === true`))) throw new Error('real Context snapshot did not expand');
+        await evalIn(ctx.page, `document.querySelector('.context-inspector .ctx-close').focus()`);
+        await pressNativeKey(ctx.page, 'Tab', true);
+        const reverse = await evalIn(ctx.page, `document.activeElement === [...document.querySelectorAll('.context-inspector summary')].filter((node) => node.getClientRects().length).at(-1)`);
+        await pressNativeKey(ctx.page, 'Tab');
+        const forward = await evalIn(ctx.page, `document.activeElement === document.querySelector('.context-inspector .ctx-close')`);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Context native Tab', { reverse, forward });
+        else rec.check('native Tab includes expanded summaries and stays in Context', reverse && forward);
+        await rec.visualPage('context-inspector-keyboard', ctx.page, { beforeShot: () => evalIn(ctx.page, `(() => { 'use strict';
+          for (const meta of document.querySelectorAll('.ctx-snap-meta')) meta.textContent = meta.textContent.replace(/ · [^·]+$/, ' · 12:00:00'); })()`) });
+        await pressNativeKey(ctx.page, 'Escape');
+        const escaped = await waitFor(() => evalIn(ctx.page, `!document.querySelector('.context-inspector')`), { budgetMs: 1_000, pollMs: 40 });
+        const returned = await evalIn(ctx.page, `document.activeElement === document.querySelector('.debug-export-btn')`);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Context native Escape', { escaped, returned });
+        else rec.check('Escape closes Context and returns focus to the persistent debug button', escaped && returned);
+        if (!escaped) await evalIn(ctx.page, `document.querySelector('.ctx-close').click()`);
+        rec.check('Context inspection makes no extra model call and leaves its menu closed', ctx.modelCallCount() === calls
+          && await evalIn(ctx.page, `!document.querySelector('.context-inspector, .debug-menu')`));
+      } finally {
+        await evalIn(ctx.page, `document.querySelector('.ctx-close')?.click()`);
+        if (!(await rpc(ctx.page, { type: 'settings/update', patch: { devMode: before.state.settings.devMode, autoMemoryEnabled: before.state.settings.autoMemoryEnabled } }))?.ok) throw new Error('Context settings restore refused');
+      }
     },
   },
 
@@ -4669,6 +7308,10 @@ export const STATES = [
       })()`), { budgetMs: 8_000, pollMs: 50 });
       rec.check('both persisted fixture sessions render before capture', !!visible);
       if (!visible) throw new Error('sessions-list expected rows did not render');
+      const titles = await evalIn(ctx.page, `[...document.querySelectorAll('.sessions-list .session-title')].map((row) => row.textContent.trim())`);
+      await checkAccessibleNames(ctx.page, rec, 'Archive names identify each persisted chat', expected.map((row) => [
+        `.sessions-list .session-row:nth-child(${titles.indexOf(row.title) + 1}) .session-archive`, `Archive chat “${row.title}”`,
+      ]));
       await rec.visual('sessions-list');
       // Return to the chat view for later states.
       await evalIn(ctx.page, `document.querySelector('.topbar-actions button[title="Chats"]')?.click()`);
@@ -4759,6 +7402,15 @@ export const STATES = [
             && view.assistantText === 'HOME-COMPOSER-REPLY' && !view.busy && !view.errorText;
         }, { budgetMs: 20_000, pollMs: 80 });
         requireCheck('Home composer sends a real turn and renders its answer', answered === true);
+        const composerAfterSend = await evalIn(page, `(() => ({
+          value: document.querySelector('.home-chat form.input-bar textarea')?.value,
+          sendDisabled: document.querySelector('.home-chat form.input-bar .send-btn')?.disabled,
+          leakedDrafts: Object.keys(localStorage).filter((key) => key.startsWith('peerd.draft.')
+            && (localStorage.getItem(key) ?? '').includes('HOME-COMPOSER-MESSAGE')),
+        }))()`);
+        rec.check('a confirmed Home send leaves the composer and its saved draft empty',
+          composerAfterSend?.value === '' && composerAfterSend.sendDisabled === true
+            && composerAfterSend.leakedDrafts?.length === 0, JSON.stringify(composerAfterSend));
         const state = await rpc(page, { type: 'state/get' });
         const sessionId = state?.state?.session?.sessionId;
         requireCheck('Home observes the bound live session', typeof sessionId === 'string' && sessionId.length > 0);
@@ -4824,6 +7476,282 @@ export const STATES = [
           `document.documentElement.dataset.peerdBootStage === 'app-ready' && !!document.querySelector('.input-bar textarea')`).catch(() => false),
         { budgetMs: 20_000, pollMs: 80 });
         if (!restored) throw new Error('Home fixture did not restore the live side panel');
+      }
+    },
+  },
+
+  // --- functional: Home > Chats by keyboard, and the live chat header -------
+  // Chats is Home's default view when no panel is open. A row must open with
+  // Enter (a real <button>), its delete control must be a named sibling that
+  // shows on keyboard focus, and the header must carry the session title (the
+  // state snapshot used to drop it, so the header always read "New chat").
+  {
+    name: 'home-chat-list-keyboard', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
+      const panelUrl = await evalIn(ctx.page, 'location.href');
+      const sendChat = async (text) => {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text });
+        if (!sent?.ok) throw new Error(`agent/send failed: ${JSON.stringify(sent)}`);
+        await waitFor(async () => { const o = await probe(ctx); return o.assistantText && !o.busy; }, { budgetMs: 20_000 });
+      };
+      await sendChat('alpha chat about tides');
+      await rpc(ctx.page, { type: 'session/reset' });
+      await waitFor(async () => !(await rpc(ctx.page, { type: 'state/get' }))?.state?.session?.sessionId, { budgetMs: 10_000, pollMs: 80 });
+      await sendChat('beta chat about bread');
+      let page = null;
+      try {
+        await releasePanelDocument(ctx);
+        page = await openWidePage(ctx, 'home/home.html#chat', { ready: '.home-shell' });
+        const listed = await waitFor(() => evalIn(page, `document.querySelectorAll('.chat-list-item').length >= 2`), { budgetMs: 15_000, pollMs: 80 });
+        rec.check('Home lists both chats', !!listed);
+        const header = () => evalIn(page, `document.querySelector('.home-chat-title')?.textContent ?? null`);
+        const activeTitle = () => evalIn(page, `document.querySelector('.chat-list-item.is-active .chat-list-item-title')?.textContent ?? null`);
+        const titles = { header: await header(), active: await activeTitle() };
+        rec.check('the chat header carries the live session title',
+          titles.header === 'beta chat about bread' && titles.active === 'beta chat about bread', JSON.stringify(titles));
+        // Real Tabs from "+ New chat": the first row, its delete control, the second row.
+        await evalIn(page, `document.querySelector('button.chat-list-new').focus()`);
+        for (let i = 0; i < 3; i++) await pressKey(page, 'Tab');
+        const focused = await evalIn(page, `(() => {
+          const a = document.activeElement;
+          const row = a?.closest('.chat-list-item');
+          const del = row?.querySelector('.chat-item-del');
+          return { tag: a?.tagName ?? null, inRow: !!row, active: !!row?.classList.contains('is-active'),
+            nested: !!a?.querySelector?.('.chat-item-del'), delOpacity: del ? getComputedStyle(del).opacity : null,
+            delLabel: del?.getAttribute('aria-label') ?? null, title: row?.querySelector('.chat-list-item-title')?.textContent ?? null };
+        })()`);
+        rec.check('Tab reaches the older chat as a real button that does not swallow its delete control',
+          focused.tag === 'BUTTON' && focused.inRow && !focused.active && !focused.nested && focused.title === 'alpha chat about tides',
+          JSON.stringify(focused));
+        rec.check('keyboard focus reveals the delete control, named per chat',
+          focused.delOpacity === '1' && /^Delete chat “.+”$/.test(focused.delLabel ?? ''), JSON.stringify(focused));
+        const beforeId = (await rpc(page, { type: 'state/get' }))?.state?.session?.sessionId ?? null;
+        await pressKey(page, 'Enter');
+        const switched = await waitFor(async () => {
+          const id = (await rpc(page, { type: 'state/get' }))?.state?.session?.sessionId ?? null;
+          return id && id !== beforeId ? id : null;
+        }, { budgetMs: 8_000, pollMs: 80 });
+        rec.check('Enter on a chat row switches the live session', !!switched, JSON.stringify({ beforeId, switched }));
+        const headerFollows = await waitFor(async () => (await header()) === 'alpha chat about tides', { budgetMs: 8_000, pollMs: 80 });
+        rec.check('the header follows the switched chat', !!headerFollows, JSON.stringify(await header()));
+        await rec.shotPage('home-chat-list-keyboard', page);
+      } finally {
+        if (page) await retirePrivateTransferPage(page);
+        await restorePanelDocument(ctx, panelUrl);
+      }
+    },
+  },
+
+  // --- functional: Home keeps the view you chose around the side panel -------
+  // A panel the user opened must survive a return to Home (only a card-opened
+  // panel auto-closes), and closing the panel after navigating must not yank
+  // Home back to Chats.
+  {
+    name: 'home-panel-navigation', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
+      const panelUrl = await evalIn(ctx.page, 'location.href');
+      const view = (page) => evalIn(page, `document.querySelector('main.home-content')?.className.replace('home-content home-content--', '') ?? null`);
+      const panelBar = (page) => evalIn(page, `!!document.querySelector('.home-panel-bar')`);
+      let page = null;
+      let blank = null;
+      try {
+        await releasePanelDocument(ctx);
+        page = await openWidePage(ctx, 'home/home.html#chat', { ready: '.home-shell' });
+        rec.check('Home owns Chat while no panel is connected', (await view(page)) === 'chat' && !(await panelBar(page)));
+        // The panel comes back (its port connects): Home hands Chat over.
+        await restorePanelDocument(ctx, panelUrl);
+        const handed = await waitFor(async () => (await panelBar(page)) && (await view(page)) !== 'chat', { budgetMs: 8_000, pollMs: 80 });
+        rec.check('an open panel takes Chat and Home drops to a tool view', !!handed, JSON.stringify({ view: await view(page) }));
+        await clickAndSyncRedraw(page, '[data-home-view="library"]');
+        rec.check('Library opens beside the panel', (await view(page)) === 'library');
+        // Leave for another tab and come back: a panel the user opened stays.
+        blank = await (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json();
+        const blankPage = await attach(blank.webSocketDebuggerUrl);
+        await blankPage.send('Page.enable');
+        await blankPage.send('Page.bringToFront');
+        const hidden = await waitFor(() => evalIn(page, `document.visibilityState === 'hidden'`), { budgetMs: 5_000, pollMs: 50 });
+        await page.send('Page.bringToFront');
+        const visible = await waitFor(() => evalIn(page, `document.visibilityState === 'visible'`), { budgetMs: 5_000, pollMs: 50 });
+        blankPage.close();
+        rec.check('Home went hidden and came back', !!hidden && !!visible);
+        await sleep(1_000);
+        const surfaces = await rpc(page, { type: 'surfaces/get' }).catch(() => null);
+        const returned = { surfaces, view: await view(page), panelBar: await panelBar(page) };
+        rec.check('a panel the user opened stays open when Home returns',
+          surfaces?.sidePanelOpen === true && returned.panelBar && returned.view === 'library', JSON.stringify(returned));
+        // Closing the panel now keeps Library instead of yanking Home to Chats.
+        await releasePanelDocument(ctx);
+        const closed = await waitFor(async () => !(await panelBar(page)), { budgetMs: 8_000, pollMs: 80 });
+        await sleep(300);
+        rec.check('closing the panel keeps the view the user navigated to', !!closed && (await view(page)) === 'library', JSON.stringify({ view: await view(page) }));
+        await rec.shotPage('home-panel-navigation', page);
+      } finally {
+        if (blank) await fetch(`http://127.0.0.1:${ctx.port}/json/close/${blank.id}`).catch(() => {});
+        if (page) await retirePrivateTransferPage(page);
+        await restorePanelDocument(ctx, panelUrl);
+      }
+    },
+  },
+
+  // --- functional: a card-opened side panel closes when you return to Home ---
+  // "Go ↗" on a "peerd opened a tab" card opens the side panel to follow the
+  // agent's tab. Coming back to Home must close that panel and hand Chat back,
+  // while a panel the user opened stays (home-panel-navigation). The close is
+  // the real one, which destroys the browser-owned panel document, so the
+  // harness reopens the panel for the states that follow.
+  {
+    name: 'home-card-panel-return', kind: 'functional', phase: 'post-unlock',
+    responder: (callIndex) => (callIndex === 0
+      ? { sse: sseToolCall('open_tab', {}) }
+      : { sse: sseText('The tab is open.') }),
+    async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
+      // why the sync redraw: a hidden tab gets no animation frame, so commit
+      // Mithril's scheduled redraw before reading Home's DOM.
+      const snap = async (page) => ({
+        sidePanelOpen: (await rpc(page, { type: 'surfaces/get' }).catch(() => null))?.sidePanelOpen ?? null,
+        ...(await evalIn(page, `import('/vendor/mithril/mithril.js').then(({ default: m }) => {
+          m.redraw.sync();
+          return {
+            view: document.querySelector('main.home-content')?.className.replace('home-content home-content--', '') ?? null,
+            panelBar: !!document.querySelector('.home-panel-bar'),
+            visibility: document.visibilityState,
+          };
+        })`, true)),
+      });
+      const homeOwnsChat = async (page) => {
+        const s = await snap(page);
+        return s.sidePanelOpen === false && s.view === 'chat' && !s.panelBar;
+      };
+      let page = null;
+      let tabsBefore = null;
+      try {
+        page = await openWidePage(ctx, 'home/home.html#chat', { ready: '.home-shell' });
+        tabsBefore = await evalIn(page, `chrome.tabs.query({}).then((tabs) => tabs.map((tab) => tab.id))`, true);
+        // Bring the chat home first: the live panel closes for real.
+        await rpc(page, { type: 'sidepanel/close' });
+        const owned = await waitFor(() => homeOwnsChat(page), { budgetMs: 8_000, pollMs: 80 });
+        rec.check('closing the panel hands Chat to Home', !!owned, JSON.stringify(await snap(page)));
+        const sent = await rpc(page, { type: 'agent/send', text: 'Open a blank tab for me.' });
+        rec.check('agent/send accepted from Home', !!sent?.ok, JSON.stringify(sent));
+        const card = await waitFor(() => evalIn(page, `!!document.querySelector('.agent-tab-notice-go')`), { budgetMs: 20_000, pollMs: 80 });
+        const settled = await waitFor(() => evalIn(page,
+          `!document.querySelector('.message-assistant.streaming') && !document.querySelector('form.input-bar button.stop')`),
+        { budgetMs: 20_000, pollMs: 80 });
+        rec.check('the opened-tab card renders on Home', !!card && !!settled);
+        await page.send('Page.bringToFront');
+        await waitFor(() => evalIn(page, `document.visibilityState === 'visible'`), { budgetMs: 5_000, pollMs: 50 });
+        // Go: a real click, since the gesture is what lets Home open the panel.
+        await realClick(page, '.agent-tab-notice-go');
+        const followed = await waitFor(async () => {
+          const s = await snap(page);
+          return s.visibility === 'hidden' && s.sidePanelOpen === true && s.panelBar;
+        }, { budgetMs: 15_000, pollMs: 80 });
+        rec.check('Go opens the side panel and leaves Home for the agent tab', !!followed, JSON.stringify(await snap(page)));
+        const returnedAt = Date.now();
+        await page.send('Page.bringToFront');
+        const closed = await waitFor(() => homeOwnsChat(page), { budgetMs: 3_000, pollMs: 50 });
+        rec.check('returning to Home closes the card-opened panel and Chat is back',
+          !!closed, JSON.stringify({ ...(await snap(page)), afterMs: Date.now() - returnedAt }));
+        await rec.shotPage('home-card-panel-return', page);
+      } finally {
+        if (page) {
+          if (tabsBefore) {
+            await evalIn(page, `(async () => {
+              const before = new Set(${JSON.stringify(tabsBefore)});
+              const tabs = await chrome.tabs.query({});
+              await Promise.all(tabs.filter((tab) => Number.isInteger(tab.id) && !before.has(tab.id))
+                .map((tab) => chrome.tabs.remove(tab.id).catch(() => {})));
+            })()`, true).catch(() => {});
+          }
+          await retirePrivateTransferPage(page);
+        }
+        const panelAlive = await evalIn(ctx.page, 'true').then(() => true, () => false);
+        if (!panelAlive) {
+          await ctx.reopenNativePanel();
+          await awaitLivePanel(ctx);
+        }
+      }
+    },
+  },
+
+  // --- functional: the Home notifications bell (preview, network on) --------
+  // The bell's menu is a disclosure: Escape closes it and returns focus to the
+  // bell, focus leaving the bell area closes it, and at narrow widths (the rail
+  // is a top bar) it opens below the bell inside the viewport, not above the window.
+  {
+    name: 'home-notifications-menu', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, true);
+      let page = null;
+      try {
+        page = await openWidePage(ctx, 'home/home.html#library', { ready: '.home-shell' });
+        const bellShown = await waitFor(() => evalIn(page, `!!document.querySelector('.notif-bell')`), { budgetMs: 15_000, pollMs: 80 });
+        rec.check('the notifications bell renders with the network on', !!bellShown);
+        // Three feed entries, broadcast the way the dweb base host emits them.
+        for (let i = 0; i < 3; i++) {
+          await evalIn(ctx.page, `chrome.runtime.sendMessage({ type: 'dweb/notify', notification: {
+            id: 'e2e-notif-${i}', ts: Date.now(), kind: 'peer', title: 'New peer connected', body: 'peer e2e-${i}', link: 'network',
+          } }).catch(() => null)`, true);
+        }
+        const fed = await waitFor(() => evalIn(page,
+          `import('/shared/peer-notifications.js').then(({ peerNotifications }) => peerNotifications.list().length >= 3)`, true),
+        { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the feed holds the three entries', !!fed);
+        const snap = () => evalIn(page, `({
+          open: !!document.querySelector('.notif-menu'), items: document.querySelectorAll('.notif-item').length,
+          expanded: document.querySelector('.notif-bell')?.getAttribute('aria-expanded') ?? null,
+          onBell: document.activeElement === document.querySelector('.notif-bell'),
+          active: document.activeElement?.className ?? null,
+        })`);
+        await evalIn(page, `document.querySelector('.notif-bell').focus()`);
+        await pressKey(page, 'Enter');
+        const opened = await waitFor(async () => (await snap()).open, { budgetMs: 3_000, pollMs: 50 });
+        rec.check('Enter on the bell opens the menu', !!opened, JSON.stringify(await snap()));
+        await pressKey(page, 'Escape');
+        await waitFor(async () => !(await snap()).open, { budgetMs: 3_000, pollMs: 50 });
+        const afterEscape = await snap();
+        rec.check('Escape closes the menu and returns focus to the bell',
+          !afterEscape.open && afterEscape.onBell && afterEscape.expanded === 'false', JSON.stringify(afterEscape));
+        if (!(await snap()).open) await clickAndSyncRedraw(page, '.notif-bell');
+        await evalIn(page, `document.querySelector('.notif-bell').focus()`);
+        await waitFor(async () => (await snap()).open, { budgetMs: 3_000, pollMs: 50 });
+        await evalIn(page, `document.querySelector('.home-rail-lock').focus()`);
+        await waitFor(async () => !(await snap()).open, { budgetMs: 3_000, pollMs: 50 });
+        const afterFocusOut = await snap();
+        rec.check('focus leaving the bell area closes the menu', !afterFocusOut.open, JSON.stringify(afterFocusOut));
+        // Narrow window: the rail is a top bar and the menu must open inside the viewport.
+        if ((await snap()).open) await clickAndSyncRedraw(page, '.notif-bell');
+        await page.send('Emulation.setDeviceMetricsOverride', { width: 600, height: 800, deviceScaleFactor: 1, mobile: false });
+        const narrow = await waitFor(() => evalIn(page, `matchMedia('(max-width: 620px)').matches`), { budgetMs: 3_000, pollMs: 50 });
+        await clickAndSyncRedraw(page, '.notif-bell');
+        const menuBox = await waitFor(() => evalIn(page, `(() => {
+          const menu = document.querySelector('.notif-menu');
+          if (!menu) return null;
+          const r = menu.getBoundingClientRect();
+          const items = [...menu.querySelectorAll('.notif-item')];
+          const usable = items.filter((it) => {
+            const b = it.getBoundingClientRect(); const x = b.left + b.width / 2; const y = b.top + b.height / 2;
+            return x >= 0 && y >= 0 && x < innerWidth && y < innerHeight && it.contains(document.elementFromPoint(x, y));
+          }).length;
+          return { top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right),
+            items: items.length, usable, vw: innerWidth, vh: innerHeight };
+        })()`), { budgetMs: 3_000, pollMs: 50 });
+        rec.check('at 600px the menu opens inside the viewport with every item usable',
+          !!narrow && !!menuBox && menuBox.top >= 0 && menuBox.bottom <= menuBox.vh && menuBox.left >= 0 && menuBox.right <= menuBox.vw
+            && menuBox.items >= 3 && menuBox.usable === menuBox.items, JSON.stringify(menuBox));
+        await rec.shotPage('home-notifications-menu-narrow', page);
+      } finally {
+        if (page) {
+          await evalIn(page, `import('/shared/peer-notifications.js').then(({ peerNotifications }) => peerNotifications.clear())`, true).catch(() => {});
+          await retirePrivateTransferPage(page);
+        }
+        await chooseFixtureNetwork(ctx, false);
       }
     },
   },
@@ -4933,6 +7861,49 @@ export const STATES = [
     },
   },
 
+  // Rename fields render on both revisions. The head checks the new focus rules.
+  {
+    name: 'home-contacts-rename', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, true);
+      // The RFC 8032 public key keeps this saved contact and its avatar stable.
+      const did = 'did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw';
+      const page = await openWidePage(ctx, 'home/home.html#contacts', { ready: '.home-shell' });
+      try {
+        const saved = await rpc(page, { type: 'contacts/set', did, name: 'Rename review' });
+        rec.check('the contact is saved through the real route', saved?.ok === true, JSON.stringify(saved));
+        const ready = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.contact-row')]
+          .some((row) => row.querySelector('.peerd-disc-name')?.textContent === 'Rename review')`),
+        { budgetMs: 15_000, pollMs: 80 });
+        if (!ready) throw new Error('the saved contact did not render');
+        await evalIn(page, `[...document.querySelectorAll('.contact-row')]
+          .find((row) => row.querySelector('.peerd-disc-name')?.textContent === 'Rename review')
+          .querySelector('[title="Edit name"]').click()`);
+        const editing = await waitFor(() => evalIn(page,
+          `document.querySelector('.contact-name-input')?.value === 'Rename review'
+            && document.activeElement === document.querySelector('.contact-name-input')`),
+        { budgetMs: 5_000, pollMs: 50 });
+        rec.check('Contacts opens its focused name field', !!editing);
+        await rec.visualPage('home-contacts-rename', page, { beforeShot: () => evalIn(page,
+          `import('/shared/peer-notifications.js').then(({ peerNotifications }) => peerNotifications.clear())`, true) });
+        await pressKey(page, 'Escape');
+        rec.check('Escape leaves the saved contact name unchanged',
+          (await rpc(page, { type: 'contacts/list' }))?.contacts?.find((contact) => contact.did === did)?.name === 'Rename review');
+      } finally {
+        await rpc(page, { type: 'contacts/forget', did }).catch(() => {});
+        await retirePrivateTransferPage(page);
+        await chooseFixtureNetwork(ctx, false);
+      }
+    },
+  },
+  {
+    name: 'home-library-rename', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      await captureHomeLibraryGit(ctx, rec, { visualName: 'home-library-rename', rename: true });
+    },
+  },
   // --- visual (WIDE): browser-native Git history on an App -------------------
   // Creates through the real import→App→Git path, then opens the Library's
   // developer panel. Import avoids opening a second tab during the visual state,
@@ -4961,14 +7932,16 @@ export const STATES = [
   },
 
   // Real Explore component with a controlled catalog. Both themes and widths
-  // show the signed-hint caveat and the legacy unknown state.
+  // show the tile grid; an older tree shows its signed-hint filters instead.
   ...[false, true].map(narrow => ({
     name: narrow ? 'home-explore-narrow' : 'home-explore', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
+      const { flow, phase2 } = discoverSurface();
       const page = await openExtPage(ctx, 'tests/fixtures/explore.html');
       try {
-        await page.send('Emulation.setDeviceMetricsOverride', {width:narrow ? 320 : 960,height:narrow ? 1200 : 760,deviceScaleFactor:1,mobile:false});
+        // why 1400 narrow: the Your apps row and the search label sit above the one-column tiles.
+        await page.send('Emulation.setDeviceMetricsOverride', {width:narrow ? 320 : 960,height:narrow ? 1400 : 760,deviceScaleFactor:1,mobile:false});
         const ready = await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 3`), {budgetMs:8000,pollMs:80});
         const fullView = await evalIn(page, `(() => {
           const cards = [...document.querySelectorAll('.disc-card')];
@@ -4979,6 +7952,25 @@ export const STATES = [
         })()`);
         rec.check('Explore renders all publisher claims including legacy unknown in full view', ready === true && fullView === true);
         await rec.visualPage(narrow ? 'home-explore-narrow' : 'home-explore', page);
+        if (flow) {
+          // why the tree's own label: the merge-base tree renders its own words.
+          const pick = (label) => evalIn(page, `(async () => {
+            [...document.querySelectorAll('.disc-pill')].find(pill => pill.textContent === ${JSON.stringify(label)}).click();
+            (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
+            return [...document.querySelectorAll('.disc-tile-name')].map(node => node.textContent);
+          })()`, true);
+          rec.check('From people you know keeps only the saved contact’s app',
+            JSON.stringify(await pick(phase2 ? 'From people you know' : 'From contacts')) === JSON.stringify(['Field notes']));
+          rec.check('Updates is empty while every installed app is current', (await pick('Updates')).length === 0
+            && await evalIn(page, `document.body.textContent.includes('No matching apps')`));
+          const included = await pick(phase2 ? 'Comes with peerd' : 'Included');
+          rec.check('Comes with peerd lists both packaged starters and Commons',
+            included.length === 3 && included.includes('Peerd-to-Peerd Commons'));
+          rec.check('All restores every shared app', (await pick('All')).length === 3);
+          rec.check('Explore controls and cards fit the viewport',
+            await evalIn(page, `document.documentElement.scrollWidth <= innerWidth`));
+          return;
+        }
         await evalIn(page, `(() => {const filter=document.querySelector('select');filter.value='yes';filter.dispatchEvent(new Event('change',{bubbles:true}));})()`);
         const filtered = await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 1 && document.querySelector('.disc-name')?.textContent === 'Orbit lab'`), {budgetMs:4000,pollMs:50});
         rec.check('WebAssembly filter selects the declared module App', filtered === true);
@@ -5012,6 +8004,224 @@ export const STATES = [
       } finally { try {page.close();} catch { /* */ } }
     },
   })),
+  // The Included pill: both packaged starters and Commons as tiles, read only.
+  {
+    name: 'home-explore-included', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      if (!discoverSurface().flow) {
+        rec.observe('merge-base surface', { present: false, reason: 'the Included filter was introduced on this branch' });
+        return;
+      }
+      const page = await openExtPage(ctx, 'tests/fixtures/explore.html');
+      try {
+        await page.send('Emulation.setDeviceMetricsOverride', {width:960,height:760,deviceScaleFactor:1,mobile:false});
+        if (!await waitFor(() => evalIn(page, `document.querySelectorAll('.disc-card').length === 3`), {budgetMs:8000,pollMs:80})) {
+          throw new Error('Explore did not render');
+        }
+        // why the tree's own label: the merge-base tree renders its own words.
+        const label = discoverSurface().phase2 ? 'Comes with peerd' : 'Included';
+        await evalIn(page, `(async () => {
+          [...document.querySelectorAll('.disc-pill')].find(pill => pill.textContent === ${JSON.stringify(label)}).click();
+          (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
+        })()`, true);
+        // why wait for an enabled Commons action: it stays off until the Library read lands.
+        const included = await waitFor(() => evalIn(page, `(() => {
+          const metas = [...document.querySelectorAll('.disc-tile-meta')].map(node => node.textContent);
+          return metas.length === 3 && metas.every(text => text === 'Comes with peerd')
+            && [...document.querySelectorAll('.disc-tile-action')].some(button => button.textContent === 'Add and open Commons' && !button.disabled);
+        })()`), {budgetMs:4000,pollMs:50});
+        rec.check('Included lists both packaged starters and Commons and sends only reads', !!included
+          && await evalIn(page, `window.__exploreFixtureCalls.every(type =>
+            ['apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distributed/info', 'contacts/list', 'dweb/blocked-peers'].includes(type))`));
+        rec.check('Explore controls and cards fit the viewport', await evalIn(page, `document.documentElement.scrollWidth <= innerWidth`));
+        await rec.visualPage('home-explore-included', page);
+      } finally { try { page.close(); } catch { /* */ } }
+    },
+  },
+
+  // Home's own glue for a notification's app page, mounted for real: the bell
+  // keeps the key, Discover answers it once and clears it, and leaving
+  // Discover drops a request that still waits. One profile hears no peer app,
+  // so the page answers the heard read itself; every other read is real.
+  {
+    name: 'home-discover-notification', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const available = await evalIn(ctx.page, `(async () =>
+        (await import('/shared/channel-config.js')).DWEB_ENABLED)()`, true);
+      if (!available) { rec.check('unsupported host shows no peer notifications', true); return; }
+      if (!discoverSurface().flow) {
+        rec.observe('merge-base surface', { present: false, reason: 'notification app pages were introduced on this branch' });
+        return;
+      }
+      const wasOn = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings?.dwebEnabled === true;
+      await chooseFixtureNetwork(ctx, true);
+      const panelUrl = await evalIn(ctx.page, 'location.href');
+      let panelRetired = false;
+      const page = await openWidePage(ctx, 'home/home.html#library', { ready: '.notif-bell' });
+      const key = 'e2e-notified-app';
+      const tile = `[data-key=${JSON.stringify(key)}] .disc-tile-open`;
+      const opened = `document.querySelector('.disc-app-title')?.textContent === 'Notified app'`;
+      // why two frames: Home moves focus into new content one frame after it renders.
+      const frames = () => evalIn(page, `new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))`, true);
+      const clickNotification = async () => {
+        await evalIn(page, `document.querySelector('.notif-bell')?.click()`);
+        const listed = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.notif-item')]
+          .some(item => item.textContent.includes('Notified app'))`), { budgetMs: 5_000, pollMs: 50 });
+        if (!listed) throw new Error('the notification is not in the bell');
+        // A real click focuses the control first.
+        await evalIn(page, `(() => {
+          const item = [...document.querySelectorAll('.notif-item')].find(node => node.textContent.includes('Notified app'));
+          item.focus(); item.click();
+        })()`);
+      };
+      try {
+        // why the page answers the heard read: `hold` parks the next reply.
+        const stubbed = await evalIn(page, `(async () => {
+          const { encodeDidKey } = await import('/shared/address/did.js');
+          const publisher = encodeDidKey(new Uint8Array(32).fill(5));
+          const version_id = '5'.repeat(64);
+          const card = { dwapp_id: ${JSON.stringify(key)}, name: 'Notified app', slug: 'notified', seq: 1, version_id, publisher,
+            uri: 'peerd://' + publisher + '/' + version_id };
+          const heard = window.__e2eHeard = { card, apps: [card], hold: null, release: () => {} };
+          const api = globalThis.browser ?? globalThis.chrome;
+          const real = api.runtime.sendMessage.bind(api.runtime);
+          const stub = (message, ...rest) => message?.type !== 'dweb/base/heard' ? real(message, ...rest)
+            : (heard.hold ?? Promise.resolve()).then(() => ({ ok: true, apps: heard.apps }));
+          api.runtime.sendMessage = stub;
+          return api.runtime.sendMessage === stub;
+        })()`, true);
+        if (!stubbed) throw new Error('the page could not answer the heard read');
+        // The offscreen host broadcasts this message; another extension page can too.
+        await evalIn(ctx.page, `new Promise(done => chrome.runtime.sendMessage({ type: 'dweb/notify', notification: {
+          id: 'app-e2e-notified', ts: Date.now(), kind: 'app', key: ${JSON.stringify(key)},
+          title: 'New app to install', body: 'Notified app', link: 'discover',
+        } }, () => { void chrome.runtime.lastError; done(true); }))`, true);
+        const badge = await waitFor(() => evalIn(page, `!!document.querySelector('.notif-badge')`), { budgetMs: 10_000, pollMs: 50 });
+        rec.check('the notification reaches the Home bell', !!badge);
+
+        await clickNotification();
+        rec.check('the bell opens the notified app page in Discover',
+          !!await waitFor(() => evalIn(page, opened), { budgetMs: 10_000, pollMs: 50 }));
+        await evalIn(page, `document.querySelector('.disc-back')?.click()`);
+        await waitFor(() => evalIn(page, `!document.querySelector('.disc-back') && !!document.querySelector(${JSON.stringify(tile)})`),
+          { budgetMs: 5_000, pollMs: 50 });
+        // Discover is open now: the same notification must open its page again,
+        // which it can only if Discover cleared the key it answered.
+        await clickNotification();
+        const reopened = await waitFor(() => evalIn(page, opened), { budgetMs: 10_000, pollMs: 50 });
+        await frames();
+        rec.check('an answered key is cleared, so the same notification opens its page again', !!reopened);
+        rec.check('the app page keeps focus on its back link after Home moves focus',
+          await evalIn(page, `!!document.activeElement?.matches('.disc-back')`),
+          await evalIn(page, `document.activeElement?.outerHTML?.slice(0, 120) ?? ''`));
+
+        // Not heard yet: the request waits for a heard read, and leaving
+        // Discover before it lands drops the request.
+        await evalIn(page, `document.querySelector('.disc-back')?.click()`);
+        await evalIn(page, `(() => { window.__e2eHeard.apps = []; window.dispatchEvent(new Event('focus')); })()`);
+        await waitFor(() => evalIn(page, `!document.querySelector(${JSON.stringify(tile)})`), { budgetMs: 5_000, pollMs: 50 });
+        await evalIn(page, `window.__e2eHeard.hold = new Promise(done => { window.__e2eHeard.release = done; })`);
+        await clickNotification();
+        await frames();
+        rec.check('a notification for an app not heard yet waits on the root',
+          await evalIn(page, `!!document.querySelector('.disc-home') && !document.querySelector('.disc-back')`));
+        await evalIn(page, `document.querySelector('[data-home-view="library"]')?.click()`);
+        await waitFor(() => evalIn(page, `!document.querySelector('.disc-home')`), { budgetMs: 5_000, pollMs: 50 });
+        await evalIn(page, `(() => {
+          const heard = window.__e2eHeard;
+          heard.apps = [heard.card]; heard.hold = null; heard.release();
+        })()`);
+        await evalIn(page, `document.querySelector('[data-home-view="discover"]')?.click()`);
+        const root = await waitFor(() => evalIn(page, `!!document.querySelector(${JSON.stringify(tile)})`), { budgetMs: 10_000, pollMs: 50 });
+        await frames();
+        rec.check('leaving Discover drops a waiting notification, so Discover opens on its root',
+          !!root && await evalIn(page, `!document.querySelector('.disc-back')`));
+
+        // why retire the panel: only the Home chat owner can show its banner.
+        panelRetired = true;
+        await ctx.page.send('Page.navigate', { url: 'about:blank' });
+        if (!await waitFor(() => evalIn(ctx.page, `location.href === 'about:blank'`).catch(() => false),
+          { budgetMs: 5_000, pollMs: 50 })) throw new Error('notification fixture did not release the side-panel document');
+        // Home adds Chats only after the surface update releases chat ownership.
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('[data-home-view="chat"]')`),
+          { budgetMs: 10_000, pollMs: 50 })) throw new Error('Home did not receive chat ownership');
+        await evalIn(page, `document.querySelector('[data-home-view="chat"]').click()`);
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('.home-chat form.input-bar textarea')`),
+          { budgetMs: 20_000, pollMs: 80 })) throw new Error('Home chat did not show its composer');
+        await evalIn(ctx.swConn, `new Promise(done => chrome.runtime.sendMessage({ type: 'dweb/notify', notification: {
+          id: 'app-e2e-banner', ts: Date.now(), kind: 'app', key: ${JSON.stringify(key)},
+          title: 'New app to install', body: 'Notified app', link: 'discover',
+        } }, () => { void chrome.runtime.lastError; done(true); }))`, true);
+        if (!await waitFor(() => evalIn(page, `document.querySelector('.notif-banner .home-popout')?.textContent === 'View in Discover'`),
+          { budgetMs: 5_000, pollMs: 50 })) throw new Error('Home chat did not show the app notification');
+        await evalIn(page, `(() => { const button = document.querySelector('.notif-banner .home-popout'); button.focus(); button.click(); })()`);
+        rec.check('the chat banner opens the notified app page in Discover',
+          !!await waitFor(() => evalIn(page, opened), { budgetMs: 10_000, pollMs: 50 }));
+      } finally {
+        try { await page.close(); } catch { /* */ }
+        if (panelRetired) {
+          await ctx.page.send('Page.navigate', { url: panelUrl });
+          await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
+          if (!await waitFor(() => evalIn(ctx.page,
+            `document.documentElement.dataset.peerdBootStage === 'app-ready' && !!document.querySelector('.input-bar textarea')`).catch(() => false),
+          { budgetMs: 20_000, pollMs: 80 })) throw new Error('notification fixture did not restore the side panel');
+        }
+        if (!wasOn) await chooseFixtureNetwork(ctx, false);
+      }
+    },
+  },
+
+  // Blocking a maker, for real: only the exact Home page may change the stored
+  // policy, Contacts lists what it stores, and Unblock there undoes it.
+  {
+    name: 'home-block-maker', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      const available = await evalIn(ctx.page, `(async () =>
+        (await import('/shared/channel-config.js')).DWEB_ENABLED)()`, true);
+      if (!available) { rec.check('unsupported host has no maker block', true); return; }
+      if (!discoverSurface().blocks) {
+        rec.observe('merge-base surface', { present: false, reason: 'blocking a maker was introduced on this branch' });
+        return;
+      }
+      const wasOn = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings?.dwebEnabled === true;
+      await chooseFixtureNetwork(ctx, true);
+      const maker = await evalIn(ctx.page, `(async () =>
+        (await import('/shared/address/did.js')).encodeDidKey(new Uint8Array(32).fill(6)))()`, true);
+      const key = JSON.stringify(maker.slice(-8));
+      const page = await openWidePage(ctx, 'home/home.html#contacts');
+      try {
+        rec.check('a first-party page other than Home cannot block a maker',
+          (await rpc(ctx.page, { type: 'dweb/peer-block', did: maker }))?.error === 'kernel-route-unauthorized');
+        rec.check('neither can it read the blocked list',
+          (await rpc(ctx.page, { type: 'dweb/blocked-peers' }))?.error === 'kernel-route-unauthorized');
+        const blocked = await rpc(page, { type: 'dweb/peer-block', did: maker });
+        rec.check('Home blocks a maker by the full did, and the policy is stored', blocked?.durable === true, JSON.stringify(blocked));
+        rec.check('the stored list names the blocked maker',
+          (await rpc(page, { type: 'dweb/blocked-peers' }))?.blocked?.includes(maker) === true);
+        // Contacts reads the list on its own poll.
+        const listed = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.contacts-blocked-row')]
+          .some(row => row.textContent.includes(${key}))`), { budgetMs: 10_000, pollMs: 100 });
+        rec.check('Contacts lists the blocked maker', !!listed);
+        await evalIn(page, `(() => {
+          const row = [...document.querySelectorAll('.contacts-blocked-row')].find(node => node.textContent.includes(${key}));
+          const button = row?.querySelector('button');
+          button?.focus(); button?.click();
+        })()`);
+        const unblocked = await waitFor(() => evalIn(page, `document.querySelector('.contacts-unblocked')?.textContent
+          === 'After you unblock someone, their apps show up again the next time peerd hears from them.'`), { budgetMs: 10_000, pollMs: 100 });
+        rec.check('Unblock in Contacts says when their apps come back', !!unblocked);
+        rec.check('the stored list no longer names them',
+          (await rpc(page, { type: 'dweb/blocked-peers' }))?.blocked?.includes(maker) === false);
+      } finally {
+        try { await rpc(page, { type: 'dweb/peer-unblock', did: maker }); } catch { /* the check above reports it */ }
+        try { await page.close(); } catch { /* */ }
+        if (!wasOn) await chooseFixtureNetwork(ctx, false);
+      }
+    },
+  },
 
   // Functional rendered coverage for committed success warnings. This takes a
   // screenshot without creating a local visual authority baseline. CI remains
@@ -5034,12 +8244,14 @@ export const STATES = [
         `), { budgetMs: 8_000, pollMs: 80 });
         rec.check('the narrow warning fixture renders both update actions', !!ready);
 
+        // A tile's Update opens that app's page and sends the update there.
         await evalIn(page, `
           [...document.querySelectorAll('.disc-card button')]
             .find((button) => button.textContent === 'Update')?.click()
         `);
+        // why the footnote: the installed line is a status too, and it comes first.
         const discoverWarning = await waitFor(() => evalIn(page, `
-          document.querySelector('.disc-card [role="status"]')?.textContent ?? ''
+          document.querySelector('.disc-panel .disc-footnote[role="status"]')?.textContent ?? ''
         `), { budgetMs: 4_000, pollMs: 50 });
 
         await evalIn(page, `
@@ -5049,7 +8261,7 @@ export const STATES = [
         const warningLayout = await waitFor(() => evalIn(page, `(() => {
           const statuses = [
             document.querySelector('section[aria-labelledby="library-warning-heading"] p.muted[role="status"]'),
-            document.querySelector('.disc-card [role="status"]'),
+            document.querySelector('.disc-panel .disc-footnote[role="status"]'),
           ].filter(Boolean);
           if (statuses.length !== 2) return null;
           return {
@@ -5066,6 +8278,10 @@ export const STATES = [
         rec.check('Library and Discover render both committed warning details',
           warningText.includes('security audit entry could not be written')
             && (warningText.match(/Older shared bytes will be cleaned up/g) ?? []).length === 2,
+          JSON.stringify({ discoverWarning, warningLayout }));
+        // why its own check: only the Library says the words above.
+        rec.check('Discover says in plain words that the security log missed the update',
+          (warningLayout?.texts?.[1] ?? '').includes('peerd could not add it to the security log.'),
           JSON.stringify({ discoverWarning, warningLayout }));
         rec.check('combined warning statuses fit the narrow viewport',
           warningLayout?.documentWidth <= warningLayout?.viewportWidth
@@ -5374,6 +8590,60 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
+  // why: the idle Providers capture cannot show a refused test. Keep the real
+  // page and inventory, but fix this one reply so the image needs no API key.
+  {
+    name: 'options-provider-test-429', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const page = await openWidePage(ctx, 'options/options.html');
+      try {
+        await waitFor(() => evalIn(page, `document.querySelector('.provider-card') !== null`),
+          { budgetMs: 15_000, pollMs: 80 });
+        await evalIn(page, `(async () => {
+          const m = (await import('/vendor/mithril/mithril.js')).default;
+          const { OptionsApp } = await import('/options/components/options-app.js');
+          const { makeUiRuntimeClient } = await import('/shared/ui-runtime-client.js');
+          const browser = (await import('/shared/browser-api.js')).default;
+          const client = makeUiRuntimeClient({ browser });
+          const snapshot = await client.send({ type: 'state/get' });
+          const status = await client.send({ type: 'provider/status' });
+          if (!snapshot?.state || !Array.isArray(status?.providers)) throw new Error('provider fixture snapshot missing');
+          const state = snapshot.state;
+          state.providers = { ...state.providers, current: 'anthropic', hasKey: true };
+          state.settings = { ...state.settings, providerName: 'anthropic', providerModel: '' };
+          const providers = status.providers.map(provider => provider.name === 'anthropic'
+            ? { ...provider, hasKey: true } : provider);
+          const send = message => message.type === 'provider/status'
+            ? Promise.resolve({ ok: true, providers })
+            : message.type === 'provider/test' && message.provider === 'anthropic'
+              ? Promise.resolve({ ok: false, error: 'http-429' })
+              : client.send(message);
+          const root = document.getElementById('app');
+          m.mount(root, null);
+          m.mount(root, { view: () => m(OptionsApp, { state, send, section: 'providers' }) });
+        })()`, true);
+        const clicked = await waitFor(() => evalIn(page, `(() => {
+          const card = [...document.querySelectorAll('.provider-card')]
+            .find(node => node.querySelector('.provider-card-name')?.textContent === 'Anthropic');
+          const button = [...(card?.querySelectorAll('button') ?? [])]
+            .find(node => node.textContent === 'Test');
+          if (!button) return false;
+          button.click();
+          return true;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        const message = await waitFor(() => evalIn(page, `document.querySelector('.provider-card .key-msg')?.textContent`),
+          { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the provider test shows a settled result', clicked && !!message, message);
+        if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') {
+          rec.check('the refused test names its status and recovery step',
+            message?.includes('(429)') && message.includes('Check your plan, credit or rate limit')
+              && !message.includes('reach the provider'), message);
+        }
+        await rec.visualPage('options-provider-test-429', page);
+      } finally { try { page.close(); } catch {} }
+    },
+  },
   // --- the on-device model cards ------------------------------------------
   // options-fulltab captures the providers page from the top, which leaves the
   // Local (WebGPU) card below the fold - so the multi-model list it now renders
@@ -5456,6 +8726,151 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
+  {
+    name: 'options-voice-ready', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const page = await openWidePage(ctx, 'options/options.html#!/voice');
+      try {
+        const loaded = await waitFor(() => evalIn(page, `[...document.querySelectorAll('.voice-section button')]
+          .some((button) => button.textContent === 'Enable voice')`), { budgetMs: 15_000, pollMs: 80 });
+        if (!loaded) throw new Error('The Voice settings did not load');
+        const state = await rpc(page, { type: 'state/get' });
+        if (!state?.ok || state.state.settings.voiceEngine === 'moonshine') {
+          throw new Error('The Voice capture requires the Web Speech preference');
+        }
+        // why Web Speech: enabling its idle manager does not record audio or
+        // download a model. The real ready state exposes the silence slider.
+        await evalIn(page, `[...document.querySelectorAll('.voice-section button')]
+          .find((button) => button.textContent === 'Enable voice').click()`);
+        const ready = await waitFor(() => evalIn(page,
+          `!!document.querySelector('.voice-section input[type="range"]')
+            && !!document.querySelector('.voice-status.is-ok')`), { budgetMs: 10_000, pollMs: 50 });
+        if (!ready) throw new Error('Voice settings did not reach the ready state');
+        const named = await evalIn(page, `(() => {
+          const slider = document.querySelector('.voice-section input[type="range"]');
+          return slider.id === 'voice-silence' && !!document.querySelector('label[for="voice-silence"]')
+            && slider.getAttribute('aria-valuetext') === (Number(slider.value) / 1000).toFixed(1) + 's';
+        })()`);
+        if (baseRender) rec.observe('merge-base silence slider name', { named });
+        else rec.check('the silence slider has a label and a value in seconds', named);
+        await rec.visualPage('options-voice-ready', page);
+      } finally {
+        await evalIn(page, `[...document.querySelectorAll('.voice-section button')]
+          .find((button) => button.textContent === 'Disable voice')?.click()`).catch(() => {});
+        const disabled = await waitFor(async () => {
+          const state = await rpc(ctx.page, { type: 'state/get' });
+          return state?.ok && state.state.settings.voiceEnabled !== true;
+        }, { budgetMs: 5_000, pollMs: 50 });
+        if (!disabled) throw new Error('Voice settings did not return to disabled');
+        await retirePrivateTransferPage(page);
+      }
+    },
+  },
+  {
+    name: 'options-key-forms', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      let page = await openWidePage(ctx, 'options/options.html#!/api-integrations');
+      try {
+        const loaded = await waitFor(() => evalIn(page,
+          `!!document.querySelector('form.provider-card-form input[type="password"]')`), { budgetMs: 15_000, pollMs: 80 });
+        if (!loaded) throw new Error('The API key form did not load');
+        const named = await evalIn(page, `(() => {
+          const form = document.querySelector('form.provider-card-form');
+          form.querySelector('input').focus();
+          return ['API host', 'API key', 'Authentication', 'Header name'].every((name) =>
+            form.querySelector('[aria-label="' + name + '"]'))
+            && form.nextElementSibling?.getAttribute('role') === 'status';
+        })()`);
+        if (baseRender) rec.observe('merge-base API form names', { named });
+        else rec.check('the API form names its fields and keeps a live result line', named);
+        await rec.visualPage('options-api-form', page);
+        await retirePrivateTransferPage(page);
+        page = null;
+        page = await openWidePage(ctx, 'options/options.html#!/vault');
+        const vaultReady = await waitFor(() => evalIn(page, `!!document.querySelector('#recpass2')`),
+          { budgetMs: 15_000, pollMs: 80 });
+        if (!vaultReady) throw new Error('The recovery passphrase form did not load');
+        // why: use the real vault passphrase and its 120 s Argon2 budget.
+        // The capture must keep the same unlock passphrase.
+        await evalIn(page, `(() => {
+          for (const id of ['recpass', 'recpass2']) {
+            const input = document.getElementById(id);
+            input.value = ${JSON.stringify(PASSPHRASE)};
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          document.getElementById('recpass').closest('form').requestSubmit();
+        })()`);
+        const saved = await waitFor(() => evalIn(page, `[...document.querySelectorAll('form p')]
+          .some((line) => /Recovery passphrase (updated|set)[.]/.test(line.textContent))`),
+        { budgetMs: 120_000, pollMs: 80 });
+        if (!saved) throw new Error('The recovery passphrase did not report success');
+        const ink = await evalIn(page, `[...document.querySelectorAll('form p')]
+          .find((line) => /Recovery passphrase (updated|set)[.]/.test(line.textContent))?.style.color === 'var(--ok-ink)'`);
+        if (baseRender) rec.observe('merge-base recovery result colour', { ink });
+        else rec.check('the recovery result uses the readable text colour', ink);
+        await rec.visualPage('options-vault-recovery', page, {
+          beforeShot: () => evalIn(page, `document.getElementById('recpass').closest('form').scrollIntoView({ block: 'center' })`),
+        });
+      } finally { if (page) await retirePrivateTransferPage(page); }
+    },
+  },
+
+  {
+    name: 'options-voice-confirm', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const before = await rpc(ctx.page, { type: 'state/get' });
+      const auditBefore = await rpc(ctx.page, { type: 'audit/list', limit: 800 });
+      if (!before?.ok || !before.state?.settings || !auditBefore?.ok || !Array.isArray(auditBefore.entries)) throw new Error('Voice baseline read refused');
+      const priorIds = new Set(auditBefore.entries.map((entry) => entry.id));
+      const keys = ['voiceEnabled', 'voiceEngine', 'voiceVariant', 'voiceSilenceMs', 'ocrEnabled'];
+      const page = await openWidePage(ctx, 'options/options.html#!/voice');
+      const requests = [];
+      let activity;
+      page.on((method, params) => { if (method === 'Network.requestWillBeSent' && params.request.url.startsWith('https://')) requests.push(params.request.url); });
+      try {
+        await page.send('Network.enable');
+        if (!await waitFor(() => evalIn(page, `[...document.querySelectorAll('.voice-section button')].some((button) => button.textContent === 'Upgrade to on-device (Moonshine)' && !button.disabled)`))) throw new Error('real Voice upgrade trigger is missing');
+        await evalIn(page, `(() => { 'use strict'; const trigger = [...document.querySelectorAll('.voice-section button')].find((button) => button.textContent === 'Upgrade to on-device (Moonshine)'); trigger.focus(); trigger.click(); })()`);
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('.voice-section .peerd-modal')`))) throw new Error('real Voice confirmation did not open');
+        const dialog = await evalIn(page, `(() => { 'use strict'; const dialog = document.querySelector('.voice-section .peerd-modal');
+          return { role: dialog.getAttribute('role'), modal: dialog.getAttribute('aria-modal'), title: dialog.getAttribute('aria-labelledby'),
+            cancelFocused: document.activeElement === dialog.querySelector('button.secondary'), text: dialog.textContent }; })()`);
+        rec.check('Voice states download facts before any approval', dialog.text.includes('250 MB') && dialog.text.includes('Download & enable'));
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Voice dialog focus and name', dialog);
+        else rec.check('Voice opens a named modal with Cancel focused', dialog.role === 'dialog' && dialog.modal === 'true'
+          && dialog.title === 'voice-confirm-title' && dialog.cancelFocused, JSON.stringify(dialog));
+        await checkAccessibleNames(page, rec, 'Voice exposes its named download dialog', [['.voice-section .peerd-modal', 'Download on-device voice model?', 'dialog']]);
+        await rec.visualPage('options-voice-confirm', page);
+        await evalIn(page, `document.querySelector('.voice-section .peerd-modal a').focus()`);
+        await pressNativeKey(page, 'Tab', true);
+        const reverse = await evalIn(page, `document.activeElement?.textContent === 'Download & enable'`);
+        await pressNativeKey(page, 'Tab');
+        const forward = await evalIn(page, `document.activeElement === document.querySelector('.voice-section .peerd-modal a')`);
+        await pressNativeKey(page, 'Escape');
+        const escaped = await waitFor(() => evalIn(page, `!document.querySelector('.voice-section .peerd-modal')`), { budgetMs: 1_000, pollMs: 40 });
+        const returned = await evalIn(page, `document.activeElement?.textContent === 'Upgrade to on-device (Moonshine)'`);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Voice native keys', { reverse, forward, escaped, returned });
+        else rec.check('native Tab wraps and Escape returns focus to the Voice trigger', reverse && forward && escaped && returned);
+        if (!escaped) await evalIn(page, `document.querySelector('.voice-section .peerd-modal button.secondary').click()`);
+        if (!await waitFor(() => evalIn(page, `!document.querySelector('.voice-section .peerd-modal')`))) throw new Error('Voice Cancel did not close');
+        rec.check('the real OCR trigger stays disabled while integrity is unpinned', await evalIn(page,
+          `[...document.querySelectorAll('.ocr-section button')].some((button) => button.disabled && button.textContent === 'OCR not available in this build yet')`));
+        const after = await rpc(page, { type: 'state/get' });
+        const auditAfter = await rpc(page, { type: 'audit/list', limit: 800 });
+        if (!after?.ok || !after.state?.settings || !auditAfter?.ok || !Array.isArray(auditAfter.entries)) throw new Error('Voice settled read refused');
+        rec.check('cancelled Voice consent changes no voice setting and starts no model download', keys.every((key) => before.state.settings[key] === after.state.settings[key])
+          && requests.length === 0 && !auditAfter.entries.some((entry) => !priorIds.has(entry.id) && entry.type === 'voice_model_fetch'), JSON.stringify({ requests }));
+        activity = await openWidePage(ctx, 'options/options.html#!/activity');
+        if (!await waitFor(() => evalIn(activity, `!!document.querySelector('.options-page button[title="Refresh"]')`))) throw new Error('real Activity Refresh is missing');
+        await checkAccessibleNames(activity, rec, 'Activity Refresh has its action as its accessible name', [['.options-page button[title="Refresh"]', 'Refresh']]);
+      } finally { if (activity) await activity.close(); await page.close(); }
+    },
+  },
 
   // --- visual (WIDE): the two settings pages the redesign rebuilt -------------
   //
@@ -5474,11 +8889,26 @@ export const STATES = [
     name: 'options-behavior', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
       const page = await openWidePage(ctx, 'options/options.html#!/behavior');
       try {
         await waitFor(() => evalIn(page, `document.querySelectorAll('.set-row').length >= 11`),
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
+        await evalIn(page, `document.querySelector('.set-toggle')?.focus()`);
         await rec.visualPage('options-behavior', page);
+        await evalIn(page, `(() => {
+          const button = [...document.querySelectorAll('button')]
+            .find((el) => el.textContent === 'Reset section to defaults');
+          button.scrollIntoView({ block: 'center' }); button.click();
+        })()`);
+        await evalIn(page, `import('/vendor/mithril/mithril.js').then(({ default: m }) => m.redraw.sync())`, true);
+        const confirmed = await evalIn(page,
+          `document.body.textContent.includes('Reset the settings on this page to their defaults?')
+            && document.activeElement?.textContent === 'No'`);
+        if (baseRender) rec.observe('merge-base reset confirmation', { confirmed });
+        else rec.check('reset asks before it changes this page', confirmed);
+        await rec.visualPage('options-reset-confirm', page);
+        await evalIn(page, `[...document.querySelectorAll('button')].find((el) => el.textContent === 'No')?.click()`);
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -5550,6 +8980,131 @@ export const STATES = [
     },
   },
   {
+    name: 'options-memory-safety', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const scope = { kind: 'project', workspace: 'settings-safety' };
+      const body = '# Project memory\n\n- Keep the saved files.';
+      const draft = `${body}\n- Keep this unsaved edit too.`;
+      const page = await openWidePage(ctx, 'options/options.html#!/memory');
+      let prior;
+      let attempted = false;
+      try {
+        const exported = await rpc(page, { type: 'memory/export' });
+        if (!exported?.ok) throw new Error('Memory export failed');
+        prior = exported.payload.docs.find((doc) => doc.id === 'project:settings-safety');
+        attempted = true;
+        const written = await rpc(page, { type: 'memory/write', scope, body });
+        if (!written?.ok) throw new Error('Memory seed failed');
+        await page.send('Page.reload');
+        const ready = await waitFor(() => evalIn(page,
+          `[...document.querySelectorAll('.memory-card')].some((card) => card.querySelector('.memory-scope')?.textContent === 'Project · settings-safety')`),
+        { budgetMs: 15_000, pollMs: 80 });
+        if (!ready) throw new Error('The project memory editor did not open');
+        await evalIn(page, `[...document.querySelectorAll('.memory-actions button')].find((el) => el.textContent === 'Delete all').click()`);
+        await evalIn(page, `import('/vendor/mithril/mithril.js').then(({ default: m }) => m.redraw.sync())`, true);
+        const pending = await rpc(page, { type: 'memory/export' });
+        rec.check('one Delete all click leaves the saved memory intact',
+          pending?.payload?.docs.some((doc) => doc.id === 'project:settings-safety' && doc.body === body));
+        const confirmed = await evalIn(page, `!!document.querySelector('.memory-confirm') && document.activeElement?.textContent === 'No'`);
+        if (baseRender) rec.observe('merge-base memory confirmation', { confirmed });
+        else rec.check('Delete all asks with a separate confirmation', confirmed);
+        await rec.visualPage('options-memory-delete-confirm', page);
+        await evalIn(page, `[...document.querySelectorAll('.memory-confirm button')].find((el) => el.textContent === 'No')?.click()`);
+        await evalIn(page, `(() => {
+          const card = [...document.querySelectorAll('.memory-card')]
+            .find((el) => el.querySelector('.memory-scope')?.textContent === 'Project · settings-safety');
+          const input = card.querySelector('textarea');
+          input.value = ${JSON.stringify(draft)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          location.hash = '!/costs';
+        })()`);
+        const left = await waitFor(() => evalIn(page, `!document.querySelector('.memory-pane')`),
+          { budgetMs: 5_000, pollMs: 50 });
+        if (!left) throw new Error('Settings did not leave Memory');
+        await evalIn(page, `location.hash = '!/memory'`);
+        const restored = await waitFor(() => evalIn(page,
+          `[...document.querySelectorAll('.memory-card')].some((card) => card.querySelector('.memory-scope')?.textContent === 'Project · settings-safety')`),
+        { budgetMs: 5_000, pollMs: 50 });
+        const current = await rpc(page, { type: 'memory/export' });
+        rec.check('editing and navigation leave the saved memory unchanged', !!restored
+          && current?.payload?.docs.some((doc) => doc.id === 'project:settings-safety' && doc.body === body));
+        const retained = await evalIn(page, `[...document.querySelectorAll('.memory-card')]
+          .find((el) => el.querySelector('.memory-scope')?.textContent === 'Project · settings-safety')?.querySelector('textarea')?.value === ${JSON.stringify(draft)}`);
+        if (baseRender) rec.observe('merge-base memory draft', { retained });
+        else rec.check('a section switch preserves the unsaved draft', retained);
+        await rec.visualPage('options-memory-draft-restored', page);
+      } finally {
+        await evalIn(page, `[...document.querySelectorAll('.memory-card')]
+          .find((el) => el.querySelector('.memory-scope')?.textContent === 'Project · settings-safety')
+          ?.querySelectorAll('button').forEach((button) => { if (button.textContent === 'Revert') button.click(); })`).catch(() => {});
+        if (attempted) await rpc(page, prior ? { type: 'memory/write', scope, body: prior.body } : { type: 'memory/delete', scope }).catch(() => {});
+        await retirePrivateTransferPage(page);
+      }
+    },
+  },
+  {
+    name: 'options-activity-history', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const marker = 'settings-history-e2e.test';
+      const page = await openWidePage(ctx, 'options/options.html#!/activity');
+      let added = false;
+      try {
+        const prior = await rpc(page, { type: 'denylist/list' });
+        if (!prior?.ok || prior.patterns?.includes(marker)) throw new Error('Activity marker is not free');
+        added = true;
+        const result = await rpc(page, { type: 'denylist/add', pattern: marker });
+        if (!result?.ok) throw new Error('Activity marker could not be recorded');
+        const recorded = await waitFor(async () => (await rpc(page, { type: 'audit/list', limit: 20_000 }))
+          ?.entries?.some((entry) => entry.type === 'denylist_added' && entry.details?.pattern === marker),
+        { budgetMs: 5_000, pollMs: 50 });
+        if (!recorded) throw new Error('The activity marker was not recorded');
+        // why real requests: the old event must fall outside the route's actual
+        // fetch window. Keep the current mode while generating newer events.
+        await evalIn(page, `(async () => {
+          const browser = (await import('/shared/browser-api.js')).default;
+          const state = await browser.runtime.sendMessage({ type: 'state/get' });
+          const mode = state.state.session.permission.mode;
+          for (let index = 0; index < 501; index++) {
+            const reply = await browser.runtime.sendMessage({ type: 'permission/set', mode });
+            if (!reply?.ok) throw new Error('Activity event could not be recorded');
+          }
+        })()`, true);
+        const outside = await waitFor(async () => {
+          const log = await rpc(page, { type: 'audit/list' });
+          return log?.total > log?.entries?.length
+            && !log.entries.some((entry) => entry.details?.pattern === marker);
+        }, { budgetMs: 5_000, pollMs: 50 });
+        if (!outside) throw new Error('The old event did not leave the fetch window');
+        await page.send('Page.reload');
+        const loaded = await waitFor(() => evalIn(page, `!!document.querySelector('.log-filter-query')`),
+          { budgetMs: 15_000, pollMs: 80 });
+        if (!loaded) throw new Error('Activity filters did not load');
+        const windowNamed = await evalIn(page,
+          `/Newest 500 of [0-9]+ recorded events/.test(document.body.textContent)`);
+        if (baseRender) rec.observe('merge-base Activity window', { windowNamed });
+        else rec.check('Activity states that it loaded only the newest events', windowNamed);
+        await evalIn(page, `(() => {
+          const input = document.querySelector('.log-filter-query');
+          input.value = ${JSON.stringify(marker)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`);
+        const found = await waitFor(() => evalIn(page,
+          `document.querySelector('.log-row')?.textContent.includes(${JSON.stringify(marker)})`),
+        { budgetMs: 5_000, pollMs: 50 });
+        if (baseRender) rec.observe('merge-base older event search', { found: !!found });
+        else rec.check('a filter finds an event older than the default fetch window', !!found);
+        await rec.visualPage('options-activity-older-event', page);
+      } finally {
+        if (added) await rpc(page, { type: 'denylist/remove', pattern: marker }).catch(() => {});
+        await retirePrivateTransferPage(page);
+      }
+    },
+  },
+  {
     name: 'options-denylist', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
@@ -5597,7 +9152,9 @@ export const STATES = [
         rec.check('Options confirmed Remove deletes only the custom pattern', removed === true);
         if (!removed) throw new Error('Options denylist removal did not settle');
       } finally {
-        if (fixtureAttempted) await rpc(ctx.page, { type: 'denylist/remove', pattern }).catch(() => {});
+        for (const rule of fixtureAttempted ? [pattern, `*.${pattern}`] : []) {
+          await rpc(ctx.page, { type: 'denylist/remove', pattern: rule }).catch(() => {});
+        }
         try { page.close(); } catch { /* */ }
       }
     },
@@ -5707,6 +9264,42 @@ export const STATES = [
         }, { budgetMs: 8_000, pollMs: 80 });
         rec.check('Options confirmed Remove forgets only the selected learned host', removed === true);
         if (!removed) throw new Error('Options learned host removal did not settle');
+        const seed = async (origin) => {
+          const enabled = await rpc(ctx.page, { type: 'settings/update', patch: { devMode: true } });
+          const learned = await rpc(ctx.page, { type: 'debug/originLock', origin, seedReason: 'password-field' });
+          const disabled = await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } });
+          if (!enabled?.ok || !disabled?.ok || !learned?.ok || learned.learned !== true) throw new Error('real learn path refused');
+        };
+        const inspect = async (origin) => {
+          const result = await rpc(ctx.page, { type: 'debug/originLock', origin });
+          if (!result?.ok || typeof result.learned !== 'boolean') throw new Error('classifier read refused');
+          return result.learned;
+        };
+        const forgotten = await inspect('https://accounts.acme.test:8443');
+        await seed('https://later.example');
+        const afterLearn = await rpc(page, { type: 'learned/list' });
+        if (!afterLearn?.ok || !Array.isArray(afterLearn.origins)) throw new Error('post-learn list refused');
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base removal and later learn', { forgotten, afterLearn });
+        else rec.check('Remove changes the live classifier and a later learn cannot restore the host', forgotten === false
+          && afterLearn.origins.map((entry) => entry.host).sort().join(',') === 'later.example,portal.globex.test');
+        await page.send('Page.reload', { ignoreCache: true });
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('[data-learned-host="portal.globex.test"]')`))) throw new Error('learned list did not reload');
+        await clickAndSyncRedraw(page, '[data-learned-role="trigger"][data-learned-host="portal.globex.test"]');
+        await Promise.all([
+          clickAndSyncRedraw(page, '[data-learned-role="confirm"][data-learned-host="portal.globex.test"]'),
+          seed('https://concurrent.example'),
+        ]);
+        if (!await waitFor(() => evalIn(page, `document.querySelector('.learned-sites .key-msg.ok')?.textContent === 'Removed portal.globex.test.'`))) throw new Error('raced Remove did not receive its receipt');
+        const raced = await rpc(page, { type: 'learned/list' });
+        const protectedAfterRace = await inspect('https://concurrent.example');
+        if (!raced?.ok || !Array.isArray(raced.origins)) throw new Error('raced list refused');
+        rec.check('a concurrent learn remains protected', protectedAfterRace === true);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base Remove and learn overlap', raced);
+        else rec.check('Remove and learn share one ordered durable set', raced.origins.map((entry) => entry.host).sort().join(',') === 'concurrent.example,later.example'
+          && await inspect('https://portal.globex.test') === false);
+        await page.send('Page.reload', { ignoreCache: true });
+        if (!await waitFor(() => evalIn(page, `!!document.querySelector('[data-learned-role="trigger-all"]')`))) throw new Error('raced learned list did not reload');
+        await rec.visualPage('options-learned-after-remove', page);
         // why: the separate store read can see a committed removal before the
         // UI receives its receipt. Wait for that receipt above, not the number
         // of trigger buttons (arming the first confirm already lowers it).
@@ -5721,6 +9314,16 @@ export const STATES = [
         rec.check('Options confirmed Forget all clears the remaining learned hosts', cleared === true,
           JSON.stringify({ armedAll, confirmedAll, cleared }));
         if (!cleared) throw new Error('Options learned sites clear did not settle');
+        const clearedClassifier = await inspect('https://concurrent.example');
+        await seed('https://after-clear.example');
+        const afterClear = await rpc(page, { type: 'learned/list' });
+        if (!afterClear?.ok || !Array.isArray(afterClear.origins)) throw new Error('post-clear list refused');
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base clear and later learn', { clearedClassifier, afterClear });
+        else rec.check('Forget all changes the classifier and stays cleared after another learn', clearedClassifier === false
+          && afterClear.origins.length === 1 && afterClear.origins[0].host === 'after-clear.example');
+        await page.send('Page.reload', { ignoreCache: true });
+        if (!await waitFor(() => evalIn(page, `document.querySelector('.learned-sites')?.textContent.includes('after-clear.example')`))) throw new Error('post-clear learned list did not reload');
+        await rec.visualPage('options-learned-after-clear', page);
       } finally {
         await rpc(ctx.page, { type: 'settings/update', patch: { devMode: false } }).catch(() => {});
         if (priorEntries) {
@@ -5843,6 +9446,302 @@ export const STATES = [
         if (skillAttempted) await rpc(ctx.page, { type: 'skills/remove', name: skillName }).catch(() => {});
         if (hookAttempted) await rpc(ctx.page, { type: 'hooks/remove', id: hookId }).catch(() => {});
         if (page) await retirePrivateTransferPage(page);
+      }
+    },
+  },
+  {
+    name: 'administrative-validation', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const base = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const modelCallsBefore = ctx.modelCallCount();
+      const skillName = 'e2e-folded-description';
+      const description = 'Read the full skill description. Use this fixture to check line folding.';
+      let page;
+      let skillAttempted = false;
+      try {
+        for (const kind of ['skills', 'hooks']) {
+          page = await openWidePage(ctx, `options/options.html#!/${kind}`);
+          const prior = await rpc(page, { type: `${kind}/list` });
+          if (!prior?.ok || !Array.isArray(prior[kind])) throw new Error(`${kind} read refused`);
+          if (kind === 'skills' && prior.skills.some((skill) => skill.name === skillName)) throw new Error('skill fixture already exists');
+          const selector = kind === 'skills' ? '.skills-install textarea' : '.hook-add-editor';
+          const submit = kind === 'skills' ? '.skills-install button' : '.hook-add button[type="submit"]';
+          if (kind === 'hooks') {
+            if (!await waitFor(() => evalIn(page, `!!document.querySelector('.hooks-actions button')`))) throw new Error('hook form did not mount');
+            await clickAndSyncRedraw(page, '.hooks-actions button');
+          }
+          if (!await waitFor(() => evalIn(page, `!!document.querySelector(${JSON.stringify(selector)})`))) throw new Error(`${kind} editor did not mount`);
+          const draft = kind === 'skills' ? '---\nname: 日本語スキル\ndescription: Check an invalid handle.\n---\nKeep this draft.'
+            : '---\nid: e2e-invalid-rule\nevent: pre-tool-use\nmatch: type\nrule:\n  matchArg: text\n  contains: e2e\n  onmatch: allow\n---\nKeep this draft.';
+          await evalIn(page, `(() => { 'use strict';
+            const editor = document.querySelector(${JSON.stringify(selector)});
+            editor.value = ${JSON.stringify(draft)};
+            editor.dispatchEvent(new Event('input', { bubbles: true }));
+          })()`);
+          if (!await waitFor(() => evalIn(page, `document.querySelector(${JSON.stringify(submit)})?.disabled === false`))) throw new Error(`${kind} Save did not enable`);
+          await clickAndSyncRedraw(page, submit);
+          const noticeSelector = kind === 'skills' ? '.skills-status' : '.hooks-pane .key-msg.err';
+          const notice = await waitFor(() => evalIn(page, `document.querySelector(${JSON.stringify(noticeSelector)})?.textContent`));
+          if (!notice) throw new Error(`${kind} refusal did not settle`);
+          rec.check(`${kind} refusal preserves the exact draft`, await evalIn(page,
+            `document.querySelector(${JSON.stringify(selector)})?.value === ${JSON.stringify(draft)}
+              && document.querySelector(${JSON.stringify(submit)})?.disabled === false`));
+          const after = await rpc(page, { type: `${kind}/list` });
+          rec.check(`${kind} refusal writes nothing`, after?.ok && JSON.stringify(after[kind]) === JSON.stringify(prior[kind]));
+          if (base) rec.observe(`${kind} base refusal`, notice);
+          else rec.check(`${kind} reports a known actionable refusal`, notice.startsWith(kind === 'skills' ? 'Skill not installed:' : 'Hook not saved:')
+            && !notice.includes('could not confirm'), notice);
+          await rec.visualPage(kind === 'skills' ? 'administrative-validation' : `${kind}-validation-refusal`, page);
+          if (kind === 'skills') {
+            skillAttempted = true;
+            const text = `---\nname: ${skillName}\ndescription: >-\n  Read the full skill description.\n  Use this fixture to check line folding.\n---\nOnly a parser test fixture.`;
+            await evalIn(page, `(() => { 'use strict';
+              const editor = document.querySelector('.skills-install textarea');
+              editor.value = ${JSON.stringify(text)}; editor.dispatchEvent(new Event('input', { bubbles: true }));
+            })()`);
+            await clickAndSyncRedraw(page, '.skills-install button');
+            const installed = await waitFor(async () => {
+              const listed = await rpc(page, { type: 'skills/list' });
+              return listed?.ok && listed.skills.find((skill) => skill.name === skillName);
+            });
+            if (!installed) throw new Error('folded skill did not install');
+            if (base) rec.observe('base folded description', installed.description);
+            else rec.check('the full folded description persists', installed.description === description, installed.description);
+            if (!await waitFor(() => evalIn(page, `document.querySelector('.skills-list')?.textContent.includes(${JSON.stringify(installed.description)})`))) throw new Error('installed skill did not render');
+            await rec.visualPage('skill-folded-description', page);
+            const removed = await rpc(page, { type: 'skills/remove', name: skillName });
+            if (!removed?.ok) throw new Error('skill fixture cleanup refused');
+            skillAttempted = false;
+          }
+          await page.close(); page = null;
+        }
+        rec.check('validation and install need no model call', ctx.modelCallCount() === modelCallsBefore);
+      } finally {
+        if (skillAttempted) await rpc(ctx.page, { type: 'skills/remove', name: skillName });
+        if (page) await page.close();
+      }
+    },
+  },
+  {
+    name: 'shared-chat-title', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      const fileBytes = await readFile(new URL('../../extension/peerd-runtime/tools/prompt-wrap.js', import.meta.url));
+      const fileText = fileBytes.toString('utf8');
+      const priorSettings = await evalIn(ctx.page, `(async () => { 'use strict';
+        return (await (await import('/peerd-egress/kernel-storage.js')).kv.get('settings.v1')) ?? {};
+      })()`, true);
+      if (!priorSettings || typeof priorSettings !== 'object' || Array.isArray(priorSettings)) throw new Error('saved provider settings are unavailable');
+      const status = await rpc(ctx.page, { type: 'provider/status' });
+      if (status?.ok !== true || status.providers?.find((provider) => provider.name === 'anthropic')?.hasKey !== false) throw new Error('the ephemeral title fixture requires no prior Anthropic key');
+      const fixture = await startWebFixtureServer();
+      const requests = [];
+      let tab;
+      try {
+        const keyed = await rpc(ctx.page, { type: 'provider/setKey', provider: 'anthropic', plaintext: 'sk-e2e-shared-title-only', activate: false });
+        const selected = await rpc(ctx.page, { type: 'settings/update', patch: { providerName: 'anthropic', providerModel: '' } });
+        if (keyed?.ok !== true || selected?.ok !== true) throw new Error('the real Anthropic fixture setup refused');
+        if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.input-bar input[type="file"]') && !!document.querySelector('.input-bar textarea')`))) throw new Error('the Anthropic composer did not become ready');
+        tab = await evalIn(ctx.page, `(async () => { 'use strict';
+          return (await chrome.tabs.create({ url: ${JSON.stringify(`${fixture.url.replace('127.0.0.1', 'orders.peerd.test')}/products`)}, active: false })).id;
+        })()`, true);
+        if (!Number.isInteger(tab)) throw new Error('shared web tab did not open');
+        const loaded = await waitFor(() => evalIn(ctx.page, `chrome.tabs.get(${tab}).then((tab) => tab.status === 'complete')`, true));
+        if (!loaded) throw new Error('shared web fixture did not load');
+        ctx.setModelResponder((_index, request) => {
+          requests.push({ url: request.url, method: request.method,
+            body: request.postData ?? Buffer.concat((request.postDataEntries ?? [])
+              .map((entry) => Buffer.from(entry.bytes ?? '', 'base64'))).toString() });
+          return { sse: [
+            ['message_start', { type: 'message_start', message: { id: 'msg-e2e-shared-title', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } }],
+            ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
+            ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Shared content received.' } }],
+            ['content_block_stop', { type: 'content_block_stop', index: 0 }],
+            ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 2 } }],
+            ['message_stop', { type: 'message_stop' }],
+          ].map(([event, payload]) => `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`).join('') };
+        });
+        await evalIn(ctx.page, `(() => { 'use strict';
+          const files = new DataTransfer();
+          files.items.add(new File([Uint8Array.from(${JSON.stringify([...fileBytes])})], 'prompt-wrap.js', { type: 'text/javascript' }));
+          const input = document.querySelector('.input-bar input[type="file"]');
+          if (!input) throw new Error('real attachment input is missing');
+          input.files = files.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+        })()`);
+        if (!await waitFor(() => evalIn(ctx.page, `document.querySelector('.attach-chip-name')?.textContent === 'prompt-wrap.js'`))) throw new Error('file did not stage');
+        const question = 'Summarize the page and this file.';
+        await evalIn(ctx.page, `(() => { 'use strict';
+          const input = document.querySelector('.input-bar textarea');
+          input.value = ${JSON.stringify(`@tab:${tab} ${question}`)};
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.closest('form').requestSubmit();
+        })()`);
+        const session = await waitFor(async () => {
+          const state = await rpc(ctx.page, { type: 'state/get' });
+          return state?.ok && state.state?.session?.messages?.some((message) => message.role === 'assistant' && message.content === 'Shared content received.' && message.streaming !== true) ? state.state.session : null;
+        }, { budgetMs: 30_000, pollMs: 80 });
+        if (!session) throw new Error('shared composer send did not settle');
+        rec.check('one real Anthropic request is intercepted', ctx.modelCallCount() === 1 && requests.length === 1
+          && requests[0].url === 'https://api.anthropic.com/v1/messages' && requests[0].method === 'POST');
+        const content = session.messages.find((message) => message.role === 'user')?.content;
+        rec.check('the durable message keeps real page and file context', typeof content === 'string'
+          && content.includes('<untrusted_web_content ')
+          && content.includes('Coffee Mug') && content.endsWith(`\n\n<peerd_file name="prompt-wrap.js">\n${fileText}\n</peerd_file>`), content?.slice(0, 250));
+        const modelMessages = requests.length === 1 ? JSON.parse(requests[0].body).messages : [];
+        const modelText = modelMessages.flatMap((message) => typeof message.content === 'string'
+          ? [message.content] : (message.content ?? []).filter((block) => block.type === 'text').map((block) => block.text)).join('\n');
+        rec.check('the model gets the same fenced context', requests.length === 1
+          && modelText.includes('untrusted_web_content') && modelText.includes('Coffee Mug')
+          && modelText.includes(`<peerd_file name="prompt-wrap.js">\n${fileText}\n</peerd_file>`));
+        const listed = await rpc(ctx.page, { type: 'session/list' });
+        const title = listed?.ok === true && Array.isArray(listed.sessions)
+          ? listed.sessions.find((row) => row.sessionId === session.sessionId)?.title : null;
+        if (typeof title !== 'string' || !title.trim()) throw new Error(`real chat title metadata is missing: ${JSON.stringify({ sessionId: session.sessionId, listed })}`);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base shared title', title);
+        else rec.check('only the user question becomes the new title', title === question, title);
+        await clickAndSyncRedraw(ctx.page, '[aria-label="Chats"]');
+        if (!await waitFor(() => evalIn(ctx.page, `(() => { 'use strict';
+          const node = document.querySelector('.session-row.active .session-title');
+          return node instanceof HTMLElement && node.textContent === ${JSON.stringify(title)};
+        })()`))) throw new Error('real chat title did not render');
+        await rec.visual('shared-chat-title');
+        await clickAndSyncRedraw(ctx.page, '[aria-label="Chats"]');
+        if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('.input-bar textarea')`))) throw new Error('chat did not reopen');
+      } finally {
+        try {
+          const keys = ['providerName', 'providerModel'];
+          const reset = keys.filter((key) => !Object.hasOwn(priorSettings, key));
+          const patch = Object.fromEntries(keys.filter((key) => Object.hasOwn(priorSettings, key)).map((key) => [key, priorSettings[key]]));
+          if (reset.length && (await rpc(ctx.page, { type: 'settings/reset', keys: reset }))?.ok !== true) throw new Error('unset provider settings did not restore');
+          if (Object.keys(patch).length && (await rpc(ctx.page, { type: 'settings/update', patch }))?.ok !== true) throw new Error('saved provider settings did not restore');
+          const restored = await evalIn(ctx.page, `(async () => { 'use strict';
+            return (await (await import('/peerd-egress/kernel-storage.js')).kv.get('settings.v1')) ?? {};
+          })()`, true);
+          rec.check('provider settings restore with exact saved field presence', keys.every((key) =>
+            Object.hasOwn(restored, key) === Object.hasOwn(priorSettings, key) && restored[key] === priorSettings[key]));
+        } finally {
+          if (tab) await evalIn(ctx.page, `chrome.tabs.remove(${tab})`, true);
+          await fixture.close();
+        }
+      }
+    },
+  },
+  {
+    name: 'document-attachment-refusals', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const initial = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings;
+      if (!initial) throw new Error('the provider state is unavailable');
+      try {
+        const key = await rpc(ctx.page, { type: 'provider/setKey', provider: 'anthropic', plaintext: 'sk-e2e-document-refusal-only' });
+        const provider = await rpc(ctx.page, { type: 'settings/update', patch: { providerName: 'anthropic', providerModel: '' } });
+        if (key?.ok !== true || provider?.ok !== true) throw new Error('the attachment provider did not initialize');
+        if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('input.attach-input')`), { budgetMs: 15_000 })) throw new Error('the real file picker is unavailable');
+        const legacy = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+        for (const [name, bytes, expected] of [
+          ['report.doc', legacy, 'older or password-protected Office file'],
+          ['locked.docx', legacy, 'without a password, then attach it again'],
+          ['broken.docx', [0x50, 0x4b, 3, 4, 0, 0, 0, 0], 'corrupt, password-protected, or uses unsupported compression'],
+        ]) {
+          await evalIn(ctx.page, `(() => {
+            const files = new DataTransfer();
+            files.items.add(new File([Uint8Array.from(${JSON.stringify(bytes)})], ${JSON.stringify(name)}));
+            const input = document.querySelector('input.attach-input');
+            input.files = files.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+            const composer = document.querySelector('form.input-bar textarea');
+            composer.focus(); composer.select();
+          })()`);
+          await ctx.page.send('Input.insertText', { text: 'Summarize this document.' });
+          if (!await waitFor(() => evalIn(ctx.page, `document.querySelector('.attach-chip-name')?.textContent === ${JSON.stringify(name)} && !!document.querySelector('form.input-bar button.send-btn:not(:disabled)')`), { budgetMs: 10_000 })) throw new Error('the file did not stage for Send');
+          const before = ctx.modelCallCount();
+          if (!await clickAndSyncRedraw(ctx.page, 'form.input-bar button.send-btn')) throw new Error('the real Send control is unavailable');
+          const settled = await waitFor(() => evalIn(ctx.page, `(() => {
+            const error = document.querySelector('.attach-error')?.textContent;
+            const busy = !!document.querySelector('form.input-bar button.stop');
+            return error && !busy ? { error, draft: document.querySelector('form.input-bar textarea')?.value,
+              chip: document.querySelector('.attach-chip-name')?.textContent,
+              users: document.querySelectorAll('.message-user').length } : null;
+          })()`), { budgetMs: 30_000, pollMs: 50 });
+          if (!settled) throw new Error('the real attachment refusal did not settle');
+          rec.check(`${name} refuses before a model request and keeps the draft`, ctx.modelCallCount() === before && settled.draft === 'Summarize this document.' && settled.chip === name && settled.users === 0, JSON.stringify(settled));
+          if (baseRender) rec.observe(`merge-base ${name} refusal`, settled);
+          else rec.check(`${name} gives a safe next step`, settled.error.includes(expected)
+            && !settled.error.includes('WebVM') && !settled.error.includes('Document extraction failed.'), settled.error);
+          await evalIn(ctx.page, `document.querySelector('form.input-bar').scrollIntoView({ block: 'end' })`);
+          await rec.visual(name.endsWith('.doc') ? 'document-attachment-refusals' : `document-attachment-${name.replace('.', '-')}`);
+          await evalIn(ctx.page, `(() => {
+            for (const button of document.querySelectorAll('.attach-chip-remove')) button.click();
+            const input = document.querySelector('form.input-bar textarea'); input.focus(); input.select();
+          })()`);
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+          await ctx.page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+        }
+      } finally {
+        const restored = await rpc(ctx.page, { type: 'settings/update', patch: { providerName: initial.providerName, providerModel: initial.providerModel } });
+        if (restored?.ok !== true) throw new Error('the original provider did not restore');
+      }
+    },
+  },
+  {
+    name: 'pull-in-moved-tab', kind: 'visual', phase: 'post-unlock',
+    responder: null,
+    async run(ctx, rec) {
+      // why: a fresh Home host leaves the real native panel closed. The shared
+      // harness panel must stay alive for the next state.
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir, panelPath: 'home/home.html',
+        modelResponder: (index) => ({ sse: index === 0 ? sseToolCall('sandbox_create', { kind: 'notebook', name: 'Moved Notebook' }) : sseText('Notebook ready.') }) });
+      let browser;
+      let notebook;
+      let panel;
+      let panelSession;
+      try {
+        await unlockAndReady(child.page);
+        const sent = await rpc(child.page, { type: 'agent/send', text: 'Create a Notebook named Moved Notebook.' });
+        if (!sent?.ok) throw new Error('real Notebook creation refused');
+        if (!await waitFor(async () => {
+          const state = await rpc(child.page, { type: 'state/get' });
+          return state?.ok && state.state?.session?.messages?.some((message) => message.role === 'assistant' && message.content === 'Notebook ready.' && message.streaming !== true);
+        }, { budgetMs: 30_000 })) throw new Error('Notebook creation did not settle');
+        const surfaces = await rpc(child.page, { type: 'surfaces/get' });
+        if (surfaces?.ok !== true || surfaces.sidePanelOpen !== false) throw new Error('fresh native panel is not closed');
+        const target = await waitFor(async () => (await fetch(`http://127.0.0.1:${child.port}/json/list`).then((reply) => reply.json()))
+          .find((entry) => entry.url.includes('/engine-tabs/notebook-tab/index.html#')), { budgetMs: 30_000 });
+        if (!target) throw new Error('real Notebook target is missing');
+        notebook = await attach(target.webSocketDebuggerUrl);
+        await notebook.send('Page.enable');
+        if (!await waitFor(() => evalIn(notebook, `!!document.querySelector('.peerd-pull')`))) throw new Error('native pull-in chip did not mount');
+        const before = await evalIn(notebook, `chrome.tabs.getCurrent().then((tab) => ({ id: tab.id, windowId: tab.windowId, document: performance.timeOrigin }))`, true);
+        const movedWindow = await evalIn(notebook, `chrome.windows.create({ tabId: ${before.id}, focused: true }).then((window) => window.id)`, true);
+        const after = await evalIn(notebook, `chrome.tabs.getCurrent().then((tab) => ({ id: tab.id, windowId: tab.windowId, document: performance.timeOrigin }))`, true);
+        rec.check('the real Notebook tab moves without a new document', before.id === after.id && before.document === after.document
+          && before.windowId !== after.windowId && after.windowId === movedWindow, JSON.stringify({ before, after }));
+        await notebook.send('Page.bringToFront');
+        const button = await evalIn(notebook, `(() => { 'use strict'; const bounds = document.querySelector('.peerd-pull').getBoundingClientRect(); return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }; })()`);
+        await notebook.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...button });
+        await notebook.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...button });
+        const version = await fetch(`http://127.0.0.1:${child.port}/json/version`).then((reply) => reply.json());
+        browser = await attach(version.webSocketDebuggerUrl);
+        let lastNativeTargets = [];
+        const nativeTarget = await waitFor(async () => {
+          lastNativeTargets = (await browser.send('Target.getTargets')).targetInfos;
+          return lastNativeTargets.find((entry) => entry.url.split('#')[0] === `chrome-extension://${child.sw.id}/sidepanel/sidepanel.html`);
+        });
+        if (!nativeTarget) throw new Error(`native pull-in did not open a panel: ${JSON.stringify({
+          targets: lastNativeTargets.map(({ targetId, type, url }) => ({ targetId, type, url })), before, after,
+        })}`);
+        ({ sessionId: panelSession } = await browser.send('Target.attachToTarget', { targetId: nativeTarget.targetId, flatten: true }));
+        panel = { send: (method, parameters = {}) => browser.send(method, parameters, panelSession) };
+        const ownerWindow = await evalIn(panel, `chrome.windows.getCurrent().then((window) => window.id)`, true);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('base native panel window', { ownerWindow, after });
+        else rec.check('native pull-in opens in the moved tab window', ownerWindow === after.windowId, JSON.stringify({ ownerWindow, after }));
+        if (!await waitFor(() => evalIn(panel, `!!document.querySelector('.input-bar textarea')`))) throw new Error('native panel did not become ready');
+        await panel.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
+        await rec.visualPage('pull-in-moved-tab', panel);
+      } finally {
+        if (panelSession) await browser.send('Target.detachFromTarget', { sessionId: panelSession });
+        notebook?.close(); browser?.close();
+        await child.close();
       }
     },
   },
@@ -6024,6 +9923,72 @@ export const STATES = [
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
+  // why: hold the real disk lock in another document before this VM boots.
+  // No CheerpX device can open in either refusal case.
+  {
+    name: 'vm-disk-ownership', kind: 'visual', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      if (process.env.PEERD_VISUAL_BASE_RENDER === '1') {
+        const extension = process.argv.find(arg => arg.startsWith('--extension='))?.slice('--extension='.length);
+        if (!extension) throw new Error('base visual render requires an explicit extension tree');
+        if (!existsSync(join(extension, 'engine-tabs/vm-tab/disk-lock.js'))) {
+          rec.observe('merge-base surface', { present: false, reason: 'disk refusal introduced on this branch' });
+          return;
+        }
+      }
+      const holder = await openExtPage(ctx, 'options/options.html');
+      let page;
+      try {
+        const vm = await evalIn(holder, `(async () => {
+          const { buildManifest } = await import('/shared/bundle/manifest.js');
+          const { packBundle } = await import('/shared/bundle/bundle.js');
+          const { toBase64 } = await import('/shared/bundle/bytes.js');
+          const { manifest, chunks } = await buildManifest({ payload: packBundle({ files: {} }),
+            type: 'vm-recipe', mime: 'application/peerd-vm-recipe', meta: { kind: 'vm', name: 'Disk guard' } });
+          const imported = await chrome.runtime.sendMessage({ type: 'import/apply',
+            envelope: { format: 'peerd-bundle', version: 1, manifest, chunks: chunks.map(toBase64) } });
+          if (!imported?.ok) throw new Error(JSON.stringify(imported));
+          const reply = await chrome.runtime.sendMessage({ type: 'vm/get-meta', vmId: imported.id });
+          const { diskLockName } = await import('/engine-tabs/vm-tab/disk-lock.js');
+          await new Promise(resolve => {
+            navigator.locks.request(diskLockName(reply.record.diskOverlayKey), () => {
+              resolve(); return new Promise(() => {});
+            });
+          });
+          return reply.record;
+        })()`, true);
+        for (const failure of ['busy', 'unavailable']) {
+          page = await openWidePage(ctx, 'engine-tabs/vm-tab/index.html', { ready: '.boot-card.is-failed' });
+          if (failure === 'unavailable') {
+            await page.send('Page.addScriptToEvaluateOnNewDocument', { source:
+              `Object.defineProperty(navigator, 'locks', { value: { request() { throw new Error('lock service unavailable'); } } });` });
+          }
+          await page.send('Page.navigate', { url: `chrome-extension://${ctx.sw.id}/engine-tabs/vm-tab/index.html?lock-case=${failure}#${vm.id}` });
+          const refused = await waitFor(() => evalIn(page, `(() => {
+            if (!document.querySelector('.boot-card.is-failed') || location.hash) return null;
+            return { text: document.body.innerText, log: document.getElementById('boot-log')?.textContent,
+              cheerpxLoaded: performance.getEntriesByType('resource').some(entry => entry.name.includes('/cheerpx/')) };
+          })()`), { budgetMs: 10_000, pollMs: 50 });
+          rec.check(`${failure} disk ownership stops before the VM loads`,
+            !!refused && !refused.cheerpxLoaded && !refused.log?.includes('IDBDevice.create')
+              && refused.text.includes(failure === 'busy' ? 'already open in another tab' : 'Could not lock the VM disk'),
+            JSON.stringify(refused));
+          const pinClock = () => evalIn(page, `(() => {
+            for (const node of document.querySelectorAll('#boot-log, #boot-log *')) {
+              for (const text of node.childNodes) if (text.nodeType === 3) text.textContent = text.textContent.replace(/\\d{2}:\\d{2}:\\d{2}/g, '00:00:00').replaceAll(${JSON.stringify(vm.id)}, 'vm-disk-guard');
+            }
+            // why: match the existing VM capture guard for fixed blur layers.
+            const pullIn = document.querySelector('.peerd-pull');
+            if (pullIn) { pullIn.style.backdropFilter = 'none'; pullIn.style.webkitBackdropFilter = 'none'; pullIn.getBoundingClientRect(); }
+          })()`);
+          await rec.visualPage(`vm-disk-${failure}`, page, { beforeShot: pinClock });
+          await page.close();
+          page = null;
+        }
+      } finally { try { page?.close(); } catch {} try { await holder.closeTarget(); } catch {} }
+    },
+  },
+  WEBVM_TERMINAL_STATE,
   NOTEBOOK_FETCH_STATE,
   {
     name: 'notebook-remote-restricted', kind: 'functional', phase: 'post-unlock',
@@ -6244,7 +10209,116 @@ export const STATES = [
             && failureView?.output?.includes('./lib/failure.js:1')
             && !/blob:|data:/.test(failureView?.output ?? ''),
           JSON.stringify({ importedFailure, failureView }));
-      } finally { try { page.close(); } catch { /* */ } }
+
+        const sendNotebook = (message) => evalIn(ctx.swConn, `(async () => {
+          const tabs = await chrome.tabs.query({});
+          const tab = tabs.find((candidate) => candidate.url?.includes(${JSON.stringify(`#${notebookId}`)}));
+          if (!tab?.id) throw new Error('Notebook tab not found');
+          return chrome.tabs.sendMessage(tab.id, ${JSON.stringify({ notebookId, ...message })});
+        })()`, true);
+        const draft = 'return 21 * 2';
+        await evalIn(page, `document.querySelector('.cm-content').focus()`);
+        const selectAll = { key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: process.platform === 'darwin' ? 4 : 2 };
+        await page.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...selectAll });
+        await page.send('Input.dispatchKeyEvent', { type: 'keyUp', ...selectAll });
+        await page.send('Input.insertText', { text: draft });
+        if (!await waitFor(async () => (await sendNotebook({ type: 'js/read-file', path: 'notebook.js' }))?.content === draft,
+          { budgetMs: 10_000, pollMs: 100 })) throw new Error('Notebook draft did not save');
+        const backupDirectory = (create) => evalIn(page, `(async () => {
+          let dir = await navigator.storage.getDirectory();
+          dir = await dir.getDirectoryHandle('peerd-notebooks');
+          dir = await dir.getDirectoryHandle(${JSON.stringify(notebookId)});
+          await dir.removeEntry('notebook.before-agent.js', { recursive: true }).catch((error) => {
+            if (error.name !== 'NotFoundError') throw error;
+          });
+          if (${create}) await dir.getDirectoryHandle('notebook.before-agent.js', { create: true });
+        })()`, true);
+        await backupDirectory(true);
+        const backupFailure = await sendNotebook({ type: 'js/eval', code: 'return 43', timeoutMs: 10_000 });
+        const keptDraft = await sendNotebook({ type: 'js/read-file', path: 'notebook.js' });
+        rec.check('a native backup write failure leaves the saved Notebook draft intact',
+          backupFailure?.ok === false && keptDraft?.content === draft, JSON.stringify({ backupFailure, keptDraft }));
+        await backupDirectory(false);
+        const recovered = await sendNotebook({ type: 'js/eval', code: 'return 43', timeoutMs: 10_000 });
+        if (recovered?.ok !== true) throw new Error('Notebook backup retry failed');
+
+        const custodyPath = `peerd-notebook-custody/${notebookId}/mirror.json`;
+        const backupAliases = ['notebook.before-agent.js', '/notebook.before-agent.js', 'notebook.before-agent.js/', '///notebook.before-agent.js///'];
+        const backupBeforeWrites = await sendNotebook({ type: 'js/read-file', path: backupAliases[0] });
+        const boundaryPaths = ['mirror.json', `/${custodyPath}`, `../../${custodyPath}`, `..\\${custodyPath}`, 'bad\0path'];
+        const boundaryCode = `
+          const paths = ${JSON.stringify([...boundaryPaths, ...backupAliases])};
+          const writes = [], deletes = [];
+          for (const path of paths) {
+            try { await peerd.self.writeFile(path, '{"pending":true}'); writes.push(true); } catch { writes.push(false); }
+            try { await peerd.self.deleteFile(path); deletes.push(true); } catch { deletes.push(false); }
+          }
+          let rootBlocked = false;
+          try { await navigator.storage.getDirectory(); } catch { rootBlocked = true; }
+          return { writes, deletes, rootBlocked };
+        `;
+        const boundary = await sendNotebook({ type: 'js/eval', code: boundaryCode, timeoutMs: 10_000 });
+        const routeWrite = await sendNotebook({ type: 'js/write-file', path: `/${custodyPath}`, content: '{"pending":true}' });
+        const escapeWrite = await sendNotebook({ type: 'js/write-file', path: `../../${custodyPath}`, content: '{"pending":true}' });
+        const backupWrites = [];
+        for (const path of backupAliases) backupWrites.push(await sendNotebook({ type: 'js/write-file', path, content: 'return 0' }));
+        const backupAfterWrites = await sendNotebook({ type: 'js/read-file', path: backupAliases[0] });
+        const markerAfterWrites = await evalIn(page, `(async () => {
+          let dir = await navigator.storage.getDirectory();
+          for (const part of ['peerd-notebook-custody', ${JSON.stringify(notebookId)}]) dir = await dir.getDirectoryHandle(part);
+          return JSON.parse(await (await (await dir.getFileHandle('mirror.json')).getFile()).text());
+        })().catch(() => null)`, true);
+        rec.check('agent file writes and deletes cannot forge the host mirror marker',
+          boundary?.result?.value?.rootBlocked === true
+            && JSON.stringify(boundary?.result?.value?.writes) === '[true,true,false,false,false,false,false,false,false]'
+            && JSON.stringify(boundary?.result?.value?.deletes) === '[true,true,false,false,false,false,false,false,false]'
+            && routeWrite?.ok === true && escapeWrite?.ok === false && markerAfterWrites?.code === boundaryCode
+            && backupWrites.every((reply) => reply?.ok === false)
+            && backupBeforeWrites?.ok === true && backupAfterWrites?.content === backupBeforeWrites?.content,
+          JSON.stringify({ boundary, routeWrite, escapeWrite, markerAfterWrites, backupWrites, backupBeforeWrites, backupAfterWrites }));
+
+        const source = await readFile(new URL('../../extension/engine-tabs/notebook-tab/notebook-tab.js', import.meta.url), 'utf8');
+        const marker = 'await mirrorOpfs.write(LAST_AGENT_PATH, JSON.stringify({ code: msg.code }));';
+        const index = source.indexOf(marker);
+        if (index < 0 || source.indexOf(marker, index + 1) >= 0) throw new Error('Notebook marker location is not unique');
+        let paused = false;
+        page.on((method) => { if (method === 'Debugger.paused') paused = true; });
+        await page.send('Debugger.enable');
+        const point = await page.send('Debugger.setBreakpointByUrl', {
+          url: `chrome-extension://${ctx.sw.id}/engine-tabs/notebook-tab/notebook-tab.js`,
+          lineNumber: source.slice(0, index).split('\n').length - 1,
+          columnNumber: index - source.lastIndexOf('\n', index - 1) - 1,
+        });
+        if (!point.locations?.length) throw new Error('Notebook marker breakpoint did not bind');
+        const interrupted = sendNotebook({ type: 'js/eval', code: 'return 44', timeoutMs: 10_000 }).catch(() => null);
+        if (!await waitFor(() => paused, { budgetMs: 10_000, pollMs: 50 })) throw new Error('Notebook marker commit did not pause');
+        await page.send('Debugger.removeBreakpoint', { breakpointId: point.breakpointId });
+        await page.send('Page.reload');
+        await page.send('Debugger.disable');
+        if (!await waitFor(() => evalIn(page, `!document.getElementById('notebook-app').hidden && !!document.querySelector('.cm-content')`),
+          { budgetMs: 10_000, pollMs: 100 })) throw new Error('Notebook did not reload');
+        await interrupted;
+        const blocked = await sendNotebook({ type: 'js/eval', code: 'return 45', timeoutMs: 10_000 });
+        const backup = await sendNotebook({ type: 'js/read-file', path: 'notebook.before-agent.js' });
+        const notebook = await sendNotebook({ type: 'js/read-file', path: 'notebook.js' });
+        const visible = await evalIn(page, `!!document.querySelector('.pe-node[data-path="notebook.before-agent.js"]')`);
+        rec.check('reload recovers a journaled replacement and preserves the visible backup',
+          blocked?.result?.value === 45 && backup?.content === draft && notebook?.content === 'return 45' && visible === true,
+          JSON.stringify({ blocked, backup, notebook, visible }));
+        const removed = await evalIn(page, `(async () => {
+          const { createRepositoryService } = await import('/peerd-engine/index.js');
+          await createRepositoryService().destroy({ kind: 'notebook', id: ${JSON.stringify(notebookId)} }, { worktree: true });
+          const root = await navigator.storage.getDirectory();
+          return Promise.all(['peerd-notebooks', 'peerd-notebook-custody'].map(async (name) => {
+            const parent = await root.getDirectoryHandle(name);
+            return parent.getDirectoryHandle(${JSON.stringify(notebookId)}).then(() => false, (error) => error.name === 'NotFoundError');
+          }));
+        })()`, true);
+        rec.check('Notebook destruction removes workspace files and host custody', removed?.every((value) => value === true), JSON.stringify(removed));
+      } finally {
+        await page.send('Debugger.disable').catch(() => {});
+        try { page.close(); } catch { /* */ }
+      }
     },
   },
   {
@@ -6269,6 +10343,265 @@ export const STATES = [
       finally { try { page.close(); } catch { /* */ } }
     },
   },
+  // why: use the real sandbox message and trusted parent, with a reserved URL.
+  {
+    name: 'app-consent-arming', kind: 'visual', phase: 'post-unlock',
+    responder: call => ({ sse: call === 0 ? sseToolCall('sandbox_create', {
+      kind: 'app', name: 'Consent guard', files: { 'index.html': `<!doctype html><title>Consent guard</title>
+<main><h1>External link</h1><p>The trusted bar must confirm this link.</p></main>
+<script>'use strict'; addEventListener('message', event => { if (event.data?.type === 'request-link') parent.postMessage({type:'app-link',href:'https://consent.peerd.test/approved'},'*'); });</script>` },
+    }) : sseText('CONSENT-READY') }),
+    async run(ctx, rec) {
+      const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      let page, targetId;
+      const targets = () => fetch(`http://127.0.0.1:${ctx.port}/json/list`).then(reply => reply.json());
+      const opened = () => targets().then(all => all.filter(target => target.url.startsWith('https://consent.peerd.test/')));
+      try {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create the Consent guard App.' });
+        if (!sent?.ok) throw new Error('Consent App creation failed');
+        const target = await waitFor(async () => (await targets()).find(candidate => candidate.title === 'peerd · Consent guard'),
+          { budgetMs: 30_000, pollMs: 100 });
+        if (!target) throw new Error('Consent App did not open');
+        targetId = target.id;
+        page = await attach(target.webSocketDebuggerUrl);
+        await page.send('Runtime.enable');
+        await page.send('Page.enable');
+        await page.send('Page.bringToFront');
+        await page.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+        await waitFor(() => evalIn(page, `document.getElementById('boot')?.classList.contains('is-hidden')`),
+          { budgetMs: 10_000, pollMs: 50 });
+        const early = await evalIn(page, `(async () => {
+          const bar = await new Promise((resolve, reject) => {
+            const observer = new MutationObserver(() => {
+              const bar = document.querySelector('[role="alertdialog"]');
+              if (bar) { observer.disconnect(); clearTimeout(timer); resolve(bar); }
+            });
+            const timer = setTimeout(() => { observer.disconnect(); reject(new Error('consent bar missing')); }, 5000);
+            observer.observe(document.body, { childList: true });
+            document.getElementById('app-frame').contentWindow.postMessage({ type: 'request-link' }, '*');
+          });
+          const allow = [...bar.querySelectorAll('button')].find(button => button.textContent === 'Open link');
+          if (!${baseRender}) allow?.click();
+          return { disabled: allow?.disabled, open: !!document.querySelector('[role="alertdialog"]'),
+            inert: document.getElementById('app-frame').inert, focused: document.activeElement?.textContent };
+        })()`, true);
+        if (baseRender) {
+          await rec.visualPage('app-consent-armed', page);
+          await evalIn(page, `[...document.querySelectorAll('[role="alertdialog"] button')].find(button => button.textContent === 'Deny').click()`);
+          return;
+        }
+        rec.check('the new prompt blocks immediate approval and makes the App inert',
+          early?.disabled && early.open && early.inert && early.focused === 'Deny', JSON.stringify(early));
+        await waitFor(() => evalIn(page, `document.querySelector('[role="alertdialog"] button')?.disabled === false`),
+          { budgetMs: 5_000, pollMs: 50 });
+        const point = await evalIn(page, `(() => {
+          const button = [...document.querySelectorAll('[role="alertdialog"] button')].find(node => node.textContent === 'Open link');
+          const rect = button.getBoundingClientRect();
+          return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+        })()`);
+        for (const type of ['mousePressed', 'mouseReleased']) {
+          await page.send('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 2 });
+        }
+        rec.check('a multi-click after arming cannot approve or open a tab',
+          await evalIn(page, `!!document.querySelector('[role="alertdialog"]')`) && (await opened()).length === 0);
+        await rec.visualPage('app-consent-armed', page);
+        for (const type of ['mousePressed', 'mouseReleased']) {
+          await page.send('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 1 });
+        }
+        const approved = await waitFor(async () => (await opened())[0], { budgetMs: 5_000, pollMs: 50 });
+        rec.check('a deliberate single click opens exactly the confirmed link',
+          approved?.url === 'https://consent.peerd.test/approved'
+            && await evalIn(page, `!document.querySelector('[role="alertdialog"]') && !document.getElementById('app-frame').inert`));
+      } finally {
+        for (const target of await opened()) await fetch(`http://127.0.0.1:${ctx.port}/json/close/${target.id}`);
+        try { page?.close(); } catch {}
+        if (targetId) await fetch(`http://127.0.0.1:${ctx.port}/json/close/${targetId}`);
+      }
+    },
+  },
+  {
+    name: 'library-app-reuse', kind: 'functional', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('No model call is needed to open a local App.') }),
+    async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
+      const base = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      const appPage = `chrome-extension://${ctx.sw.id}/engine-tabs/app-tab/index.html`;
+      const targets = async () => fetch(`http://127.0.0.1:${ctx.port}/json/list`).then((reply) => reply.json());
+      const beforeApps = await rpc(ctx.page, { type: 'apps/list' });
+      if (beforeApps?.ok !== true) throw new Error('The App catalog is unavailable');
+      const previousIds = new Set(beforeApps.apps.map((app) => app.id));
+      let appId;
+      let options;
+      let home;
+      let app;
+      let runner;
+      let captured;
+      try {
+        options = await openWidePage(ctx, 'options/options.html#!/transfer?starter=csv-lab', { ready: '.starter-review' });
+        const apply = '.starter-review > button:first-of-type';
+        const phase2 = discoverSurface().phase2;
+        const applyLabel = phase2 ? 'Add to Library' : 'Apply: add local copy';
+        const installedText = phase2 ? 'Added to your Library.' : 'Local copy added.';
+        const reviewReady = await waitFor(() => evalIn(options,
+          `document.querySelector(${JSON.stringify(apply)})?.textContent.trim() === ${JSON.stringify(applyLabel)}
+            && document.querySelector(${JSON.stringify(apply)}).disabled === false`));
+        if (!reviewReady) throw new Error('The packaged CSV Lab review is not ready');
+        await clickAndSyncRedraw(options, apply);
+        const installed = await waitFor(() => evalIn(options,
+          `document.querySelector('.starter-review')?.innerText.includes(${JSON.stringify(installedText)})`));
+        rec.check('the real packaged CSV Lab copy is installed', installed === true);
+        if (!installed) throw new Error('The CSV Lab Apply outcome is not known');
+        const listed = await rpc(ctx.page, { type: 'apps/list' });
+        const added = listed?.apps?.filter((row) => !previousIds.has(row.id) && row.name === 'CSV Lab') ?? [];
+        rec.check('the catalog contains one new durable App ID', listed?.ok === true && added.length === 1);
+        if (added.length !== 1) throw new Error('The installed App ID is not unique');
+        appId = added[0].id;
+        await options.close();
+        options = null;
+        home = await openWidePage(ctx, 'home/home.html#library', { ready: '.home-shell' });
+        // why: a hidden Home can defer its redraw. Observe the actual reply without replacing it.
+        await evalIn(home, `(async () => {
+          'use strict';
+          const browser = (await import('/shared/browser-api.js')).default;
+          const send = browser.runtime.sendMessage.bind(browser.runtime);
+          globalThis.__libraryOpenReceipts = [];
+          browser.runtime.sendMessage = (message, ...args) => {
+            const row = message?.type === 'apps/open' ? { appId: message.appId, settled: false } : null;
+            if (row) globalThis.__libraryOpenReceipts.push(row);
+            const pending = send(message, ...args);
+            if (row) Promise.resolve(pending).then(
+              (reply) => { row.reply = reply; row.settled = true; },
+              (error) => { row.error = String(error); row.settled = true; });
+            return pending;
+          };
+        })()`, true);
+        const openSelector = `.library-card[data-app-id="${appId}"] [data-library-action="open"]`;
+        const open = `document.querySelector(${JSON.stringify(openSelector)})`;
+        const buttonReady = await waitFor(() => evalIn(home, `!!(${open}) && !(${open}).disabled`));
+        if (!buttonReady) throw new Error('The Library Open button is not ready');
+        await clickAndSyncRedraw(home, openSelector);
+        const original = await waitFor(async () => (await targets()).find((row) =>
+          row.type === 'page' && row.url.startsWith(`${appPage}#${appId}?owner=`)));
+        if (!original) throw new Error('The first Library Open did not create an App host');
+        const firstReceipt = await waitFor(() => evalIn(home,
+          `globalThis.__libraryOpenReceipts.length === 1 && globalThis.__libraryOpenReceipts[0].settled
+            ? globalThis.__libraryOpenReceipts[0] : null`), { budgetMs: 45_000 });
+        rec.check('the first single Open has a known native receipt', firstReceipt?.appId === appId
+          && firstReceipt.reply?.ok === true, JSON.stringify(firstReceipt));
+        if (firstReceipt?.reply?.ok !== true) throw new Error('The first Open outcome is not known');
+        app = await attach(original.webSocketDebuggerUrl);
+        await app.send('Page.enable');
+        await app.send('Emulation.setDeviceMetricsOverride', { width: 900, height: 620, deviceScaleFactor: 1, mobile: false });
+        const sandbox = await waitFor(async () => {
+          const host = await evalIn(app, `({ ready: !!document.querySelector('#boot.is-hidden')
+            && !document.querySelector('#boot.is-failed'), url: document.querySelector('#app-frame')?.src })`);
+          return host.ready && (await targets()).find((row) => row.type === 'iframe'
+            && row.parentId === original.id && row.url === host.url);
+        });
+        if (!sandbox) throw new Error('The real App sandbox did not become ready');
+        runner = await attach(sandbox.webSocketDebuggerUrl);
+        const sealed = await waitFor(() => evalIn(runner, `(() => {
+          'use strict';
+          const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'peerd');
+          return globalThis.origin === 'null' && document.title === 'CSV Lab'
+            && !!document.querySelector('#csv') && typeof document.querySelector('#analyze')?.onclick === 'function'
+            && descriptor?.writable === false && descriptor.configurable === false && Object.isFrozen(descriptor.value);
+        })()`));
+        rec.check('the exact opaque CSV Lab sandbox is initialized', sealed === true);
+        if (!sealed) throw new Error('The App sandbox identity is not qualified');
+        const identities = [];
+        for (const [target, page] of [[original, app], [sandbox, runner]]) {
+          const contexts = new Map();
+          page.on((method, params) => {
+            if (method === 'Runtime.executionContextCreated') contexts.set(params.context.id, params.context);
+            if (method === 'Runtime.executionContextDestroyed') contexts.delete(params.executionContextId);
+            if (method === 'Runtime.executionContextsCleared') contexts.clear();
+          });
+          await page.send('Runtime.enable');
+          const { frameTree } = await page.send('Page.getFrameTree');
+          const context = await waitFor(() => [...contexts.values()].find((row) =>
+            row.auxData?.isDefault && row.auxData.frameId === frameTree.frame.id));
+          if (!context?.uniqueId) throw new Error('The App heap identity is unavailable');
+          const handle = await page.send('Runtime.evaluate', { expression: 'globalThis', contextId: context.id });
+          if (handle.exceptionDetails || !handle.result?.objectId) throw new Error('The App heap handle is unavailable');
+          identities.push({ target, page, contexts, context, objectId: handle.result.objectId,
+            frame: frameTree.frame, document: await evalIn(page, `({ href: location.href, timeOrigin: performance.timeOrigin })`) });
+        }
+        const owner = new URLSearchParams(new URL(original.url).hash.split('?')[1]).get('owner');
+        const durableOwner = await rpc(home, { type: 'session/get', sessionId: owner });
+        rec.check('the App URL has a real durable owner', !!owner && durableOwner?.ok === true
+          && durableOwner.session?.sessionId === owner);
+        const queryEvidence = await evalIn(home, `(async () => {
+          'use strict';
+          return { canonical: ${JSON.stringify(original.url)},
+            old: await chrome.tabs.query({ url: ${JSON.stringify(`${appPage}#${appId}*`)} }),
+            broad: await chrome.tabs.query({ url: ${JSON.stringify(`${appPage}*`)} }) };
+        })()`, true);
+        rec.observe('native fragment and page queries before reuse', queryEvidence);
+        const readyAgain = await waitFor(() => evalIn(home, `(async () => {
+          'use strict';
+          (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
+          return !!(${open}) && !(${open}).disabled;
+        })()`, true));
+        if (!readyAgain) throw new Error('The first Library Open did not settle');
+        await clickAndSyncRedraw(home, openSelector);
+        const receipts = await waitFor(() => evalIn(home, `globalThis.__libraryOpenReceipts.length === 2
+          && globalThis.__libraryOpenReceipts[1].settled ? globalThis.__libraryOpenReceipts : null`), { budgetMs: 45_000 });
+        if (!base) rec.check('the second single Open has a known native receipt', receipts?.length === 2
+          && receipts.every((row) => row.appId === appId && row.reply?.ok === true), JSON.stringify(receipts));
+        const after = await targets();
+        const live = after.filter((row) => row.type === 'page'
+          && row.url.split('#')[0] === appPage && new URL(row.url).hash.slice(1).split('?')[0] === appId);
+        const heaps = [];
+        for (const identity of identities) {
+          const read = await identity.page.send('Runtime.callFunctionOn', { objectId: identity.objectId,
+            functionDeclaration: 'function () { "use strict"; return { current: this === globalThis, href: location.href, timeOrigin: performance.timeOrigin }; }',
+            returnByValue: true }).catch((error) => ({ error: String(error) }));
+          const { frameTree } = await identity.page.send('Page.getFrameTree');
+          heaps.push({ targetId: identity.target.id, before: identity.document, after: read.result?.value,
+            unchanged: !read.exceptionDetails && read.result?.value?.current === true
+              && identity.contexts.get(identity.context.id)?.uniqueId === identity.context.uniqueId
+              && frameTree.frame.id === identity.frame.id && frameTree.frame.loaderId === identity.frame.loaderId
+              && read.result.value.href === identity.document.href
+              && read.result.value.timeOrigin === identity.document.timeOrigin });
+        }
+        const catalog = await rpc(home, { type: 'apps/list' });
+        rec.check('Open keeps the same durable App catalog entry', catalog?.ok === true
+          && catalog.apps.filter((row) => !previousIds.has(row.id)).length === 1
+          && catalog.apps.some((row) => row.id === appId));
+        rec.check('Library Open needs no model request', ctx.modelCallCount() === 0);
+        const reuse = live.length === 1 && live[0].id === original.id && live[0].url === original.url
+          && heaps.length === 2 && heaps.every((heap) => heap.unchanged);
+        rec.observe('actual Library reuse', { appId, original, live, heaps, reuse, base,
+          receipts: receipts ?? await evalIn(home, 'globalThis.__libraryOpenReceipts') });
+        // why: the base must show its real duplicate host. It predates this reuse fix.
+        if (!base) rec.check('sequential Open keeps one exact tab, URL, document and both heaps', reuse);
+        const capture = live.find((row) => row.id !== original.id) ?? live[0];
+        if (!capture) throw new Error('No actual App host remains for capture');
+        captured = capture.id === original.id ? app : await attach(capture.webSocketDebuggerUrl);
+        await captured.send('Emulation.setDeviceMetricsOverride', { width: 900, height: 620, deviceScaleFactor: 1, mobile: false });
+        const painted = await waitFor(() => evalIn(captured, `document.readyState === 'complete'
+          && (!!document.querySelector('#boot.is-hidden') || !!document.querySelector('#boot.is-failed'))`));
+        if (!painted) throw new Error('The actual App outcome did not render');
+        rec.observe('captured App outcome', await evalIn(captured,
+          `({ href: location.href, title: document.title, text: document.body.innerText.slice(0, 600) })`));
+        await rec.visualPage('library-app-reuse', captured);
+      } finally {
+        try {
+          if (captured && captured !== app) captured.close();
+          runner?.close();
+          app?.close();
+          if (appId) for (const target of (await targets()).filter((row) => row.type === 'page'
+            && row.url.split('#')[0] === appPage && new URL(row.url).hash.slice(1).split('?')[0] === appId)) {
+            await fetch(`http://127.0.0.1:${ctx.port}/json/close/${target.id}`);
+          }
+        } finally {
+          await home?.close();
+          await options?.close();
+        }
+      }
+    },
+  },
   {
     name: 'app-editor-save-recovery', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex) => ({ sse: callIndex === 0
@@ -6279,14 +10612,16 @@ export const STATES = [
       }) : sseText('EDITOR-RECOVERY-READY') }),
     async run(ctx, rec) {
       const directory = await mkdtemp(join(tmpdir(), 'peerd-editor-recovery-'));
+      const priorTargets = new Set((await fetch(`http://127.0.0.1:${ctx.port}/json/list`).then((reply) => reply.json())).map((target) => target.id));
       let page;
+      let vaultLocked = false;
       try {
         const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create an App named Editor recovery.' });
         rec.check('App creation accepted', sent?.ok === true, JSON.stringify(sent));
         const target = await waitFor(async () => {
           const targets = await fetch(`http://127.0.0.1:${ctx.port}/json/list`).then((reply) => reply.json());
           return targets.find((candidate) => candidate.type === 'page'
-            && candidate.title === 'peerd · Editor recovery') ?? null;
+            && candidate.title === 'peerd · Editor recovery' && !priorTargets.has(candidate.id)) ?? null;
         }, { budgetMs: 30_000, pollMs: 100 });
         if (!target) throw new Error('The created App did not render');
         page = await attach(target.webSocketDebuggerUrl);
@@ -6303,6 +10638,26 @@ export const STATES = [
         await evalIn(page, `document.getElementById('mode-toggle').click()`);
         await waitFor(() => evalIn(page, `!!document.querySelector('#editor-panel:not([hidden]) .cm-content')`),
           { budgetMs: 10_000, pollMs: 100 });
+        const loaded = await evalIn(page, `(async () => {
+          const { EditorView } = await import('/vendor/codemirror/cm.js');
+          const view = EditorView.findFromDOM(document.querySelector('.cm-editor'));
+          view.focus();
+          return view.state.doc.toString();
+        })()`, true);
+        for (const type of ['keyDown', 'keyUp']) {
+          await page.send('Input.dispatchKeyEvent', { type, key: 'z', code: 'KeyZ', windowsVirtualKeyCode: 90,
+            modifiers: type === 'keyDown' ? (process.platform === 'darwin' ? 4 : 2) : 0 });
+        }
+        await sleep(600);
+        const afterUndo = await evalIn(page, `(async () => {
+          const { EditorView } = await import('/vendor/codemirror/cm.js');
+          const { opfsHelpers } = await import('/peerd-engine/index.js');
+          return { buffer: EditorView.findFromDOM(document.querySelector('.cm-editor')).state.doc.toString(),
+            saved: await opfsHelpers(['peerd-apps', ${JSON.stringify(appId)}]).read('index.html') };
+        })()`, true);
+        rec.check('Undo after loading leaves the App source and saved file intact',
+          !!loaded && afterUndo?.buffer === loaded && afterUndo.saved === loaded, JSON.stringify(afterUndo));
+        await rec.shotPage('undo-after-load', page);
         await evalIn(page, `(() => {
           const original = window.prompt;
           window.prompt = () => 'notes.txt';
@@ -6347,12 +10702,160 @@ export const STATES = [
             editorHidden: document.getElementById('editor-panel')?.hidden,
             files: [...document.querySelectorAll('.pe-node[data-path]')].map((node) => node.dataset.path),
           })`);
+          if (process.env.PEERD_VISUAL_BASE_RENDER === '1' && diagnostic.boot?.includes('is-failed') && diagnostic.bootMessage) {
+            rec.observe('merge-base App editor', diagnostic);
+            await rec.visualPage('app-editor-recovery', page);
+            return;
+          }
           throw new Error(`The renewed App editor did not expose notes.txt: ${JSON.stringify(diagnostic)}`);
         }
         await evalIn(page, `document.querySelector('.pe-node[data-path="notes.txt"]').click()`);
         await waitFor(() => evalIn(page,
           `document.querySelector('.pe-node.is-active')?.dataset.path === 'notes.txt'`),
         { budgetMs: 10_000, pollMs: 100 });
+        const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+        const selectFile = async (path) => {
+          const opened = await evalIn(page, `(() => {
+            const directory = document.querySelector('.pe-node[data-kind="dir"][data-path="data"]');
+            if (directory?.getAttribute('aria-expanded') === 'false') directory.click();
+            const file = [...document.querySelectorAll('.pe-node[data-kind="file"]')].find((node) => node.dataset.path === ${JSON.stringify(path)});
+            file?.click();
+            return !!file;
+          })()`);
+          if (!opened || !await waitFor(() => evalIn(page,
+            `document.querySelector('.pe-node.is-active')?.dataset.path === ${JSON.stringify(path)}`),
+          { budgetMs: 10_000, pollMs: 100 })) throw new Error(`Editor file did not open: ${path}`);
+        };
+        const replaceDraft = async (content) => {
+          await evalIn(page, `(async () => {
+            const { EditorView } = await import('/vendor/codemirror/cm.js');
+            const view = EditorView.findFromDOM(document.querySelector('.cm-editor'));
+            view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+            view.focus();
+          })()`, true);
+          await page.send('Input.insertText', { text: content });
+        };
+        const savedText = (path) => evalIn(page, `(async () => {
+          const { opfsHelpers } = await import('/peerd-engine/opfs.js');
+          return opfsHelpers(['peerd-apps', ${JSON.stringify(appId)}]).read(${JSON.stringify(path)});
+        })()`, true);
+        // why: this records real replies. It never replaces a route result.
+        await evalIn(page, `(async () => {
+          const browser = (await import('/shared/browser-api.js')).default;
+          const original = browser.runtime.sendMessage.bind(browser.runtime);
+          globalThis.__engineReplies = [];
+          browser.runtime.sendMessage = async (message, ...args) => {
+            const reply = await original(message, ...args);
+            if (['app/editor-write', 'app/actor-chat'].includes(message?.type)) {
+              globalThis.__engineReplies.push({ type: message.type, path: message.path, reply });
+            }
+            return reply;
+          };
+        })()`, true);
+        const chat = async (text) => {
+          const before = await evalIn(page, `document.querySelectorAll('.actor-chat-message').length`);
+          await evalIn(page, `(() => {
+            if (document.getElementById('actor-chat-drawer').hidden) document.getElementById('actor-chat-toggle').click();
+            const input = document.getElementById('actor-chat-input');
+            input.focus(); input.select();
+          })()`);
+          await page.send('Input.insertText', { text });
+          await evalIn(page, `document.getElementById('actor-chat-send').click()`);
+          const settled = await waitFor(() => evalIn(page, `(() => {
+            const messages = [...document.querySelectorAll('.actor-chat-message')];
+            const last = messages.at(-1);
+            const input = document.getElementById('actor-chat-input');
+            if (messages.length < ${before + 2} || last?.dataset.role === 'user' || input.disabled) return null;
+            return { text: last.textContent, role: last.dataset.role, prompt: input.value,
+              reply: globalThis.__engineReplies.filter((entry) => entry.type === 'app/actor-chat').at(-1)?.reply };
+          })()`), { budgetMs: 60_000, pollMs: 100 });
+          if (!settled) throw new Error('The real App actor chat did not settle');
+          return settled;
+        };
+        ctx.setModelResponder(() => ({ sse: sseText('APP-DRAWER-READY') }));
+        const workingChat = await chat('Reply with APP-DRAWER-READY.');
+        rec.check('the real App actor drawer works before the error control',
+          workingChat.role === 'actor' && workingChat.text === 'APP-DRAWER-READY' && workingChat.reply?.ok === true,
+          JSON.stringify(workingChat));
+        ctx.setModelResponder(() => ({ status: 401, body: '{"error":{"message":"invalid api key SECRET-PROVIDER-TEXT"}}' }));
+        const authChat = await chat('Keep this prompt after a rejected key.');
+        rec.check('the actor receives a real model 401', authChat.reply?.ok === false
+          && /HTTP 401/.test(authChat.reply?.error ?? '') && ctx.modelCallCount() > 0, JSON.stringify(authChat));
+        if (baseRender) rec.observe('merge-base actor 401 guidance', authChat);
+        else rec.check('the drawer names a rejected key and keeps the known-refusal prompt',
+          authChat.text === 'API key rejected (401). Check or update it in Settings.'
+          && authChat.prompt === 'Keep this prompt after a rejected key.' && !authChat.text.includes('SECRET-PROVIDER-TEXT'),
+          JSON.stringify(authChat));
+        await rec.visualPage('app-actor-chat-auth-refusal', page);
+        await evalIn(page, `document.getElementById('actor-chat-close').click()`);
+        await selectFile('data/first.json');
+        const invalidJson = '{"saved":';
+        await replaceDraft(invalidJson);
+        const invalidSave = await waitFor(async () => {
+          const saved = await savedText('data/first.json');
+          const result = await evalIn(page, `({ text: document.getElementById('app-save-message').textContent,
+            visible: !document.getElementById('app-save-status').hidden,
+            reply: globalThis.__engineReplies.filter((entry) => entry.type === 'app/editor-write').at(-1)?.reply })`);
+          return result.visible || saved === invalidJson ? { ...result, saved } : null;
+        }, { budgetMs: 10_000, pollMs: 100 });
+        if (!invalidSave) throw new Error('The real invalid JSON save did not settle');
+        if (baseRender) rec.observe('merge-base invalid JSON write', invalidSave);
+        else rec.check('invalid JSON stays in the editor and cannot replace the durable file',
+          invalidSave.saved === firstData && invalidSave.reply?.code === 'app-file-invalid-json'
+          && invalidSave.text.includes('Fix the JSON to save it.'), JSON.stringify(invalidSave));
+        rec.check('the invalid JSON draft remains available to repair', await evalIn(page, `(async () => {
+          const { EditorView } = await import('/vendor/codemirror/cm.js');
+          return EditorView.findFromDOM(document.querySelector('.cm-editor')).state.doc.toString() === ${JSON.stringify(invalidJson)};
+        })()`, true));
+        await rec.visualPage('app-editor-invalid-json', page);
+        const repairedJson = '{"saved":true,"repaired":true}';
+        await replaceDraft(repairedJson);
+        const repaired = await waitFor(async () => await savedText('data/first.json') === repairedJson
+          && await evalIn(page, `document.getElementById('app-save-status').hidden`), { budgetMs: 10_000, pollMs: 100 });
+        rec.check('valid JSON saves through the same editor after repair', !!repaired);
+        if (!repaired) throw new Error('The JSON repair did not reach the durable file');
+        await selectFile('index.html');
+        const originalHtml = await savedText('index.html');
+        const lockedDraft = `${originalHtml}\n<!-- Keep this draft through a locked save. -->`;
+        const locked = await rpc(ctx.page, { type: 'vault/lock' });
+        if (locked?.ok !== true) throw new Error(`Vault lock failed: ${JSON.stringify(locked)}`);
+        vaultLocked = true;
+        await replaceDraft(lockedDraft);
+        const lockNotice = await waitFor(() => evalIn(page, `document.getElementById('app-save-status').hidden
+          ? null : document.getElementById('app-save-status').textContent`), { budgetMs: 10_000, pollMs: 100 });
+        const lockedReply = await evalIn(page, `globalThis.__engineReplies.filter((entry) => entry.type === 'app/editor-write').at(-1)?.reply`);
+        rec.check('the real locked save refuses before a disk change and keeps Retry',
+          lockedReply?.error === 'vault-locked' && await savedText('index.html') === originalHtml
+          && await evalIn(page, `document.getElementById('app-save-retry').textContent === 'Retry'`), JSON.stringify({ lockNotice, lockedReply }));
+        if (baseRender) rec.observe('merge-base locked save guidance', lockNotice);
+        else rec.check('the Save banner directs the user to unlock',
+          lockNotice?.includes('Unlock it in the peerd panel, then retry.') && !lockNotice.includes('free browser storage'), lockNotice);
+        await rec.visualPage('app-editor-locked-save', page);
+        const beforeLockedChat = ctx.modelCallCount();
+        const lockedChat = await chat('Keep this prompt while the vault is locked.');
+        rec.check('a locked drawer send makes no model call', ctx.modelCallCount() === beforeLockedChat, JSON.stringify(lockedChat));
+        if (baseRender) rec.observe('merge-base locked actor guidance', lockedChat);
+        else rec.check('the drawer names a real known locked refusal and keeps its prompt',
+          lockedChat.reply?.error === 'vault-locked' && lockedChat.reply?.outcomeKnown === true
+          && lockedChat.text === 'Vault is locked. Unlock it in the peerd panel, then send again.'
+          && lockedChat.prompt === 'Keep this prompt while the vault is locked.', JSON.stringify(lockedChat));
+        await rec.visualPage('app-actor-chat-locked-refusal', page);
+        const unlocked = await rpc(ctx.page, { type: 'vault/unlock', passphrase: PASSPHRASE }, { timeoutMs: 120_000 });
+        if (unlocked?.ok !== true) throw new Error(`Vault unlock failed: ${JSON.stringify(unlocked)}`);
+        vaultLocked = false;
+        await evalIn(page, `document.getElementById('app-save-retry').click()`);
+        const retried = await waitFor(async () => await savedText('index.html') === lockedDraft
+          && await evalIn(page, `document.getElementById('app-save-status').hidden`), { budgetMs: 10_000, pollMs: 100 });
+        rec.check('unlock and the existing Retry save the exact draft', !!retried);
+        if (!retried) throw new Error('The real save retry did not finish');
+        ctx.setModelResponder(() => ({ sse: sseText('APP-DRAWER-RECOVERED') }));
+        const recoveredChat = await chat('Reply with APP-DRAWER-RECOVERED.');
+        rec.check('the drawer works after unlock without a page reload',
+          recoveredChat.role === 'actor' && recoveredChat.text === 'APP-DRAWER-RECOVERED' && recoveredChat.reply?.ok === true,
+          JSON.stringify(recoveredChat));
+        await evalIn(page, `document.getElementById('actor-chat-close').click()`);
+        await selectFile('notes.txt');
+        ctx.setModelResponder(() => ({ sse: sseText('EDITOR-RECOVERY-READY') }));
         const draft = 'These edits exist only in the open draft.\nKeep every character: café ✓';
         await evalIn(page, `(async () => {
           const browser = (await import('/shared/browser-api.js')).default;
@@ -6420,8 +10923,10 @@ export const STATES = [
             && after.guard === true && after.url === target.url && after.noticeVisible === true,
           JSON.stringify(after));
         await page.send('Page.bringToFront');
+        await rec.visualPage('app-editor-recovery', page);
         await rec.shotPage('draft-preserved', page);
       } finally {
+        if (vaultLocked) await rpc(ctx.page, { type: 'vault/unlock', passphrase: PASSPHRASE }, { timeoutMs: 120_000 });
         try { await page?.send('Page.setDownloadBehavior', { behavior: 'default' }); } catch {}
         try { page?.close(); } catch {}
         await rm(directory, { recursive: true, force: true });
@@ -8193,7 +12698,7 @@ Promise.resolve().then(async () => {
         await evalIn(appPage, `document.getElementById('mode-toggle')?.click()`);
         const editorState = await waitFor(() => evalIn(appPage, `(() => {
           const rows = [...document.querySelectorAll('.pe-node.is-readonly')];
-          if (rows.length < 3) return null;
+          if (rows.length < 3 || document.getElementById('editor-panel')?.hidden !== false) return null;
           rows[0].click();
           return {
             labels: rows.map((row) => row.getAttribute('aria-label')),
@@ -8563,3 +13068,8 @@ Promise.resolve().then(async () => {
     },
   },
 ];
+
+// why: keep the functional check and include the same real flow in CI images.
+const appEditorRecovery = STATES.find((state) => state.name === 'app-editor-save-recovery');
+if (!appEditorRecovery) throw new Error('App editor recovery state is missing');
+STATES.push({ ...appEditorRecovery, name: 'app-editor-recovery', kind: 'visual' });

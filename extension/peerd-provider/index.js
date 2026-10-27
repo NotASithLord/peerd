@@ -53,7 +53,7 @@ export {
   openrouterAdapter,
   DEFAULT_MODEL as OPENROUTER_DEFAULT_MODEL,
   // Live gateway catalog + the curated "popular" seed, for the Settings
-  // model-curation picker. listOpenRouterModels doubles as the key-verify probe.
+  // model-curation picker. The catalog is public; provider/test verifies the key.
   listOpenRouterModels,
   OPENROUTER_POPULAR,
 } from './adapters/openrouter.js';

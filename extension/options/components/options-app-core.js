@@ -257,7 +257,9 @@ const OptionsApp = {
         ]),
       ]),
       m('main.options-content', m('.options-page', [
-        m('h2', SECTION_TITLES[section] ?? 'Settings'),
+        // why its own title: Discover's Try opens Backup & restore with a
+        // starter, and that page only adds the app to the Library.
+        m('h2', section === 'transfer' && m.route.param('starter') !== undefined ? 'Try an app' : SECTION_TITLES[section] ?? 'Settings'),
         m(ActorIsolationBanner, { capability: state.capabilities?.actorExecution, send }),
         OptionsApp.section(vnode),
       ])),

@@ -338,21 +338,10 @@ export const createVmTabTracker = ({ tabs, announce, onAdopt, onDrop } = {}) => 
   });
 
   return {
-    bootstrap: tracker.bootstrap,
-    onTabReady: tracker.onTabReady,
-    onTabRemoved: tracker.onTabRemoved,
-    // why parseVmIdFromUrl: the VM tracker has always exposed the
-    // vm-flavored name; keep it so existing callers don't have to change.
+    // why: forward failures and readiness from the same tracker.
+    ...tracker,
+    // why: keep the existing WebVM name for its callers.
     parseVmIdFromUrl: tracker.parseIdFromUrl,
-    getTabId: tracker.getTabId,
-    isReady: tracker.isReady,
-    ensureTab: tracker.ensureTab,
-    closeTab: tracker.closeTab,
-    // reloadTab + markReloading: the wedged-VM self-heal in vm-client recycles a
-    // hung tab in place (reload, not close: close would interrupt the command lane).
-    reloadTab: tracker.reloadTab,
-    markReloading: tracker.markReloading,
-    listLive: tracker.listLive,
   };
 };
 

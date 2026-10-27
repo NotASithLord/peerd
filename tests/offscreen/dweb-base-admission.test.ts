@@ -9,6 +9,7 @@ import { formatPeerdUri } from '../../extension/peerd-distributed/content/uri.js
 import { prepareAppBundle } from '../../extension/peerd-distributed/apps/loader.js';
 import { fromBase64 } from '../../extension/shared/bundle/bytes.js';
 import { appSeedHandoff } from '../../extension/shared/app-seed-handoff.js';
+import { withDeclaration } from '../../extension/offscreen/app-declaration.js';
 
 const source = readFileSync(new URL('../../extension/offscreen/dweb-base.js', import.meta.url), 'utf8');
 // Exercise the authored boundary functions with finite injected host effects;
@@ -62,7 +63,7 @@ test('offscreen update carries exact conflict and publication receipts and trust
   const { manifest, hash } = await buildManifest({ payload, type: 'app', identity });
   const app = await prepareAppBundle({ uri: formatPeerdUri({ did: identity.did, hash }), manifest, payload });
   const update = source.slice(source.indexOf("case 'dweb/base-host/update-app':"));
-  const callback = section('announce: async', '\n            },', update)
+  const callback = section('announce: async', '\n              },', update)
     .replace(/^announce: /, '') + '\n}';
   const calls: any[] = [];
   let reply: any = { ok: true, app: { id: 'a' }, cleanupHashes: ['old', 'old', 3] };
@@ -71,15 +72,16 @@ test('offscreen update carries exact conflict and publication receipts and trust
     previousHash: 'forged-old', pendingHashes: ['forged-pending'],
   };
   const boundary = new Function('msg', 'swEffectCall', 'publishFailureError', 'manifest', 'payload', 'appSeedHandoff', 'prepared',
-    'let cleanupHashes = []; return { announce: ' + callback + ', cleanup: () => cleanupHashes };',
+    'withDeclaration', 'let cleanupHashes = []; return { announce: ' + callback + ', cleanup: () => cleanupHashes };',
   )(message, async (type: string, args: any) => { calls.push({ type, ...args }); return reply; },
-    publishFailureError, manifest, payload, appSeedHandoff, app);
+    publishFailureError, manifest, payload, appSeedHandoff, app, withDeclaration);
   await boundary.announce();
   expect(calls[0]).toMatchObject({
     type: 'dweb/app-update', appId: 'a', strategy: 'replace',
     conflictToken: 7, publicationGeneration: 11,
   });
-  expect(calls[0].dweb).toEqual(app.dweb);
+  // The update records what the new version's verified files ask of peerd: no peerd.json, the dwapp default.
+  expect(calls[0].dweb).toEqual({ ...app.dweb, declared: { hash, dweb: true, instructions: false, observeAct: false } });
   expect(calls[0].files).toBeUndefined();
   expect(calls[0].seedBundle.manifest).toEqual(manifest);
   expect(fromBase64(calls[0].seedBundle.payload)).toEqual(payload);
@@ -92,6 +94,30 @@ test('offscreen update carries exact conflict and publication receipts and trust
     message: 'conflict', conflictToken: 8, requiresAction: true,
     performed: true, outcomeKnown: false, outcomeKind: 'transport-lost', retryable: false,
   });
+});
+
+test('a heard install and a room install record what the version\'s verified files ask of peerd', async () => {
+  const identity = await generateIdentity();
+  const files = { 'index.html': readFileSync(new URL('../../extension/tests/runner.html', import.meta.url)) };
+  const payload = packBundle({ entry: 'index.html', files });
+  const { manifest, hash } = await buildManifest({ payload, type: 'app', identity });
+  const app = await prepareAppBundle({ uri: formatPeerdUri({ did: identity.did, hash }), manifest, payload });
+  const heard = source.slice(source.indexOf("case 'dweb/base-host/install-app':"));
+  const room = source.slice(source.indexOf("if (op === 'install-app') {"));
+  for (const [install, end] of [[heard, '\n              },'], [room, '\n      },']]) {
+    const callback = section('announce: async', end, install).replace(/^announce: /, '') + '\n}';
+    const calls: ({ type: string } & Record<string, unknown>)[] = [];
+    const announce = new Function('msg', 'swEffectCall', 'publishFailureError', 'manifest', 'payload', 'appSeedHandoff', 'prepared',
+      'withDeclaration', 'appId', 'return ' + callback + ';',
+    )({ publicationGeneration: 3 }, async (type: string, args: Record<string, unknown>) => {
+      calls.push({ type, ...args });
+      return { ok: true, app: { id: 'a' } };
+    }, publishFailureError, manifest, payload, appSeedHandoff, app, withDeclaration, 'a') as () => Promise<unknown>;
+    await announce();
+    expect(calls[0]).toMatchObject({ type: 'dweb/app-install', appId: 'a', publicationGeneration: 3 });
+    // No peerd.json: the dwapp default an install writes.
+    expect(calls[0].dweb).toEqual({ ...app.dweb, declared: { hash, dweb: true, instructions: false, observeAct: false } });
+  }
 });
 
 test('retired reseed compensates through the network, not its host wrapper', async () => {

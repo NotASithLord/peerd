@@ -73,6 +73,16 @@ describe('callOpenAi exact authority boundary', () => {
     expect(request.nativeBody.model).toBe(DEFAULT_MODEL);
     expect(request.nativeBody.stream).toBe(true);
   });
+
+  test('names the output cap max_completion_tokens, never max_tokens', async () => {
+    let request: any = null;
+    const modelEgress = makeModelEgress({
+      openInference: async (args: any) => { request = args; return okStreamingResponse(); },
+    });
+    await drain(callOpenAi(baseArgs({ modelEgress, maxTokens: 2048 }) as any));
+    expect(request.nativeBody.max_completion_tokens).toBe(2048);
+    expect('max_tokens' in request.nativeBody).toBe(false);
+  });
 });
 
 describe('callOpenAi — retryable status set', () => {
@@ -97,6 +107,29 @@ describe('callOpenAi — retryable status set', () => {
     expect(calls).toBe(1);
     expect(thrown).toBeInstanceOf(ProviderHttpError);
     expect(thrown.status).toBe(status);
+  });
+
+  test.each([
+    "{\"error\": {\"message\": \"Rate limit reached for gpt-4o-mini in organization org-abc on requests per min (RPM): Limit 3, Used 3, Requested 1. Please try again in 20s. Visit https://platform.openai.com/account/rate-limits to learn more. You can increase your rate limit by adding a payment method to your account at https://platform.openai.com/account/billing.\", \"type\": \"requests\", \"param\": null, \"code\": \"rate_limit_exceeded\"}}",
+    "{\"error\": {\"message\": \"Rate limit reached for gpt-4o in organization org-abc on tokens per min (TPM): Limit 30000, Used 28000, Requested 4000. Please try again in 4s. Visit https://platform.openai.com/account/rate-limits to learn more. You can increase your rate limit by adding a payment method to your account at https://platform.openai.com/account/billing.\", \"type\": \"tokens\", \"param\": null, \"code\": \"rate_limit_exceeded\"}}",
+    "{\"error\": {\"message\": \"Provider returned error\", \"code\": 429, \"metadata\": {\"raw\": \"{\\\"error\\\": {\\\"code\\\": 429, \\\"message\\\": \\\"Resource has been exhausted (e.g. check quota).\\\", \\\"status\\\": \\\"RESOURCE_EXHAUSTED\\\"}}\", \"provider_name\": \"Google\"}}}",
+    "{\"error\": {\"message\": \"Quota exceeded for quota metric 'Generate Content API requests per minute' and limit 'GenerateContent request limit per minute for a region' of service 'generativelanguage.googleapis.com'.\", \"code\": 429, \"metadata\": {\"provider_name\": \"Google AI Studio\"}}}",
+  ])('a throttle that mentions billing or quota still retries: %s', async (bodyText) => {
+    let calls = 0;
+    const openInference = async () => {
+      calls++;
+      return calls === 1 ? stubResponse(429, {}, bodyText) : okStreamingResponse();
+    };
+    const events = await drain(callOpenAi(baseArgs({ modelEgress: makeModelEgress({ openInference }) }) as any));
+    expect(calls).toBe(2);
+    expect(events.filter((ev) => ev.type === 'rate-limit-pause')).toHaveLength(1);
+  });
+
+  test('the usage-limit message names the provider by its brand label', () => {
+    expect(new ProviderUsageLimitError('openai').message).toStartWith('OpenAI usage limit reached');
+    expect(new ProviderUsageLimitError('openrouter').message).toStartWith('OpenRouter usage limit reached');
+    expect(new ProviderUsageLimitError('glm').message).toStartWith('Z.ai usage limit reached');
+    expect(new ProviderUsageLimitError('unknown-provider').message).toStartWith('Provider usage limit reached');
   });
 
   test('a spent account (429 insufficient_quota) fails FAST as a usage limit, no retry', async () => {

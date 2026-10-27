@@ -1,15 +1,8 @@
 // @ts-check
 
 import { composeTool } from '/peerd-runtime/tools/metadata/index.js';
-// read_memory — read memory the always-loaded block does NOT include.
-//
-// The user/project memory rides the system prompt every turn. This tool
-// fetches the rest ON DEMAND: a specific scope's full body, or the
-// subtree (path-scoped) notes for a folder/section the agent is about to
-// work in. Keeping subtree memory out of the always-loaded block is how
-// the < ~200-line budget holds while deep per-area notes still exist.
-//
-// Read-only: no confirmation, no mutation.
+// read_memory pages durable notes outside the always-loaded context.
+import { buildPagedResult, SPILL_PAGE_CHARS, pageStatusLine } from '../web/spill.js';
 
 /**
  * The memory store instance the SW injects as ctx.memory (peerd-runtime
@@ -29,23 +22,23 @@ export const readMemoryTool = composeTool("read_memory", {
     const kind = args?.scope;
     const workspace = args?.workspace ?? ctx.activeTab?.origin ?? '';
     try {
+      let content;
       if (kind === 'subtree') {
         if (!workspace) return { ok: false, error: 'workspace_required' };
         if (!args.subpath) return { ok: false, error: 'subpath_required' };
         const docs = await memory.readSubtree(workspace, args.subpath);
-        return {
-          ok: true,
-          content: docs.length
-            ? docs.map((d) => `### ${d.subpath}\n${d.body}`).join('\n\n')
-            : '(no subtree memory for that path)',
-        };
-      }
-      if (kind === 'user' || kind === 'project') {
+        content = docs.length ? docs.map((d) => `### ${d.subpath}\n${d.body}`).join('\n\n') : '(no subtree memory for that path)';
+      } else if (kind === 'user' || kind === 'project') {
         if (kind === 'project' && !workspace) return { ok: false, error: 'workspace_required' };
         const doc = await memory.readScope({ kind, workspace });
-        return { ok: true, content: doc?.body || '(empty)' };
-      }
-      return { ok: false, error: 'invalid_scope' };
+        content = doc?.body || '(empty)';
+      } else return { ok: false, error: 'invalid_scope' };
+      // why: the durable doc backs each page. Never cut notes before a write.
+      return buildPagedResult({ text: content, offset: typeof args.offset === 'number' ? args.offset : 0,
+        limit: SPILL_PAGE_CHARS, frame: (page) => page.slice + (page.remaining > 0 || page.offset > 0
+          ? `\n${pageStatusLine({ page, nextArgs: JSON.stringify({ scope: kind,
+            ...(kind !== 'user' ? { workspace } : {}), ...(kind === 'subtree' ? { subpath: args.subpath } : {}), offset: page.end }) })}` : ''),
+      });
     } catch (e) {
       return { ok: false, error: `read_memory_failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}` };
     }

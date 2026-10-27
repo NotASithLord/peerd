@@ -144,6 +144,8 @@ describe('sidepanel site-client confirmation', () => {
       expect(dialog.getAttribute('aria-modal')).toBe('true');
       expect(dialog.getAttribute('aria-labelledby')).toBe('peerd-confirm-title');
       expect(document.activeElement).toBe(buttons[0]);
+      buttons[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+      expect(document.activeElement).toBe(buttons.at(-1));
       buttons.at(-1)?.focus();
       buttons.at(-1)?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
       expect(document.activeElement).toBe(buttons[0]);

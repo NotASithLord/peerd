@@ -39,3 +39,22 @@ export const captureSessionAuthority = (storage) => {
 export const changesSessionAuthority = (patch) => !!patch && typeof patch === 'object'
   && ['permissionMode', 'confirmActions', 'originState', 'archivedAt'].some((field) =>
     Object.hasOwn(patch, field));
+
+// why: the new-chat pointer and its permission cache form one mutation. A
+// permission click during durable creation must land after binding, never be
+// overwritten by the permission snapshot that creation captured earlier.
+/** @type {WeakMap<object,Promise<unknown>>} */
+const mutationTails = new WeakMap();
+/** @template T @param {object} storage @param {()=>Promise<T>} mutate @returns {Promise<T>} */
+export const withSessionAuthorityMutation = (storage, mutate) => {
+  // Revoke synchronously, including while this mutation waits for its turn.
+  const finish = beginSessionAuthorityChange(storage);
+  const previous = mutationTails.get(storage) ?? Promise.resolve();
+  const result = previous.then(mutate);
+  const settled = result.then(() => {}, () => {}).finally(() => {
+    finish();
+    if (mutationTails.get(storage) === settled) mutationTails.delete(storage);
+  });
+  mutationTails.set(storage, settled);
+  return result.finally(() => settled);
+};

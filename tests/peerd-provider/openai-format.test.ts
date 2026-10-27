@@ -228,6 +228,16 @@ describe('from-openai stream parsing', () => {
     expect(evs.some((e) => e.type === 'error' && /bad model/.test(e.error))).toBe(true);
   });
 
+  test('mid-stream error chunk keeps its text and synthesizes no incomplete stop', async () => {
+    const evs = await drain(fromOpenAiStream(streamOf([
+      'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+      'data: {"error":{"code":502,"message":"Provider disconnected"},"usage":{"prompt_tokens":12,"completion_tokens":3},"choices":[{"delta":{"content":""},"finish_reason":"error"}]}\n\n',
+    ]), { provider: 'openrouter' }));
+    expect(evs.map((e) => e.type)).toEqual(['text-delta', 'usage', 'error']);
+    expect(evs[1].usage.inputTokens).toBe(12);
+    expect(evs[2].error).toBe('openrouter: Provider disconnected');
+  });
+
   test('stream that ends without finish_reason reports incomplete', async () => {
     const evs = await drain(fromOpenAiStream(streamOf([
       'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',

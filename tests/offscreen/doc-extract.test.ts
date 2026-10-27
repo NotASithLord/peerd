@@ -3,6 +3,27 @@ import { handleDocExtract } from '../../extension/offscreen/doc-extract.js';
 import { makeZip } from '../peerd-runtime/doc/fixtures.ts';
 
 describe('offscreen document extraction cancellation', () => {
+  test('size refusals keep their code at inline, fetch and conversion limits', async () => {
+    const limit = 75 * 1024 * 1024;
+    for (const extra of [4, 5]) {
+      const result = await handleDocExtract({ source: { name: 'large.pdf', bytesB64: 'A'.repeat(Math.ceil(limit / 3) * 4 + extra) } });
+      expect(result).toEqual({ ok: false, error: 'document_too_large' });
+    }
+    const fetched = await handleDocExtract({ source: { url: 'https://docs.example/large.pdf' } }, {
+      fetchImpl: (async () => new Response('x', { headers: { 'content-length': String(limit + 1), 'content-type': 'application/pdf' } })) as unknown as typeof fetch,
+    });
+    expect(fetched).toEqual({ ok: false, error: 'document_too_large' });
+    const office = new Uint8Array(40 * 1024 * 1024 + 1);
+    office.set([0x50, 0x4b, 3, 4]);
+    const converted = await handleDocExtract({ source: { name: 'large.docx', url: 'https://docs.example/large.docx' } }, {
+      fetchImpl: (async () => new Response(office)) as unknown as typeof fetch,
+    });
+    expect(converted).toEqual({ ok: false, error: 'document_too_large' });
+    const missing = await handleDocExtract({ source: { url: 'https://docs.example/missing.docx' } }, {
+      fetchImpl: (async () => new Response('', { status: 404 })) as unknown as typeof fetch,
+    });
+    expect(missing).toEqual({ ok: false, error: 'fetch_failed' });
+  });
   test('Stop cancels a slow response read and returns no document result', async () => {
     const controller = new AbortController();
     let fetchSignal: AbortSignal | undefined;

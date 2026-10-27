@@ -11,7 +11,7 @@ export const makeSessionRoutes = (deps) => {
     runAgentTurn, runInit, handleSystemCommand, handleToolsCommand,
     postChatNote, spawnActor, browser,
     startGoalRun, haltGoalRun, ensureSession, actorRecoveryReady, actorMessaging,
-    actorLifecycle, admitSend,
+    actorLifecycle, admitSend, clearGoalStopNote,
     // The debug surface: the pure assembler + tree walk from
     // peerd-runtime/observability, the SW's live snapshot ring, and the
     // settings/channel/version identity the bundle stamps.
@@ -272,7 +272,10 @@ export const makeSessionRoutes = (deps) => {
         const curSid = boundSessionId ?? await sessionCache.sessionGet('currentSessionId');
         // Awaited: durably forget the run so a steer-takeover can't be undone by
         // a resume() on the next unlock (parity with agent/stop; #60).
-        if (curSid) await haltGoalRun(/** @type {any} */ (curSid));
+        if (curSid) {
+          await haltGoalRun(/** @type {any} */ (curSid));
+          await clearGoalStopNote?.(curSid);
+        }
       }
       // Composer expansion (feature 04): rewrite /commands and @-references
       // BEFORE the turn starts. @tab/@file pulls (possibly untrusted)

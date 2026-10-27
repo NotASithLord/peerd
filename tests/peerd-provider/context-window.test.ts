@@ -18,6 +18,14 @@ describe('resolveContextWindow', () => {
     expect(resolveContextWindow('google/gemini-2.0-flash')).toEqual({ window: 1_048_576, known: true });
   });
 
+  test('bare OpenAI ids resolve, GPT-5.x to the 272K input cap', () => {
+    for (const id of ['gpt-4o', 'gpt-4o-mini']) expect(contextWindowFor(id)).toBe(128_000);
+    expect(contextWindowFor('o4-mini')).toBe(200_000);
+    for (const id of ['gpt-4.1', 'gpt-4.1-mini']) expect(contextWindowFor(id)).toBe(1_047_576);
+    for (const id of ['gpt-5', 'gpt-5-mini', 'gpt-5.1']) expect(contextWindowFor(id)).toBe(272_000);
+    expect(contextWindowFor('gpt-5.1-mini')).toBe(null);
+  });
+
   test('unknown models are flagged not-known (caller skips the token trigger)', () => {
     const r = resolveContextWindow('some/unlisted-model');
     expect(r.known).toBe(false);

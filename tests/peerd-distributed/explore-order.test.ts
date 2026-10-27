@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
-import { exploreOrder, nextSuggestion, suggestionKey, SURPRISE_HISTORY_LIMIT } from '../../extension/home/explore-order.js';
-const apps = Array.from({ length: 120 }, (_, i) => ({ dwapp_id: `app-${i}`, publisher: i < 100 ? 'prolific' : `publisher-${i}`, name: `App ${i}`, includes_wasm: i % 3 === 0 ? true : i % 3 === 1 ? false : null }));
+import { exploreOrder, matchesWords, nextSuggestion, searchWords, suggestionKey, SURPRISE_HISTORY_LIMIT } from '../../extension/home/explore-order.js';
+import { encodeDidKey } from '../../extension/shared/address/did.js';
+const apps = Array.from({ length: 120 }, (_, i) => ({ dwapp_id: `app-${i}`, publisher: i < 100 ? 'prolific' : `publisher-${i}`, name: `App ${i}` }));
 test('Explore balances publisher rounds without duplicate apps or arrival-order ranking', () => {
   const ordered = exploreOrder(apps, { seed: 42 });
   expect(ordered).toHaveLength(120);
@@ -9,14 +10,73 @@ test('Explore balances publisher rounds without duplicate apps or arrival-order 
   expect(exploreOrder([...apps, apps[0]!], { seed: 42 })).toEqual(ordered);
   expect(exploreOrder(apps, { seed: 871 })).not.toEqual(ordered);
 });
-test('Explore filters exact signed claims without guessing from names and searches full publisher identity', () => {
-  for (const [wasm, value] of [['yes', true], ['no', false], ['unknown', null]] as const) {
-    const selected = exploreOrder(apps, { wasm });
-    expect(selected).toHaveLength(40); expect(selected.every(a => a.includes_wasm === value)).toBe(true);
-  }
+test('Explore searches the full publisher identity and the description', () => {
   expect(exploreOrder(apps, { query: 'publisher-110' }).map(a => a.dwapp_id)).toEqual(['app-110']);
-  expect(exploreOrder([{dwapp_id:'legacy',name:'WebAssembly app'}], {wasm:'yes'})).toEqual([]);
   expect(exploreOrder([{dwapp_id:'legacy',description:'A physics simulator'}], {query:'PHYSICS'})).toHaveLength(1);
+});
+test('Explore finds an app by any word of a task, as the search label asks for', () => {
+  const cards = [
+    { dwapp_id: 'split', name: 'Expense splitter', description: 'Split shared costs and settle up with friends.' },
+    { dwapp_id: 'trip', name: 'Trip planner', description: 'Plan routes, stops and packing lists.' },
+    { dwapp_id: 'chess', name: 'Chess clock', description: 'A two-player clock.' },
+  ];
+  const found = (query: string) => exploreOrder(cards, { query }).map(a => a.dwapp_id).sort();
+  expect(found('split a bill')).toEqual(['split']);
+  expect(found('Plan a TRIP')).toEqual(['trip']);
+  expect(found('chess or a trip')).toEqual(['chess', 'trip']);
+  // Only short words: the query matches as typed.
+  expect(found('a t')).toEqual(['chess']);
+  expect(found('a b')).toEqual([]);
+  expect(found('  ')).toEqual(['chess', 'split', 'trip']);
+});
+test('search words: words of 3 or more letters, else the whole query, lower case', () => {
+  expect(searchWords('  Split a BILL ')).toEqual(['split', 'bill']);
+  expect(searchWords('to do')).toEqual(['to do']);
+  expect(searchWords('')).toEqual([]);
+  // The small words of a sentence match almost any app, so they never count.
+  expect(searchWords('split the bill')).toEqual(['split', 'bill']);
+  expect(searchWords('what did ana share')).toEqual(['ana', 'share']);
+  expect(searchWords('the app')).toEqual(['the app']);
+  expect(matchesWords('Expense splitter', ['bill', 'split'])).toBe(true);
+  expect(matchesWords('Expense splitter', ['bill'])).toBe(false);
+  expect(matchesWords('anything', [])).toBe(true);
+});
+test('a sentence finds the apps it is about: filler words and the did:key text of every maker match nothing', () => {
+  const maker = (n: number) => encodeDidKey(new Uint8Array(32).fill(n));
+  const cards = [
+    { dwapp_id: 'split', publisher: maker(1), name: 'Expense splitter', description: 'Split a bill with friends.' },
+    { dwapp_id: 'chess', publisher: maker(2), name: 'Chess clock', description: 'A clock for over-the-board games. Pause them both.' },
+    { dwapp_id: 'reading', publisher: maker(3), name: 'Reading list', description: 'Books you want to read next.' },
+    { dwapp_id: 'notes', publisher: maker(2), name: 'Field notes', description: 'Notes and sketches from a walk.' },
+  ];
+  const names = new Map([[maker(1), 'Ana']]);
+  const found = (query: string) => exploreOrder(cards, { query, names }).map(a => a.dwapp_id);
+  expect(found('split the bill')).toEqual(['split']);
+  expect(found('what did ana share')).toEqual(['split']);
+  expect(found('house key tracker')).toEqual([]);
+  expect(found('my key notes')).toEqual(['notes']);
+  // The maker still matches by the short key a tile shows, or by the whole did.
+  expect(found(maker(3).slice(-8))).toEqual(['reading']);
+  expect(found(maker(2)).sort()).toEqual(['chess', 'notes']);
+});
+
+test('an app that matches more words of the query comes first; ties keep the seeded order', () => {
+  const cards = [
+    { dwapp_id: 'a', publisher: 'one', name: 'Trip notes' },
+    { dwapp_id: 'b', publisher: 'two', name: 'Trip planner', description: 'Plan a trip with friends.' },
+    { dwapp_id: 'c', publisher: 'three', name: 'Packing list', description: 'Pack for a trip.' },
+  ];
+  const seeded = exploreOrder(cards, { seed: 42 }).map(a => a.dwapp_id);
+  const ranked = exploreOrder(cards, { query: 'plan a trip', seed: 42 }).map(a => a.dwapp_id);
+  expect(ranked[0]).toBe('b');
+  expect(ranked.slice(1)).toEqual(seeded.filter(id => id !== 'b'));
+});
+
+test('Explore searches the saved contact name a tile shows, keyed by the full did', () => {
+  const cards = [{ dwapp_id: 'x', publisher: 'did:key:zMaker', name: 'Expense splitter' }, { dwapp_id: 'y', publisher: 'did:key:zOther', name: 'Trip planner' }];
+  const names = new Map([['did:key:zMaker', 'Ana Lima']]);
+  expect(exploreOrder(cards, { query: 'ana lima', names }).map(a => a.dwapp_id)).toEqual(['x']);
+  expect(exploreOrder(cards, { query: 'ana lima' })).toEqual([]);
 });
 
 
@@ -37,4 +97,15 @@ test('Surprise me rotates publishers and immutable versions without implying ava
   expect(nextSuggestion([a],new Set(Array.from({length:SURPRISE_HISTORY_LIMIT},(_,i)=>String(i))),null)).toBeNull();
   seen.clear();
   expect(nextSuggestion([a],seen,null)).toEqual(a);
+});
+
+
+test('Surprise me skips only fresh retrieval misses and restores eligibility after expiry', () => {
+  const a = {dwapp_id:'a', publisher:'one', retrieval:{outcome:'no-provider-found',observedAt:100,expiresAt:200}};
+  const b = {dwapp_id:'b', publisher:'two'};
+  expect(nextSuggestion([a,b],new Set(),null,150)).toEqual(b);
+  expect(nextSuggestion([a],new Set(),null,150)).toBeNull();
+  expect(nextSuggestion([a],new Set(),null,200)).toEqual(a);
+  expect(nextSuggestion([a],new Set(),null,99)).toEqual(a);
+  expect(nextSuggestion([{...a,retrieval:{...a.retrieval,outcome:'lookup-error'}}],new Set(),null,150)?.dwapp_id).toBe('a');
 });

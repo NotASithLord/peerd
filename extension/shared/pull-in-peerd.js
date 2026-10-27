@@ -18,14 +18,9 @@
 // content-script-reachable SW routes" boundary (shared/messaging.js). That
 // wider scope is a separate, deliberate decision (see the security/UX writeup).
 //
-// Cross-browser: Chrome opens the window side panel — sidePanel.open() needs a
-// REAL windowId (the WINDOW_ID_CURRENT sentinel is rejected, and the async
-// tabs.getCurrent() is too late for the gesture), so we resolve and cache it at
-// mount. Firefox has no sidePanel (the build maps the panel to a
-// sidebar_action), so we open the sidebar via sidebarAction.open(). BOTH APIs
-// require a user gesture, so the open() call runs synchronously inside the
-// click handler — no await before it, or the activation is dropped (same
-// constraint as home's popToSide).
+// why: the stable tab ID opens the panel in the tab's current window.
+// Cache it before the click to keep Chrome and Firefox user activation.
+// Firefox uses sidebarAction.open() without a target.
 
 import browser from '/shared/browser-api.js';
 
@@ -38,15 +33,13 @@ const sidePanelApi = () =>
     /** @type {unknown} */ (browser)
   ).sidePanel;
 
-// Resolved once at mount: sidePanel.open() rejects the WINDOW_ID_CURRENT
-// sentinel and tabs.getCurrent() is async, so caching the real id now is the
-// only way to have it ready synchronously when the click fires.
+// why: cache the stable tab ID before the click to preserve user activation.
 /** @type {number | null} */
-let cachedWindowId = null;
-const resolveWindowId = () => {
+let cachedTabId = null;
+const resolveTabId = () => {
   try {
     const p = browser.tabs?.getCurrent?.();
-    if (p?.then) p.then((t) => { cachedWindowId = t?.windowId ?? null; }).catch(() => {});
+    if (p?.then) p.then((t) => { cachedTabId = t?.id ?? null; }).catch(() => {});
   } catch { /* no tabs API in this context */ }
 };
 
@@ -61,9 +54,9 @@ const openPanel = () => {
     const sidePanel = sidePanelApi();
     if (sidePanel?.open) {
       // id not resolved yet → no-op beats a reject (mirrors home.popToSide).
-      if (cachedWindowId == null) return;
-      const p = sidePanel.open({ windowId: cachedWindowId });
-      if (p?.catch) p.catch((e) => console.warn('[pull-in-peerd] sidePanel.open failed', e));
+      if (cachedTabId == null) return;
+      const p = sidePanel.open({ tabId: cachedTabId });
+      if (p?.catch) p.catch((e) => { console.warn('[pull-in-peerd] sidePanel.open failed', e); syncPanelState(); });
       return;
     }
     if (browser.sidebarAction?.open) {
@@ -366,7 +359,7 @@ const listenForSurfaceChanges = () => {
 /**
  * Mount the "pull in peerd" toggle onto an engine tab page. Idempotent (a
  * second call returns the existing button) and a no-op where no panel/sidebar
- * API exists. Safe to call early — windowId resolves asynchronously and is
+ * API exists. Safe to call early - tabId resolves asynchronously and is
  * ready well before the user can click.
  *
  * @returns {HTMLButtonElement | null} the button, or null if not mounted
@@ -377,7 +370,7 @@ export const mountPullInPeerd = () => {
   const existing = document.querySelector('.peerd-pull');
   if (existing) return /** @type {HTMLButtonElement} */ (existing);
 
-  resolveWindowId();
+  resolveTabId();
   injectStyles();
 
   const btn = document.createElement('button');

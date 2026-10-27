@@ -128,7 +128,7 @@ describe('kernel executable owner', () => {
       ['app/actor-chat', 'app'], ['actors/call', 'relay'],
       ['site-fetch/call', 'relay'], ['script/model-call', 'relay'],
       ['script-run/abort', 'relay'], ['a2a/call', 'relay'],
-      ['vm/tab-ready', 'engine'], ['js/tab-ready', 'engine'],
+      ['vm/tab-ready', 'engine'], ['vm/tab-failed', 'engine'], ['js/tab-ready', 'engine'],
       ['pod/tab-adopt', 'engine'], ['app/tab-ready', 'engine'],
       ['app/actor-retry', 'engine'],
     ]);
@@ -169,6 +169,12 @@ describe('kernel executable owner', () => {
     called.length = 0;
     expect(admit('dweb/base/start', {}, sender)).toBe(true);
     expect(called).toEqual(['home']);
+    for (const route of ['dweb/base/install-status', 'dweb/base/cancel-install']) {
+      called.length = 0;
+      expect(admit(route, {}, sender)).toBe(true);
+      expect(called).toEqual(['home']);
+      expect(makeKernelDwebAdmission({ home: () => false, app: () => true, offscreen: () => true })(route, {}, sender)).toBe(false);
+    }
     const notebookOnly = makeKernelDwebAdmission({
       offscreen: () => false, app: () => false, home: () => false, notebook: () => true,
     });
@@ -180,6 +186,51 @@ describe('kernel executable owner', () => {
     expect(appOnly('dweb/audit', {}, sender)).toBe(true);
     expect(appOnly('dweb/base/start', {}, sender)).toBe(false);
     expect(admit('legacy/semantic-route', {}, sender)).toBe(false);
+  });
+
+  test('only Home can block, unblock or list blocked makers, refused before the dweb routes load', async () => {
+    const routes = ['dweb/peer-block', 'dweb/peer-unblock', 'dweb/blocked-peers'];
+    for (const route of routes) expect(KERNEL_DWEB_ROUTE_NAMES).toContain(route);
+    for (const owner of ['home', 'offscreen', 'app', 'notebook']) {
+      const admit = makeKernelDwebAdmission({
+        offscreen: () => owner === 'offscreen', app: () => owner === 'app',
+        home: () => owner === 'home', notebook: () => owner === 'notebook',
+      });
+      for (const route of routes) expect(admit(route, { did: 'did:key:z', appId: 'app-1' }, {})).toBe(owner === 'home');
+    }
+    const homeSender = {};
+    const hostSender = {};
+    let loads = 0;
+    const control = createKernelExecutableControl({
+      runtimeId: 'runtime', firefox: false, dweb: true, privateTransfer: false,
+      createRuntime: () => runtimeFactory()(),
+      ...liveLoaders(),
+      loadDwebRoutes: async () => {
+        loads += 1;
+        return Object.fromEntries(KERNEL_DWEB_ROUTE_NAMES.map((name) => [name, () => ({ ok: true, name })]));
+      },
+      owns: {
+        home: (sender: unknown) => sender === homeSender, options: () => false,
+        offscreen: (sender: unknown) => sender === hostSender, app: () => false,
+      },
+      paths: {
+        app: 'chrome-extension://runtime/engine-tabs/app-tab/app-tab.html',
+        notebook: 'chrome-extension://runtime/engine-tabs/notebook-tab/notebook-tab.html',
+        vm: 'chrome-extension://runtime/engine-tabs/vm-tab/vm-tab.html',
+        pod: 'chrome-extension://runtime/engine-tabs/pod-tab/pod-tab.html',
+        options: 'chrome-extension://runtime/options/options.html',
+      },
+    });
+    // Even the offscreen host, which owns the policy read, cannot change it.
+    for (const sender of [hostSender, {}]) {
+      for (const route of routes) {
+        expect(await control.routes[route]({ did: 'did:key:z' }, sender))
+          .toEqual({ ok: false, error: 'kernel-route-unauthorized', outcomeKnown: true });
+      }
+    }
+    expect(loads).toBe(0);
+    for (const route of routes) expect(await control.routes[route]({ did: 'did:key:z' }, homeSender)).toEqual({ ok: true, name: route });
+    expect(loads).toBe(1);
   });
 
   test('refuses provenance before loading and demand-loads one exact runtime', async () => {
@@ -241,8 +292,13 @@ describe('kernel executable owner', () => {
         options: 'chrome-extension://runtime/options/options.html',
       },
     });
-    expect(await control.routes['vm/tab-ready']({ vmId: 'vm-1' }, sender('vm', 'vm-2')))
-      .toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
+    for (const route of ['vm/tab-ready', 'vm/tab-failed']) {
+      expect(control.routes[route]).toBeFunction();
+      expect(await control.routes[route]({ vmId: 'vm-1' }, sender('vm', 'vm-2')))
+        .toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
+      expect(await control.routes[route]({ vmId: 'vm-1' }, { ...sender('vm', 'vm-1'), id: 'other-runtime' }))
+        .toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
+    }
     expect(await control.routes['js/tab-ready'](
       { notebookId: 'notebook-1' }, sender('notebook', 'notebook-2'),
     )).toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
@@ -253,8 +309,10 @@ describe('kernel executable owner', () => {
       .toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
     expect(loads).toBe(0);
 
-    expect(await control.routes['vm/tab-ready']({ vmId: 'vm-1' }, sender('vm', 'vm-1')))
-      .toMatchObject({ ok: true, name: 'vm/tab-ready' });
+    for (const route of ['vm/tab-ready', 'vm/tab-failed']) {
+      expect(await control.routes[route]({ vmId: 'vm-1' }, sender('vm', 'vm-1')))
+        .toMatchObject({ ok: true, name: route });
+    }
     expect(await control.routes['js/tab-ready'](
       { notebookId: 'notebook-1' }, sender('notebook', 'notebook-1'),
     )).toMatchObject({ ok: true, name: 'js/tab-ready' });

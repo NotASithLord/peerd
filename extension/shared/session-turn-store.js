@@ -216,7 +216,10 @@ export const createSessionTurnStore = ({
         ...(isRealUserMessage(message) ? { latestNonSyntheticUserMessageId: id } : {}),
       };
       if (!current.title && message.role === 'user' && typeof message.content === 'string') {
-        const title = message.content.replace(/\s+/g, ' ').trim();
+        const title = message.content.replace(/\n\n<peerd_file name="[^"]*">\n[\s\S]*/, '')
+          .split(/<\/(?:untrusted_web_content|peerd_file)\s*>/i)
+          .map((part) => part.replace(/<(?:untrusted_web_content|peerd_file)\b[\s\S]*/i, ''))
+          .join(' ').replace(/\s+/g, ' ').trim();
         if (title) next.title = title.slice(0, 60);
       }
       return next;

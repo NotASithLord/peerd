@@ -1435,6 +1435,7 @@ describe('controller turn finite tool protocol', () => {
           sessionId: payload.sessionId,
           messageJson: JSON.stringify({
             role: 'assistant', id: 'abort-assistant', content: '', streaming: true,
+            toolUses: [{ id: 'abort-effect-call', name: 'schedule_cancel', input: { id: 'routine-1' } }],
           }),
         });
         await invoke('turn.model.observe-event', {
@@ -1467,6 +1468,7 @@ describe('controller turn finite tool protocol', () => {
     }));
     expect(ctx.sessions.snapshot().messages.find((message: any) =>
       message.id === 'abort-assistant')).toMatchObject({
+      toolUses: [{ id: 'abort-effect-call', name: 'schedule_cancel', input: { id: 'routine-1' } }],
       streaming: false, errorCode: 'turn_abort_effect_outcome_unknown',
       outcomeKnown: false, retryable: false,
     });
