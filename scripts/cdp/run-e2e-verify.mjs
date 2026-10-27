@@ -182,10 +182,13 @@ async function main() {
   const states = STATES.filter(selected);
   const preUnlock = states.filter((s) => s.phase === 'pre-unlock');
   const postUnlockPriority = (state) => state.name === 'first-turn'
-    ? -1
-    : state.name === 'browser-network-floor' ? 1 : 0;
+    ? -2
+    : state.name === 'sidepanel-first-tab-first-run' ? -1
+      : state.name === 'browser-network-floor' ? 1 : 0;
   // why: `first-turn` is only meaningful before any reset or prior post-unlock
-  // state; the network-floor probe remains last because it mutates live rules.
+  // state; the first tab offer needs the panel that showed the vault setup, so
+  // it runs before any state reloads that panel; the network-floor probe
+  // remains last because it mutates live rules.
   const postUnlock = states.filter((s) => s.phase === 'post-unlock').sort((a, b) =>
     postUnlockPriority(a) - postUnlockPriority(b));
   const results = [];

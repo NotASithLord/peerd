@@ -134,3 +134,65 @@ describe('thin-kernel synchronous front door', () => {
     expect(await recovery.reconcile()).toEqual({ lastFocusedWindowId: 4, browserFocused: true });
   });
 });
+
+describe('closing the side panel', () => {
+  type Closer = { close?: (options: { windowId: number }) => Promise<void> };
+  const attachCloser = (sidePanel: Closer) => {
+    const calls: string[] = [];
+    const browser = {
+      runtime: {},
+      windows: {
+        WINDOW_ID_NONE: -1,
+        onFocusChanged: event(),
+        getLastFocused: async () => ({ id: 4, focused: true }),
+        getAll: async ({ windowTypes }: { windowTypes: string[] }) => {
+          calls.push(`getAll:${windowTypes.join(',')}`);
+          return [{ id: 4 }, { id: 9 }];
+        },
+      },
+      sidePanel: {
+        ...sidePanel,
+        setOptions: async (options: { enabled: boolean }) => { calls.push(`setOptions:${options.enabled}`); },
+      },
+    };
+    const { closePanel } = attachKernelFrontDoor({
+      browser,
+      events: { event: (_key: string, raw: unknown) => raw, registerRecovery: () => {} },
+      uiPorts: { hasNamed: () => false },
+      settingsStore: { get: () => ({ frontDoorView: 'panel' }) },
+      openHome: () => {},
+      ready: Promise.resolve(),
+    });
+    return { closePanel, calls };
+  };
+
+  test('Chrome 141+ closes the panel in every normal window, with no disable and re-enable', async () => {
+    const closedIn: number[] = [];
+    const { closePanel, calls } = attachCloser({
+      close: async ({ windowId }) => { closedIn.push(windowId); },
+    });
+    expect(await closePanel()).toEqual({ ok: true });
+    expect(closedIn).toEqual([4, 9]);
+    expect(calls).toEqual(['getAll:normal']);
+  });
+
+  test('a window without the panel does not fail the close', async () => {
+    const { closePanel, calls } = attachCloser({
+      close: async ({ windowId }) => { if (windowId === 4) throw new Error('No active side panel'); },
+    });
+    expect(await closePanel()).toEqual({ ok: true });
+    expect(calls).toEqual(['getAll:normal']);
+  });
+
+  test('falls back to the disable and re-enable trick without close, or when every close fails', async () => {
+    const old = attachCloser({});
+    expect(await old.closePanel()).toEqual({ ok: true });
+    expect(old.calls).toEqual(['setOptions:false']);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(old.calls).toEqual(['setOptions:false', 'setOptions:true']);
+
+    const failing = attachCloser({ close: async () => { throw new Error('close failed'); } });
+    expect(await failing.closePanel()).toEqual({ ok: true });
+    expect(failing.calls).toEqual(['getAll:normal', 'setOptions:false']);
+  });
+});

@@ -34,6 +34,8 @@ export const CHANNEL_DEFAULTS = Object.freeze({
   advancedAutomationEnabled: true,
   watchAgentTab: false,
   frontDoorView: "panel",
+  firstTabEnabled: false,
+  firstTabOffered: false,
   runnerModel: "",
   prewalkEnabled: false,
   enginePrewalkEnabled: false,

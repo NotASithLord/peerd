@@ -46,7 +46,7 @@ export const normalizeSettingsPatch = (patch, {
     'reasoningEnabled', 'advancedAutomationEnabled', 'autoMemoryEnabled',
     'watchAgentTab', 'confirmWebWrites', 'schemaValidatedReplies',
     'autoResumeInterruptedTurns', 'providerFailoverEnabled',
-    'prewalkEnabled', 'enginePrewalkEnabled',
+    'prewalkEnabled', 'enginePrewalkEnabled', 'firstTabEnabled', 'firstTabOffered',
   ]) {
     if (typeof patch[key] === 'boolean') next[key] = patch[key];
   }

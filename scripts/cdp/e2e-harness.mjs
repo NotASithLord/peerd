@@ -937,7 +937,7 @@ export async function launchPeerd({
       on: (listener) => listeners.add(listener),
       off: (listener) => listeners.delete(listener),
     };
-    // why: the kernel's sidepanel/close disables the browser-owned panel, which
+    // why: the kernel's sidepanel/close closes the browser-owned panel, which
     // destroys this document target and strands the handle above. A state that
     // closes the panel for real calls this afterwards: it binds the handle to
     // the panel's next document (opened through the action when no product
@@ -945,8 +945,8 @@ export async function launchPeerd({
     reopenNativePanel = async () => {
       const previousSessionId = sessionId;
       let next = await findNativePanelTarget();
-      // The kernel re-enables the panel 250 ms after closing it, and an action
-      // click inside that window opens nothing.
+      // An older Chrome without sidePanel.close re-enables the panel 250 ms
+      // after closing it, and an action click inside that window opens nothing.
       for (let attempt = 0; !next && attempt < 3; attempt += 1) next = await openNativePanelTarget(4_000);
       if (!next) throw new Error('browser-owned side panel target did not reappear');
       ({ sessionId } = await browserConn.send('Target.attachToTarget', { targetId: next.targetId, flatten: true }));
@@ -1340,7 +1340,11 @@ export async function unlockAndReady(page, { provider = 'ollama', model = 'qwen3
   if (!vault?.ok) throw new Error('vault/initialize failed: ' + JSON.stringify(vault));
   log('vault initialized + unlocked');
   await rpc(page, { type: 'onboarding/complete', peerName: 'peerd', facts: null });
-  const upd = await rpc(page, { type: 'settings/update', patch: { providerName: provider, providerModel: model } });
+  // why answer the first tab offer here: the panel that saw the vault setup
+  // asks once, and the harness finishes first-run setup for every state.
+  const upd = await rpc(page, {
+    type: 'settings/update', patch: { providerName: provider, providerModel: model, firstTabOffered: true },
+  });
   if (!upd?.ok) throw new Error('settings/update failed: ' + JSON.stringify(upd));
   log(`provider set to ${provider} (keyless)`);
 }

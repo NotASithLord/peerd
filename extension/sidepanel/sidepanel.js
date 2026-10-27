@@ -33,6 +33,33 @@ import { eventBelongsToSidepanelWindow, focusBrowserTab } from './tab-context.js
 /** @type {ChatState} */
 let currentState = INITIAL_STATE;
 
+// "Keep peerd as the first tab": the panel that showed the first vault setup
+// offers it once (home/first-tab-prompts.js). The vault shell shows that setup
+// before this module loads, and marks the page; the vault gate here shows it
+// after a vault reset. why a lazy import: only a first run needs it, so the
+// panel's first paint stays as it was.
+/** @type {{ view: (state: ChatState) => unknown } | null} */
+let firstTab = null;
+// The answer removes the button that had focus. why the composer: a keyboard
+// user goes on from there, as on Home.
+const focusComposer = () => {
+  m.redraw.sync();
+  const composer = document.querySelector('.input-bar textarea');
+  if (composer instanceof HTMLElement) composer.focus();
+};
+const noteFirstRun = () => {
+  if (firstTab || !currentState.hydrated) return;
+  if (currentState.vault?.initialized !== false
+    && document.documentElement.dataset.peerdFirstSetup !== 'true') return;
+  firstTab = { view: () => null };
+  import('/home/first-tab-prompts.js')
+    .then(({ makePanelFirstTab }) => {
+      firstTab = makePanelFirstTab({ send, afterAnswer: focusComposer });
+      m.redraw();
+    })
+    .catch(() => { /* the switch in Settings stays */ });
+};
+
 // The shared state Port owns transport/recycle; this surface only folds events.
 /** @param {unknown} raw @returns {boolean} */
 const handlePortMessage = (raw) => {
@@ -57,6 +84,7 @@ const handlePortMessage = (raw) => {
   const next = reduceChat(currentState, folded);
   if (next === currentState) return msg.type === 'state'; // guarded bail / live complement
   currentState = next;
+  noteFirstRun();
   // Side-panel-only: the voice manager doesn't survive the panel, so re-enable
   // it on a full snapshot when the persisted setting says it was on.
   if (msg.type === 'state') maybeRestoreVoice(currentState);
@@ -383,6 +411,7 @@ const onWindowFocusChanged = (windowId) => refreshOptionsActive(null, windowId);
 const routeArgs = (view) => ({
   state: currentState, send, voiceManager, uiActions, view, optionsActive,
   activeTabStatus, stateFailed: statePort.failed, retryState: statePort.retry,
+  firstTabPrompt: firstTab?.view(currentState) ?? null,
 });
 
 // First-run onboarding is NOT gated here — it lives on the HOME page as a

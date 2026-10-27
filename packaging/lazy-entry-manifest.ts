@@ -81,6 +81,8 @@ export const PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES = Object.freeze([
   'home/home.js',
   // Home defers onboarding until profile and explicit network choice are known.
   'sidepanel/components/onboarding-view.js',
+  // The side panel loads the one-time first tab offer only after a first run.
+  'home/first-tab-prompts.js',
 
   // Fixed module Workers spawned by their owning engine tabs.
   'engine-tabs/notebook-tab/linker-worker.js',

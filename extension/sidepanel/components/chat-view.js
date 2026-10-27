@@ -60,6 +60,7 @@ const saveJsonFile = (payload, filename) => {
  * @typedef {{ state: ChatViewState, attrs: {
  *   state: ChatState, send: Send, voiceManager: any, uiActions?: UiActions,
  *   surface?: string, activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive',
+ *   holdNudges?: boolean,
  * } }} ChatViewVnode
  */
 
@@ -76,7 +77,7 @@ export const ChatView = {
   },
 
   /** @param {ChatViewVnode} vnode */
-  view: ({ attrs: { state, send, voiceManager, uiActions, surface, activeTabStatus }, state: ui }) => {
+  view: ({ attrs: { state, send, voiceManager, uiActions, surface, activeTabStatus, holdNudges }, state: ui }) => {
     const sid = state.session?.sessionId;
     const messages = state.session?.messages ?? [];
     const changedSession = sid !== ui._sid;
@@ -121,6 +122,8 @@ export const ChatView = {
       // why: only nudge once the user has gotten past the API-key
       // hurdle. Stacking onboarding cards is hostile.
       && canSend
+      // The surface shows another one-time card (the first tab prompts).
+      && !holdNudges
       && messages.length === 0
       && detectVoiceCapability('auto', {
         moonshineHostAvailable: state.capabilities?.moonshineVoiceHost?.status === 'available',
