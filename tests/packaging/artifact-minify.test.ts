@@ -253,6 +253,41 @@ describe('release artifact JavaScript minification', () => {
     expect(module.NamedFailure.name).toBe('NamedFailure');
   });
 
+  test('compacts Dweb route private bindings while preserving exports and error receipts', async () => {
+    const root = makeRoot();
+    write(root, 'manifest.json', JSON.stringify({
+      background: { service_worker: 'background/service-worker.js', type: 'module' },
+    }));
+    write(root, 'background/service-worker.js', "export { makeDwebRoutes } from './routes/dweb.js';");
+    write(root, 'offscreen/offscreen.js', 'export const ready = true;');
+    write(root, 'background/routes/dweb.js', `
+      export function makeDwebRoutes(dependencies) {
+        async function installStatus(message) {
+          const validatedInstallAttemptIdentifier = message.attemptId;
+          if (typeof validatedInstallAttemptIdentifier !== 'string') throw Object.assign(new Error('invalid attempt'), {
+            code: 'install-attempt-required', outcomeKnown: true, performed: false,
+          });
+          return dependencies.read({ id: validatedInstallAttemptIdentifier,
+            exact: validatedInstallAttemptIdentifier === message.expected,
+            length: validatedInstallAttemptIdentifier.length });
+        }
+        return { installStatus };
+      }
+    `);
+    await minifyColdArtifactModules(root, 'chrome', 'preview');
+    const source = readFileSync(join(root, 'background/routes/dweb.js'), 'utf8');
+    expect(source).not.toContain('validatedInstallAttemptIdentifier');
+    const module = await import(`${pathToFileURL(join(root, 'background/service-worker.js')).href}?${crypto.randomUUID()}`);
+    expect(Object.keys(module)).toEqual(['makeDwebRoutes']);
+    const routes = module.makeDwebRoutes({ read: (value: unknown) => value });
+    expect(Object.keys(routes)).toEqual(['installStatus']);
+    expect(await routes.installStatus({ attemptId: 'abc', expected: 'abc' }))
+      .toEqual({ id: 'abc', exact: true, length: 3 });
+    await expect(routes.installStatus({ attemptId: null })).rejects.toMatchObject({
+      name: 'Error', message: 'invalid attempt', code: 'install-attempt-required', outcomeKnown: true, performed: false,
+    });
+  });
+
   test('keeps typed error wire names through identifier minification', async () => {
     const root = makeRoot();
     const extension = join(import.meta.dir, '..', '..', 'extension');

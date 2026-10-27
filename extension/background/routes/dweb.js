@@ -171,6 +171,27 @@ export const makeDwebRoutes = (deps) => {
       return publicationReply(`dweb/base-host/${action}-address`, { address }, isCurrent, action === 'install');
     }, false);
   };
+  /** @param {'install-status'|'cancel-install'} op @param {any} message */
+  const installControl = async (op, { address, attemptId, kind, appId } = {}) => {
+    if (typeof address !== 'string' || address.length > 4096 || !(await dwebReady())) {
+      return refuse('invalid-address-or-network-off');
+    }
+    if (op === 'cancel-install' && (typeof attemptId !== 'string' || !attemptId || attemptId.length > 64)) {
+      return refuse('install-attempt-required');
+    }
+    if (kind !== undefined && !['address', 'install', 'update'].includes(kind)) return refuse('invalid-install-kind');
+    if (kind === 'update' && (typeof appId !== 'string' || !appId || appId.length > 256)) return refuse('appId-required');
+    const generation = dwebPublicationGeneration();
+    // why: the install owns the publication lane while retrieving. Controls
+    // must reach its existing host without joining that lane or acquiring one.
+    const reply = await withDeadline(() => browser.runtime.sendMessage({
+      type: `dweb/base-host/${op}`, address,
+      ...(op === 'cancel-install' ? { attemptId } : {}),
+      ...(kind !== undefined ? { kind } : {}),
+      ...(kind === 'update' ? { appId } : {}),
+    }), 2000, () => Object.assign(new Error('install-control-timeout'), { outcomeKnown: false }));
+    return publicationActive(generation) ? reply : { ...custodyChanged(), outcomeKnown: false };
+  };
   /** @param {unknown} claim */
   const dwebStorageRefusal = async (claim) => {
     if (!DWEB_ENABLED) return dwebDisabled();
@@ -647,6 +668,8 @@ export const makeDwebRoutes = (deps) => {
     // base mesh, verifies it, and persists it. The card's version identity rides
     // along so the installed record can be matched against future announces.
     'dweb/base/inspect-address': ({ address } = {}) => addressOperation('inspect', address),
+    'dweb/base/install-status': (message = {}) => installControl('install-status', message),
+    'dweb/base/cancel-install': (message = {}) => installControl('cancel-install', message),
     'dweb/base/install-address': ({ address } = {}) => addressOperation('install', address),
     'dweb/base/install': async ({ uri, name, dwappId, slug, seq } = {}) => {
       return withReadyPublication((isCurrent) => publicationReply('dweb/base-host/install-app',

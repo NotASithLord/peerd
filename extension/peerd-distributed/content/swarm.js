@@ -113,6 +113,8 @@ export const swarmFetch = async ({ uri, providers, channelFor, onProgress, timeo
         } catch { /* one unavailable candidate cannot suppress other providers */ }
       }
     };
+    onProgress?.({ phase: 'manifest', providers: clients.length });
+    signal?.throwIfAborted();
     Promise.all(Array.from({ length: Math.min(concurrency, clients.length) }, candidate))
       .then(() => rejectManifest(new Error(`no reachable provider holds ${hash}`)))
       .catch(rejectManifest);
