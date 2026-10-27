@@ -385,6 +385,19 @@ jobs:
           name: wasm-install-cancellation-twopeer
           path: artifacts/wasm-install-cancellation-twopeer/
           if-no-files-found: warn
+      - name: Cancel and retry a WASM app selected by Surprise me
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          P2P_INSTALL_CANCELLATION: '1'
+          P2P_WASM_EXECUTION: '1'
+          P2P_RANDOM_DISCOVERY: '1'
+        run: bun scripts/cdp/manual-address-twopeer.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: catalog-install-cancellation-twopeer
+          path: artifacts/catalog-install-cancellation-twopeer/
+          if-no-files-found: warn
       - name: Discover, install and execute a peer WASM binary
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
