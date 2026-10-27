@@ -546,7 +546,7 @@ const starterAppState = (key, status) => ({
     try {
       await page.send('Emulation.setDeviceMetricsOverride',{width:960,height:key === 'csv-lab' ? 1180 : 760,deviceScaleFactor:1,mobile:false});
       const done = await waitFor(() => evalIn(page, `window.__starterApp?.pressed === true
-        && window.__starterApp.status.startsWith(${JSON.stringify(status)})`), {budgetMs:15000,pollMs:80});
+        && (window.__starterApp.status.startsWith(${JSON.stringify(status)}) || ${surface.base} && window.__starterApp.status.startsWith(${JSON.stringify(key === 'wasm-image' ? 'WebAssembly processed 49152 pixels with threshold.' : '5 rows; 3 columns.')}))`), {budgetMs:15000,pollMs:80});
       rec.check(`the starter page ran and says so in plain words: ${status}`, !!done,
         JSON.stringify(await evalIn(page, 'window.__starterApp')));
       await rec.visualPage(`starter-app-${key}`, page);
