@@ -280,7 +280,7 @@ describe('dweb app store', () => {
       },
     });
     expect(await makeDwebRoutes(deps)['dweb/open-commons']({
-      seed: { name: 'Commons', files: { 'index.html': 'x' }, dweb: { seed: 'commons' } },
+      seed: { name: 'Chat rooms', files: { 'index.html': 'x' }, dweb: { seed: 'commons' } },
       room: 'room-1',
     })).toEqual({ ok: true, appId: 'app-commons' });
     expect(createArgs.sessionId).toBe('chat-owner');

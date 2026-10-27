@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  appCountLabel, BLOCKED, bytesLabel, createEffects, FAILED, failureHint, installSteps, isFailure, kbLabel, keptCards, letterOf,
-  libraryPeerApps, libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, peerCountLabel, pillFilter, rootView,
-  savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, tileAction, toneOf, TONES, UNKNOWN, unknownLines, updateOffer,
-  verifiedDeclared, wasmLabel, yourApps,
+  appCountLabel, BLOCKED, bytesLabel, createEffects, FAILED, failureHint, installSteps, isFailure, kbLabel,
+  keptCards, letterOf, libraryName, libraryPeerApps, libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, peerCountLabel,
+  pillFilter, rootView, savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, tileAction, toneOf, TONES, UNKNOWN,
+  unknownLines, updateOffer, verifiedDeclared, wasmLabel, yourApps,
 } from '../../extension/home/discover-model.js';
 import type { DwebApp } from '../../extension/home/discover-model.js';
 import { encodeDidKey } from '../../extension/shared/address/did.js';
@@ -418,7 +418,7 @@ describe('filters and contacts', () => {
   });
 
   test('included search matches name and description without case, by any word of the query', () => {
-    const items = [{ name: 'CSV Lab', description: 'Explore CSV tables' }, { name: 'Commons', description: 'Peer chat' }];
+    const items = [{ name: 'Tables and charts', description: 'Explore CSV tables' }, { name: 'Chat rooms', description: 'Peer chat' }];
     expect(matchQuery(items, 'chat')).toEqual([items[1]]);
     expect(matchQuery(items, '  csv ')).toEqual([items[0]]);
     expect(matchQuery(items, '')).toEqual(items);
@@ -434,7 +434,7 @@ describe('filters and contacts', () => {
       { id: 'undated', name: 'Undated app' },
       { id: 'new', name: 'New app', createdAt: 300 },
       { id: 'peer', name: 'Peer app', createdAt: 200, dweb: { uri: 'peerd://p/1', dwapp_id: 'peer-app' } },
-      { id: 'commons', name: 'Commons', createdAt: 50, dweb: { seed: 'commons' } },
+      { id: 'commons', name: 'Chat rooms', createdAt: 50, dweb: { seed: 'commons' } },
       { id: 'linked', name: '  ', dweb: { uri: 'peerd://l/2' } },
       { name: 'No id', createdAt: 999 },
       { id: 'bad-time', name: 'Bad time', createdAt: Number.NaN },
@@ -448,6 +448,16 @@ describe('filters and contacts', () => {
     const few = yourApps(records, 2);
     expect([few.apps.map(app => app.id), few.total]).toEqual([['new', 'peer'], 7]);
     expect(yourApps([], 6)).toEqual({ apps: [], total: 0 });
+  });
+
+  test('Chat rooms under a name that peerd gave it before shows its name now; a name the user gave it stays', () => {
+    const seed = { seed: 'commons' };
+    expect(['commons', 'Peerd-to-Peerd Commons', ' ', 'Team chat'].map(name => libraryName({ id: 'c', name, dweb: seed })))
+      .toEqual(['Chat rooms', 'Chat rooms', 'Chat rooms', 'Team chat']);
+    // Another app keeps its own name, whatever it is.
+    expect(libraryName({ id: 'p', name: 'Peerd-to-Peerd Commons' })).toBe('Peerd-to-Peerd Commons');
+    expect(libraryName(undefined)).toBe('');
+    expect(yourApps([{ id: 'c', name: 'Peerd-to-Peerd Commons', dweb: seed }], 6).apps.map(app => app.name)).toEqual(['Chat rooms']);
   });
 });
 

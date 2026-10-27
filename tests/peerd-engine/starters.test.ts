@@ -39,6 +39,34 @@ test('packaged starter envelopes reproduce source bytes and retain unsigned loca
   }
 });
 
+test('each packaged starter has one plain name: the Library shows it after an add, and its own page uses it', async () => {
+  expect(starterKeys.map(key => packagedStarter(key)?.name)).toEqual(['Tables and charts', 'Desaturator']);
+  for (const key of starterKeys) {
+    const name = packagedStarter(key)!.name;
+    const opened = await openEnvelope(JSON.parse(await readFile(`extension/peerd-engine/starters/${key}.peerd`, 'utf8')));
+    expect(opened.name).toBe(name);
+    const page = new TextDecoder().decode(opened.files['index.html']);
+    expect(page).toContain(`<title>${name}</title>`);
+    expect(page).toContain(`<h1>${name}</h1>`);
+  }
+});
+
+test('each packaged starter speaks plain words on its own page; technical words stay in Technical details', async () => {
+  const jargon = /WebAssembly|WASI|CSV|numeric|luminance|[Tt]hreshold|distribution|\bmean\b|median|filter\.wat|Grayscale/;
+  for (const key of starterKeys) {
+    const opened = await openEnvelope(JSON.parse(await readFile(`extension/peerd-engine/starters/${key}.peerd`, 'utf8')));
+    const page = new TextDecoder().decode(opened.files['index.html']);
+    const visible = page.replace(/<style>[\s\S]*?<\/style>|<script[\s\S]*?<\/script>|<details>[\s\S]*?<\/details>/g, '')
+      .replace(/<[^>]+>/g, ' ');
+    expect(visible.match(jargon)).toBeNull();
+    // The words that open the page say what the app does, as Discover's tile does.
+    expect(visible).toContain(key === 'wasm-image' ? 'Make a picture gray, or black and white.' : 'Then pick a column of numbers to see a chart.');
+  }
+  const image = new TextDecoder().decode((await openEnvelope(JSON.parse(await readFile('extension/peerd-engine/starters/wasm-image.peerd', 'utf8'))))
+    .files['index.html']);
+  expect(image).toContain('<details><summary>Technical details</summary>');
+});
+
 test('bundled WASM executes actual luminance and threshold kernels without imports', async () => {
   const module = await WebAssembly.compile(starterWasm);
   expect(WebAssembly.Module.imports(module)).toEqual([]);
@@ -57,4 +85,13 @@ test('CSV tool handles quoted delimiters/newlines, reports missing numeric data 
   expect(summarize(['2','4','','no','Infinity'])).toMatchObject({count:2,missing:3,min:2,max:4,mean:3,median:3});
   expect(summarize(['1e308','1e308']).mean).toBe(1e308);
   for (const input of ['a,b\n1', 'a\n"unterminated', 'a\na"b', 'a\n"x"tail', ','.repeat(129)]) expect(() => parseCSV(input)).toThrow();
+});
+
+test('a table pasted from a spreadsheet, with tabs between its cells, has its columns and its numbers', () => {
+  const parsed = parseCSV('Month\tRevenue\tCosts\nJanuary\t1200\t800\nFebruary\t1500\t950\n');
+  expect(parsed.headers).toEqual(['Month', 'Revenue', 'Costs']);
+  expect(summarize(parsed.rows.map(row => row[1]))).toMatchObject({ count: 2, missing: 0, min: 1200, max: 1500 });
+  // A comma in the first row keeps the comma as the separator, so a tab inside a cell stays in it.
+  expect(parseCSV('name,note\nAna,"one\ttwo"\n').rows).toEqual([['Ana', 'one\ttwo']]);
+  expect(() => parseCSV('\t'.repeat(129))).toThrow();
 });

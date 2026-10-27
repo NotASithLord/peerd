@@ -14,7 +14,7 @@ import { matchesWords, searchWords } from './explore-order.js';
 /**
  * Effect custody that must outlive one mount of the section: the page says
  * "You can leave this page. The install keeps going." (see createEffects).
- * `commons` fences "Add and open Commons" until a refusal, a failure before
+ * `commons` fences "Add and open Chat rooms" until a refusal, a failure before
  * the send, or a Library read confirms the outcome. `link` is the share-link
  * install in flight, so a view
  * mounted while it runs follows the same outcome. `reads` counts Library
@@ -418,6 +418,25 @@ export const matchQuery = (items, query) => {
   return words.length ? items.filter(item => matchesWords(`${item.name ?? ''} ${item.description ?? ''}`, words)) : items;
 };
 
+// why a copy of the seed's own name: Home draws the tile before it loads the
+// dweb module.
+export const COMMONS_NAME = 'Chat rooms';
+// The names that Chat rooms had before. A Library copy from that time still
+// has one. peerd gave that name, not the user, so Discover shows the new one.
+const FORMER_COMMONS_NAMES = Object.freeze(['commons', 'Peerd-to-Peerd Commons']);
+
+/**
+ * The name Discover shows for a Library app: the name the Library holds, or
+ * COMMONS_NAME for Chat rooms with no name or a former name. A name that the
+ * user gave it stays.
+ * @param {CatalogRecord|undefined} record
+ * @returns {string} '' for another app with no name
+ */
+export const libraryName = (record) => {
+  const name = typeof record?.name === 'string' ? record.name.trim() : '';
+  return record?.dweb?.seed === 'commons' && (!name || FORMER_COMMONS_NAMES.includes(name)) ? COMMONS_NAME : name;
+};
+
 /** @param {CatalogRecord} record */
 const addedAt = (record) => typeof record.createdAt === 'number' && Number.isFinite(record.createdAt) ? record.createdAt : null;
 
@@ -443,7 +462,7 @@ export const yourApps = (records, max) => {
       // its seed and a peer app by its dwapp_id.
       const key = [dweb?.seed, dweb?.dwapp_id, dweb?.uri].find(value => typeof value === 'string' && value);
       return {
-        id, name: typeof record.name === 'string' && record.name.trim() ? record.name : 'Unnamed app',
+        id, name: libraryName(record) || 'Unnamed app',
         toneKey: typeof key === 'string' ? key : id,
       };
     }),

@@ -32,8 +32,8 @@ const NO_SUGGESTION = 'No new suggestions match these filters. Change your searc
 const ALL_IN_LIBRARY = 'No new suggestions. Every app here is already in your Library.';
 const MAKER_EMPTY = 'This maker’s apps show up here when the people you are connected to share them.';
 const OFFLINE_EMPTY = 'You can still open the apps in your Library. New apps need the peer network.';
-const COMMONS_UNKNOWN = 'peerd is not sure Commons was added or opened. Check your Library and your tabs before you try again.';
-const COMMONS_FAILED = 'peerd could not add or open Commons. Try again.';
+const COMMONS_UNKNOWN = 'peerd is not sure the Chat rooms app was added or opened. Check your Library and your tabs before you try again.';
+const COMMONS_FAILED = 'peerd could not add or open the Chat rooms app. Try again.';
 const KEEPS_GOING = 'You can leave this page. The install keeps going.';
 const OPEN_FAILED = 'peerd could not open this app. Try again.';
 const WASM_HINT = 'The WebAssembly hint comes from the maker. peerd does not check it.';
@@ -224,7 +224,7 @@ describe('home.discover start list', () => {
       expect(el(view.root, 'h1').textContent).toBe('Discover');
       expect(view.root.querySelectorAll('li.disc-start-row').length).toBe(3);
       for (const line of ['Try an app that comes with peerd', 'See apps other people share', 'Open an app a friend sent you',
-        `Add ${packagedStarter('csv-lab')?.name} to your Library, then open it from there. It needs no network and no setup.`,
+        `Add the ${packagedStarter('csv-lab')?.name} app to your Library, then open it from there. It needs no network and no setup.`,
         'Turn on the peer network to connect straight to other people who use peerd. There is no central store.',
         'It uses some internet and storage, and other people can see your network address. Your files, chats and keys stay private.',
         'Paste the link they shared. You can look at the app before you install it. This needs the peer network.']) {
@@ -274,7 +274,7 @@ describe('home.discover start list', () => {
       await withTabs(async (opened) => {
         const row = el(view.root, '.disc-start-text');
         // Try opens a page that adds it, so the row never says it works right away.
-        expect(text(row)).toBe(`Try an app that comes with peerdAdd ${packagedStarter('csv-lab')?.name} to your Library, then open it from there. It needs no network and no setup.`);
+        expect(text(row)).toBe(`Try an app that comes with peerdAdd the ${packagedStarter('csv-lab')?.name} app to your Library, then open it from there. It needs no network and no setup.`);
         expect(row.querySelector('button')).toBe(null);
         expect(text(view.root).includes(packagedStarter('wasm-image')?.name ?? '')).toBe(false);
         await click(view.root, `Try ${packagedStarter('csv-lab')?.name}`);
@@ -611,8 +611,8 @@ describe('home.discover apps that come with peerd', () => {
         expect(text(view.root)).toContain(root);
         expect(!!view.root.querySelector('.disc-pills')).toBe(opener === 'Comes with peerd');
         await press(view.root, opener);
-        expect(tileNames(view.root)).toEqual(['CSV Lab', 'WebAssembly Image Lab', 'Peerd-to-Peerd Commons']);
-        expect(button(view.root, 'Add and open Commons')?.disabled).toBe(false);
+        expect(tileNames(view.root)).toEqual(['Tables and charts', 'Desaturator', 'Chat rooms']);
+        expect(button(view.root, 'Add and open Chat rooms')?.disabled).toBe(false);
         expect(document.activeElement).toBe(button(view.root, 'Comes with peerd'));
         await press(view.root, 'All');
         expect(view.root.querySelector('.disc-tile')).toBe(null);
@@ -632,13 +632,46 @@ describe('home.discover apps that come with peerd', () => {
       // Peers stop sharing meanwhile; the pill keeps the apps that come with peerd on screen.
       host.state.heard = [];
       await focusPoll();
-      expect(tileNames(view.root)).toEqual(['CSV Lab', 'WebAssembly Image Lab', 'Peerd-to-Peerd Commons']);
+      expect(tileNames(view.root)).toEqual(['Tables and charts', 'Desaturator', 'Chat rooms']);
       search(view.root, 'kanban');
       await press(view.root, 'Clear filters');
       expect(text(el(view.root, '.disc-empty h2'))).toBe('No shared apps yet');
       expect(view.root.querySelector('.disc-pills')).toBe(null);
       expect(document.activeElement).toBe(el(view.root, 'h1'));
       expect(host.writes().length).toBe(0);
+    } finally { view.close(); }
+  });
+
+  it('an earlier add of Chat rooms under a former name shows as Chat rooms; a name the user gave it shows as given', async () => {
+    const host = fakeHost({ heard: [card('a', 'App', ANA)],
+      library: [{ id: 'app-commons', name: 'Peerd-to-Peerd Commons', dweb: { seed: 'commons' } }] });
+    const view = mount({ send: host.send });
+    /** @param {string} name */
+    const named = async (name) => {
+      host.state.library = [{ id: 'app-commons', name, dweb: { seed: 'commons' } }];
+      await focusPoll();
+      return [tileNames(view.root).at(-1), [...view.root.querySelectorAll('.disc-yours-name')].map(node => text(node))];
+    };
+    try {
+      await settle();
+      await click(view.root, 'Comes with peerd');
+      expect(tileNames(view.root)).toEqual(['Tables and charts', 'Desaturator', 'Chat rooms']);
+      expect([...view.root.querySelectorAll('.disc-yours-name')].map(node => text(node))).toEqual(['Chat rooms']);
+      expect(tileAction(view.root, 'commons')).toBe('Open');
+      // The name it had before that, too.
+      expect(await named('commons')).toEqual(['Chat rooms', ['Chat rooms']]);
+      // A name the user gave it in the Library shows on the tile and in Your apps.
+      expect(await named('Team chat')).toEqual(['Team chat', ['Team chat']]);
+      // Only Chat rooms has those names from peerd: another app keeps its own.
+      host.state.library = [{ id: 'app-other', name: 'Peerd-to-Peerd Commons' }];
+      await focusPoll();
+      expect([...view.root.querySelectorAll('.disc-yours-name')].map(node => text(node))).toEqual(['Peerd-to-Peerd Commons']);
+      // With no Chat rooms in the Library, the tile has the name the app comes with.
+      host.state.library = [];
+      await focusPoll();
+      expect(tileNames(view.root).at(-1)).toBe('Chat rooms');
+      expect(tileAction(view.root, 'commons')).toBe('Add and open Chat rooms');
+      expect(host.writes()).toEqual([]);
     } finally { view.close(); }
   });
 });
@@ -849,7 +882,7 @@ describe('home.discover tiles and filters', () => {
       expect(tileKeys(view.root)).toEqual(['ana']);
       await click(view.root, 'Comes with peerd');
       const included = [...view.root.querySelectorAll('.disc-tile')];
-      expect(included.map(node => text(el(node, '.disc-tile-name')))).toEqual(['CSV Lab', 'WebAssembly Image Lab', 'Peerd-to-Peerd Commons']);
+      expect(included.map(node => text(el(node, '.disc-tile-name')))).toEqual(['Tables and charts', 'Desaturator', 'Chat rooms']);
       expect(included.every(node => text(node).includes('Comes with peerd'))).toBe(true);
       expect(included.slice(0, 2).map(node => text(el(node, '.disc-actions')))).toEqual(['Try it', 'Try it']);
       search(view.root, 'kanban');
@@ -1578,7 +1611,7 @@ describe('home.discover app page', () => {
         await settle();
         if (commons) {
           await click(view.root, 'Comes with peerd');
-          await click(view.root, 'Add and open Commons');
+          await click(view.root, 'Add and open Chat rooms');
           await until(() => host.count('dweb/open-commons') === 1);
         } else {
           await openTile(view.root, 'a');
@@ -1593,7 +1626,7 @@ describe('home.discover app page', () => {
         const reads = host.count('apps/list');
         early.resolve({ ok: true, apps: before }); await settle();
         expect(host.count('apps/list')).toBeGreaterThan(reads);
-        expect(button(view.root, commons ? 'Add and open Commons' : 'Update')).toBe(undefined);
+        expect(button(view.root, commons ? 'Add and open Chat rooms' : 'Update')).toBe(undefined);
       } finally { commit.resolve({ ok: false }); early.resolve({ ok: false }); view.close(); }
     });
   }
@@ -4383,14 +4416,14 @@ describe('home.discover entry points', () => {
       try {
         await settle();
         await click(view.root, 'Comes with peerd');
-        expect(button(view.root, 'Add and open Commons')?.disabled).toBe(true);
+        expect(button(view.root, 'Add and open Chat rooms')?.disabled).toBe(true);
         gate = false;
         library.resolve({ ok: true, apps: [] }); await settle();
-        expect(button(view.root, 'Add and open Commons')?.disabled).toBe(false);
-        await click(view.root, 'Add and open Commons');
+        expect(button(view.root, 'Add and open Chat rooms')?.disabled).toBe(false);
+        await click(view.root, 'Add and open Chat rooms');
         await until(() => host.count('dweb/open-commons') === 1 && !!commonsNote(view.root));
         expect(reason(view)).toEqual(['status', false]);
-        const add = button(view.root, 'Add and open Commons');
+        const add = button(view.root, 'Add and open Chat rooms');
         expect(add?.disabled).toBe(true);
         add?.click(); await settle();
         expect(host.count('dweb/open-commons')).toBe(1);
@@ -4405,7 +4438,7 @@ describe('home.discover entry points', () => {
         await settle();
         await click(view.root, 'Comes with peerd');
         expect(reason(view)).toEqual(['status', false]);
-        expect(button(view.root, 'Add and open Commons')?.disabled).toBe(true);
+        expect(button(view.root, 'Add and open Chat rooms')?.disabled).toBe(true);
         // Commons in the catalog is the receipt: the fence and its reason go.
         host.state.library = [{ id: 'app-commons', dweb: { seed: 'commons' } }];
         await focusPoll();
@@ -4428,17 +4461,17 @@ describe('home.discover entry points', () => {
     try {
       await settle();
       await click(second.root, 'Comes with peerd');
-      expect(button(second.root, 'Add and open Commons')).toBe(undefined);
+      expect(button(second.root, 'Add and open Chat rooms')).toBe(undefined);
       // The tile's own Open; the Your apps row above it lists Commons too.
       const tileOpen = () => el(second.root, '[data-key="commons"]');
       await click(tileOpen(), 'Open');
       expect(installed.writes()).toEqual([{ type: 'apps/open', appId: 'app-commons' }]);
       openOutcome = 'failed';
       await click(tileOpen(), 'Open');
-      expect(text(el(second.root, '[data-key="commons"] .error[role="alert"]'))).toBe('peerd could not open Commons. Try again.');
+      expect(text(el(second.root, '[data-key="commons"] .error[role="alert"]'))).toBe(OPEN_FAILED);
       for (openOutcome of ['unknown', 'lost']) {
         await click(tileOpen(), 'Open');
-        expect(text(el(second.root, '[data-key="commons"] [role="status"]'))).toBe('peerd is not sure Commons opened. Check your tabs.');
+        expect(text(el(second.root, '[data-key="commons"] [role="status"]'))).toBe('peerd is not sure the app opened. Check your tabs.');
         expect(el(second.root, '[data-key="commons"]').querySelector('.error')).toBe(null);
       }
       // Commons is deleted elsewhere while Open has focus: the add is a new
@@ -4446,8 +4479,8 @@ describe('home.discover entry points', () => {
       button(tileOpen(), 'Open')?.focus();
       installed.state.library = [];
       await focusPoll();
-      expect(button(second.root, 'Add and open Commons')).toBeTruthy();
-      expect(document.activeElement === button(second.root, 'Add and open Commons')).toBe(false);
+      expect(button(second.root, 'Add and open Chat rooms')).toBeTruthy();
+      expect(document.activeElement === button(second.root, 'Add and open Chat rooms')).toBe(false);
     } finally { second.close(); }
   });
 
@@ -4463,12 +4496,12 @@ describe('home.discover entry points', () => {
     try {
       await settle();
       await click(view.root, 'Comes with peerd');
-      await click(view.root, 'Add and open Commons');
+      await click(view.root, 'Add and open Chat rooms');
       await until(() => !!view.root.querySelector('[role="alert"]'));
-      expect(text(el(view.root, '[data-key="commons"] [role="alert"]'))).toBe('peerd could not load Commons. Reload the page, then try again.');
+      expect(text(el(view.root, '[data-key="commons"] [role="alert"]'))).toBe('peerd could not load the Chat rooms app. Reload the page, then try again.');
       expect(effects.commons).toBe(null);
       expect(commonsNote(view.root)).toBe(null);
-      expect(button(view.root, 'Add and open Commons')?.disabled).toBe(false);
+      expect(button(view.root, 'Add and open Chat rooms')?.disabled).toBe(false);
       expect(host.count('dweb/open-commons')).toBe(0);
     } finally { window.fetch = original; view.close(); }
   });
@@ -4484,14 +4517,14 @@ describe('home.discover entry points', () => {
     try {
       await settle();
       await click(view.root, 'Comes with peerd');
-      await click(view.root, 'Add and open Commons');
+      await click(view.root, 'Add and open Chat rooms');
       await until(() => host.count('dweb/open-commons') === 1 && !!view.root.querySelector('[role="alert"]'));
       expect(text(el(view.root, '[data-key="commons"] [role="alert"]'))).toBe(COMMONS_FAILED);
       expect(commonsNote(view.root)).toBe(null);
       expect(effects.commons).toBe(null);
-      expect(button(view.root, 'Add and open Commons')?.disabled).toBe(false);
+      expect(button(view.root, 'Add and open Chat rooms')?.disabled).toBe(false);
       // The retry is still in flight when the user leaves and comes back.
-      await click(view.root, 'Add and open Commons');
+      await click(view.root, 'Add and open Chat rooms');
       await until(() => host.count('dweb/open-commons') === 2);
       view.close();
       view = mount({ send: host.send, effects });
@@ -4501,7 +4534,7 @@ describe('home.discover entry points', () => {
       expect(commonsNote(view.root)).toBe(null);
       later.resolve({ ok: false, outcomeKnown: false });
       await until(() => !!commonsNote(view.root));
-      expect(button(view.root, 'Add and open Commons')?.disabled).toBe(true);
+      expect(button(view.root, 'Add and open Chat rooms')?.disabled).toBe(true);
       expect(host.count('dweb/open-commons')).toBe(2);
     } finally { later.resolve({ ok: false }); view.close(); }
   });
@@ -4515,7 +4548,7 @@ describe('home.discover entry points', () => {
       await settle();
       await click(view.root, 'Comes with peerd');
       // The user leaves at once, while the seed still loads and nothing is sent.
-      button(view.root, 'Add and open Commons')?.click();
+      button(view.root, 'Add and open Chat rooms')?.click();
       view.close();
       view = mount({ send: host.send, effects });
       await settle();
@@ -4525,7 +4558,7 @@ describe('home.discover entry points', () => {
       add?.click();
       await until(() => host.count('dweb/open-commons') === 1);
       reply.resolve({ ok: false, error: 'dweb-disabled' });
-      await until(() => button(view.root, 'Add and open Commons')?.disabled === false);
+      await until(() => button(view.root, 'Add and open Chat rooms')?.disabled === false);
       expect(host.count('dweb/open-commons')).toBe(1);
     } finally { reply.resolve({ ok: false }); view.close(); }
   });
@@ -4540,7 +4573,7 @@ describe('home.discover entry points', () => {
     try {
       await settle();
       await click(view.root, 'Comes with peerd');
-      await click(view.root, 'Add and open Commons');
+      await click(view.root, 'Add and open Chat rooms');
       await until(() => host.count('dweb/open-commons') === 1);
       // The user leaves while the add runs. It is confirmed, then Commons is deleted in the Library.
       view.close();
@@ -4551,8 +4584,8 @@ describe('home.discover entry points', () => {
       await settle();
       await click(view.root, 'Comes with peerd');
       expect(effects.commons).toBe(null);
-      expect(button(view.root, 'Add and open Commons')?.disabled).toBe(false);
-      await click(view.root, 'Add and open Commons');
+      expect(button(view.root, 'Add and open Chat rooms')?.disabled).toBe(false);
+      await click(view.root, 'Add and open Chat rooms');
       await until(() => host.count('dweb/open-commons') === 2);
     } finally { reply.resolve({ ok: false }); view.close(); }
   });
@@ -4573,7 +4606,7 @@ describe('home.discover entry points', () => {
       // A poll's read is in flight when the add is sent and confirmed.
       held = [first.promise, second.promise];
       await focusPoll();
-      await click(view.root, 'Add and open Commons');
+      await click(view.root, 'Add and open Chat rooms');
       await until(() => host.count('dweb/open-commons') === 1);
       // It lands with the Library as it was: no Commons yet, and the fence stays.
       first.resolve({ ok: true, apps: [] }); await settle();
@@ -4595,7 +4628,7 @@ describe('home.discover entry points', () => {
     try {
       await settle();
       await click(view.root, 'Comes with peerd');
-      await click(view.root, 'Add and open Commons');
+      await click(view.root, 'Add and open Chat rooms');
       await until(() => host.count('dweb/open-commons') === 1);
       view.close();
       view = mount({ send: host.send, effects });

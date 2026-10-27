@@ -25,10 +25,10 @@ import { blockedSet, effectOutcome, withoutBlocked } from './blocked-makers.js';
 import { discoveryAddress } from './discovery-address.js';
 import { exploreOrder, EXPLORE_WINDOW, nextSuggestion, recentRetrievalMiss, suggestionKey } from './explore-order.js';
 import {
-  BLOCKED, BLOCKED_ERROR, bytesLabel, createEffects, FAILED, failureHint, isFailure, kbLabel, keptCards, letterOf, libraryPeerApps,
-  libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, pillFilter, appCountLabel, peerCountLabel, rootView,
-  savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, tileAction, toneOf, UNKNOWN, unknownLines, updateOffer,
-  verifiedDeclared, wasmLabel, yourApps,
+  BLOCKED, BLOCKED_ERROR, bytesLabel, COMMONS_NAME, createEffects, FAILED, failureHint, isFailure, kbLabel, keptCards,
+  letterOf, libraryName, libraryPeerApps, libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, pillFilter,
+  appCountLabel, peerCountLabel, rootView, savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, tileAction, toneOf,
+  UNKNOWN, unknownLines, updateOffer, verifiedDeclared, wasmLabel, yourApps,
 } from './discover-model.js';
 import {
   actionView, appHead, appRow, backLink, blockDialog, blockedLine, cantRunPanel, conflictPanel, emptyState, installPanel,
@@ -67,13 +67,17 @@ const RUNTIME_CODES = Object.freeze(['app-runtime-invalid', 'app-runtime-unsuppo
 const POLL_MS = 4000;
 const COPIED_MS = 2000;
 const TECH_ID = 'disc-tech-facts';
-const COMMONS_NAME = 'Peerd-to-Peerd Commons';
 const CHOICE_ERROR = 'peerd could not confirm that the peer network is on. Check again before you try again.';
 const RECEIPT_HELD = 'peerd is not sure the install finished. It may still finish by itself. Install stays off until peerd knows.';
 const KEEPS_GOING = 'You can leave this page. The install keeps going.';
 const CHECKING_LINK = 'Checking the link. peerd downloads the app and checks every file…';
-const COMMONS_UNKNOWN = 'peerd is not sure Commons was added or opened. Check your Library and your tabs before you try again.';
-const COMMONS_FAILED = 'peerd could not add or open Commons. Try again.';
+// why "the Chat rooms app" in a sentence: the name alone reads as many rooms.
+const COMMONS_UNKNOWN = 'peerd is not sure the Chat rooms app was added or opened. Check your Library and your tabs before you try again.';
+const COMMONS_FAILED = 'peerd could not add or open the Chat rooms app. Try again.';
+// why the words of every other Open: the line sits in the tile, which may
+// carry the name the Library gave the app.
+const OPEN_FAILED = 'peerd could not open this app. Try again.';
+const OPEN_UNKNOWN = 'peerd is not sure the app opened. Check your tabs.';
 const NEEDS_NETWORK = 'New apps need the peer network.';
 const OFFLINE_EMPTY = `You can still open the apps in your Library. ${NEEDS_NETWORK}`;
 const MAKER_EMPTY = 'This maker’s apps show up here when the people you are connected to share them.';
@@ -660,8 +664,8 @@ export const DiscoverSection = (initialVnode) => {
     try {
       const result = await attrs.send({ type: 'apps/open', appId });
       if (result?.outcomeKnown === false) throw new Error('app-open-outcome-unknown');
-      if (!result?.ok) alertLine = { key, text: 'peerd could not open this app. Try again.' };
-    } catch { alertLine = { key, text: 'peerd is not sure the app opened. Check your tabs.', unknown: true }; }
+      if (!result?.ok) alertLine = { key, text: OPEN_FAILED };
+    } catch { alertLine = { key, text: OPEN_UNKNOWN, unknown: true }; }
     redraw();
   };
 
@@ -859,12 +863,12 @@ export const DiscoverSection = (initialVnode) => {
     let sent = false;
     try {
       const client = await loadDweb();
-      if (!client.loadSeedApp) throw new Error('Commons is not in this version of peerd.');
+      if (!client.loadSeedApp) throw new Error('The Chat rooms app is not in this version of peerd.');
       const commonsSeed = await client.loadSeedApp({ fetchText: async (/** @type {string} */ path) => {
         // The seed loader selects only our own packaged extension asset.
         // eslint-disable-next-line no-restricted-globals
         const response = await fetch(path);
-        if (!response.ok) throw new Error('peerd could not load Commons. Reload the page, then try again.');
+        if (!response.ok) throw new Error('peerd could not load the Chat rooms app. Reload the page, then try again.');
         return response.text();
       } });
       sent = true;
@@ -887,9 +891,9 @@ export const DiscoverSection = (initialVnode) => {
     try {
       const result = await attrs.send({ type: 'apps/open', appId: commonsId });
       if (result?.outcomeKnown === false) throw new Error('app-open-outcome-unknown');
-      if (!result?.ok) alertLine = { key: 'commons', text: 'peerd could not open Commons. Try again.' };
+      if (!result?.ok) alertLine = { key: 'commons', text: OPEN_FAILED };
     }
-    catch { alertLine = { key: 'commons', text: 'peerd is not sure Commons opened. Check your tabs.', unknown: true }; }
+    catch { alertLine = { key: 'commons', text: OPEN_UNKNOWN, unknown: true }; }
     finally { commonsBusy = false; redraw(); }
   };
 
@@ -1352,7 +1356,7 @@ export const DiscoverSection = (initialVnode) => {
       // opens from the Library. Discover cannot tell when it is there.
       FEATURED ? startRow({
         icon: 'cube', title: 'Try an app that comes with peerd',
-        text: `Add ${FEATURED.name} to your Library, then open it from there. It needs no network and no setup.`, action: tryStarter(),
+        text: `Add the ${FEATURED.name} app to your Library, then open it from there. It needs no network and no setup.`, action: tryStarter(),
       }) : null,
       startRow({
         icon: 'globe', title: 'See apps other people share',
@@ -1444,14 +1448,15 @@ export const DiscoverSection = (initialVnode) => {
       return starter ? [{ key: `starter:${key}`, tone: key, name: starter.name, description: starter.description,
         action: tileButton({ label: 'Try it', ariaLabel: `Try ${starter.name}`, onclick: () => openOptions(`transfer?starter=${key}`) }) }] : [];
     });
+    // why the Library's name: the user can rename the app there.
     const commons = {
-      key: 'commons', tone: 'commons', name: COMMONS_NAME,
+      key: 'commons', tone: 'commons', name: libraryName(records.find(record => record.id === commonsId)) || COMMONS_NAME,
       description: 'Chat with other people who use peerd. Adding it does not join a room. You choose one inside the app.',
       // why keyed: a Commons deleted elsewhere must not turn a focused Open into an add.
       action: keyedParts(commonsId
         ? { open: tileButton({ label: 'Open', open: true, disabled: commonsBusy, onclick: () => { void openCommons(); } }) }
         : { add: tileButton({
-          label: commonsBusy || effects.commons === 'adding' ? 'Opening…' : 'Add and open Commons',
+          label: commonsBusy || effects.commons === 'adding' ? 'Opening…' : 'Add and open Chat rooms',
           disabled: commonsBusy || !!effects.commons || !localReady, onclick: () => { void addCommons(); },
         }) }),
     };

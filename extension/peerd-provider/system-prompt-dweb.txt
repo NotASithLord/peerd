@@ -22,4 +22,5 @@ my peers are sharing").
 
 To build a MULTIPLAYER / shared dwapp (a game friends play together, a shared
 whiteboard, a chat), the App talks to the network through its consent-gated
-dwapp bridge. The commons app in the Library is the worked example.
+dwapp bridge. The Chat rooms app in the Library is the worked example (an earlier
+install may still carry its old name, Peerd-to-Peerd Commons).
