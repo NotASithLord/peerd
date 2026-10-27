@@ -23,7 +23,7 @@ import { DiscoverSection } from '/home/discover-section.js';
  */
 
 const KEY = 'peerd.manual-app-install.pending';
-const READS = Object.freeze(['bootstrap/ready', 'dweb/distributed/info', 'dweb/base/heard', 'apps/list', 'contacts/list', 'dweb/blocked-peers']);
+const READS = Object.freeze(['bootstrap/ready', 'dweb/distributed/info', 'dweb/base/heard', 'apps/list', 'contacts/list', 'dweb/blocked-peers', 'dweb/base/install-status']);
 const UNKNOWN_INSTALL = 'peerd is not sure the install finished. It may still finish by itself.';
 const RECEIPT_HELD = 'peerd is not sure the install finished. It may still finish by itself. Install stays off until peerd knows.';
 const NO_SUGGESTION = 'No new suggestions match these filters. Change your search or filters.';
@@ -1206,7 +1206,7 @@ describe('home.discover app page', () => {
       await click(view.root, 'Open');
       expect(host.writes().at(-1)).toEqual({ type: 'apps/open', appId: 'local-upd' });
       await click(view.root, 'Try again');
-      expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)')))
+      expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)')))
         .toBe('peerd is not sure the update finished. It may still finish by itself.');
       expect(text(el(view.root, '.disc-panel .disc-hint'))).toBe('Check again before you try to update it again.');
       expect(labels()).toEqual(['Check again', 'Open']);
@@ -1234,7 +1234,7 @@ describe('home.discover app page', () => {
         await settle();
         await openTile(view.root, 'a');
         await click(view.root, 'Install and share');
-        expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
+        expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
         expect(text(el(view.root, '.disc-panel .disc-hint'))).toBe('Check again before you try to install it again.');
         expect(panel(view.root).querySelector('[role="alert"]')).toBe(null);
         expect(panel(view.root).querySelector('.error')).toBe(null);
@@ -1276,7 +1276,7 @@ describe('home.discover app page', () => {
       el(view.root, '[data-key="upd"] .disc-tile-action').click(); await settle();
       expect(document.activeElement).toBe(view.root.querySelector('.disc-back'));
       expect(host.writes().map(call => [call.type, call.appId])).toEqual([['dweb/base/update-app', 'local-upd']]);
-      expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe('peerd is not sure the update finished. It may still finish by itself.');
+      expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)'))).toBe('peerd is not sure the update finished. It may still finish by itself.');
       for (const drift of [{ version: 'upd-v1', seq: 1 }, { version: 'upd-other', seq: 2 }]) {
         version = drift.version; seq = drift.seq; refreshLibrary();
         await click(view.root, 'Check again');
@@ -1307,7 +1307,7 @@ describe('home.discover app page', () => {
       await settle();
       expect(tileAction(view.root, 'a')).toBe('Installing…');
       await openTile(view.root, 'a');
-      expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(KEEPS_GOING);
+      expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)'))).toBe(KEEPS_GOING);
       expect(panel(view.root).querySelector('button')).toBe(null);
       install.resolve({ ok: false, outcomeKnown: false }); await settle();
       expect(text(panel(view.root))).toContain(UNKNOWN_INSTALL);
@@ -1334,11 +1334,11 @@ describe('home.discover app page', () => {
       view = mount({ send: host.send, effects });
       await settle();
       await openTile(view.root, 'a');
-      expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
+      expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
       expect(button(view.root, 'Install and share')).toBe(undefined);
       await click(view.root, 'Discover');
       await openTile(view.root, 'upd');
-      expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)')))
+      expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)')))
         .toBe('peerd is not sure the update finished. It may still finish by itself.');
       expect(host.count('dweb/base/install')).toBe(1);
       expect(host.count('dweb/base/update-app')).toBe(1);
@@ -2736,11 +2736,11 @@ describe('home.discover share link', () => {
         enterLink(view.root, address);
         await click(view.root, 'Check link');
         await click(view.root, 'Install and share');
-        expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(KEEPS_GOING);
+        expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)'))).toBe(KEEPS_GOING);
         view.close();
         view = mount({ send: host.send, effects }, { keepReceipt: true });
         await settle();
-        expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(KEEPS_GOING);
+        expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)'))).toBe(KEEPS_GOING);
         expect(panel(view.root).querySelector('button')).toBe(null);
         install.resolve(outcome === 'installed' ? { ok: true, app: { id: 'app-link' } } : { ok: false, error: 'raw host install text' });
         await settle();
@@ -2817,7 +2817,7 @@ describe('home.discover share link', () => {
         await click(view.root, 'Discover');
         expect(tileAction(view.root, 'same')).toBe('Installing…');
         await openTile(view.root, 'same');
-        expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(KEEPS_GOING);
+        expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)'))).toBe(KEEPS_GOING);
         expect(panel(view.root).querySelector('button')).toBe(null);
         stale.click(); await settle();
         expect(host.writes().map(call => call.type)).toEqual(['dweb/base/inspect-address', 'dweb/base/install-address']);
@@ -2826,9 +2826,9 @@ describe('home.discover share link', () => {
           install.resolve({ ok: true, app: { id: 'app-link' } }); await settle();
         } else {
           install.resolve({ ok: false, outcomeKnown: false }); await settle();
-          expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
+          expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
           await click(view.root, 'Check again');
-          expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
+          expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
           expect(button(view.root, 'Install and share')).toBe(undefined);
           // The share-link Refresh finds the exact receipt.
           await earlyRead();
@@ -2898,7 +2898,7 @@ describe('home.discover share link', () => {
         await click(view.root, 'Check link');
         const message = unknown ? `peerd is not sure the ${update ? 'update' : 'install'} finished. It may still finish by itself.`
           : `You can leave this page. The ${update ? 'update' : 'install'} keeps going.`;
-        expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(message);
+        expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)'))).toBe(message);
         expect(button(view.root, 'Install and share')).toBe(undefined);
         stale.click(); await settle();
         if (unknown) {
@@ -2906,7 +2906,7 @@ describe('home.discover share link', () => {
           const reads = host.count('apps/list');
           await click(view.root, 'Check again');
           expect(host.count('apps/list')).toBeGreaterThan(reads);
-          expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(message);
+          expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)'))).toBe(message);
           expect(button(view.root, 'Install and share')).toBe(undefined);
         }
         expect(host.writes().map(call => call.type)).toEqual(['dweb/base/inspect-address', type, 'dweb/base/inspect-address']);

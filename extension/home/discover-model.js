@@ -75,9 +75,10 @@ export const BLOCKED_ERROR = 'publisher-user-blocked';
  * technical reason for Technical details only.
  * @param {string} busy a failure value (see isFailure)
  * @param {'install'|'update'} [action] what failed
- * @returns {{hint:string, runtime:string|null}}
+ * @returns {{hint:string, runtime:string|null, cancelled?:boolean}}
  */
 export const failureHint = (busy, action = 'install') => {
+  if (busy === 'install-cancelled') return { hint: 'Nothing was installed. Try again when you are ready.', runtime: null, cancelled: true };
   if (busy === BLOCKED) return { hint: `You blocked the maker of this app. To ${action} it, unblock them in Contacts.`, runtime: null };
   return busy === FAILED || busy === UNKNOWN
     ? { hint: 'The person who shares it may have gone offline. Try again in a moment.', runtime: null }

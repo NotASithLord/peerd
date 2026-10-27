@@ -3660,7 +3660,8 @@ export const STATES = [
           globalThis.__backupHostCalls = [];
           const createDocument = chrome.offscreen.createDocument.bind(chrome.offscreen);
           chrome.offscreen.createDocument = (...args) => {
-            globalThis.__backupHostCalls.push({ url: args[0]?.url }); return createDocument(...args);
+            globalThis.__backupHostCalls.push({ url: args[0]?.url,
+              stack: new Error('backup host creation').stack?.slice(0, 3000) }); return createDocument(...args);
           };
         })()`);
         observer = await observeHosts(fresh, evidence, diagnostic, () => {});
@@ -5002,6 +5003,7 @@ export const STATES = [
     ].join('\n\n') + '\n\n' }),
     async run(ctx, rec) {
       const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      await evalIn(ctx.page, `chrome.tabs.query({ currentWindow: true }).then(tabs => { const tab = tabs.find(tab => tab.url === 'about:blank'); return tab && !tab.active ? chrome.tabs.update(tab.id, { active: true }) : null; })`, true);
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Build a budget tracker App.' });
       rec.check('the App request is accepted', sent?.ok === true);
       const settled = await waitFor(async () => {
@@ -5009,7 +5011,7 @@ export const STATES = [
         const messages = state?.state?.session?.messages ?? [];
         const final = messages.at(-1);
         const idle = await evalIn(ctx.page, `!document.querySelector('form.input-bar button.stop')
-          && !document.querySelector('.message-assistant.streaming')`);
+          && !document.querySelector('.message-assistant.streaming, .wordmark--exit, .wordmark--gone, .channel-badge.is-exiting')`);
         return idle && (final?.content === 'I will split the work into smaller calls.'
           || (baseRender && final?.stopReason === 'max_tokens'))
           ? { sessionId: state.state.session.sessionId, messages } : null;
