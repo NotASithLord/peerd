@@ -18,7 +18,7 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const cancellation = process.env.P2P_INSTALL_CANCELLATION === '1';
 const wasmExecution = process.env.P2P_WASM_EXECUTION === '1';
 const randomDiscovery = process.env.P2P_RANDOM_DISCOVERY === '1';
-const output = join(repo, cancellation ? 'artifacts/install-cancellation-twopeer' : randomDiscovery ? (wasmExecution ? 'artifacts/random-wasm-twopeer' : 'artifacts/random-js-twopeer') : wasmExecution ? 'artifacts/discovered-wasm-twopeer' : 'artifacts/manual-address-twopeer');
+const output = join(repo, cancellation ? (wasmExecution ? 'artifacts/wasm-install-cancellation-twopeer' : 'artifacts/install-cancellation-twopeer') : randomDiscovery ? (wasmExecution ? 'artifacts/random-wasm-twopeer' : 'artifacts/random-js-twopeer') : wasmExecution ? 'artifacts/discovered-wasm-twopeer' : 'artifacts/manual-address-twopeer');
 mkdirSync(output, { recursive: true });
 const temp = mkdtempSync(join(tmpdir(), 'peerd-manual-address-'));
 const sockets = new Set(), servers = [], checks = [];
