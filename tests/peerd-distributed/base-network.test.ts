@@ -612,3 +612,61 @@ test('recent missing-provider evidence excludes lookup errors and clears on retr
     expect(evidence()).toBeNull();
   } finally { publisher.base.close(); reader.base.close(); }
 });
+
+test('caller cancellation aborts lookup without recording missing providers', async () => {
+  const reader = await spawn('cancel lookup'); const publisher = await spawn('publisher');
+  const ac = new AbortController(); let lookupSignal: AbortSignal | undefined;
+  let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+  try {
+    const shared = await publisher.base.publishApp({ name: 'cancel lookup', entry: 'index.html', files: { 'index.html': 'test' } });
+    const { card } = await publisher.base.publishMeta({ slug: 'cancel-lookup', name: 'cancel lookup', head: { version_id: shared.hash, content_addr: shared.uri, size: shared.packedBytes } });
+    await reader.base.discovery.ingest(card);
+    reader.base.node.dht.findProviderContacts = async (_key: string, { signal }: any) => {
+      lookupSignal = signal; entered();
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+      return [];
+    };
+    const outcome = reader.base.fetchApp(shared.uri, { signal: ac.signal }).catch(error => error);
+    await started; ac.abort();
+    expect((await outcome).name).toBe('AbortError');
+    expect(lookupSignal?.aborted).toBe(true);
+    expect(reader.base.heardDwapps()[0]?.retrieval).toBeNull();
+    reader.base.node.dht.findProviderContacts = async () => [];
+    await expect(reader.base.fetchApp(shared.uri)).rejects.toThrow('no peer');
+  } finally { for (const peer of [reader, publisher]) { peer.base.close(); peer.mesh.close(); } }
+});
+
+test('caller cancellation aborts active provider dials without starting queued referrals', async () => {
+  const contacts = await Promise.all(Array.from({ length: 8 }, () => generateIdentity()));
+  const signals: AbortSignal[] = []; const ac = new AbortController();
+  let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+  const reader = await spawn('cancel dials', { dial: async (_contact: unknown, { signal }: { signal: AbortSignal }) => {
+    signals.push(signal); if (signals.length === 3) entered();
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+    return false;
+  } });
+  reader.base.node.dht.findProviderContacts = async () => contacts;
+  try {
+    const outcome = reader.base.fetchApp(`peerd://${contacts[0].did}/${'0'.repeat(64)}`, { signal: ac.signal }).catch(error => error);
+    await started; ac.abort();
+    expect((await outcome).name).toBe('AbortError');
+    expect(signals).toHaveLength(3);
+    expect(signals.every(signal => signal.aborted)).toBe(true);
+  } finally { reader.base.close(); reader.mesh.close(); }
+}, 2000);
+
+test('cancelled linked retrieval does not fall through to DHT and permits a fresh retry', async () => {
+  const publisher = await spawn('publisher'); const reader = await spawn('reader');
+  const ac = new AbortController(); let lookups = 0;
+  try {
+    await link(reader, publisher);
+    const shared = await publisher.base.publishApp({ name: 'cancel transfer', entry: 'index.html', files: { 'index.html': 'retry' } });
+    reader.base.node.dht.findProviderContacts = async () => { lookups++; return []; };
+    await expect(reader.base.fetchApp(shared.uri, { signal: ac.signal,
+      onProgress: () => ac.abort() })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(lookups).toBe(0);
+    const retry = await reader.base.fetchApp(shared.uri);
+    expect(retry.payload.byteLength).toBe(retry.manifest.size);
+    expect(reader.mesh.hasLink(publisher.identity.did)).toBe(true);
+  } finally { for (const peer of [reader, publisher]) { peer.base.close(); peer.mesh.close(); } }
+});

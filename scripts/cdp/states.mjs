@@ -3658,7 +3658,8 @@ export const STATES = [
           globalThis.__backupHostCalls = [];
           const createDocument = chrome.offscreen.createDocument.bind(chrome.offscreen);
           chrome.offscreen.createDocument = (...args) => {
-            globalThis.__backupHostCalls.push({ url: args[0]?.url }); return createDocument(...args);
+            globalThis.__backupHostCalls.push({ url: args[0]?.url,
+              stack: new Error('backup host creation').stack?.slice(0, 3000) }); return createDocument(...args);
           };
         })()`);
         observer = await observeHosts(fresh, evidence, diagnostic, () => {});
