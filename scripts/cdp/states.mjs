@@ -3658,7 +3658,8 @@ export const STATES = [
           globalThis.__backupHostCalls = [];
           const createDocument = chrome.offscreen.createDocument.bind(chrome.offscreen);
           chrome.offscreen.createDocument = (...args) => {
-            globalThis.__backupHostCalls.push({ url: args[0]?.url }); return createDocument(...args);
+            globalThis.__backupHostCalls.push({ url: args[0]?.url,
+              stack: new Error('backup host creation').stack?.slice(0, 3000) }); return createDocument(...args);
           };
         })()`);
         observer = await observeHosts(fresh, evidence, diagnostic, () => {});
@@ -5000,6 +5001,7 @@ export const STATES = [
     ].join('\n\n') + '\n\n' }),
     async run(ctx, rec) {
       const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      await evalIn(ctx.page, `chrome.tabs.query({ currentWindow: true }).then(tabs => { const tab = tabs.find(tab => tab.url === 'about:blank'); return tab && !tab.active ? chrome.tabs.update(tab.id, { active: true }) : null; })`, true);
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Build a budget tracker App.' });
       rec.check('the App request is accepted', sent?.ok === true);
       const settled = await waitFor(async () => {
@@ -5007,12 +5009,23 @@ export const STATES = [
         const messages = state?.state?.session?.messages ?? [];
         const final = messages.at(-1);
         const idle = await evalIn(ctx.page, `!document.querySelector('form.input-bar button.stop')
-          && !document.querySelector('.message-assistant.streaming')`);
+          && !document.querySelector('.message-assistant.streaming, .wordmark--exit, .wordmark--gone, .channel-badge.is-exiting')`);
         return idle && (final?.content === 'I will split the work into smaller calls.'
           || (baseRender && final?.stopReason === 'max_tokens'))
           ? { sessionId: state.state.session.sessionId, messages } : null;
       }, { budgetMs: 20_000, pollMs: 100 });
-      if (!settled) throw new Error('The cut tool call did not settle');
+      if (!settled) {
+        const state = await rpc(ctx.page, { type: 'state/get' });
+        const context = await evalIn(ctx.page, `(async () => ({ visibility: document.visibilityState,
+          owner: await chrome.windows.getCurrent(), tabs: await chrome.tabs.query({}),
+          current: await chrome.tabs.query({currentWindow:true}), stop: !!document.querySelector('form.input-bar button.stop'),
+          streaming: !!document.querySelector('.message-assistant.streaming'),
+          brand: [...document.querySelectorAll('[class*=wordmark], [class*=channel-badge]')].map(node => ({
+            class: node.className, text: node.textContent, display: getComputedStyle(node).display,
+            opacity: getComputedStyle(node).opacity, color: getComputedStyle(node).color,
+          })) }))()`, true);
+        throw new Error('The cut tool call did not settle: ' + JSON.stringify({baseRender,calls:ctx.modelCallCount(), messages:state?.state?.session?.messages, context}));
+      }
       const cut = settled.messages.find(message => message.stopReason === 'max_tokens');
       const result = settled.messages.flatMap(message => message.toolResults ?? [])
         .find(result => result.tool_use_id === cut?.toolUses?.[0]?.id);

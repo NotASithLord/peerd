@@ -53,6 +53,8 @@ export const makeDwebRoutes = (deps) => {
     'dweb/base/share-app': disabled,
     'dweb/base/heard': disabled,
     'dweb/base/inspect-address': addressDisabled,
+    'dweb/base/install-status': addressDisabled,
+    'dweb/base/cancel-install': addressDisabled,
     'dweb/base/install-address': addressDisabled,
     'dweb/base/install': disabled,
     'dweb/base/updates': disabled,

@@ -1,3 +1,6 @@
+// Install status/cancellation adds 1,308 authored authority bytes, no modules.
+// Preview route identifier compaction reduces shipped bytes; timings and the
+// package byte ceilings remain independent release gates, with no reserve.
 // API-first integration removes six Chrome cold modules; typed run custody adds
 // 428 Firefox source bytes / 192 packaged bytes. Exact measured values, no reserve.
 // Integrated authority, consent, Discover and recovery fixes are measured
@@ -136,12 +139,8 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  // The one added module reads what an installed App asks of peerd from the
-  // files the worker decoded (see COLD_SOURCE_RATCHETS.kernel). A Home block
-  // or unblock that stores nothing leaves no log entry, so the policy owner
-  // tells its caller whether it wrote: 88 bytes net, no module.
-  shared: Object.freeze({ modules: 408, graphBytes: 4_086_910 }),
-  target: Object.freeze({ modules: 411, graphBytes: 4_177_961 }),
+  shared: Object.freeze({ modules: 408, graphBytes: 4_088_213 }),
+  target: Object.freeze({ modules: 411, graphBytes: 4_179_264 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_251 }),
@@ -186,13 +185,7 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // Exact Settings/Home/Lab admission and chat-scoped integration metadata
   // repair existing leaves without new modules. Pin their measured closure
   // without reserve; Lab requests retain their narrow payload validators.
-  // The dweb storage routes read what an installed App asks of peerd from the
-  // files they decoded, never from the host, through one added leaf
-  // (shared/app-declaration.js), and Home asks with the update's own check
-  // whether a copy changed here. Remeasured with no reserve. The policy owner
-  // tells a Home block whether it wrote, so a no-op logs nothing: 88 bytes
-  // net in existing modules.
-  kernel: Object.freeze({ modules: 408, graphBytes: 4_086_910, entryBytes: 200, directImports: 2 }),
+  kernel: Object.freeze({ modules: 408, graphBytes: 4_088_213, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity

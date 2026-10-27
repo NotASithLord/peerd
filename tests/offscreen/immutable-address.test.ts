@@ -37,7 +37,9 @@ const fixture = async (runtime?: Runtime, descriptorRuntime = runtime, extra: Re
   } };
   const host = new Function('manualInstalls', 'immutableAppRoot', 'start', 'loadDweb', 'handle', 'mintAppId',
     'appContentOwner', 'runPublishTransaction', 'trackServedHash', 'swEffectCall',
-    'publishFailureError', 'unserveTrackedHash', 'appSeedHandoff', 'verifiedDeclaration', `return {
+    'publishFailureError', 'unserveTrackedHash', 'appSeedHandoff', 'verifiedDeclaration', `
+      ${source.slice(source.indexOf('const installAttemptKey ='), source.indexOf('/** @param {any} msg */', source.indexOf('const installAttemptKey =')))}
+      return {
       retire: () => { handle = null; },
       dispatch: async (msg) => { let reply; const sendResponse = value => { reply = value; };
         await (async () => { switch(msg.type) { ${cases} } })(); return reply;

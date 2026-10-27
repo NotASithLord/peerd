@@ -169,6 +169,12 @@ describe('kernel executable owner', () => {
     called.length = 0;
     expect(admit('dweb/base/start', {}, sender)).toBe(true);
     expect(called).toEqual(['home']);
+    for (const route of ['dweb/base/install-status', 'dweb/base/cancel-install']) {
+      called.length = 0;
+      expect(admit(route, {}, sender)).toBe(true);
+      expect(called).toEqual(['home']);
+      expect(makeKernelDwebAdmission({ home: () => false, app: () => true, offscreen: () => true })(route, {}, sender)).toBe(false);
+    }
     const notebookOnly = makeKernelDwebAdmission({
       offscreen: () => false, app: () => false, home: () => false, notebook: () => true,
     });

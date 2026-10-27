@@ -280,13 +280,13 @@ const linkButton = (label, onclick) => m('button.linklike.disc-link-btn', { type
  * `action` names the effect that runs, failed, may still finish or finished
  * on this visit; the steps list takes its name from it.
  * @param {{state:InstallState, name:string, message:string|null, action?:'install'|'update',
- *   failure?:{action:'install'|'update', hint:string}|null, unknown?:{status:string, hint:string}|null,
- *   notice:string|null, error:unknown, primary:ButtonProps|null, secondary?:ButtonProps|null,
+ *   failure?:{action:'install'|'update', hint:string, cancelled?:boolean}|null, unknown?:{status:string, hint:string}|null,
+ *   transfer?:any, notice:string|null, error:unknown, primary:ButtonProps|null, secondary?:ButtonProps|null,
  *   otherVersion?:boolean, fresh?:boolean, updated?:boolean, changed?:boolean, steps?:boolean,
  *   sharing?:string|null, onLibrary?:(()=>void)|null}} props
  */
 export const installPanel = ({
-  state, name, message, action = 'install', failure, unknown, notice, error, primary, secondary, otherVersion, fresh, updated, changed,
+  state, name, message, action = 'install', failure, unknown, notice, error, transfer, primary, secondary, otherVersion, fresh, updated, changed,
   steps = true, sharing, onLibrary,
 }) => {
   const actions = primary ? m('.disc-panel-actions', keyedParts({
@@ -302,6 +302,7 @@ export const installPanel = ({
           step.sub ? m('span.type-small.disc-step-sub', step.sub) : null,
         ]),
       ]))) : null,
+    state === 'installing' && transfer ? m.fragment({}, [transfer]) : null,
     state === 'installing' && message ? m('p.type-small.disc-footnote', { role: 'status' }, message) : null,
     state === 'installed' || (secondary && otherVersion) ? m('p.type-body-sm.disc-installed', { tabindex: -1, role: 'status' }, otherVersion
       ? 'Another version of this app is in your Library. Open runs the version you have.'
@@ -312,7 +313,8 @@ export const installPanel = ({
           : fresh ? [m('strong', 'Installed.'), ' ', m('bdi', name), ' is now in your Library. Other people can get it from you while your peer network is on.']
             : 'In your Library. Other people can get it from you while your peer network is on.') : null,
     state === 'failed' && failure ? [
-      m('p.error.disc-panel-error', { role: 'alert' }, ['peerd could not ', failure.action, ' ', m('bdi', name), '.']),
+      failure.cancelled ? m('p.type-body-sm', { role: 'status' }, failure.action === 'update' ? 'Update cancelled. Your installed version is unchanged.' : 'Installation cancelled.')
+        : m('p.error.disc-panel-error', { role: 'alert' }, ['peerd could not ', failure.action, ' ', m('bdi', name), '.']),
       m('p.type-body-sm.disc-hint', failure.hint),
     ] : null,
     state === 'unknown' && unknown ? [

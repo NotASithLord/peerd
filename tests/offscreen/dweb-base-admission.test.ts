@@ -62,7 +62,7 @@ test('offscreen update carries exact conflict and publication receipts and trust
   const { manifest, hash } = await buildManifest({ payload, type: 'app', identity });
   const app = await prepareAppBundle({ uri: formatPeerdUri({ did: identity.did, hash }), manifest, payload });
   const update = source.slice(source.indexOf("case 'dweb/base-host/update-app':"));
-  const callback = section('announce: async', '\n            },', update)
+  const callback = section('announce: async', '\n              },', update)
     .replace(/^announce: /, '') + '\n}';
   const calls: any[] = [];
   let reply: any = { ok: true, app: { id: 'a' }, cleanupHashes: ['old', 'old', 3] };
