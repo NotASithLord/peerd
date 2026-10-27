@@ -51,13 +51,23 @@ test('each packaged starter has one plain name: the Library shows it after an ad
   }
 });
 
+// The words a person sees on the page: its text outside <style>, <script> and
+// Technical details. why a parser, not a regexp: it reads the page as a browser does.
+const visibleText = (html: string) => {
+  let hidden = 0;
+  let text = '';
+  new HTMLRewriter()
+    .on('style, script, details', { element: (element) => { hidden++; element.onEndTag(() => { hidden--; }); } })
+    .onDocument({ text: (chunk) => { if (!hidden) text += chunk.lastInTextNode ? `${chunk.text} ` : chunk.text; } })
+    .transform(html);
+  return text;
+};
+
 test('each packaged starter speaks plain words on its own page; technical words stay in Technical details', async () => {
   const jargon = /WebAssembly|WASI|CSV|numeric|luminance|[Tt]hreshold|distribution|\bmean\b|median|filter\.wat|Grayscale/;
   for (const key of starterKeys) {
     const opened = await openEnvelope(JSON.parse(await readFile(`extension/peerd-engine/starters/${key}.peerd`, 'utf8')));
-    const page = new TextDecoder().decode(opened.files['index.html']);
-    const visible = page.replace(/<style>[\s\S]*?<\/style>|<script[\s\S]*?<\/script>|<details>[\s\S]*?<\/details>/g, '')
-      .replace(/<[^>]+>/g, ' ');
+    const visible = visibleText(new TextDecoder().decode(opened.files['index.html']));
     expect(visible.match(jargon)).toBeNull();
     // The words that open the page say what the app does, as Discover's tile does.
     expect(visible).toContain(key === 'wasm-image' ? 'Make a picture gray, or black and white.' : 'Then pick a column of numbers to see a chart.');
