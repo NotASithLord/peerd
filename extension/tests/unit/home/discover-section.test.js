@@ -1015,7 +1015,7 @@ describe('home.discover tiles and filters', () => {
       expect(tileAction(view.root, 'notes')).toBe('Update | Open');
       expect(document.activeElement === el(view.root, '[data-key="notes"] .disc-tile-action')).toBe(false);
       await strayEnter();
-      // Review turns into Open when the Library gains the app elsewhere.
+      // Look at it turns into Open when the Library gains the app elsewhere.
       el(view.root, '[data-key="orbit"] .disc-tile-action').focus();
       host.state.library = [local('local-notes', notes), local('local-orbit', orbit)];
       await focusPoll();
@@ -1077,7 +1077,7 @@ describe('home.discover tiles and filters', () => {
 
   // Any peer can sign a card that names another maker's uri. Only the card its
   // own publisher signed stands for the Library record at that uri.
-  it('a card that names another maker\'s installed version is not that app: Review, no installed line, and no Open', async () => {
+  it('a card that names another maker\'s installed version is not that app: Look at it, no installed line, and no Open', async () => {
     const address = formatDwappUri({ did: ANA, hash: 'a'.repeat(64) });
     const target = immutableAppRoot(address);
     const signed = card('signed', 'Signed app', ANA, { version_id: target.hash });
@@ -2154,6 +2154,30 @@ describe('home.discover the app says it', () => {
     } finally { read.resolve({ ok: false }); view.close(); }
   });
 
+  it('just updated: the update reply names the facts of the new version before a Library read lands', async () => {
+    const newer = card('upd', 'Trip planner', BOB, { version_id: 'upd-v2', seq: 2 });
+    const older = local('local-upd', newer, { version_id: 'upd-v1', seq: 1, hash: 'upd-v1', declared: declared('upd-v1', ALL) });
+    const row = local('local-upd', newer, { hash: newer.version_id, declared: declared(newer.version_id, { dweb: true }) });
+    const read = deferred();
+    let hold = false;
+    const host = fakeHost({ heard: [newer] }, {
+      'dweb/base/update-app': () => { hold = true; return { ok: true, app: row }; },
+      'apps/list': () => hold ? read.promise : { ok: true, apps: [older] },
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'upd');
+      expect(text(el(view.root, '.disc-says p'))).toBe(NOT_KNOWN.replace('install it', 'update it'));
+      await press(view.root, 'Update'); await settle();
+      expect(text(panel(view.root))).toContain('in your Library is now the new version.');
+      expect(chips(view.root)).toEqual([['Uses the peer network', false]]);
+      read.resolve({ ok: true, apps: [row] }); await settle();
+      expect(chips(view.root)).toEqual([['Uses the peer network', false]]);
+      expect(host.writes().map(call => call.type)).toEqual(['dweb/base/update-app']);
+    } finally { read.resolve({ ok: false }); view.close(); }
+  });
+
   it('share link: the facts from the link check, only for the version the link names', async () => {
     const [first, second] = ['a', 'b'].map(c => formatDwappUri({ did: ANA, hash: c.repeat(64) }));
     /** @param {string} link @param {unknown} flags */
@@ -2586,6 +2610,10 @@ describe('home.discover share dialog', () => {
       expect(writes).toEqual([discoveryAddress(app)]);
       expect(el(box, '[role="status"]')).toBe(status);
       expect(text(status)).toBe('Link copied.');
+      // A click on the link selects all of it, so copying it by hand is one step.
+      // why the event itself: a script focus brings back the old selection after it.
+      input.dispatchEvent(new FocusEvent('focus'));
+      expect([input.selectionStart, input.selectionEnd]).toEqual([0, input.value.length]);
       await keydown('Escape');
       expect(dialog(view.root)).toBe(null);
       expect(document.activeElement).toBe(el(view.root, '[data-share-open]'));
@@ -2644,6 +2672,23 @@ describe('home.discover share dialog', () => {
     await withShare({ writeText: async () => {} }, async (view) => {
       expect(view.root.querySelector('[data-share-open]')).toBe(null);
     }, { heard: [card('drift', 'Drift app', ANA, { version_id: hash, uri: 'peerd://other/hash' })] });
+  });
+
+  it('a share dialog whose link goes away closes, and stays closed when the link comes back', async () => {
+    await withShare({ writeText: async () => {} }, async (view, host) => {
+      await press(view.root, 'Share');
+      expect(dialog(view.root)).toBeTruthy();
+      // Peers now send a card whose coordinates disagree, so it has no share link.
+      host.state.heard = [{ ...app, uri: 'peerd://other/hash' }];
+      await focusPoll();
+      expect(dialog(view.root)).toBe(null);
+      expect(view.root.querySelector('[data-share-open]')).toBe(null);
+      host.state.heard = [app];
+      await focusPoll();
+      expect(view.root.querySelector('[data-share-open]')).toBeTruthy();
+      expect(dialog(view.root)).toBe(null);
+      expect(host.writes().length).toBe(0);
+    });
   });
 
   for (const clipboard of [undefined, { writeText: async () => { throw new Error('permission denied raw error'); } }]) {
@@ -2972,6 +3017,9 @@ describe('home.discover share link', () => {
         await click(view.root, 'Check again');
         expect(sessionStorage.getItem(KEY)).toBe(null);
         expect(button(panel(view.root), 'Open')?.disabled).toBe(false);
+        // Check again confirms the install the user started, so the line says so and names it.
+        expect(text(el(view.root, '.disc-panel .disc-installed')))
+          .toBe('Installed. Unnamed app is now in your Library. Other people can get it from you while your peer network is on.');
         expect(host.count('dweb/base/install-address')).toBe(1);
       } finally { view.close(); sessionStorage.removeItem(KEY); }
     });
@@ -3233,7 +3281,7 @@ describe('home.discover share link', () => {
           await click(view.root, 'Check again');
           expect(text(el(view.root, '.disc-panel [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
           expect(button(view.root, 'Install and share')).toBe(undefined);
-          // The share-link Refresh finds the exact receipt.
+          // The share-link Check again finds the exact receipt.
           await earlyRead();
           await click(view.root, 'Discover');
           await click(view.root, 'Check link');
@@ -3305,7 +3353,7 @@ describe('home.discover share link', () => {
         expect(button(view.root, 'Install and share')).toBe(undefined);
         stale.click(); await settle();
         if (unknown) {
-          // Refresh reads the Library again. It does not hold this version yet.
+          // Check again reads the Library again. It does not hold this version yet.
           const reads = host.count('apps/list');
           await click(view.root, 'Check again');
           expect(host.count('apps/list')).toBeGreaterThan(reads);
@@ -3314,7 +3362,7 @@ describe('home.discover share link', () => {
         }
         expect(host.writes().map(call => call.type)).toEqual(['dweb/base/inspect-address', type, 'dweb/base/inspect-address']);
         if (unknown) {
-          // Refresh finds this version in the Library.
+          // Check again finds this version in the Library.
           host.state.library = [local(appId, same)];
           await click(view.root, 'Check again');
         } else {
@@ -4009,7 +4057,11 @@ describe('home.discover block a maker', () => {
 
   it('a known failure says what failed and keeps Block; an unknown one stays neutral, and Check again reads the list, never blocks again', async () => {
     /** @type {unknown[]} */ const replies = [{ ok: false, error: 'vault-locked' }, { ok: false, outcomeKnown: false }, { ok: false, outcomeKnown: false }];
-    const host = fakeHost({ heard: [card('a', 'Expense splitter', ANA)], contacts: ana }, { 'dweb/peer-block': () => replies.shift() });
+    let listFails = false;
+    const host = fakeHost({ heard: [card('a', 'Expense splitter', ANA)], contacts: ana }, {
+      'dweb/peer-block': () => replies.shift(),
+      'dweb/blocked-peers': /** @returns {unknown} */ () => (listFails ? { ok: false } : { ok: true, blocked: host.state.blocked }),
+    });
     const view = mount({ send: host.send });
     try {
       await settle();
@@ -4035,6 +4087,12 @@ describe('home.discover block a maker', () => {
       expect(text(el(dialog, '[role="alert"]'))).toBe('peerd could not block Ana. Try again.');
       expect(document.activeElement).toBe(el(dialog, '[data-block-confirm]'));
       await pressOff(view.root, 'Block Ana');
+      // A list read that fails decides nothing: the neutral line stays, and focus returns to Check again.
+      listFails = true;
+      await pressOff(view.root, 'Check again');
+      expect(text(el(dialog, 'p[role="status"]'))).toBe('peerd is not sure Ana is blocked. Check again before you try again.');
+      expect(document.activeElement).toBe(el(dialog, '[data-block-check]'));
+      listFails = false;
       // This time the host stored it after all: the list is the receipt.
       host.state.blocked = [ANA];
       await click(view.root, 'Check again');
@@ -4144,6 +4202,108 @@ describe('home.discover block a maker', () => {
       expect(view.root.querySelector('.disc-menu')).toBe(null);
       expect(document.activeElement).toBe(back);
     } finally { view.close(); }
+  });
+
+  it('a page change closes the name form, so a later visit to the maker page opens without it', async () => {
+    const host = fakeHost({ heard: [card('a', 'Expense splitter', ANA)], contacts: ana });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'a');
+      await click(view.root, 'Made by Ana, someone you know');
+      await openMenu(view.root);
+      await click(view.root, 'Rename');
+      expect(view.root.querySelector('.disc-rename')).toBeTruthy();
+      // One of their apps, then their page again.
+      el(view.root, 'li.disc-app-row .disc-tile-open').click(); await settle();
+      expect(text(el(view.root, '.disc-app-title'))).toBe('Expense splitter');
+      await click(view.root, 'Made by Ana, someone you know');
+      expect(view.root.querySelector('.disc-rename')).toBe(null);
+      expect(host.writes()).toEqual([]);
+    } finally { view.close(); }
+  });
+
+  it('Back while a name saves: the saved name shows at once, and the maker page then opens without the form', async () => {
+    const save = deferred();
+    const host = fakeHost({ heard: [card('a', 'Expense splitter', ANA)], contacts: ana }, { 'contacts/set': () => save.promise });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'a');
+      await click(view.root, 'Made by Ana, someone you know');
+      await openMenu(view.root);
+      await click(view.root, 'Rename');
+      const input = /** @type {HTMLInputElement} */ (el(view.root, '.disc-rename input'));
+      input.value = 'Ana Lopez';
+      input.dispatchEvent(new Event('input', { bubbles: true })); await settle();
+      await click(view.root, 'Save');
+      el(view.root, '.disc-back').click(); await settle();
+      host.state.contacts = [{ did: ANA, name: 'Ana Lopez', saved: true }];
+      save.resolve({ ok: true, contact: { name: 'Ana Lopez' } }); await settle();
+      // The store saved the name, so the page the user went back to says so.
+      expect(text(el(view.root, '.disc-app-maker'))).toBe('Made by Ana Lopez, someone you know');
+      await click(view.root, 'Made by Ana Lopez, someone you know');
+      expect(text(el(view.root, '.disc-person-id h2'))).toBe('Ana Lopez');
+      expect(view.root.querySelector('.disc-rename')).toBe(null);
+      expect(host.writes().map(call => call.type)).toEqual(['contacts/set']);
+    } finally { save.resolve({ ok: false }); view.close(); }
+  });
+
+  it('a name save that fails, or may not have finished, after Back says so when the maker page opens again', async () => {
+    for (const reply of [{ ok: false, outcomeKnown: true }, { ok: false, outcomeKnown: false }]) {
+      const save = deferred();
+      const host = fakeHost({ heard: [card('a', 'Expense splitter', ANA)], contacts: ana }, { 'contacts/set': () => save.promise });
+      const view = mount({ send: host.send });
+      try {
+        await settle();
+        await openTile(view.root, 'a');
+        await click(view.root, 'Made by Ana, someone you know');
+        await openMenu(view.root);
+        await click(view.root, 'Rename');
+        const input = /** @type {HTMLInputElement} */ (el(view.root, '.disc-rename input'));
+        input.value = 'Ana Lopez';
+        input.dispatchEvent(new Event('input', { bubbles: true })); await settle();
+        await click(view.root, 'Save');
+        el(view.root, '.disc-back').click(); await settle();
+        save.resolve(reply); await settle();
+        // The page the user went back to keeps its words: the store kept the old name.
+        expect(text(el(view.root, '.disc-app-maker'))).toBe('Made by Ana, someone you know');
+        await click(view.root, 'Made by Ana, someone you know');
+        if (reply.outcomeKnown) {
+          // The form comes back as the user left it, with the line that says what failed.
+          expect(text(el(view.root, '.disc-rename [role="alert"]'))).toBe('peerd could not save the name. Try again.');
+          expect(/** @type {HTMLInputElement} */ (el(view.root, '.disc-rename input')).value).toBe('Ana Lopez');
+        } else {
+          expect(view.root.querySelector('.disc-rename')).toBe(null);
+          expect([...view.root.querySelectorAll('.disc-page p[role="status"]')].map(node => text(node)))
+            .toContain('peerd is not sure the name was saved. Check Contacts before you try again.');
+        }
+        expect(host.count('contacts/set')).toBe(1);
+      } finally { save.resolve({ ok: false }); view.close(); }
+    }
+  });
+
+  it('a block that runs while the page changes keeps its confirm, which comes back with the maker page and shows the outcome', async () => {
+    const reply = deferred();
+    const host = fakeHost({ heard: [card('a', 'Expense splitter', ANA), card('a2', 'Budget board', ANA)], contacts: ana },
+      { 'dweb/peer-block': () => reply.promise });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'a');
+      await click(view.root, 'Made by Ana, someone you know');
+      await openMenu(view.root);
+      await click(view.root, 'Block Ana');
+      await press(view.root, 'Block Ana');
+      // A notification opens one of their apps while the block runs.
+      view.set({ openKey: 'a2' }); await settle();
+      expect(text(el(view.root, '.disc-app-title'))).toBe('Budget board');
+      await click(view.root, 'Made by Ana, someone you know');
+      expect(button(el(view.root, '.disc-block'), 'Blocking…')?.disabled).toBe(true);
+      reply.resolve({ ok: false, error: 'vault-locked' }); await settle();
+      expect(text(el(view.root, '.disc-block [role="alert"]'))).toBe('peerd could not block Ana. Try again.');
+      expect(host.count('dweb/peer-block')).toBe(1);
+    } finally { reply.resolve({ ok: false }); view.close(); }
   });
 
   it('Save stays off for the saved name, and Enter on it sends nothing', async () => {
@@ -4307,6 +4467,8 @@ describe('home.discover block a maker', () => {
       const input = el(view.root, '.disc-rename input');
       expect(document.activeElement).toBe(input);
       expect([input.getAttribute('placeholder'), text(el(view.root, '.disc-rename label'))]).toEqual(['Add a name…', 'Name']);
+      // Contacts keeps at most 64 characters of a name, so the field takes no more.
+      expect(/** @type {HTMLInputElement} */ (input).maxLength).toBe(64);
       expect(button(view.root, 'Save')?.disabled).toBe(true);
       // Escape leaves the form, back on the menu button.
       keydown(input, 'Escape'); await settle();

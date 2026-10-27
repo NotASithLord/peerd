@@ -115,7 +115,7 @@ describe('network and root state', () => {
     expect(rootView({ ...base, net: { kind: 'looking', linked: 0 } })).toBe('looking');
   });
 
-  test('the Included pill needs no peer: it lists apps with no heard app, but never with the network off', () => {
+  test('the Comes with peerd pill needs no peer: it lists apps with no heard app, but never with the network off', () => {
     const included = { enabled: true, net: null, heardCount: 0, loading: true, failed: false, included: true };
     expect(rootView(included)).toBe('grid');
     expect(rootView({ ...included, net: { kind: 'connected', linked: 2 }, loading: false })).toBe('grid');
@@ -471,6 +471,8 @@ describe('filters and contacts', () => {
 
   test('Your apps: the Library apps, the most recently added first, at most `max`, with a total', () => {
     const records = [
+      // Added at the same time as 'old': the Library order decides.
+      { id: 'tie', name: 'Tie app', createdAt: 100 },
       { id: 'old', name: 'Old app', createdAt: 100 },
       { id: 'undated', name: 'Undated app' },
       { id: 'new', name: 'New app', createdAt: 300 },
@@ -481,13 +483,13 @@ describe('filters and contacts', () => {
       { id: 'bad-time', name: 'Bad time', createdAt: Number.NaN },
     ];
     const all = yourApps(records, 10);
-    expect(all.total).toBe(7);
-    expect(all.apps.map(app => app.id)).toEqual(['new', 'peer', 'old', 'commons', 'undated', 'linked', 'bad-time']);
+    expect(all.total).toBe(8);
+    expect(all.apps.map(app => app.id)).toEqual(['new', 'peer', 'tie', 'old', 'commons', 'undated', 'linked', 'bad-time']);
     // The tone key matches the app's tile: Commons by its seed, a peer app by its dwapp_id.
-    expect(all.apps.map(app => app.toneKey)).toEqual(['new', 'peer-app', 'old', 'commons', 'undated', 'peerd://l/2', 'bad-time']);
+    expect(all.apps.map(app => app.toneKey)).toEqual(['new', 'peer-app', 'tie', 'old', 'commons', 'undated', 'peerd://l/2', 'bad-time']);
     expect(all.apps.find(app => app.id === 'linked')?.name).toBe('Unnamed app');
     const few = yourApps(records, 2);
-    expect([few.apps.map(app => app.id), few.total]).toEqual([['new', 'peer'], 7]);
+    expect([few.apps.map(app => app.id), few.total]).toEqual([['new', 'peer'], 8]);
     expect(yourApps([], 6)).toEqual({ apps: [], total: 0 });
   });
 

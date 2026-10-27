@@ -135,6 +135,10 @@ describe('packaged starters', () => {
         expect(button(view.root, 'Add to Library')).toBe(undefined);
         expect(view.root.textContent).toContain('peerd is not sure the app was added. Check your Library before you add it again.');
         expect(/Refresh|reconcile/.test(view.root.textContent ?? '')).toBe(false);
+        // The add may still have happened, so the line is a neutral status, never an alert.
+        expect(view.root.querySelector('[role="alert"]')).toBe(null);
+        expect(view.root.querySelector('[role="status"]')?.textContent)
+          .toBe('peerd is not sure the app was added. Check your Library before you add it again.');
         expect(view.root.textContent?.includes('starter was not added')).toBe(false);
       } finally { view.close(); }
     }

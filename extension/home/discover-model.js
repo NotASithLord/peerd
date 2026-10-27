@@ -488,11 +488,11 @@ const addedAt = (record) => typeof record.createdAt === 'number' && Number.isFin
  * @returns {{apps: LibraryApp[], total: number}}
  */
 export const yourApps = (records, max) => {
-  /** @type {{record:CatalogRecord, id:string, at:number|null, index:number}[]} */
-  const rows = records.flatMap((record, index) => typeof record?.id === 'string' && record.id
-    ? [{ record, id: record.id, at: addedAt(record), index }] : []);
-  rows.sort((a, b) => (a.at === null || b.at === null
-    ? Number(a.at === null) - Number(b.at === null) : b.at - a.at) || a.index - b.index);
+  /** @type {{record:CatalogRecord, id:string, at:number|null}[]} */
+  const rows = records.flatMap(record => typeof record?.id === 'string' && record.id
+    ? [{ record, id: record.id, at: addedAt(record) }] : []);
+  // why no tie-break: the sort is stable, so ties and records with no time keep their Library order.
+  rows.sort((a, b) => (a.at === null || b.at === null ? Number(a.at === null) - Number(b.at === null) : b.at - a.at));
   return {
     total: rows.length,
     apps: rows.slice(0, max).map(({ record, id }) => {

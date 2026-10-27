@@ -159,7 +159,8 @@ export const DiscoverSection = (initialVnode) => {
   /** @type {{route:Route, name:string}|null} */ let makerFrom = null;
   // The page key whose share dialog is open.
   /** @type {string|null} */ let shareFor = null;
-  // The maker page's menu, name form and block confirm. A page change closes them.
+  // The maker page's menu, name form and block confirm. Opening a page closes them.
+  // why not Back: a name that a running save stores then shows at once.
   let menuOpen = false;
   /** @type {{did:string, value:string, busy:boolean, failed:boolean}|null} */ let renaming = null;
   /** @type {{did:string, name:string}|null} */ let renameUnknown = null;
@@ -908,7 +909,16 @@ export const DiscoverSection = (initialVnode) => {
   // root keeps its scroll and the tile that opened the page, so Back can
   // return both.
   // why not a block in flight: its outcome still lands, on whatever page is open.
-  const closeMakerParts = () => { menuOpen = false; renaming = null; renameUnknown = null; if (!blockBusy) { blockFor = null; blockIssue = null; } };
+  // why a save that runs or failed, or whose outcome is not known, stays for
+  // its maker's page: Back keeps it, and only that page can say how it ended.
+  /** @param {Route} next */
+  const closeMakerParts = (next) => {
+    const same = next.page === 'maker' ? next.did : null;
+    menuOpen = false;
+    if (!(renaming?.did === same && (renaming.busy || renaming.failed))) renaming = null;
+    if (renameUnknown?.did !== same) renameUnknown = null;
+    if (!blockBusy) { blockFor = null; blockIssue = null; }
+  };
   /** @param {Route} next @param {string} originKey */
   const openPage = (next, originKey) => {
     if (route.page === 'root') origin = { key: originKey, scroll: scrollHost()?.scrollTop ?? 0 };
@@ -919,7 +929,7 @@ export const DiscoverSection = (initialVnode) => {
     surpriseNote = null;
     shareFor = null;
     makerFrom = null;
-    closeMakerParts();
+    closeMakerParts(next);
     forgetLocalChanges();
     pendingFocus = { selector: '.disc-back', scroll: 0 };
   };
@@ -939,7 +949,6 @@ export const DiscoverSection = (initialVnode) => {
     void loadBlocked();
   };
   const goBack = () => {
-    closeMakerParts();
     if (route.page === 'maker' && makerFrom) {
       route = makerFrom.route;
       makerFrom = null;

@@ -389,9 +389,11 @@ describe('home.contacts blocked makers', () => {
     const row = () => need(root, '.contacts-blocked-row');
     const press = async (/** @type {string} */ label) => { clickText(row(), 'button', label); await flush(); await flush(); };
     try {
+      // The pressed button is off while each request runs, so focus comes back to the row's button.
       await press('Unblock');
       const alert = need(row(), '[role="alert"]');
       expect([alert.textContent, alert.classList.contains('error')]).toEqual(['peerd could not unblock Alice. Try again.', true]);
+      expect(document.activeElement).toBe(need(row(), '[data-unblock]'));
       await press('Unblock');
       const status = need(row(), 'p[role="status"]');
       expect([status.textContent, status.classList.contains('error')])
@@ -400,15 +402,18 @@ describe('home.contacts blocked makers', () => {
       // The unblock may be done, so the row claims neither outcome.
       expect(row().querySelector('.contacts-blocked-meta')).toBe(null);
       expect(need(row(), 'button').textContent).toBe('Check again');
+      expect(document.activeElement).toBe(need(row(), '[data-unblock]'));
       // The list still names them, so the unblock did not happen.
       await press('Check again');
       expect(need(row(), '[role="alert"]').textContent).toBe('peerd could not unblock Alice. Try again.');
+      expect(document.activeElement).toBe(need(row(), '[data-unblock]'));
       await press('Unblock');
       // This time it was stored after all: the list is the receipt.
       blocked = [];
       await press('Check again');
       expect(root.querySelector('.contacts-blocked-row')).toBe(null);
       expect(root.textContent).toContain('After you unblock someone, their apps show up again the next time peerd hears from them.');
+      expect(document.activeElement).toBe(need(root, '.contacts-unblocked'));
       expect(sent(send, 'dweb/peer-unblock').length).toBe(3);
     } finally { unmount(); }
   });
@@ -479,6 +484,37 @@ describe('home.contacts blocked makers', () => {
       expect(root.textContent).toContain('After you unblock someone, their apps show up again the next time peerd hears from them.');
       expect(sent(send, 'dweb/peer-unblock').length).toBe(1);
     } finally { for (const release of held) release(); unmount(); }
+  });
+
+  it('the poll settles an unknown unblock once the list drops the maker, and a later block of them starts fresh', async () => {
+    let blocked = [DID_A];
+    const send = makeSend({
+      'dweb/blocked-peers': () => ({ ok: true, blocked }),
+      'dweb/peer-unblock': () => ({ ok: false, outcomeKnown: false }),
+    });
+    const { root, unmount } = await mountView(send, undefined, 20);
+    /** @param {() => boolean} ready */
+    const polled = async (ready) => {
+      for (let tries = 0; tries < 200 && !ready(); tries++) { await new Promise((resolve) => setTimeout(resolve, 10)); m.redraw.sync(); }
+    };
+    try {
+      clickText(root, '.contacts-blocked-row button', 'Unblock');
+      await flush();
+      await flush();
+      expect(need(root, '.contacts-blocked-row button').textContent).toBe('Check again');
+      // Stored after all, or unblocked in another tab: the next list the poll reads is the receipt.
+      blocked = [];
+      await polled(() => !root.querySelector('.contacts-blocked-row'));
+      expect(root.querySelector('.contacts-blocked-row')).toBe(null);
+      expect(need(root, '.contacts-unblocked').textContent)
+        .toBe('After you unblock someone, their apps show up again the next time peerd hears from them.');
+      // Blocked again in Discover: the row offers Unblock, and nothing is left of the last try.
+      blocked = [DID_A];
+      await polled(() => !!root.querySelector('.contacts-blocked-row'));
+      expect(need(root, '.contacts-blocked-row button').textContent).toBe('Unblock');
+      expect(need(root, '.contacts-blocked-row').querySelector('p[role="status"]')).toBe(null);
+      expect(sent(send, 'dweb/peer-unblock').length).toBe(1);
+    } finally { unmount(); }
   });
 
   it('after an unblock, focus moves to the line that says so only when it was lost, never from a control the user moved to', async () => {
