@@ -262,15 +262,17 @@ const linkButton = (label, onclick) => m('button.linklike.disc-link-btn', { type
  * is a committed warning after success; `error` is an Open failure.
  * `otherVersion`: the Library holds another version, so the installed line
  * claims no version. `fresh`: this visit installed it, so the line says so
- * and names it. `secondary` sits next to `primary`; `sharing` explains what
+ * and names it. `changed`: the copy changed on this device, and peers still
+ * get the version peerd checked, never the edits.
+ * `secondary` sits next to `primary`; `sharing` explains what
  * Install and share does; `onLibrary` adds Go to Library next to Open.
  * @param {{state:InstallState, name:string, message:string|null,
  *   failure?:{action:'install'|'update', hint:string}|null, unknown?:{status:string, hint:string}|null,
  *   notice:string|null, error:unknown, primary:ButtonProps|null, secondary?:ButtonProps|null,
- *   otherVersion?:boolean, fresh?:boolean, sharing?:string|null, onLibrary?:(()=>void)|null}} props
+ *   otherVersion?:boolean, fresh?:boolean, changed?:boolean, sharing?:string|null, onLibrary?:(()=>void)|null}} props
  */
 export const installPanel = ({
-  state, name, message, failure, unknown, notice, error, primary, secondary, otherVersion, fresh, sharing, onLibrary,
+  state, name, message, failure, unknown, notice, error, primary, secondary, otherVersion, fresh, changed, sharing, onLibrary,
 }) => {
   const actions = primary ? m('.disc-panel-actions', keyedParts({
     [primary.label]: primaryButton(primary), ...(secondary ? { [secondary.label]: secondaryButton(secondary) } : {}),
@@ -288,8 +290,10 @@ export const installPanel = ({
     state === 'installing' && message ? m('p.type-small.disc-footnote', { role: 'status' }, message) : null,
     state === 'installed' || (secondary && otherVersion) ? m('p.type-body-sm.disc-installed', { tabindex: -1, role: 'status' }, otherVersion
       ? 'Another version of this app is in your Library. Open runs the version you have.'
-      : fresh ? [m('strong', 'Installed.'), ' ', m('bdi', name), ' is now in your Library. Other people can get it from you while your peer network is on.']
-        : 'In your Library. Other people can get it from you while your peer network is on.') : null,
+      : changed ? 'In your Library. Other people can get the version its maker shared from you while your peer network is on. '
+        + 'They do not get your changes.'
+        : fresh ? [m('strong', 'Installed.'), ' ', m('bdi', name), ' is now in your Library. Other people can get it from you while your peer network is on.']
+          : 'In your Library. Other people can get it from you while your peer network is on.') : null,
     state === 'failed' && failure ? [
       m('p.error.disc-panel-error', { role: 'alert' }, ['peerd could not ', failure.action, ' ', m('bdi', name), '.']),
       m('p.type-body-sm.disc-hint', failure.hint),
@@ -356,15 +360,17 @@ const safetyRow = (name, text) => m('.disc-safety-row', [
 // change the files after the install, so the check belongs to the install.
 // `action` names what the page offers: an update page updates.
 // why `mine` outranks `checked`: the user made the app, so peerd may never have
-// checked it at an install. Its one line is true in every case.
+// checked it at an install. Its one line is true in every case. `changed`:
+// the copy in the Library is no longer the files peerd checked, so it says so.
 const SAFETY_TITLE = 'disc-safety-title';
-/** @param {{maker:Maker|null, checked:'link'|'installed'|null, action?:'install'|'update', mine?:boolean}} props */
-export const safetyLines = ({ maker, checked, action = 'install', mine = false }) => {
+/** @param {{maker:Maker|null, checked:'link'|'installed'|null, action?:'install'|'update', mine?:boolean, changed?:boolean}} props */
+export const safetyLines = ({ maker, checked, action = 'install', mine = false, changed = false }) => {
   const made = maker ? ['Made by ', makerName(maker), '. '] : [];
   const who = maker?.name ? m('bdi', maker.name) : 'its maker';
-  const check = checked === 'installed' ? ['When you installed it, peerd checked that it was exactly the app ', who, ' shared.']
-    : checked === 'link' ? ['peerd checked that this is exactly the app ', who, ' shared.']
-      : [`When you ${action} it, peerd checks that every file is exactly what `, who, ' shared.'];
+  const check = changed ? ['It changed on this device after you installed it.', ' It is no longer exactly the app ', who, ' shared.']
+    : checked === 'installed' ? ['When you installed it, peerd checked that it was exactly the app ', who, ' shared.']
+      : checked === 'link' ? ['peerd checked that this is exactly the app ', who, ' shared.']
+        : [`When you ${action} it, peerd checks that every file is exactly what `, who, ' shared.'];
   return m('section.disc-section.disc-safety', { 'aria-labelledby': SAFETY_TITLE }, [
     m('h3.type-label-strong', { id: SAFETY_TITLE }, 'What to know'),
     safetyRow('key', mine ? 'You made this app. Other people get the files you share from your Library.'

@@ -6,6 +6,7 @@ import { withDeadline } from '/shared/cold-util.js';
 import { policyDid } from '/shared/peer-policy.js';
 import { finiteEffectReceiptFields } from '../host-effect-verdict.js';
 import { appReleaseDescriptorMatches } from '/shared/app-dweb-identity.js';
+import { verifiedDeclaration } from '/shared/app-declaration.js';
 
 /**
  * @param {Record<string, any>} deps
@@ -232,6 +233,18 @@ export const makeDwebRoutes = (deps) => {
       return failureResult(error);
     }
   };
+  // why read here, never taken from the host: the facts must describe the
+  // files this worker decoded against the verified hash and stores. Without
+  // a seed bundle nothing here checked the files, so the facts are not known.
+  /** @param {{hash:string}} dweb @param {Record<string, string|Uint8Array>} files @param {string} entryFile @param {unknown} seedBundle */
+  const ownDeclared = (dweb, files, entryFile, seedBundle) => seedBundle ? verifiedDeclaration({ files, entryFile, dweb }) : null;
+  // why one check for an update and for Discover: the Library copy is the
+  // release peerd checked only while its files equal the commit peerd made
+  // when it stored that release. Runtime data is not part of a release.
+  /** @param {string} appId @param {{dweb?: {git_oid?: string, hash?: unknown}}} rec */
+  const releaseChanged = async (appId, rec) => !rec.dweb?.git_oid
+    || (typeof rec.dweb?.hash === 'string' && !appReleaseDescriptorMatches(rec))
+    || !await repositories.matches({ kind: 'app', id: appId }, { at: rec.dweb.git_oid, excludeAppData: true });
   /** @param {any} seed @param {string|null} [sessionId] */
   const createSeedApp = async (seed, sessionId = null) => {
     if (!seed.files || typeof seed.files !== 'object') throw new Error('seed-files-required');
@@ -244,14 +257,21 @@ export const makeDwebRoutes = (deps) => {
   // is the user's own click in Discover or Contacts. It writes the policy the
   // agent's dweb_block writes, and the host reads that policy before it joins.
   // A block also runs dweb_block's revocation (`revokePeer`): the agent's
-  // remembered A2A consent and its conversations with them end.
+  // remembered A2A consent and its conversations with them end. why an audit
+  // entry once the policy is stored: the agent's dweb_block is audited by its
+  // tool dispatcher, and a block from Home is the same decision.
   /** @param {unknown} did @param {boolean} block */
   const setPeerBlocked = async (did, block) => {
     if (!DWEB_ENABLED) return dwebDisabled();
     try { policyDid(did); } catch { return { ...refuse('invalid-peer-did'), outcomeKnown: true }; }
     const generation = dwebPublicationGeneration();
-    return setUserPeerBlocked({ kv, vault, browser, revokePeer, current: () => dwebPublicationGeneration() === generation },
+    const result = await setUserPeerBlocked({ kv, vault, browser, revokePeer, current: () => dwebPublicationGeneration() === generation },
       { did: /** @type {string} */ (did), block });
+    // why only a write: a block of a maker already blocked changes nothing, so it logs nothing.
+    if ('durable' in result && result.changed) {
+      await auditLog.append({ type: block ? 'dweb_peer_blocked' : 'dweb_peer_unblocked', details: { did } }).catch(() => {});
+    }
+    return result;
   };
 
   /** @type {ReturnType<typeof makeDwebRoutes>} */
@@ -270,6 +290,22 @@ export const makeDwebRoutes = (deps) => {
     },
     'dweb/peer-block': ({ did } = {}) => setPeerBlocked(did, true),
     'dweb/peer-unblock': ({ did } = {}) => setPeerBlocked(did, false),
+    // Home only, a read: Discover claims what peerd checked at an install only
+    // while this says the copy is unchanged. `changed` is null with no release
+    // to compare. why the write lock: an edit cannot land halfway through it.
+    'dweb/app-local-changes': async ({ appId } = {}) => {
+      if (!DWEB_ENABLED) return dwebDisabled();
+      if (vault.isLocked()) return refuse('vault-locked');
+      if (typeof appId !== 'string') return refuse('appId-required');
+      try {
+        return await appClient.withWriteLock(appId, async () => {
+          const rec = await appRegistry.get(appId);
+          if (!rec) return refuse('app-not-found');
+          return { ok: true, changed: typeof rec.dweb?.hash === 'string' && typeof rec.dweb.git_oid === 'string'
+            ? await releaseChanged(appId, rec) : null };
+        });
+      } catch (error) { return failureResult(error); }
+    },
     'dweb/app-authority-generations': async (_msg, sender) => {
       if (isOffscreenSender?.(sender) !== true) return refuse('offscreen-sender-required');
       if (!DWEB_ENABLED) return dwebDisabled();
@@ -334,6 +370,7 @@ export const makeDwebRoutes = (deps) => {
         if (!isCurrent()) {
           return custodyChanged();
         }
+        if (dweb && typeof dweb === 'object') dweb = { ...dweb, declared: ownDeclared(dweb, files, entryFile, seedBundle) };
         record = await appClient.create({ appId, name, files, entryFile, fileKinds, dweb, source: 'dweb' });
         createdAppId = record.id;
         if (!isCurrent()) {
@@ -418,12 +455,10 @@ export const makeDwebRoutes = (deps) => {
           ...(Array.isArray(rec.dweb?.pending_seed_unserve_hashes) ? rec.dweb.pending_seed_unserve_hashes : []),
           ...(typeof rec.dweb?.hash === 'string' ? [rec.dweb.hash] : []),
         ].filter((hash) => typeof hash === 'string' && hash !== dweb?.hash))];
-        const nextDweb = { ...(dweb ?? {}) };
+        const nextDweb = { ...(dweb ?? {}), declared: ownDeclared(dweb, files, entryFile, seedBundle) };
         if (cleanupHashes.length) nextDweb.pending_seed_unserve_hashes = cleanupHashes;
         else delete nextDweb.pending_seed_unserve_hashes;
-        const diverged = !rec.dweb?.git_oid
-          || (typeof rec.dweb?.hash === 'string' && !appReleaseDescriptorMatches(rec))
-          || !await repositories.matches({ kind: 'app', id: appId }, { at: rec.dweb.git_oid, excludeAppData: true });
+        const diverged = await releaseChanged(appId, rec);
         if (diverged && !resolvesConflict) return updateConflict(appId);
         if (!isCurrent()) {
           return custodyChanged();

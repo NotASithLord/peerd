@@ -136,20 +136,26 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 407, graphBytes: 4_081_980 }),
-  target: Object.freeze({ modules: 410, graphBytes: 4_173_031 }),
+  // The one added module reads what an installed App asks of peerd from the
+  // files the worker decoded (see COLD_SOURCE_RATCHETS.kernel). A Home block
+  // or unblock that stores nothing leaves no log entry, so the policy owner
+  // tells its caller whether it wrote: 88 bytes net, no module.
+  shared: Object.freeze({ modules: 408, graphBytes: 4_086_910 }),
+  target: Object.freeze({ modules: 411, graphBytes: 4_177_961 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_251 }),
   entryBytesCeiling: 236,
   directImportsCeiling: 3,
 });
+// The 23 added bytes in each Firefox graph name Home's new read route
+// (dweb/app-local-changes) in the shared route inventory. No module changes.
 export const FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Exact shared authority closure including synchronous session revocation.
-  modules: 90, graphBytes: 666_398, entryBytes: 239, directImports: 3,
+  modules: 90, graphBytes: 666_421, entryBytes: 239, directImports: 3,
 });
 export const PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  modules: 92, graphBytes: 674_029, entryBytes: 250, directImports: 2,
+  modules: 92, graphBytes: 674_052, entryBytes: 250, directImports: 2,
 });
 
 // The offscreen entry is a broker/supervisor, not a feature host. Its former
@@ -180,7 +186,13 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // Exact Settings/Home/Lab admission and chat-scoped integration metadata
   // repair existing leaves without new modules. Pin their measured closure
   // without reserve; Lab requests retain their narrow payload validators.
-  kernel: Object.freeze({ modules: 407, graphBytes: 4_081_980, entryBytes: 200, directImports: 2 }),
+  // The dweb storage routes read what an installed App asks of peerd from the
+  // files they decoded, never from the host, through one added leaf
+  // (shared/app-declaration.js), and Home asks with the update's own check
+  // whether a copy changed here. Remeasured with no reserve. The policy owner
+  // tells a Home block whether it wrote, so a no-op logs nothing: 88 bytes
+  // net in existing modules.
+  kernel: Object.freeze({ modules: 408, graphBytes: 4_086_910, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -211,8 +223,11 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // not a supported demand boundary. This is the exact achieved minified
     // authored graph in the disposable, module-preserving release staging tree.
     // Pin the measured pacing/consent/revocation closure with no reserve.
+    // Home's new read route adds its name to the route inventory and a
+    // disabled answer to the Store dweb routes template: 63 bytes, no module.
+    // The peer policy owner tells its caller whether a block wrote: 22 bytes.
     serviceWorker: Object.freeze({
-      modules: 404, graphBytes: 2_098_780, entryBytes: 173,
+      modules: 404, graphBytes: 2_098_865, entryBytes: 173,
       inputSha256: '5f67dd7fe4ed68e9f9cfb12d1cb482e873e3c4a54dcb00bb84d44297ad3b23d4',
     }),
     // One shared read-only authority schema/provenance validator rejects
@@ -228,7 +243,8 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     offscreen: Object.freeze({ modules: 7, graphBytes: 21_997, entryBytes: 13_293 }),
   }),
   firefox: Object.freeze({
-    serviceWorker: Object.freeze({ modules: 90, graphBytes: 421_665, entryBytes: 210 }),
+    // +23 bytes: the route inventory names Home's new read route.
+    serviceWorker: Object.freeze({ modules: 90, graphBytes: 421_688, entryBytes: 210 }),
     sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
     home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
   }),
@@ -246,19 +262,24 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
       // The Home routes that block, unblock and list makers (the same durable
       // user peer policy dweb_block writes, with the same A2A consent
       // revocation through the turn relay) add thin handlers to an existing
-      // module and no module. Remeasured with no reserve.
+      // module and no module. The worker then reads what an installed App
+      // asks of peerd from the files it decoded (shared/app-declaration.js,
+      // the one added module), never from the host, and answers Discover's
+      // question whether a copy changed here with the update's own check.
+      // A block that stores nothing logs nothing. Remeasured with no reserve.
       serviceWorker: Object.freeze({
-        modules: 410, graphBytes: 2_219_018, entryBytes: 207,
-        inputSha256: 'b4982b66be05990a092f10a1fdc9dd982b8a7cd71cdbbe22896c4ac565b4253b',
+        modules: 411, graphBytes: 2_220_849, entryBytes: 207,
+        inputSha256: 'a1f094c13a0a64c41b3e3b5fe27ecddd16751cf61575fb4ba36ffda5c865022d',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 129_474, entryBytes: 564 }),
       offscreen: Object.freeze({ modules: 7, graphBytes: 22_079, entryBytes: 13_293 }),
     }),
     // Firefox has no dweb host yet, but Preview still carries its distinct
-    // generated channel policy bytes.
+    // generated channel policy bytes. +23 bytes: the route inventory names
+    // Home's new read route.
     firefox: Object.freeze({
-      serviceWorker: Object.freeze({ modules: 92, graphBytes: 427_088, entryBytes: 81 }),
+      serviceWorker: Object.freeze({ modules: 92, graphBytes: 427_111, entryBytes: 81 }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
     }),

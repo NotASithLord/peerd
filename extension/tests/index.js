@@ -139,6 +139,7 @@ import './unit/sidepanel/paced-origins-view.test.js';
 import './unit/sidepanel/pacing-bar.test.js';
 import './unit/sidepanel/chat-reducer-pacing.test.js';
 import './unit/options/activity-origin-events.test.js';
+import './unit/options/activity-peer-block.test.js';
 import './unit/options/behavior-rows.test.js';
 import './unit/options/activity-tool-failed.test.js';
 import './unit/options/dweb-section.test.js';

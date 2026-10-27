@@ -35,6 +35,7 @@ export const makeDwebRoutes = (deps) => {
     'dweb/blocked-peers': disabled,
     'dweb/peer-block': disabled,
     'dweb/peer-unblock': disabled,
+    'dweb/app-local-changes': disabled,
     'dweb/app-authority-generations': offscreenDisabled,
     'dweb/meta-admit': metaDisabled,
     'dweb/app-snapshot': offscreenDisabled,

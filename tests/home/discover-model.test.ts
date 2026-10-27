@@ -303,18 +303,27 @@ describe('the app says it', () => {
       ],
       note: 'From the app’s own files, checked when peerd looked at it.',
     });
-    expect(saysIt({ declared: { dweb: false, instructions: true, observeAct: false }, checked: 'installed' })).toMatchObject({
+    expect(saysIt({ declared: { dweb: false, instructions: true, observeAct: false }, checked: 'installed', changed: false })).toMatchObject({
       chips: [{ text: 'Comes with instructions for peerd', strong: false }],
       note: 'From the app’s own files, checked when peerd installed it.',
     });
     // Nothing to show still says when peerd read it: an edit on this device can change the files later.
-    expect(saysIt({ declared: { dweb: false, instructions: false, observeAct: false }, checked: 'installed' })).toEqual({
+    expect(saysIt({ declared: { dweb: false, instructions: false, observeAct: false }, checked: 'installed', changed: false })).toEqual({
       kind: 'nothing', chips: [], note: 'From the app’s own files, checked when peerd installed it.',
       line: 'It does not use the peer network and has no instructions for peerd.',
     });
     expect(saysIt({ declared: { dweb: false, instructions: false, observeAct: false }, checked: 'link' })?.note)
       .toBe('From the app’s own files, checked when peerd looked at it.');
     for (const checked of ['link', 'installed'] as const) expect(saysIt({ declared: null, checked })).toBe(null);
+  });
+
+  test('the Library copy shows its facts only while the service worker says it is unchanged', () => {
+    const declared = { dweb: true, instructions: true, observeAct: true };
+    // Changed on this device, or not known yet: the facts peerd checked no longer stand for it.
+    for (const changed of [true, null, undefined]) expect(saysIt({ declared, checked: 'installed', changed })).toBe(null);
+    expect(saysIt({ declared, checked: 'installed', changed: false })?.chips).toHaveLength(3);
+    // A share link's facts are its own files: no copy here to change.
+    for (const changed of [true, null]) expect(saysIt({ declared, checked: 'link', changed })?.chips).toHaveLength(3);
   });
 });
 

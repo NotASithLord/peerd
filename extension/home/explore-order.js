@@ -47,7 +47,10 @@ const matchCount = (app, words, whole, names) => {
 /**
  * One publisher per round. The seed is fixed for a visit; polling cannot
  * reshuffle existing cards. DID diversity is not Sybil resistance. With a
- * query, an app that matches more of its words comes first.
+ * query, each maker's best match goes first in its own list, and in each
+ * round an app that matches more of its words comes first.
+ * why inside the rounds: a maker who packs many cards with the task words
+ * would otherwise fill the first page of every search.
  * `names`: saved contact names by full did, so a search finds the maker
  * name a tile shows.
  * @template {{dwapp_id?:string,publisher?:string,name?:string,slug?:string,description?:string}} T
@@ -71,20 +74,24 @@ export const exploreOrder = (apps, { query = '', seed = 0, names } = {}) => {
   }
   /** @param {string} a @param {string} b */
   const compare = (a, b) => rank(a, seed) - rank(b, seed) || a.localeCompare(b);
+  /** @param {T} a @param {T} b */
+  const byHits = (a, b) => (hits.get(b.dwapp_id ?? '') ?? 0) - (hits.get(a.dwapp_id ?? '') ?? 0);
   let publishers = [...groups.keys()].sort(compare);
-  for (const group of groups.values()) group.sort((a, b) => compare(a.dwapp_id ?? '', b.dwapp_id ?? ''));
+  for (const group of groups.values()) group.sort((a, b) => byHits(a, b) || compare(a.dwapp_id ?? '', b.dwapp_id ?? ''));
   /** @type {T[]} */ const ordered = [];
   for (let round = 0; publishers.length; round++) {
+    /** @type {T[]} */ const batch = [];
     /** @type {string[]} */ const next = [];
     for (const publisher of publishers) {
       const app = groups.get(publisher)?.[round];
-      if (app) ordered.push(app);
+      if (app) batch.push(app);
       if ((groups.get(publisher)?.length ?? 0) > round + 1) next.push(publisher);
     }
+    // why a stable sort: ties keep the seeded order.
+    ordered.push(...batch.sort(byHits));
     publishers = next;
   }
-  // why a stable sort: ties keep the seeded order.
-  return ordered.sort((a, b) => (hits.get(b.dwapp_id ?? '') ?? 0) - (hits.get(a.dwapp_id ?? '') ?? 0));
+  return ordered;
 };
 
 export const SURPRISE_HISTORY_LIMIT = 512;

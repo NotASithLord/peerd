@@ -305,16 +305,18 @@ export const verifiedDeclared = (value, version) => {
  * known yet" would contradict "peerd checked" in What to know.
  * why strong: the agent can then see and use the app, the furthest reach.
  * why the note says when: an edit on this device can change the files after
- * the check, so the facts belong to that check.
- * @param {{declared:Declared|null, checked:'link'|'installed'|null, action?:'install'|'update'}} input
+ * the check, so the facts belong to that check. why `changed` for the
+ * Library's copy: an edit keeps the version, so the facts show only while
+ * the service worker says the files are still the ones peerd checked.
+ * @param {{declared:Declared|null, checked:'link'|'installed'|null, action?:'install'|'update', changed?:boolean|null}} input
  * @returns {{kind:'unknown'|'nothing'|'checked', chips:{text:string, strong:boolean}[], line:string|null, note:string|null}|null}
  */
-export const saysIt = ({ declared, checked, action = 'install' }) => {
+export const saysIt = ({ declared, checked, action = 'install', changed = null }) => {
   if (!checked) {
     return { kind: 'unknown', chips: [], note: null,
       line: `Not known yet. peerd reads this from the app itself when it checks it. Paste its link or ${action} it, and peerd checks every file first.` };
   }
-  if (!declared) return null;
+  if (!declared || (checked !== 'link' && changed !== false)) return null;
   const chips = SAYS.filter(([key]) => declared[key]).map(([key, text]) => ({ text, strong: key === 'observeAct' }));
   const note = `From the app’s own files, checked when peerd ${checked === 'link' ? 'looked at it' : 'installed it'}.`;
   return chips.length

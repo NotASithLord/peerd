@@ -18,12 +18,14 @@ import { DiscoverSection } from '/home/discover-section.js';
 /** @typedef {{id:string, name?:string, dweb?:Record<string, unknown>}} LibraryRow */
 /** @typedef {{did:string, name:string, saved:boolean}} ContactRow */
 /**
+ * `changedHere`: Library app ids whose files changed on this device.
  * @typedef {{heard:DwebApp[], library:LibraryRow[], contacts:ContactRow[], blocked:string[], linked:number, running:boolean,
- *   lease:string, heardFails:boolean, libraryFails:boolean}} HostState
+ *   lease:string, heardFails:boolean, libraryFails:boolean, changedHere:string[]}} HostState
  */
 
 const KEY = 'peerd.manual-app-install.pending';
-const READS = Object.freeze(['bootstrap/ready', 'dweb/distributed/info', 'dweb/base/heard', 'apps/list', 'contacts/list', 'dweb/blocked-peers']);
+const READS = Object.freeze(['bootstrap/ready', 'dweb/distributed/info', 'dweb/base/heard', 'apps/list', 'contacts/list', 'dweb/blocked-peers',
+  'dweb/app-local-changes']);
 const UNKNOWN_INSTALL = 'peerd is not sure the install finished. It may still finish by itself.';
 const RECEIPT_HELD = 'peerd is not sure the install finished. It may still finish by itself. Install stays off until peerd knows.';
 const NO_SUGGESTION = 'No new suggestions match these filters. Change your search or filters.';
@@ -65,7 +67,7 @@ const fakeHost = (initial = {}, routes = {}) => {
   /** @type {HostState} */
   const state = {
     heard: [], library: [], contacts: [], blocked: [], linked: 3, running: true, lease: 'active',
-    heardFails: false, libraryFails: false, ...initial,
+    heardFails: false, libraryFails: false, changedHere: [], ...initial,
   };
   /** @type {Message[]} */ const calls = [];
   /** @param {Message} message */
@@ -81,6 +83,7 @@ const fakeHost = (initial = {}, routes = {}) => {
     if (message.type === 'apps/list') return state.libraryFails ? { ok: false } : { ok: true, apps: state.library };
     if (message.type === 'contacts/list') return { ok: true, contacts: state.contacts };
     if (message.type === 'dweb/blocked-peers') return { ok: true, blocked: state.blocked };
+    if (message.type === 'dweb/app-local-changes') return { ok: true, changed: state.changedHere.includes(String(message.appId)) };
     throw new Error(`unexpected ${message.type}`);
   };
   /** @param {string} type */
@@ -1173,10 +1176,14 @@ describe('home.discover app page', () => {
       await click(view.root, 'Install and share');
       expect(text(el(view.root, '.disc-panel [role="alert"]'))).toBe('peerd could not install App.');
       expect(text(el(view.root, '.disc-panel .disc-hint'))).toBe('You blocked the maker of this app. To install it, unblock them in Contacts.');
+      // Only an unblock helps, so the page offers no Try again that can only fail the same way.
+      expect(panel(view.root).querySelector('button')).toBe(null);
       await click(view.root, 'Discover');
       el(view.root, '[data-key="upd"] .disc-tile-action').click(); await settle();
       expect(text(el(view.root, '.disc-panel [role="alert"]'))).toBe('peerd could not update Updater.');
       expect(text(el(view.root, '.disc-panel .disc-hint'))).toBe('You blocked the maker of this app. To update it, unblock them in Contacts.');
+      // The installed version still runs, so Open stays.
+      expect([...panel(view.root).querySelectorAll('button')].map(node => text(node).trim())).toEqual(['Open']);
       expect(host.count('dweb/base/install') + host.count('dweb/base/update-app')).toBe(2);
     } finally { view.close(); }
   });
@@ -1818,15 +1825,18 @@ describe('home.discover app page', () => {
   it('the user made the app: What to know says so, and never that an install checked it against its maker', async () => {
     // Made here and shared, so the Library record has no facts from an install.
     const mine = card('mine', 'My app', SELF);
-    const host = fakeHost({ heard: [mine], library: [local('local-mine', mine, { local: true })] });
+    const host = fakeHost({ heard: [mine], library: [local('local-mine', mine, { local: true })], changedHere: ['local-mine'] });
     const view = mount({ send: host.send });
     try {
       await settle();
-      await openTile(view.root, 'mine');
+      await openTile(view.root, 'mine'); await settle();
       expect(text(panel(view.root))).toContain('In your Library.');
       expect(text(el(view.root, '.disc-safety-text'))).toBe('You made this app. Other people get the files you share from your Library.');
       expect(text(el(view.root, '.disc-safety')).includes('peerd checked')).toBe(false);
       expect(view.root.querySelector('.disc-says')).toBe(null);
+      // No install checked its files, so peerd asks nothing about them, and edits made here are not news.
+      expect(text(el(view.root, '.disc-app-head')).includes('Changed on this device')).toBe(false);
+      expect(host.count('dweb/app-local-changes')).toBe(0);
       expect(host.writes().length).toBe(0);
     } finally { view.close(); }
   });
@@ -1927,13 +1937,14 @@ describe('home.discover the app says it', () => {
     try {
       await settle();
       const calls = host.calls.length;
-      await openTile(view.root, 'a');
+      // why a second settle after each open: the facts wait for peerd's answer about the copy.
+      await openTile(view.root, 'a'); await settle();
       expect(chips(view.root)).toEqual([
         ['Uses the peer network', false], ['Comes with instructions for peerd', false], ['Lets peerd see and use it', true],
       ]);
       expect(text(el(view.root, '.disc-says .disc-footnote'))).toBe('From the app’s own files, checked when peerd installed it.');
       await click(view.root, 'Discover');
-      await openTile(view.root, 'b');
+      await openTile(view.root, 'b'); await settle();
       expect(chips(view.root)).toEqual([]);
       expect(text(el(view.root, '.disc-says p'))).toBe('It does not use the peer network and has no instructions for peerd.');
       // The facts belong to the install: an edit on this device can change the files later.
@@ -1941,11 +1952,13 @@ describe('home.discover the app says it', () => {
       // What to know says peerd checked it, so no "Not known yet" sits under it.
       for (const key of ['c', 'd']) {
         await click(view.root, 'Discover');
-        await openTile(view.root, key);
+        await openTile(view.root, key); await settle();
         expect(text(el(view.root, '.disc-safety'))).toContain('When you installed it, peerd checked that it was exactly the app');
         expect(says(view.root)).toBe(null);
       }
-      expect(host.calls.length).toBe(calls);
+      // Each page only asked whether its copy changed on this device: no check, no download.
+      expect(host.calls.slice(calls).map(call => [call.type, call.appId]))
+        .toEqual(['local-a', 'local-b', 'local-c', 'local-d'].map(appId => ['dweb/app-local-changes', appId]));
     } finally { view.close(); }
   });
 
@@ -1963,7 +1976,7 @@ describe('home.discover the app says it', () => {
       await settle();
       await openTile(view.root, 'a');
       expect(text(el(view.root, '.disc-says p'))).toBe(NOT_KNOWN);
-      await press(view.root, 'Install and share');
+      await press(view.root, 'Install and share'); await settle();
       expect(text(panel(view.root))).toContain('is now in your Library.');
       expect(chips(view.root)).toEqual([['Uses the peer network', false]]);
       read.resolve({ ok: true, apps: [row] }); await settle();
@@ -2025,7 +2038,178 @@ describe('home.discover the app says it', () => {
       expect(button(panel(view.root), 'Open')?.disabled).toBe(false);
       expect(chips(view.root)).toEqual([['Comes with instructions for peerd', false]]);
       expect(text(el(view.root, '.disc-says .disc-footnote'))).toBe('From the app’s own files, checked when peerd installed it.');
+      // Changed on this device since: once peerd's next check answers, the Library's facts no longer stand for it.
+      host.state.changedHere = ['app-link'];
+      await focusPoll(); await settle();
+      expect(says(view.root)).toBe(null);
+      expect(text(el(view.root, '.disc-app-head'))).toContain('Changed on this device');
       expect(host.writes()).toEqual([]);
+    } finally { view.close(); sessionStorage.removeItem(KEY); }
+  });
+
+  it('a copy changed on this device says so, and shows none of the facts peerd checked when it installed it', async () => {
+    const app = card('a', 'Expense splitter', ANA);
+    const host = fakeHost({
+      heard: [app], contacts: [{ did: ANA, name: 'Ana', saved: true }], changedHere: ['local-a'],
+      library: [local('local-a', app, { hash: app.version_id, declared: declared(app.version_id) })],
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'a'); await settle();
+      expect(text(el(view.root, '.disc-app-head'))).toContain('Changed on this device');
+      expect(text(el(view.root, '.disc-safety-text'))).toBe('Made by Ana. It changed on this device after you installed it. '
+        + 'It is no longer exactly the app Ana shared. Nobody reviewed it for safety.');
+      expect(text(el(view.root, '.disc-safety')).includes('peerd checked')).toBe(false);
+      // "It does not use the peer network…" would be a claim about files that changed since.
+      expect(says(view.root)).toBe(null);
+      // Peers get the version peerd checked from the user, never the edits, and the panel says so.
+      expect(text(el(view.root, '.disc-panel .disc-installed'))).toBe('In your Library. Other people can get the version its maker shared '
+        + 'from you while your peer network is on. They do not get your changes.');
+      expect(host.writes()).toEqual([]);
+    } finally { view.close(); }
+  });
+
+  it('each visit to the page of an installed copy asks about the copy again', async () => {
+    const app = card('a', 'Expense splitter', ANA);
+    const host = fakeHost({ heard: [app], library: [local('local-a', app, { hash: app.version_id, declared: declared(app.version_id) })] });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'a'); await settle();
+      expect(text(el(view.root, '.disc-says p'))).toBe('It does not use the peer network and has no instructions for peerd.');
+      // Changed meanwhile, with no return to this tab: the next visit asks again.
+      await click(view.root, 'Discover');
+      host.state.changedHere = ['local-a'];
+      await openTile(view.root, 'a'); await settle();
+      expect(says(view.root)).toBe(null);
+      expect(text(el(view.root, '.disc-app-head'))).toContain('Changed on this device');
+      expect(host.count('dweb/app-local-changes')).toBe(2);
+      expect(host.writes()).toEqual([]);
+    } finally { view.close(); }
+  });
+
+  it('a return to the tab asks about the copy again, one read at a time, and keeps the last answer on screen until the next lands', async () => {
+    const app = card('a', 'Expense splitter', ANA);
+    /** @type {{promise: Promise<unknown>, resolve: (value: unknown) => void}[]} */ const reads = [];
+    const host = fakeHost({ heard: [app], library: [local('local-a', app, { hash: app.version_id, declared: declared(app.version_id, ALL) })] }, {
+      'dweb/app-local-changes': () => { const read = deferred(); reads.push(read); return read.promise; },
+    });
+    const view = mount({ send: host.send });
+    const head = () => text(el(view.root, '.disc-app-head'));
+    const safety = () => text(el(view.root, '.disc-safety'));
+    try {
+      await settle();
+      await openTile(view.root, 'a');
+      // Not known yet: What to know says what the install checked, and no fact shows.
+      expect(safety()).toContain('When you installed it, peerd checked that it was exactly the app');
+      expect(says(view.root)).toBe(null);
+      // Back to the tab again and again while the first read runs: each read waits for
+      // the app's write lock, so no second one starts beside it.
+      for (let i = 0; i < 5; i++) await focusPoll();
+      expect(reads.length).toBe(1);
+      // Its answer is about the time before those returns, so it counts for nothing, and one more read starts.
+      reads[0].resolve({ ok: true, changed: false }); await settle(); await settle();
+      expect(says(view.root)).toBe(null);
+      expect(reads.length).toBe(2);
+      reads[1].resolve({ ok: true, changed: false }); await settle();
+      expect(chips(view.root).length).toBe(3);
+      // An edit in the app's own tab, then back here: peerd asks again, and the page keeps its place meanwhile.
+      await focusPoll();
+      expect(reads.length).toBe(3);
+      expect(chips(view.root).length).toBe(3);
+      reads[2].resolve({ ok: true, changed: true }); await settle();
+      expect(says(view.root)).toBe(null);
+      expect(safety()).toContain('It changed on this device after you installed it.');
+      expect(head()).toContain('Changed on this device');
+      // The warning stays on screen while peerd checks again.
+      await focusPoll();
+      expect(reads.length).toBe(4);
+      expect(head()).toContain('Changed on this device');
+      expect(safety()).toContain('It changed on this device after you installed it.');
+      // A read that fails, or finds no release to compare, claims nothing either way.
+      reads[3].resolve({ ok: false, error: 'vault-locked' }); await settle();
+      expect(says(view.root)).toBe(null);
+      expect(head().includes('Changed on this device')).toBe(false);
+      expect(safety()).toContain('When you installed it, peerd checked');
+      await focusPoll();
+      reads[4].resolve({ ok: true, changed: null }); await settle();
+      expect(says(view.root)).toBe(null);
+      expect(head().includes('Changed on this device')).toBe(false);
+      expect(reads.length).toBe(5);
+      expect(host.writes()).toEqual([]);
+    } finally { for (const read of reads) read.resolve({ ok: false }); view.close(); }
+  });
+
+  it('a new version asks about the copy again, so a changed copy that an update replaced no longer says it changed', async () => {
+    const v1 = card('upd', 'Trip planner', BOB);
+    const v2 = card('upd', 'Trip planner', BOB, { version_id: 'upd-v2', seq: 2 });
+    const host = fakeHost({
+      heard: [v1], changedHere: ['local-upd'],
+      library: [local('local-upd', v1, { hash: v1.version_id, declared: declared(v1.version_id) })],
+    }, {
+      // The update replaces the files that changed on this device.
+      'dweb/base/update-app': () => {
+        host.state.changedHere = [];
+        host.state.library = [local('local-upd', v2, { hash: v2.version_id, declared: declared(v2.version_id, { dweb: true }) })];
+        return { ok: true, app: host.state.library[0] };
+      },
+    });
+    // why the poll by hand: a return to the tab asks about the copy anyway,
+    // so only the 4 s poll brings a new version to an open page without a new ask.
+    /** @type {(() => void)[]} */ const ticks = [];
+    const realInterval = window.setInterval;
+    window.setInterval = /** @type {typeof window.setInterval} */ (/** @type {unknown} */ (
+      (/** @type {() => void} */ tick, /** @type {number} */ ms) => { ticks.push(tick); return realInterval.call(window, tick, ms); }));
+    const view = (() => { try { return mount({ send: host.send }); } finally { window.setInterval = realInterval; } })();
+    try {
+      await settle();
+      await openTile(view.root, 'upd'); await settle();
+      expect(text(el(view.root, '.disc-app-head'))).toContain('Changed on this device');
+      // Peers share a new version while the page is open, and the user updates.
+      host.state.heard = [v2];
+      for (const tick of ticks) tick();
+      await until(() => !!button(view.root, 'Update'));
+      await press(view.root, 'Update');
+      await until(() => chips(view.root).length > 0);
+      expect(text(el(view.root, '.disc-app-head')).includes('Changed on this device')).toBe(false);
+      expect(chips(view.root)).toEqual([['Uses the peer network', false]]);
+      expect(host.count('dweb/app-local-changes')).toBe(2);
+      expect(host.writes().map(call => call.type)).toEqual(['dweb/base/update-app']);
+    } finally { view.close(); }
+  });
+
+  it('a share link to an installed copy that changed here says so, and its own check claims nothing for the copy Open runs', async () => {
+    const address = formatDwappUri({ did: ANA, hash: 'a'.repeat(64) });
+    const target = immutableAppRoot(address);
+    const asks = declared(target.hash);
+    const host = fakeHost({
+      changedHere: ['app-link'],
+      library: [{ id: 'app-link', name: 'Signed app', dweb: {
+        uri: target.uri, hash: target.hash, version_id: target.hash, publisher: target.publisher, git_oid: 'g1', declared: asks,
+      } }],
+    }, {
+      'dweb/base/inspect-address': () => ({ ok: true, summary: {
+        ...target, name: 'Signed app', decodedBytes: 3, fileCount: 1, entryFile: 'index.html', containsWasm: false, declared: asks,
+      } }),
+      'apps/open': () => ({ ok: true }),
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await click(view.root, 'Paste link');
+      enterLink(view.root, address);
+      await click(view.root, 'Check link'); await settle();
+      expect(text(el(view.root, '.disc-app-head'))).toContain('Changed on this device');
+      expect(text(el(view.root, '.disc-safety-text'))).toBe(`Made by ${shortKey(ANA)}. It changed on this device after you installed it. `
+        + 'It is no longer exactly the app its maker shared. Nobody reviewed it for safety.');
+      // The link's facts are true of the version it names, not of the copy Open runs.
+      expect(says(view.root)).toBe(null);
+      expect(text(el(view.root, '.disc-panel .disc-installed'))).toBe('In your Library. Other people can get the version its maker shared '
+        + 'from you while your peer network is on. They do not get your changes.');
+      expect(host.calls.filter(call => call.type === 'dweb/app-local-changes').map(call => call.appId)).toEqual(['app-link']);
+      await click(panel(view.root), 'Open');
+      expect(host.writes().map(call => call.type)).toEqual(['dweb/base/inspect-address', 'apps/open']);
     } finally { view.close(); sessionStorage.removeItem(KEY); }
   });
 });
@@ -2688,6 +2872,7 @@ describe('home.discover share link', () => {
       await click(view.root, 'Install and share');
       expect(text(el(view.root, '.disc-panel [role="alert"]'))).toBe('peerd could not install Signed app.');
       expect(text(el(view.root, '.disc-panel .disc-hint'))).toBe('You blocked the maker of this app. To install it, unblock them in Contacts.');
+      expect(button(panel(view.root), 'Try again')).toBe(undefined);
       expect(host.writes().map(call => call.type)).toEqual(['dweb/base/inspect-address', 'dweb/base/inspect-address', 'dweb/base/install-address']);
     } finally { view.close(); sessionStorage.removeItem(KEY); }
   });

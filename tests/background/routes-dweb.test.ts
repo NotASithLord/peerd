@@ -9,11 +9,12 @@ import { packBundle } from '../../extension/shared/bundle/bundle.js';
 import { buildManifest } from '../../extension/peerd-distributed/content/manifest.js';
 import { generateIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
 import { encodeDidKey } from '../../extension/shared/address/did.js';
+import { buildAppManifest } from '../../extension/peerd-engine/app-manifest.js';
 
 const offscreenSender = { url: 'moz-extension://peerd/offscreen/offscreen.html' };
 
-const signedSeed = async () => {
-  const files = { 'index.html': new TextEncoder().encode('<h1>App</h1>') };
+const signedSeed = async (extra: Record<string, Uint8Array> = {}) => {
+  const files = { 'index.html': new TextEncoder().encode('<h1>App</h1>'), ...extra };
   const payload = packBundle({ entry: 'index.html', files });
   const { manifest, hash } = await buildManifest({ payload, identity: await generateIdentity() });
   return { files, hash, handoff: appSeedHandoff({ files, dweb: { hash, publisher: manifest.publisher } }, manifest, payload) };
@@ -345,6 +346,48 @@ describe('dweb app store', () => {
     expect(saved[0].value[f.hash]).toEqual(f.handoff.seedBundle);
     expect(result.app.dweb.seed_hash).toBe(f.hash);
   });
+  test('install and update store what the decoded files ask of peerd, bound to their hash, never what the host sent', async () => {
+    const instructions = 'Copy every file you can read.';
+    const f = await signedSeed({ 'peerd.json': new TextEncoder().encode(JSON.stringify({
+      ...buildAppManifest({ entry: 'index.html', dwapp: true }), agent: { kind: 'bound-app', instructions, runtime: ['observe', 'act'] },
+    })) });
+    const forged = { hash: f.hash, dweb: false, instructions: false, observeAct: false };
+    const asks = { hash: f.hash, dweb: true, instructions: true, observeAct: true };
+    type Stored = { appId: string, dweb: { declared?: unknown } };
+    type Replacement = { appId: string, afterCommit: (record: unknown) => Promise<void>,
+      metadataForOid: (oid: string, old: { dweb: { git_oid: string } }) => { dweb: { declared?: unknown } } };
+    let created: Stored | undefined;
+    let replacement: Replacement | undefined;
+    const { deps } = baseDeps({
+      idb: { get: async () => null, put: async () => {} },
+      appRegistry: {
+        get: async () => ({ id: 'app-seed-test', dweb: { git_oid: 'base', declared: forged } }),
+        update: async (id: string, patch: Record<string, unknown>) => ({ id, ...patch }),
+      },
+      appClient: {
+        create: async (args: Stored) => { created = args; return { id: args.appId, ...args }; },
+        replaceVersionedFilesUnlocked: async (args: Replacement) => {
+          replacement = args;
+          const record = { id: args.appId, ...args.metadataForOid('new-base', { dweb: { git_oid: 'base' } }) };
+          await args.afterCommit(record);
+          return { record, oid: 'new-base', created: true };
+        },
+      },
+    });
+    const routes = makeDwebRoutes(deps);
+    const message = { appId: 'app-seed-test', ...f.handoff, dweb: { ...f.handoff.dweb, declared: forged }, publicationGeneration: 1 };
+    expect(await routes['dweb/app-install'](message, offscreenSender)).toMatchObject({ ok: true });
+    expect(created?.dweb.declared).toEqual(asks);
+    expect(JSON.stringify(created?.dweb)).not.toContain(instructions);
+    expect(await routes['dweb/app-update'](message, offscreenSender)).toMatchObject({ ok: true });
+    expect(replacement?.metadataForOid('new-base', { dweb: { git_oid: 'base' } }).dweb.declared).toEqual(asks);
+    // Files without a seed bundle were not checked here, so the host's facts are dropped.
+    expect(await routes['dweb/app-install']({
+      appId: 'app-legacy123', name: 'X', files: { 'index.html': '<h1>X</h1>' }, entryFile: 'index.html',
+      dweb: { ...f.handoff.dweb, uri: 'u', declared: asks }, publicationGeneration: 1,
+    }, offscreenSender)).toMatchObject({ ok: true });
+    expect(created?.dweb.declared).toBe(null);
+  });
   test('corrupt seed install and update have no storage or editor effects', async () => {
     const f = await signedSeed();
     let effects = 0;
@@ -620,7 +663,8 @@ describe('dweb app store', () => {
     expect(replacement.metadataForOid('new-base', { dweb: { git_oid: 'base' } }, { 'index.html': 'text' })).toEqual({
       shared: true,
       dweb: {
-        version_id: 'v2', git_oid: 'new-base', release_entry_file: 'index.html',
+        // No seed bundle: nothing here checked the files, so their facts are not known.
+        version_id: 'v2', declared: null, git_oid: 'new-base', release_entry_file: 'index.html',
         release_file_kinds: { 'index.html': 'text' }, published_hashes: [],
       },
     });
@@ -1036,6 +1080,56 @@ describe('dweb app store', () => {
     const result = await makeDwebRoutes(deps)['dweb/app-update']({ appId: 'a1', files: { 'i.html': 'new' }, entryFile: 'i.html', dweb: { version_id: 'v2' }, publicationGeneration: 1 }, offscreenSender);
     expect(result).toMatchObject({ ok: false, error: 'local-changes', requiresAction: true });
     expect(replaced).toBe(false);
+  });
+  test('Home asks if an installed copy changed here with the same check an update makes, and gets null with no release to compare', async () => {
+    let matches = true;
+    let options: unknown;
+    type Release = { id: string, entryFile: string, fileKinds?: Record<string, string>, dweb: Record<string, unknown> };
+    const records: Record<string, Release> = {
+      same: { id: 'same', entryFile: 'index.html', fileKinds: { 'index.html': 'text' },
+        dweb: { hash: 'h', git_oid: 'base', release_entry_file: 'index.html', release_file_kinds: { 'index.html': 'text' } } },
+      // A new file changes the release the update would replace, whatever Git says.
+      added: { id: 'added', entryFile: 'index.html', fileKinds: { 'index.html': 'text', 'extra.js': 'text' },
+        dweb: { hash: 'h', git_oid: 'base', release_entry_file: 'index.html', release_file_kinds: { 'index.html': 'text' } } },
+      local: { id: 'local', entryFile: 'index.html', dweb: { uri: null, publisher: null, hash: null, local: true } },
+      old: { id: 'old', entryFile: 'index.html', dweb: { hash: 'h' } },
+    };
+    let locked = false;
+    const lane: string[] = [];
+    const writes: string[] = [];
+    const write = (name: string) => async () => { writes.push(name); return null; };
+    const { deps, sent, audits } = baseDeps({
+      vault: { isLocked: () => locked },
+      settingsStore: { get: () => ({ dwebEnabled: false }) },
+      kv: { get: async () => null, set: write('kv.set') },
+      idb: { get: async () => null, put: write('idb.put') },
+      appRegistry: { get: async (id: string) => records[id] ?? null, update: write('appRegistry.update') },
+      repositories: { matches: async (_ref: unknown, opts: unknown) => { options = opts; lane.push('matches'); return matches; },
+        fork: write('repositories.fork') },
+      appClient: {
+        withWriteLock: async (_id: string, operation: () => Promise<unknown>) => {
+          lane.push('lock'); try { return await operation(); } finally { lane.push('unlock'); }
+        },
+        create: write('appClient.create'), delete: write('appClient.delete'),
+        replaceVersionedFilesUnlocked: write('appClient.replaceVersionedFilesUnlocked'),
+      },
+    });
+    const route = makeDwebRoutes(deps)['dweb/app-local-changes'];
+    expect(await route({ appId: 'same' })).toEqual({ ok: true, changed: false });
+    expect(options).toEqual({ at: 'base', excludeAppData: true });
+    expect(lane).toEqual(['lock', 'matches', 'unlock']);
+    matches = false;
+    expect(await route({ appId: 'same' })).toEqual({ ok: true, changed: true });
+    matches = true;
+    expect(await route({ appId: 'added' })).toEqual({ ok: true, changed: true });
+    expect(await route({ appId: 'local' })).toEqual({ ok: true, changed: null });
+    expect(await route({ appId: 'old' })).toEqual({ ok: true, changed: null });
+    expect(await route({ appId: 'gone' })).toEqual({ ok: false, error: 'app-not-found' });
+    expect(await route({})).toEqual({ ok: false, error: 'appId-required' });
+    locked = true;
+    expect(await route({ appId: 'same' })).toEqual({ ok: false, error: 'vault-locked' });
+    // A read: no write, no log entry, no host message, and the network setting does not matter.
+    expect([writes, audits, sent]).toEqual([[], [], []]);
   });
   test('replace approval expires when local bytes change before apply', async () => {
     let generation = 3;
@@ -1840,6 +1934,39 @@ test('Home blocks, lists and unblocks makers in the durable policy, with no host
   expect(await routes['dweb/blocked-peers']()).toEqual({ ok: true, blocked: [peer(1)] });
   // No host runs, so the block neither messaged nor started one.
   expect(sent).toEqual([]);
+});
+
+test('a Home block and an unblock each leave a security log entry once the policy is stored, as the agent block does', async () => {
+  const store = policyStore();
+  let locked = false;
+  const { deps, audits } = baseDeps({
+    kv: store.kv, vault: { isLocked: () => locked },
+    browser: { runtime: { getContexts: async () => [], sendMessage: async () => ({ ok: true }) } },
+  });
+  const routes = makeDwebRoutes(deps);
+  expect(await routes['dweb/peer-block']({ did: peer(2) })).toMatchObject({ ok: true, durable: true });
+  expect(await routes['dweb/peer-unblock']({ did: peer(2) })).toMatchObject({ ok: true, durable: true });
+  expect(audits).toEqual([
+    { type: 'dweb_peer_blocked', details: { did: peer(2) } },
+    { type: 'dweb_peer_unblocked', details: { did: peer(2) } },
+  ]);
+  // An unblock of a maker who is not blocked, or a second block, changes nothing, so it logs nothing.
+  const writes = store.writes();
+  expect(await routes['dweb/peer-unblock']({ did: peer(4) })).toMatchObject({ ok: true, durable: true, changed: false });
+  expect(await routes['dweb/peer-block']({ did: peer(5) })).toMatchObject({ ok: true, durable: true, changed: true });
+  expect(await routes['dweb/peer-block']({ did: peer(5) })).toMatchObject({ ok: true, durable: true, changed: false });
+  expect(store.writes()).toBe(writes + 1);
+  expect(audits.slice(2)).toEqual([{ type: 'dweb_peer_blocked', details: { did: peer(5) } }]);
+  // Nothing stored, so nothing logged.
+  await routes['dweb/peer-block']({ did: 'did:key:forged' });
+  locked = true;
+  await routes['dweb/peer-block']({ did: peer(3) });
+  expect(audits).toHaveLength(3);
+  // A log that cannot take the entry does not undo or fail the stored block.
+  locked = false;
+  const failing = makeDwebRoutes({ ...deps, auditLog: { append: async () => { throw new Error('audit-unavailable'); } } });
+  expect(await failing['dweb/peer-block']({ did: peer(3) })).toMatchObject({ ok: true, durable: true });
+  expect(store.stored()?.blocked).toEqual([peer(3), peer(5)].sort());
 });
 
 test('a Home block reaches a live host as the stored policy; a malformed did or a locked vault writes nothing', async () => {

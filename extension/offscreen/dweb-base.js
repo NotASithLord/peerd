@@ -27,7 +27,7 @@ import {
 import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
 import { MAX_NETWORK_BUNDLE_BYTES } from '/shared/bundle/bundle.js';
 import { appSeedHandoff } from '/shared/app-seed-handoff.js';
-import { verifiedDeclaration, withDeclaration } from '/offscreen/app-declaration.js';
+import { verifiedDeclaration } from '/shared/app-declaration.js';
 import { publishFailureError, runPublishTransaction } from '/shared/publish-transaction.js';
 import { createSelfDeviceHost } from '/offscreen/dweb-self.js';
 import { createAppRoomLiveness } from '/offscreen/app-room-liveness.js';
@@ -802,7 +802,7 @@ const handleRoomOpUnlocked = async (msg, current = () => true) => {
       announce: async () => {
         const a = prepared;
         const r = await swEffectCall('dweb/app-install', {
-          appId, ...appSeedHandoff(withDeclaration(a), manifest, payload),
+          appId, ...appSeedHandoff(a, manifest, payload),
           publicationGeneration: msg.publicationGeneration,
         });
         if (!r?.ok) throw publishFailureError(r, 'install failed');
@@ -970,7 +970,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
                 const summary = client.immutableAppSummary(verified);
                 const a = verified.app;
                 const result = await swEffectCall('dweb/app-install', {
-                  appId, ...appSeedHandoff(withDeclaration(a), verified.manifest, verified.payload), name: summary.name ?? a.name,
+                  appId, ...appSeedHandoff(a, verified.manifest, verified.payload), name: summary.name ?? a.name,
                   publicationGeneration: msg.publicationGeneration,
                 });
                 if (!result?.ok) throw publishFailureError(result, 'install failed');
@@ -1347,7 +1347,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
             announce: async () => {
               const a = prepared;
               const r = await swEffectCall('dweb/app-install', {
-                appId, ...appSeedHandoff(withDeclaration(a), manifest, payload),
+                appId, ...appSeedHandoff(a, manifest, payload),
                 publicationGeneration: msg.publicationGeneration,
               });
               if (!r?.ok) throw publishFailureError(r, 'install failed');
@@ -1406,7 +1406,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
                 ...(msg.strategy === 'replace' || msg.strategy === 'fork'
                   ? { strategy: msg.strategy, conflictToken: msg.conflictToken }
                   : {}),
-                ...appSeedHandoff(withDeclaration(a), manifest, payload),
+                ...appSeedHandoff(a, manifest, payload),
               });
               if (!r?.ok) throw Object.assign(publishFailureError(r, 'update failed'), {
                 conflictToken: r?.conflictToken,
