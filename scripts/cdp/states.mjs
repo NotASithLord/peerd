@@ -4073,6 +4073,11 @@ export const STATES = [
           throw new Error('The proposed site-client contracts are unavailable for visual review');
         }
         await rec.visual('site-client-contract-details');
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', NARROW_PANEL_METRICS);
+        await rec.visual('site-client-contract-details-narrow');
+        await evalIn(ctx.page, `document.querySelector('[aria-label="Proposed site-client contracts"]')?.closest('details')?.removeAttribute('open')`);
+        await rec.visual('site-client-confirm-narrow');
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
         const maximum = await evalIn(ctx.page, `(async () => {
           const m = (await import('/vendor/mithril/mithril.js')).default;
           const { ConfirmModal } = await import('/sidepanel/components/app.js');
@@ -4113,7 +4118,9 @@ export const STATES = [
             && maximum?.scrollable && maximum?.overflow === 'auto'
             && maximum?.actionPosition === 'sticky',
           JSON.stringify(maximum));
+        await rec.visual('site-client-maximum');
       } finally {
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
         await evalIn(ctx.page, `document.querySelector('#e2e-site-client-confirm')?.remove()`);
       }
     },

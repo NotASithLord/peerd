@@ -1,40 +1,14 @@
 #!/usr/bin/env bun
-// run-e2e-verify — the single-Chrome VERIFY LOOP. Runs every state from
-// states.mjs (functional + visual) against ONE Chrome (reset the session + swap
-// the model responder between states), writes screenshot artifacts + a
-// structured result.json an agent can READ, and prints a concise summary.
-//
-// THIS is the command the change→verify→fix loop invokes:
-//   1. edit code
-//   2. `bun run e2e:verify`
-//   3. read scripts/cdp/artifacts/result.json (what passed/failed + why)
-//      and the screenshots (LOOK at the rendered UI); on a visual diff, read
-//      <name>-diff.png to see what moved
-//   4. edit, repeat until ok:true
-//
-// Flags / env:
-//   --functional            skip visual states (environment-independent; CI)
-//   --extension=<dir>       load a DIFFERENT extension build (visual-vs-base
-//                           renders the merge-base through this same path, so
-//                           both sides of a comparison run identical code)
-//   --artifacts=<dir>       write this run's artifacts somewhere other than
-//                           scripts/cdp/artifacts/ (the dir is WIPED on start,
-//                           so two runs that must coexist need separate dirs)
-//   UPDATE_BASELINES=1       (re)write the local self-reference instead of comparing
-//
-// Visual states never fail this run: the local baselines are a self-reference,
-// not an approved look (see visual.mjs). The regression verdict is
-// visual-vs-base.mjs. A visual state's own rec.check()s DO gate.
-//
-// Artifacts (gitignored) land in scripts/cdp/artifacts/:
-//   <state>-<label>.png         screenshots to look at
-//   <name>-current.png / -diff.png   on a visual state
-//   result.json                 the structured verdict
+// Run the selected states in one Chrome instance. Keep checks and images in result.json.
+// --functional selects behavior checks. --visual selects visual states.
+// --extension loads another tree. --artifacts selects the output directory.
+// UPDATE_BASELINES=1 updates local references. Pixel changes never fail this run.
+// A failed state or a failed check fails the run.
 
 import { rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, relative, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { launchPeerd, unlockAndReady, resetSession, freezeAnimations, setEmulatedTheme, capturePage, THEMES, sleep, log } from './e2e-harness.mjs';
+import { launchPeerd, unlockAndReady, resetSession, freezeAnimations, setEmulatedTheme, capturePage, visualSourceIdentity, THEMES, sleep, log } from './e2e-harness.mjs';
 import { STATES } from './states.mjs';
 import {
   compareToBaseline, decodePng, writeDiffImage, BASELINE_DIR, UPDATE_BASELINES,
@@ -85,6 +59,14 @@ const makeRecorder = (ctx, state) => {
       const file = join(ARTIFACTS, `${state.name}-${label}.png`);
       writeFileSync(file, png);
       screenshots.push({ label, path: relative(ROOT, file) });
+      return png;
+    },
+    async browserWindow(label, context = ctx, target) {
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(label)) throw new Error('Browser window labels must use lowercase letters, digits and hyphens');
+      const png = await context.screenshotWindow(target);
+      const file = join(ARTIFACTS, `${state.name}-${label}.browser-window.png`);
+      writeFileSync(file, png);
+      screenshots.push({ label, path: relative(ROOT, file), kind: 'browser-window' });
       return png;
     },
     // Compare + record ONE captured variant (a state × theme). Shared by the
@@ -169,6 +151,7 @@ async function main() {
   mkdirSync(ARTIFACTS, { recursive: true });
 
   const states = STATES.filter(selected);
+  const sourceIdentity = visualSourceIdentity({ extensionDir: EXTENSION_DIR, states: states.map((state) => state.name) });
   const preUnlock = states.filter((s) => s.phase === 'pre-unlock');
   const postUnlockPriority = (state) => state.name === 'first-turn'
     ? -1
@@ -201,6 +184,9 @@ async function main() {
   } finally {
     ctx.close();
   }
+  if (sourceIdentity !== visualSourceIdentity({ extensionDir: EXTENSION_DIR, states: states.map((state) => state.name) }))
+    results.push({ name: 'source-identity', kind: 'functional', ok: false, visuals: [], screenshots: [], observations: [],
+      checks: [{ name: 'Source stays unchanged during capture', pass: false, detail: 'Source files or capture settings changed during this run' }] });
 
   const checksTotal = results.reduce((n, r) => n + r.checks.length, 0);
   const checksFailed = results.reduce((n, r) => n + r.checks.filter((c) => !c.pass).length, 0);
@@ -209,6 +195,7 @@ async function main() {
   const ok = results.every((r) => r.ok);
   const report = {
     ok,
+    sourceIdentity,
     runAt: new Date().toISOString(),
     visual: {
       platform: VISUAL_PLATFORM,
