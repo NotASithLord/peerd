@@ -2,8 +2,7 @@
 // and the side panel close that no longer disables the panel
 // (background/kernel-front-door.js), driven in the real extension.
 //
-// Headless Chrome has no tab strip to photograph, so the tab icon states are
-// read from the live Home document, and one fixture shows the three icons.
+// Capture the native pinned tab when browser window evidence is enabled.
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -535,6 +534,7 @@ export const FIRST_TAB_STATES = [
         await waitFor(() => evalIn(page, `!!document.querySelector('.home-shell')`).catch(() => false), { budgetMs: 15_000, pollMs: 80 });
         await sleep(500);
         rec.check('"Got it" hides the hint for good', stored === '1' && await hint(page) === null, JSON.stringify({ stored }));
+        await second.close(); second = null;
 
         // Back on the chat, then the side panel takes it.
         await clickAndRedraw(page, '[data-home-view="chat"]');
@@ -549,6 +549,7 @@ export const FIRST_TAB_STATES = [
           !!besidePanel, String(besidePanel ?? await evalIn(page, `document.querySelector('.home-content')?.className`)));
         await page.send('Emulation.setDeviceMetricsOverride', WIDE_METRICS);
         await rec.visualPage('home-first-tab-beside-panel', page);
+        if (process.env.PEERD_BROWSER_WINDOW_EVIDENCE === '1') await rec.browserWindow('pinned-home-beside-panel', ctx, page);
       } finally {
         try { page?.close(); } catch { /* */ }
         try { second?.close(); } catch { /* */ }
