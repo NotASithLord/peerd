@@ -82,7 +82,12 @@ const main = async () => {
 
   ws.onmessage = (e: any) => {
     let m: any; try { m = JSON.parse(e.data); } catch { return; }
-    if (m.t === 'barrier') { gates.get(m.stage)?.(); }
+    if (m.t === 'barrier') {
+      // The fixture relay may release only these locally registered stages.
+      if (m.stage === 'ready') gates.get('ready')?.();
+      else if (m.stage === 'published') gates.get('published')?.();
+      else if (m.stage === 'complete') gates.get('complete')?.();
+    }
     else if (m.t === 'roster') { roster = m.peers; for (const p of m.peers) ensureLink(p.did); }
     else if (m.t === 'msg') { linkTo(m.from).deliver(m.payload); ensureLink(m.from); }
   };
