@@ -3756,7 +3756,41 @@ export const STATES = [
               stack: new Error('backup host creation').stack?.slice(0, 3000) }); return createDocument(...args);
           };
         })()`);
-        observer = await observeHosts(fresh, evidence, diagnostic, () => {});
+        const shellSource = await readFile(join(ctx.extensionDir, 'offscreen/controller-shell.js'), 'utf8');
+        const refusalLine = shellSource.split('\n').findIndex(line => line.includes("ok: false, code: 'host-concurrency'"));
+        if (refusalLine < 0) throw new Error('controller refusal diagnostic location missing');
+        const configureWorkerDebugger = async (connection, sessionId) => {
+          const send = (method, params = {}) => connection.send(method, params, sessionId);
+          const { breakpointId } = await send('Debugger.setBreakpointByUrl', {
+            url: `chrome-extension://${fresh.sw.id}/offscreen/controller-shell.js`, lineNumber: refusalLine,
+          });
+          connection.on(async (method, params, message) => {
+            if (method !== 'Debugger.paused' || message.sessionId !== sessionId
+              || !params.hitBreakpoints?.includes(breakpointId)) return;
+            try {
+              evidence.controllerOccupancy ??= [];
+              if (evidence.controllerOccupancy.length < 12) {
+                // why: only finite capability/phase labels leave the paused frame;
+                // never retain request identifiers, payloads or authority objects.
+                const result = await send('Debugger.evaluateOnCallFrame', {
+                  callFrameId: params.callFrames[0].callFrameId,
+                  expression: `(() => {
+                    const label = value => typeof value === 'string' && /^[a-z][a-z0-9./-]{0,63}$/.test(value) ? value : 'other';
+                    return { refused: label(operation.capability), concurrent, stopConcurrent, maxConcurrent,
+                      operations: Array.from(operations.values()).slice(0, 16).map(item => ({
+                        capability: label(item.capability), phase: ['accepted', 'committed'].includes(item.phase) ? item.phase : 'other',
+                        stopLane: item.stopLane === true, pendingCalls: item.kernelCalls.size,
+                      })) };
+                  })()`, returnByValue: true, silent: true,
+                });
+                if (result.exceptionDetails) throw new Error('controller occupancy projection failed');
+                evidence.controllerOccupancy.push(result.result.value);
+              }
+            } catch { evidence.observerErrors.push('controller occupancy diagnostic failed'); }
+            finally { await send('Debugger.resume').catch(() => {}); }
+          });
+        };
+        observer = await observeHosts(fresh, evidence, diagnostic, () => {}, undefined, configureWorkerDebugger);
         const initialized = await rpc(fresh.page, { type: 'vault/initialize', passphrase: PASSPHRASE }, { timeoutMs: 120_000 });
         if (initialized?.ok !== true) throw new Error('the fresh backup vault did not initialize');
         const noChoice = (await rpc(fresh.page, { type: 'state/get' }))?.state?.settings;
