@@ -3589,7 +3589,7 @@ export const STATES = [
         const { sessionId } = await debug.send('Target.attachToTarget', { targetId: fresh.sw.targetId, flatten: true });
         const debugSend = (method, params = {}) => debug.send(method, params, sessionId);
         const scriptPaths = new Map();
-        const onPause = (method, params, message) => {
+        const onPause = async (method, params, message) => {
           if (message.sessionId !== sessionId) return;
           if (method === 'Debugger.scriptParsed' && scriptPaths.size < 2000
             && /^chrome-extension:\/\/[a-p]{32}\/[a-zA-Z0-9_./-]+\.js$/.test(params.url ?? '')) {
@@ -3597,9 +3597,9 @@ export const STATES = [
           }
           if (method !== 'Debugger.paused') return;
           // why: the public transfer reply deliberately hides arbitrary errors.
-          // Keep only bounded static source locations, never exception text,
-          // scopes, arguments, object values, or exported secret material.
-          if (exceptions.length < 24) exceptions.push({
+          // Keep bounded static locations and allowlisted refusal codes, never
+          // exception text, scopes, arguments, or exported secret material.
+          const receipt = exceptions.length < 24 ? {
             kind: ['Error', 'TypeError', 'DOMException', 'ReferenceError', 'RangeError']
               .includes(params.data?.className) ? params.data.className : 'other',
             frames: (params.callFrames ?? []).slice(0, 12).map((frame) => ({
@@ -3607,10 +3607,32 @@ export const STATES = [
               line: frame.location?.lineNumber,
               column: frame.location?.columnNumber,
             })),
-          });
+          } : null;
+          if (receipt) exceptions.push(receipt);
+          try {
+            if (receipt && params.data?.objectId) {
+              // why: projectTools returns finite refusal codes; project only
+              // that data property, without evaluating getters or error text.
+              const projection = await debugSend('Runtime.callFunctionOn', {
+                objectId: params.data.objectId,
+                functionDeclaration: `function() {
+                  'use strict';
+                  const code = Object.getOwnPropertyDescriptor(this, 'code')?.value;
+                  return ['host-concurrency', 'module-load-failed', 'module-load-timeout',
+                    'controller-module-load-failed', 'controller-call-aborted',
+                    'controller-capability-unimplemented', 'controller-deadline-expired',
+                    'controller-worker-lost', 'kernel-channel-lost', 'kernel-operation-denied',
+                    'turn-tool-projection-failed', 'turn-payload-invalid', 'turn-authority-invalid']
+                    .includes(code) ? code : 'unclassified';
+                }`,
+                returnByValue: true, silent: true,
+              });
+              receipt.code = projection.result?.value ?? 'unavailable';
+            }
+          } catch { if (receipt) receipt.code = 'unavailable'; }
+          finally { await debugSend('Debugger.resume').catch(() => {}); }
           // Observation changes scheduling; it is diagnostic evidence, not a
           // replacement for a passing uninstrumented release qualification.
-          debugSend('Debugger.resume').catch(() => {});
         };
         debug.on(onPause);
         try {
