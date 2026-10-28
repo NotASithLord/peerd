@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs';
 const source = readFileSync('extension/shared/pull-in-peerd.js', 'utf8');
 // why: use the exact module functions without changing the live browser API.
 const load = (browser: any) => new Function('browser', `'use strict';
-  ${source.replace("import browser from '/shared/browser-api.js';", '').replace('export const mountPullInPeerd', 'const mountPullInPeerd')}
-  return { resolveTarget: typeof resolveTabId === 'function' ? resolveTabId : resolveWindowId, openPanel };
+  ${source.replace("import browser from '/shared/browser-api.js';", '').replace(/^export const /gm, 'const ')}
+  return { resolveTarget: typeof resolveTabId === 'function' ? resolveTabId : resolveWindowId, openPanel, panelKind, onPanelOpenChange, listenForSurfaceChanges };
 `)(browser);
 
 test('pull-in opens by stable tab ID after a window move, inside the gesture', async () => {
@@ -51,4 +51,28 @@ test('Firefox keeps its synchronous untargeted sidebar open', () => {
   let opened = 0;
   load({ sidebarAction: { open: () => { opened++; } } }).openPanel();
   expect(opened).toBe(1);
+});
+
+test('the panel probe names the surface each browser can open', () => {
+  expect(load({ sidePanel: { open: () => {} }, sidebarAction: { open: () => {} } }).panelKind()).toBe('side-panel');
+  expect(load({ sidebarAction: { open: () => {} } }).panelKind()).toBe('sidebar');
+  expect(load({}).panelKind()).toBe(null);
+});
+
+test('a panel listener hears the state at once, then each change the kernel pushes', () => {
+  const scope = globalThis as { document?: unknown };
+  const saved = scope.document;
+  // why: an open panel removes the chip's hint, which the module looks up in the page.
+  scope.document = { getElementById: () => null };
+  try {
+    let push: (message: unknown) => void = () => {};
+    const api = load({ runtime: { onMessage: { addListener: (listener: (message: unknown) => void) => { push = listener; } } } });
+    const seen: boolean[] = [];
+    api.listenForSurfaceChanges();
+    api.onPanelOpenChange((open: boolean) => { seen.push(open); });
+    push({ type: 'surfaces/changed', sidePanelOpen: true });
+    push({ type: 'surfaces/changed', sidePanelOpen: true });
+    push({ type: 'surfaces/changed', sidePanelOpen: false });
+    expect(seen).toEqual([false, true, false]);
+  } finally { scope.document = saved; }
 });

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { attach } from '../../scripts/cdp/e2e-harness.mjs';
+import { attach, CDPSessionDetachedError } from '../../scripts/cdp/e2e-harness.mjs';
 
 const fixture = () => {
   const commands: string[] = [];
@@ -20,6 +20,8 @@ const fixture = () => {
         }
         else if (message.method === 'ok') socket.send(JSON.stringify({ id: message.id, result: { accepted: true } }));
         else if (message.method === 'refuse') socket.send(JSON.stringify({ id: message.id, error: { message: 'refused' } }));
+        else if (message.method === 'forged-detach') socket.send(JSON.stringify({ id: message.id,
+          error: { name: 'CDPSessionDetachedError', sessionId: 'retired-worker', message: 'CDP session detached; outcome unknown' } }));
       },
     },
   });
@@ -32,7 +34,10 @@ test('CDP correlates success and protocol refusal without retrying', async () =>
   try {
     expect(await connection.send('ok')).toEqual({ accepted: true });
     await expect(connection.send('refuse')).rejects.toThrow('refuse: refused');
-    expect(server.commands).toEqual(['ok', 'refuse']);
+    const forged = await connection.send('forged-detach').catch(error => error);
+    expect(forged).toBeInstanceOf(Error);
+    expect(forged).not.toBeInstanceOf(CDPSessionDetachedError);
+    expect(server.commands).toEqual(['ok', 'refuse', 'forged-detach']);
   } finally { connection.close(); server.close(); }
 });
 
@@ -65,10 +70,11 @@ test('native child detach rejects only its pending commands and preserves the br
   const connection = await attach(server.url, undefined, { commandTimeoutMs: 100 });
   try {
     const retired = connection.send('Runtime.enable', {}, 'retired-worker').then(
-      () => 'unexpected success', error => String(error));
+      () => 'unexpected success', error => error);
     const live = connection.send('ok', {}, 'live-worker');
     await connection.send('detach');
-    expect(await retired).toContain('CDP session detached; outcome unknown');
+    expect(await retired).toBeInstanceOf(CDPSessionDetachedError);
+    expect(await retired).toMatchObject({ sessionId: 'retired-worker' });
     expect(await live).toEqual({ accepted: true });
     await expect(connection.send('Runtime.enable', {}, 'retired-worker'))
       .rejects.toThrow('CDP session detached; outcome unknown');
