@@ -10543,9 +10543,15 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         const escape = { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: process.platform === 'darwin' ? 53 : 9 };
         for (const type of ['rawKeyDown', 'keyUp']) await app.send('Input.dispatchKeyEvent', { type, ...escape });
         await waitFor(() => evalIn(app, `document.fullscreenElement === null`), { budgetMs: 5_000, pollMs: 50 });
+        // The DOM exits before the native window finishes resizing. A new
+        // pointer gesture needs the settled window, not the old screen bounds.
+        const windowRestored = await waitFor(async () => {
+          const { bounds } = await browser.send('Browser.getWindowForTarget', { targetId: target.id });
+          return bounds.windowState === 'normal';
+        }, { budgetMs: 5_000, pollMs: 50 });
         const left = await fullScreenView();
         // why beside first: with full screen already gone, Esc would pass without doing anything.
-        verdict('Esc leaves full screen and brings the App controls back', beside && !left.full && !left.handle && !left.status
+        verdict('Esc leaves full screen and brings the App controls back', beside && windowRestored === true && !left.full && !left.handle && !left.status
           && ['#fullscreen-btn', '#actor-chat-toggle', '#export-btn', '#mode-toggle'].every((selector) => left.controls.includes(selector)),
         JSON.stringify(left));
         // why: the button's own display rule must not beat its hidden attribute, set where the browser cannot go full screen.
@@ -10566,7 +10572,7 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
           handle: getComputedStyle(document.getElementById('peerd-handle')).display,
         })`);
         verdict('full screen with the side panel already open shows no P handle', again === true
-          && reentry.chip === 'Close the peerd side panel' && reentry.handle === 'none', JSON.stringify({ again, ...reentry }));
+          && reentry.chip === 'Close the peerd side panel' && reentry.handle === 'none', JSON.stringify({ again, ...reentry, windowRestored, errors: app.events.slice(-12) }));
         const consent = await evalIn(app, `(async () => {
           const { bar, fullAtPrompt } = await new Promise((resolve, reject) => {
             const observer = new MutationObserver(() => {
