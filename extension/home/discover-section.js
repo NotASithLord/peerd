@@ -410,8 +410,8 @@ export const DiscoverSection = (initialVnode) => {
   // under its write lock. A page change and a return to the tab ask again,
   // and so does a new version, as the key holds it. why not a manual refresh:
   // no page that shows a Library copy's facts offers one.
-  // why the last answer stays until the next one lands: the page must not
-  // drop its warning, or move, while peerd checks again. why one read at a
+  // Keep a previous changed-copy warning while checking again, but never
+  // present stale unchanged-copy facts after a return or navigation. why one read at a
   // time: each read waits for the app's lock, so a read that a later return
   // made stale answers nothing, and then one more read starts.
   const forgetLocalChanges = () => { localChangesEpoch++; };
@@ -436,7 +436,7 @@ export const DiscoverSection = (initialVnode) => {
         redraw();
       })();
     }
-    return entry.value;
+    return entry.epoch === localChangesEpoch || entry.value === true ? entry.value : null;
   };
 
   const poll = () => { void loadLocal(); void refresh(); void readStatus(); };
@@ -1721,7 +1721,7 @@ export const DiscoverSection = (initialVnode) => {
     // why the link's own check first: it read this exact version's files. A
     // page restored after a reload has only the Library's record of them.
     const fromLink = verifiedDeclared(linkPreview?.declared, target.hash);
-    const says = changed === true ? null : saysIt(fromLink ? { declared: fromLink, checked: 'link' } : {
+    const says = localId && changed !== false ? null : saysIt(fromLink ? { declared: fromLink, checked: 'link' } : {
       declared: localId ? verifiedDeclared(records.find(record => record.id === localId)?.dweb?.declared, target.hash) : null,
       checked: 'installed', changed,
     });

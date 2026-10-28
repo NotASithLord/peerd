@@ -2221,9 +2221,11 @@ describe('home.discover the app says it', () => {
     const address = formatDwappUri({ did: ANA, hash: 'a'.repeat(64) });
     const target = immutableAppRoot(address);
     sessionStorage.setItem(KEY, address);
+    const copyRead = deferred();
+    let checkingChange = false;
     const host = fakeHost({ library: [{ id: 'app-link', dweb: {
       uri: target.uri, hash: target.hash, publisher: target.publisher, declared: declared(target.hash, { instructions: true }),
-    } }] });
+    } }] }, { 'dweb/app-local-changes': () => checkingChange ? copyRead.promise : { ok: true, changed: false } });
     const view = mount({ send: host.send }, { keepReceipt: true });
     try {
       await settle();
@@ -2232,12 +2234,14 @@ describe('home.discover the app says it', () => {
       expect(chips(view.root)).toEqual([['Comes with instructions for peerd', false]]);
       expect(text(el(view.root, '.disc-says .disc-footnote'))).toBe('From the app’s own files, checked when peerd installed it.');
       // Changed on this device since: once peerd's next check answers, the Library's facts no longer stand for it.
-      host.state.changedHere = ['app-link'];
+      checkingChange = true;
       await focusPoll(); await settle();
+      expect(says(view.root)).toBe(null);
+      copyRead.resolve({ ok: true, changed: true }); await settle();
       expect(says(view.root)).toBe(null);
       expect(text(el(view.root, '.disc-app-head'))).toContain('Changed on this device');
       expect(host.writes()).toEqual([]);
-    } finally { view.close(); sessionStorage.removeItem(KEY); }
+    } finally { copyRead.resolve({ ok: false }); view.close(); sessionStorage.removeItem(KEY); }
   });
 
   it('a copy changed on this device says so, and shows none of the facts peerd checked when it installed it', async () => {
@@ -2282,7 +2286,7 @@ describe('home.discover the app says it', () => {
     } finally { view.close(); }
   });
 
-  it('a return to the tab asks about the copy again, one read at a time, and keeps the last answer on screen until the next lands', async () => {
+  it('a return rechecks one read at a time, hides stale facts, and retains a changed-copy warning', async () => {
     const app = card('a', 'Expense splitter', ANA);
     /** @type {{promise: Promise<unknown>, resolve: (value: unknown) => void}[]} */ const reads = [];
     const host = fakeHost({ heard: [app], library: [local('local-a', app, { hash: app.version_id, declared: declared(app.version_id, ALL) })] }, {
@@ -2307,10 +2311,10 @@ describe('home.discover the app says it', () => {
       expect(reads.length).toBe(2);
       reads[1].resolve({ ok: true, changed: false }); await settle();
       expect(chips(view.root).length).toBe(3);
-      // An edit in the app's own tab, then back here: peerd asks again, and the page keeps its place meanwhile.
+      // An edit in the app's own tab: hide stale unchanged-copy facts while the new check waits.
       await focusPoll();
       expect(reads.length).toBe(3);
-      expect(chips(view.root).length).toBe(3);
+      expect(says(view.root)).toBe(null);
       reads[2].resolve({ ok: true, changed: true }); await settle();
       expect(says(view.root)).toBe(null);
       expect(safety()).toContain('It changed on this device after you installed it.');
