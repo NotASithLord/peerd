@@ -1679,3 +1679,69 @@ describe('production feature-lease runtime', () => {
     ]);
   });
 });
+
+test('overlapping network disables both await durable vault recovery', async () => {
+  const env = makeEnvironment();
+  const replacementEntered = deferred();
+  const releaseReplacement = deferred();
+  let refuseStop = true;
+  const runtime = makeRuntime(env, makeStore(), 'kernel-disable-overlap', {
+    sendHostMessage: async (message: any) => {
+      if (refuseStop && message.type === 'feature-lease/host-stop'
+          && message.lease?.scope === 'dweb') {
+        refuseStop = false;
+        throw new Error('lost-network-stop-receipt');
+      }
+      return env.sendHostMessage(message);
+    },
+  });
+  await runtime.ready;
+  await runtime.acquire('vault-authority');
+  await runtime.acquire('dweb');
+  env.onStart(async scope => {
+    if (scope === 'vault-authority') {
+      replacementEntered.resolve();
+      await releaseReplacement.promise;
+    }
+  });
+  const first = runtime.disable('dweb');
+  let secondFinished = false;
+  const second = runtime.disable('dweb').then(result => { secondFinished = true; return result; });
+  try {
+    await replacementEntered.promise;
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(secondFinished).toBe(false);
+  } finally {
+    releaseReplacement.resolve();
+    await Promise.all([first, second]);
+  }
+  expect(runtime.snapshot().leases['vault-authority'].status).toBe('active');
+  expect(runtime.snapshot().disabled).toContain('dweb');
+});
+
+test('overlapping disable does not hide an earlier physical retirement failure', async () => {
+  const env = makeEnvironment();
+  const runtime = makeRuntime(env, makeStore(), 'kernel-disable-failed-close', {
+    recoveryAttempts: 1, wait: async () => {},
+    sendHostMessage: async (message: any) => {
+      if (message.type === 'feature-lease/host-stop' && message.lease?.scope === 'dweb') {
+        throw new Error('lost-stop-receipt');
+      }
+      return env.sendHostMessage(message);
+    },
+    closeOffscreen: async () => {
+      throw new Error('physical-retirement-failed');
+    },
+  });
+  await runtime.ready;
+  await runtime.acquire('vault-authority');
+  await runtime.acquire('dweb');
+  const results = await Promise.allSettled([runtime.disable('dweb'), runtime.disable('dweb')]);
+  expect(results[0].status).toBe('rejected');
+  expect(results[1].status).toBe('rejected');
+  if (results[0].status === 'rejected' && results[1].status === 'rejected') {
+    expect(results[1].reason).toBe(results[0].reason);
+    expect(results[0].reason).toMatchObject({ message: 'feature-lease-host-close-timeout' });
+  }
+  expect(runtime.snapshot().disabled).toContain('dweb');
+});

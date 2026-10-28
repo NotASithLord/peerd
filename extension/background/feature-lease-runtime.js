@@ -62,7 +62,7 @@ export const createProductionFeatureLeaseRuntime = ({
     throw new TypeError('feature-lease-host-timeout-invalid');
   }
   /** @template T @param {()=>Promise<T>|T} operation @param {number} timeoutMs @param {string} phase */
-  const withinHostDeadline = (operation, timeoutMs, phase) => withDeadline(
+  const hostDeadline = (operation, timeoutMs, phase) => withDeadline(
     operation, timeoutMs, () => {
       const error = /** @type {Error & {code?:string,outcomeKnown?:boolean}} */ (
         new Error(`feature lease host ${phase} timed out`)
@@ -73,10 +73,10 @@ export const createProductionFeatureLeaseRuntime = ({
     }, setTimeoutFn, clearTimeoutFn,
   );
   const hostStatus = (/** @type {()=>Promise<any>|any} */ operation) =>
-    withinHostDeadline(operation, hostStatusTimeoutMs, 'status');
+    hostDeadline(operation, hostStatusTimeoutMs, 'status');
   const hostEffect = (/** @type {()=>Promise<any>|any} */ operation,
     /** @type {'start'|'stop'|'close'|'ensure'} */ phase) =>
-    withinHostDeadline(operation, hostEffectTimeoutMs, phase);
+    hostDeadline(operation, hostEffectTimeoutMs, phase);
   const retirementStore = (/** @type {()=>Promise<any>} */ operation) => withDeadline(
     operation, hostEffectTimeoutMs,
     () => Object.assign(new Error('feature-host-retirement-store-timeout'), {
@@ -85,7 +85,7 @@ export const createProductionFeatureLeaseRuntime = ({
     setTimeoutFn, clearTimeoutFn,
   );
   /** @type {Map<string, number>} */
-  const scopedUsers = new Map();
+  const scopeUsers = new Map();
   /** @type {Set<string>} */
   const durableScopes = new Set();
   const hostLane = makeSerialLane();
@@ -93,13 +93,13 @@ export const createProductionFeatureLeaseRuntime = ({
   let hostRetirement = null;
   let hostRetirementLoaded = false;
   /** @type {Map<string, number>} */
-  const recoveryTokens = new Map();
+  const retryTokens = new Map();
   /** @type {string|null} */
   let residentHostEpoch = null;
   const cancelRecovery = (/** @type {string} */ scope) => {
-    recoveryTokens.set(scope, (recoveryTokens.get(scope) ?? 0) + 1);
+    retryTokens.set(scope, (retryTokens.get(scope) ?? 0) + 1);
   };
-  const waitForOffscreenClosed = async () => {
+  const waitForHostClose = async () => {
     for (let attempt = 0; attempt < 40; attempt += 1) {
       const present = await hostStatus(hasOffscreen).catch(() => true);
       if (!present) return;
@@ -212,7 +212,7 @@ export const createProductionFeatureLeaseRuntime = ({
       && reply.protocol === FEATURE_LEASE_HOST_PROTOCOL
       && reply.buildId === identity.buildId
       && typeof reply.hostEpoch === 'string';
-    const authenticatedButIncompatible = () => reply?.ok === true
+    const incompatible = () => reply?.ok === true
       && (reply.protocol !== FEATURE_LEASE_HOST_PROTOCOL
         || reply.buildId !== identity.buildId
         || typeof reply.hostEpoch !== 'string');
@@ -223,10 +223,10 @@ export const createProductionFeatureLeaseRuntime = ({
     const attempts = create ? 40 : 1;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       reply = await query().catch(() => null);
-      if (valid() || authenticatedButIncompatible()) break;
+      if (valid() || incompatible()) break;
       if (attempt + 1 < attempts) await wait(25);
     }
-    if (!valid() && create && authenticatedButIncompatible()) {
+    if (!valid() && create && incompatible()) {
       await hostEffect(closeOffscreen, 'close').catch(() => {});
       await hostEffect(() => ensureOffscreen(scope), 'ensure');
       reply = await query().catch(() => null);
@@ -271,7 +271,7 @@ export const createProductionFeatureLeaseRuntime = ({
     vaultUnlocked,
   });
 
-  const stopOrphanedHostScopes = async (
+  const stopOrphans = async (
     /** @type {Iterable<string>} */ scopes,
   ) => {
     const status = await readHost(false).catch(() => null);
@@ -293,7 +293,7 @@ export const createProductionFeatureLeaseRuntime = ({
   };
 
   /** @param {string} hostEpoch */
-  const retirePhysicalHost = async (hostEpoch) => {
+  const retireHost = async (hostEpoch) => {
     const attempts = Math.min(3, recoveryAttempts);
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const present = await hostStatus(hasOffscreen).catch(() => null);
@@ -311,7 +311,7 @@ export const createProductionFeatureLeaseRuntime = ({
       if (observedEpoch !== hostEpoch) return false;
       await hostEffect(closeOffscreen, 'close').catch(() => {});
       try {
-        await waitForOffscreenClosed();
+        await waitForHostClose();
         coordinator.confirmHostRetired(hostEpoch);
         if (residentHostEpoch === hostEpoch) residentHostEpoch = null;
         return true;
@@ -329,7 +329,7 @@ export const createProductionFeatureLeaseRuntime = ({
    * so close the one physical offscreen realm and verify its absence.
    * @param {string} hostEpoch
    */
-  const retireMarkedHost = async (hostEpoch) => {
+  const retireMarked = async (hostEpoch) => {
     const attempts = Math.min(3, recoveryAttempts);
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const present = await hostStatus(hasOffscreen).catch(() => null);
@@ -345,7 +345,7 @@ export const createProductionFeatureLeaseRuntime = ({
       }
       try {
         await hostEffect(closeOffscreen, 'close');
-        await waitForOffscreenClosed();
+        await waitForHostClose();
         coordinator.confirmHostRetired(hostEpoch);
         if (residentHostEpoch === hostEpoch) residentHostEpoch = null;
         return true;
@@ -376,7 +376,7 @@ export const createProductionFeatureLeaseRuntime = ({
         const present = await hostStatus(hasOffscreen).catch(() => null);
         if (present !== false) {
           await hostEffect(closeOffscreen, 'close').catch(() => {});
-          try { await waitForOffscreenClosed(); }
+          try { await waitForHostClose(); }
           catch (retirementCause) {
             if (attempt + 1 < attempts) {
               await wait(Math.min(500, 50 * (2 ** attempt)));
@@ -403,7 +403,7 @@ export const createProductionFeatureLeaseRuntime = ({
       throw new Error('feature-host-retirement-failed');
     }
     if (!record) return Object.freeze({ ok: true, retired: false });
-    await retireMarkedHost(record.hostEpoch);
+    await retireMarked(record.hostEpoch);
     await clearRetirement(record.hostEpoch);
     return Object.freeze({ ok: true, retired: true, hostEpoch: record.hostEpoch });
   };
@@ -434,7 +434,7 @@ export const createProductionFeatureLeaseRuntime = ({
     if (Object.entries(coordinator.snapshot().leases).some(([scope, lease]) =>
       OFFSCREEN_SCOPES.has(scope) && ['starting', 'active'].includes(lease.status))) return false;
     const exactEpoch = status?.hostEpoch ?? residentHostEpoch;
-    return typeof exactEpoch === 'string' ? retirePhysicalHost(exactEpoch) : false;
+    return typeof exactEpoch === 'string' ? retireHost(exactEpoch) : false;
   };
 
   /** @param {string} hostEpoch @param {readonly any[]} affected */
@@ -447,8 +447,8 @@ export const createProductionFeatureLeaseRuntime = ({
       for (const { scope, durable } of items) {
         if (!durable) continue;
         if (!work.has(scope)) {
-          const token = (recoveryTokens.get(scope) ?? 0) + 1;
-          recoveryTokens.set(scope, token);
+          const token = (retryTokens.get(scope) ?? 0) + 1;
+          retryTokens.set(scope, token);
           work.set(scope, { token, attempts: 0 });
         }
         pending.add(scope);
@@ -463,7 +463,7 @@ export const createProductionFeatureLeaseRuntime = ({
       pending.delete(scope);
       const state = work.get(scope);
       const posture = coordinator.snapshot();
-      const cancelled = recoveryTokens.get(scope) !== state.token || posture.locked
+      const cancelled = retryTokens.get(scope) !== state.token || posture.locked
         || posture.disabled.includes(scope);
       if (cancelled || state.attempts >= recoveryAttempts) {
         state.result = Object.freeze({ ok: false, outcomeKnown: true, scope,
@@ -488,24 +488,24 @@ export const createProductionFeatureLeaseRuntime = ({
       results: [...work.values()].map((state) => state.result) });
   };
 
-  const poisonedHostEpochs = () => [...new Set(Object.entries(coordinator.snapshot().leases)
+  const poisonedEpochs = () => [...new Set(Object.entries(coordinator.snapshot().leases)
     .filter(([scope, state]) => OFFSCREEN_SCOPES.has(scope)
       && typeof state?.poisonedHostEpoch === 'string')
     .map(([, state]) => /** @type {string} */ (state.poisonedHostEpoch)))];
 
   const retirePoisoned = async () => {
     const retirements = [];
-    for (const hostEpoch of poisonedHostEpochs()) {
+    for (const hostEpoch of poisonedEpochs()) {
       const affected = coordinator.hostLost(hostEpoch);
       for (const item of affected) durableScopes.delete(item.scope);
-      if (affected.length > 0) await retirePhysicalHost(hostEpoch);
+      if (affected.length > 0) await retireHost(hostEpoch);
       retirements.push(Object.freeze({ hostEpoch, affected }));
     }
     return retirements;
   };
 
   /** @param {readonly {hostEpoch:string,affected:readonly any[]}[]} retirements */
-  const recoverRetirements = async (retirements) => {
+  const recoverRetired = async (retirements) => {
     const results = [];
     for (const { hostEpoch, affected } of retirements) {
       results.push(await recoverDurable(hostEpoch, affected));
@@ -513,14 +513,14 @@ export const createProductionFeatureLeaseRuntime = ({
     return results;
   };
 
-  const finishRevocationUnsafe = async (/** @type {string} */ scope,
+  const finishRevoke = async (/** @type {string} */ scope,
     /** @type {Promise<any>} */ resultPromise) => {
     const result = await resultPromise;
     if (OFFSCREEN_SCOPES.has(scope)) {
       if (result?.outcomeKnown === false) {
         return Object.freeze({ result, retirements: await retirePoisoned() });
       }
-      await stopOrphanedHostScopes([scope]);
+      await stopOrphans([scope]);
       await closeIdleHost();
     }
     return Object.freeze({ result, retirements: [] });
@@ -529,13 +529,13 @@ export const createProductionFeatureLeaseRuntime = ({
   const revokeUnsafe = (/** @type {string} */ scope,
     /** @type {string} */ reason = 'feature-disabled') => {
     durableScopes.delete(scope);
-    return finishRevocationUnsafe(scope, coordinator.revoke(scope, reason));
+    return finishRevoke(scope, coordinator.revoke(scope, reason));
   };
 
-  const finishLockUnsafe = async (/** @type {Promise<any[]>} */ resultsPromise) => {
+  const finishLock = async (/** @type {Promise<any[]>} */ resultsPromise) => {
     const results = await resultsPromise;
     const retirements = await retirePoisoned();
-    await stopOrphanedHostScopes(OFFSCREEN_FEATURE_LEASE_SCOPES);
+    await stopOrphans(OFFSCREEN_FEATURE_LEASE_SCOPES);
     await closeIdleHost();
     return Object.freeze({ results, retirements });
   };
@@ -546,7 +546,7 @@ export const createProductionFeatureLeaseRuntime = ({
     if (!OFFSCREEN_SCOPES.has(scope) || typeof operation !== 'function') {
       throw new TypeError('feature-lease-scoped-operation-invalid');
     }
-    scopedUsers.set(scope, (scopedUsers.get(scope) ?? 0) + 1);
+    scopeUsers.set(scope, (scopeUsers.get(scope) ?? 0) + 1);
     let acquired = false;
     try {
       const lease = await hostLane(async () => {
@@ -562,9 +562,9 @@ export const createProductionFeatureLeaseRuntime = ({
       acquired = true;
       return await operation(leaseCapability(lease));
     } finally {
-      const remaining = Math.max(0, (scopedUsers.get(scope) ?? 1) - 1);
-      if (remaining === 0) scopedUsers.delete(scope);
-      else scopedUsers.set(scope, remaining);
+      const remaining = Math.max(0, (scopeUsers.get(scope) ?? 1) - 1);
+      if (remaining === 0) scopeUsers.delete(scope);
+      else scopeUsers.set(scope, remaining);
       if (acquired && remaining === 0) {
         const finished = await hostLane(async () => {
           if (!durableScopes.has(scope)) {
@@ -572,7 +572,7 @@ export const createProductionFeatureLeaseRuntime = ({
           }
           return null;
         }).catch(() => null);
-        if (finished) await recoverRetirements(finished.retirements).catch(() => {});
+        if (finished) await recoverRetired(finished.retirements).catch(() => {});
       }
     }
   };
@@ -626,10 +626,10 @@ export const createProductionFeatureLeaseRuntime = ({
     }
     return result;
   };
-  const finishRevocation = async (/** @type {string} */ scope,
+  const settleRevoke = async (/** @type {string} */ scope,
     /** @type {Promise<any>} */ result) => {
-    const finished = await hostLane(() => finishRevocationUnsafe(scope, result));
-    await recoverRetirements(finished.retirements);
+    const finished = await hostLane(() => finishRevoke(scope, result));
+    await recoverRetired(finished.retirements);
     return finished.result;
   };
   const revoke = (/** @type {string} */ scope,
@@ -637,20 +637,29 @@ export const createProductionFeatureLeaseRuntime = ({
     cancelRecovery(scope);
     durableScopes.delete(scope);
     const result = coordinator.revoke(scope, reason);
-    return finishRevocation(scope, result);
+    return settleRevoke(scope, result);
   };
+  /** @type {Map<string,Promise<any>>} */
+  const disabling = new Map();
   const disable = (/** @type {string} */ scope) => {
     cancelRecovery(scope);
     durableScopes.delete(scope);
     const result = coordinator.disable(scope);
-    return finishRevocation(scope, result);
+    // why: OFF joins prior vault recovery outside the host lane.
+    const finished = Promise.all([
+      disabling.get(scope), settleRevoke(scope, result),
+    ]).then(([, value]) => value);
+    disabling.set(scope, finished);
+    const clear = () => { if (disabling.get(scope) === finished) disabling.delete(scope); };
+    void finished.then(clear, clear);
+    return finished;
   };
   const lock = async () => {
     for (const scope of FEATURE_LEASE_SCOPES) cancelRecovery(scope);
     durableScopes.clear();
     const results = coordinator.lock();
-    const finished = await hostLane(() => finishLockUnsafe(results));
-    await recoverRetirements(finished.retirements);
+    const finished = await hostLane(() => finishLock(results));
+    await recoverRetired(finished.retirements);
     return finished.results;
   };
   const reconcile = () => hostLane(async () => {
@@ -683,7 +692,7 @@ export const createProductionFeatureLeaseRuntime = ({
     // identity read. Keep physical retirement serialized, then release the
     // lane before replaying durable scopes just like the normal transition
     // path does for a cold dweb start.
-    return hostLane(() => retirePhysicalHost(hostEpoch))
+    return hostLane(() => retireHost(hostEpoch))
       .then(() => recoverDurable(hostEpoch, affected));
   };
 
@@ -696,7 +705,7 @@ export const createProductionFeatureLeaseRuntime = ({
     // why: a late operation belongs to the epoch in its lease, not whichever
     // host happens to be current. An observed successor proves the old epoch
     // is gone and must never be closed to settle stale operation cleanup.
-    await retireMarkedHost(hostEpoch);
+    await retireMarked(hostEpoch);
     await clearRetirement(hostEpoch);
     return Object.freeze({ hostEpoch, affected });
   }).then(({ hostEpoch: retiredHostEpoch, affected }) =>
