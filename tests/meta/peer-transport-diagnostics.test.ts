@@ -73,3 +73,28 @@ test('incoming carriers are observed once without replacing application listener
   expect(received).toBe(1);
   expect(world.__DWEB_TRANSPORT__.map((entry: any) => entry.stage)).toEqual(['observed', 'receive']);
 });
+
+test('ICE diagnostics retain bounded connectivity facts without addresses or credentials', async () => {
+  const world = setup();
+  const peer = new world.RTCPeerConnection({});
+  peer.getStats = async () => new Map([
+    ['local', { type: 'local-candidate', candidateType: 'host', protocol: 'udp', address: 'private-name.local', usernameFragment: 'SECRET' }],
+    ['remote', { type: 'remote-candidate', candidateType: 'SECRET', protocol: 'SECRET', address: '192.0.2.14' }],
+    ...Array.from({ length: 30 }, (_, i): [string, Record<string, unknown>] => [String(i), {
+      type: 'candidate-pair', state: 'failed', nominated: false, requestsSent: 7, responsesReceived: 0,
+      requestsReceived: -1, responsesSent: 'SECRET', remoteCandidateId: 'SECRET',
+    }]),
+  ]);
+  peer.connectionState = 'failed';
+  peer.dispatchEvent(new Event('connectionstatechange'));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const stats = world.__DWEB_TRANSPORT__.find((entry: any) => entry.stage === 'ice-stats');
+  expect(stats.candidates).toEqual([
+    { side: 'local-candidate', type: 'host', protocol: 'udp', addressKind: 'mdns' },
+    { side: 'remote-candidate', type: 'unknown', protocol: 'unknown', addressKind: 'ipv4' },
+  ]);
+  expect(stats.pairs).toHaveLength(16);
+  expect(stats.pairs[0]).toEqual({ state: 'failed', nominated: false, requestsSent: 7, responsesReceived: 0 });
+  const serialized = JSON.stringify(stats);
+  for (const secret of ['SECRET', 'private-name', '192.0.2.14']) expect(serialized).not.toContain(secret);
+});
