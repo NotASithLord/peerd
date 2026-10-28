@@ -211,12 +211,12 @@ describe('aggregate ingress bounds', () => {
     const mesh = createRoomMesh({ roomId: 'r', identity,
       audit: (type, detail) => { if (type === 'peer_verification_overflow') diagnostics.push(detail); } });
     const c = channel(); mesh.addLink(c, remote.did);
-    const env = await signEnvelope(buildEnvelope({ ch: 3, typ: 1, from: remote.did,
+    const env = await signEnvelope(buildEnvelope({ ch: 5, typ: 1, from: remote.did,
       body: {}, id: 'overflow', ts: 0 }), remote);
     let received = 0;
     mesh.onEnvelope(() => { received++; });
     for (let i = 0; i < 65; i++) c.receive(env);
-    expect(diagnostics).toEqual([{ did: remote.did, channel: 3, claimedForwarded: false,
+    expect(diagnostics).toEqual([{ did: remote.did, channel: 5, claimedForwarded: false,
       activePeer: 32, activeMesh: 32, queuedPeer: 32, queuedMesh: 32 }]);
     expect(c.closed()).toBe(true);
     expect(mesh.hasLink(remote.did)).toBe(false);

@@ -427,7 +427,7 @@ export const createRoomMesh = ({
         // and channel classification distinguish local pressure from peer floods.
         audit?.('peer_verification_overflow', {
           did: link.did,
-          channel: Number.isInteger(msg.ch) && msg.ch >= 0 && msg.ch <= 4 ? msg.ch : -1,
+          channel: Number.isInteger(msg.ch) && msg.ch >= 0 && msg.ch <= 5 ? msg.ch : -1,
           claimedForwarded: msg.ch === 4 && msg.from !== link.did,
           activePeer: link.verifying, activeMesh: verifying,
           queuedPeer: link.queued, queuedMesh: verificationQueue.length,
