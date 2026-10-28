@@ -37,7 +37,8 @@ const finish = async code => { await cleanup(); process.exit(code); };
 process.once('SIGTERM', () => void finish(143));
 process.once('SIGINT', () => void finish(130));
 // why: an abandoned SSH connection must not leave a browser occupying a host.
-setTimeout(() => void finish(1), 10 * 60_000).unref();
+const watchdog = setTimeout(() => void finish(1), 10 * 60_000);
+watchdog.unref();
 
 const fingerprint = () => {
   let machine;
@@ -144,6 +145,9 @@ for await (const line of lines) {
     const result = method === 'launch' ? await launch(args)
       : method === 'diagnostics' ? { logs: errors, transports: await evaluate('window.cluster?.diagnostics()') }
       : await evaluate(`window.cluster[${JSON.stringify(method)}](${JSON.stringify(args ?? {})})`);
+    // why: successful coordinator work renews the idle lease for a soak;
+    // hung requests and abandoned SSH sessions still expire and clean up.
+    watchdog.refresh();
     process.stdout.write(`${JSON.stringify({ id, result: result ?? null })}\n`);
   } catch (error) {
     process.stdout.write(`${JSON.stringify({ id: request?.id, error: error.message })}\n`);
