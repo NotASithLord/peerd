@@ -421,6 +421,14 @@ export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, n
 }
 
 // ---- raw CDP attach over Chrome's WebSocket (no npm client) -----------------
+export class CDPSessionDetachedError extends Error {
+  constructor(method, sessionId) {
+    super(`${method}: CDP session detached; outcome unknown`);
+    this.name = 'CDPSessionDetachedError';
+    this.sessionId = sessionId;
+  }
+}
+
 export async function attach(wsUrl, onEvent, { commandTimeoutMs = 180_000 } = {}) {
   if (!Number.isFinite(commandTimeoutMs) || commandTimeoutMs <= 0) throw new Error('Invalid CDP command timeout');
   const ws = new WebSocket(wsUrl);
@@ -455,9 +463,7 @@ export async function attach(wsUrl, onEvent, { commandTimeoutMs = 180_000 } = {}
       const sessionId = m.params.sessionId;
       detachedSessions.add(sessionId);
       for (const request of pending.values()) {
-        if (request.sessionId === sessionId) request.finish({ error: {
-          message: 'CDP session detached; outcome unknown',
-        } });
+        if (request.sessionId === sessionId) request.detach();
       }
     }
     if (m.method === 'Runtime.exceptionThrown') {
@@ -487,7 +493,7 @@ export async function attach(wsUrl, onEvent, { commandTimeoutMs = 180_000 } = {}
   };
   const send = (method, params = {}, sessionId) => new Promise((res, rej) => {
     if (closed || ws.readyState !== WebSocket.OPEN) { rej(new Error(`${method}: CDP connection is closed (${closeReason ?? 'socket unavailable'})`)); return; }
-    if (sessionId && detachedSessions.has(sessionId)) { rej(new Error(`${method}: CDP session detached; outcome unknown`)); return; }
+    if (sessionId && detachedSessions.has(sessionId)) { rej(new CDPSessionDetachedError(method, sessionId)); return; }
     const i = ++id;
     // why: a page-side deadline cannot settle a lost CDP response. Retire the
     // connection on timeout; never replay a command with an unknown outcome.
@@ -495,12 +501,14 @@ export async function attach(wsUrl, onEvent, { commandTimeoutMs = 180_000 } = {}
       closePending(`CDP command ${method} timed out; outcome unknown`);
       ws.close();
     }, commandTimeoutMs);
-    pending.set(i, { sessionId, finish: (m) => {
+    const finish = (m) => {
       clearTimeout(timer);
       pending.delete(i);
-      if (m.error) rej(new Error(`${method}: ${m.error.message}`));
+      if (m.error) rej(m.error instanceof CDPSessionDetachedError ? m.error : new Error(`${method}: ${m.error.message}`));
       else res(m.result);
-    } });
+    };
+    pending.set(i, { sessionId, finish,
+      detach: () => finish({ error: new CDPSessionDetachedError(method, sessionId) }) });
     try { ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) })); }
     catch { closePending('CDP send failed; outcome unknown'); ws.close(); }
   });

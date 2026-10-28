@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { runInNewContext } from 'node:vm';
 import { OBSERVER_SOURCE, assertNoTransport } from '../../scripts/cdp/network-consent-cold.mjs';
-import { createAuxiliaryFetchRetirement } from '../../scripts/cdp/e2e-harness.mjs';
+import { CDPSessionDetachedError, createAuxiliaryFetchRetirement } from '../../scripts/cdp/e2e-harness.mjs';
 
 test('auxiliary Fetch retirement fences late attachment and releases only the exact owned target', () => {
   const connections = new Map();
@@ -529,6 +529,71 @@ test('startup-held dedicated worker retirement requires exact native destruction
   await expect(live.observer.barrier()).rejects.toThrow('target destruction target=held');
   await expect(live.observer.close()).rejects.toThrow('Unobserved target retired: held');
 }, 5_000);
+
+test('native detach during startup installation enters exact destruction retirement', async () => {
+  const fixture = await retirementObserver();
+  fixture.onCommand((method, id) => {
+    if (id !== 'held' || method !== 'Runtime.addBinding') return undefined;
+    const failure = Promise.reject(new CDPSessionDetachedError(method, id));
+    fixture.retire(id);
+    return failure;
+  });
+  fixture.target('held', true);
+  await fixture.observer.barrier();
+  expect(fixture.evidence.observerErrors).toEqual([]);
+  expect(fixture.evidence.lifecycle.some((entry: any) => entry.targetId === 'held'
+    && entry.proof === 'destroyed-before-startup-release')).toBe(true);
+  expect(fixture.calls.some(call => call.sessionId === 'held'
+    && call.method === 'Runtime.runIfWaitingForDebugger')).toBe(false);
+  await fixture.observer.close();
+});
+
+test.each(['no-detach', 'wrong-session', 'plain-error', 'released'])('native detach cannot excuse %s instrumentation failure', async kind => {
+  const fixture = await retirementObserver();
+  fixture.onCommand((method, id) => {
+    if (id !== 'held' || method !== 'Runtime.addBinding') return undefined;
+    const error = kind === 'plain-error' ? new Error('Runtime.addBinding: CDP session detached; outcome unknown')
+      : new CDPSessionDetachedError(method, kind === 'wrong-session' ? 'other' : id);
+    const failure = Promise.reject(error);
+    if (kind !== 'no-detach') fixture.retire(id);
+    return failure;
+  });
+  fixture.target('held', kind !== 'released');
+  await expect(fixture.observer.barrier()).rejects.toThrow('Observer failed');
+  await expect(fixture.observer.close()).rejects.toThrow('Observer failed');
+});
+
+test('native detach never substitutes for exact target destruction', async () => {
+  const fixture = await retirementObserver();
+  fixture.onCommand((method, id) => {
+    if (id !== 'held' || method !== 'Runtime.addBinding') return undefined;
+    const failure = Promise.reject(new CDPSessionDetachedError(method, id));
+    fixture.retire(id, false);
+    fixture.emit('Target.targetDestroyed', { targetId: 'other' });
+    return failure;
+  });
+  fixture.target('held', true);
+  await expect(fixture.observer.barrier()).rejects.toThrow('target destruction target=held');
+  await expect(fixture.observer.close()).rejects.toThrow('Unobserved target retired: held');
+}, 5_000);
+
+test('native detach while draining an observed realm still waits for destruction', async () => {
+  const fixture = await retirementObserver();
+  fixture.target('old'); await fixture.observer.barrier();
+  fixture.onDrain(id => {
+    if (id !== 'old') return {};
+    const failure = Promise.reject(new CDPSessionDetachedError('Runtime.evaluate', id));
+    fixture.retire(id, false);
+    setTimeout(() => {
+      fixture.targets.delete(id); fixture.emit('Target.targetDestroyed', { targetId: id });
+    }, 5);
+    return failure;
+  });
+  await fixture.observer.barrier();
+  expect(fixture.evidence.lifecycle.some((entry: any) => entry.method === 'observer.retirementConfirmed'
+    && entry.targetId === 'old')).toBe(true);
+  await fixture.observer.close();
+});
 
 test('pending startup resume irrevocably disqualifies unobserved retirement', async () => {
   const fixture = await retirementObserver();
