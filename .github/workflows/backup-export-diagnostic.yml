@@ -5,6 +5,8 @@ on:
     paths:
       - .github/workflows/backup-export-diagnostic.yml
       - scripts/cdp/states.mjs
+      - extension/background/feature-lease-runtime.js
+      - extension/offscreen/controller-shell.js
 permissions:
   contents: read
 jobs:
