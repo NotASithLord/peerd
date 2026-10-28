@@ -10350,12 +10350,7 @@ export const STATES = [
         const index = source.indexOf(marker);
         if (index < 0 || source.indexOf(marker, index + 1) >= 0) throw new Error('Notebook marker location is not unique');
         let paused = false;
-        let pauseLocation = null;
-        page.on((method, params) => {
-          if (method !== 'Debugger.paused') return;
-          paused = true;
-          pauseLocation = params.callFrames?.[0]?.location ?? null;
-        });
+        page.on((method) => { if (method === 'Debugger.paused') paused = true; });
         await page.send('Debugger.enable');
         const point = await page.send('Debugger.setBreakpointByUrl', {
           url: `chrome-extension://${ctx.sw.id}/engine-tabs/notebook-tab/notebook-tab.js`,
@@ -10363,22 +10358,8 @@ export const STATES = [
           columnNumber: index - source.lastIndexOf('\n', index - 1) - 1,
         });
         if (!point.locations?.length) throw new Error('Notebook marker breakpoint did not bind');
-        let delivery = { status: 'pending' };
-        const interrupted = sendNotebook({ type: 'js/eval', code: 'return 44', timeoutMs: 10_000 })
-          .then((reply) => {
-            // why: distinguish a missed debugger stop from a refused operation,
-            // without retaining arbitrary reply data or changing the deadline.
-            delivery = { status: 'settled', ok: reply?.ok === true,
-              code: /^[a-z0-9-]{1,80}$/.test(reply?.code ?? '') ? reply.code : null,
-              outcomeKnown: reply?.outcomeKnown === true,
-              returnedCanary: reply?.result?.value === 44 };
-            return reply;
-          }).catch(() => { delivery = { status: 'transport-rejected' }; return null; });
-        const reachedMarker = await waitFor(() => paused, { budgetMs: 10_000, pollMs: 50 });
-        rec.observe('Notebook marker breakpoint and delivery', {
-          locations: point.locations, pauseLocation, delivery, reachedMarker: !!reachedMarker,
-        });
-        if (!reachedMarker) throw new Error('Notebook marker commit did not pause');
+        const interrupted = sendNotebook({ type: 'js/eval', code: 'return 44', timeoutMs: 10_000 }).catch(() => null);
+        if (!await waitFor(() => paused, { budgetMs: 10_000, pollMs: 50 })) throw new Error('Notebook marker commit did not pause');
         await page.send('Debugger.removeBreakpoint', { breakpointId: point.breakpointId });
         await page.send('Page.reload');
         await page.send('Debugger.disable');
