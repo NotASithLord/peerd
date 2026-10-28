@@ -10,6 +10,51 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-28
+
+### Added
+
+- Discover shows host-owned install progress and lets you cancel retrieval
+  before publication begins. Leaving Home does not abandon the install;
+  cancellation identifies the exact attempt and refuses once commit begins.
+- Signed JavaScript and WebAssembly Apps can be selected through Surprise me,
+  inspected, installed, shared, and explicitly opened in the opaque App runner.
+  Native acceptance covers cancellation and a fresh retry for both link and
+  catalog installation paths.
+
+### Fixed
+
+- App retrieval cancellation stops its own lookup, connection and content
+  requests without closing peer links used by other work. Cancelled requests
+  do not mark providers unavailable.
+- Discovery catalog pages fit the negotiated transport frame limit without
+  skipping cards when a page must shrink.
+- Verified locally seeded App bytes remain available when the original
+  publisher is offline. Recent explicit no-provider results temporarily
+  suppress repeated suggestions; unknown failures remain unknown.
+- Vault locking no longer reacquires a retired host through publication.
+  Fresh-profile consent, worker restart and host-loss checks retain strict
+  network-observation and teardown requirements.
+- Interrupted Notebook replacement, fresh-chat permission ordering,
+  confirmation focus trapping and spend-limit outcomes retain explicit
+  recovery and authority checks. Site-client receipts preserve exact origin
+  provenance and Unicode values.
+- Browser App runtime detection recognizes supported WebAssembly SIMD.
+
+### Validation and scope
+
+- P2P remains opt-in and Chrome-preview-only. Native WebRTC checks cover
+  discovery, install, cancellation, retry and explicit execution. Signed
+  catalog and provider-survival tests cover bounded reconciliation; they do
+  not establish representative WAN/NAT reachability or physical network scale.
+- Retry starts a new download; partial-download resume and larger WASM
+  streaming are not included. Standalone Discover-installed WASI programs
+  remain unsupported. Experimental bounded-push discovery and API-first
+  site-client behavior remain opt-in.
+- Browser binary signing and installed-client update qualification are
+  separate from this runtime release. Public Apple signing, Linux and Windows
+  installed-update qualification remain outstanding.
+
 ## [0.9.2] - 2026-10-15
 
 ### Fixed

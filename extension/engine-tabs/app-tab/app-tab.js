@@ -781,10 +781,13 @@ const dwebBridgeLifecycle = createDwebBridgeLifecycle();
 let confirmationTail = Promise.resolve();
 
 /** @param {{ appName: string, detail: string, kind?: string, approveLabel?: string }} args @returns {Promise<boolean>} */
-const showConfirmation = (args) => {
+const showConfirmation = async (args) => {
   // why leave full screen first: for its first seconds, full screen shows the
   // browser's own exit message at the top center, over this bar's text and buttons.
-  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  if (document.fullscreenElement) {
+    try { await document.exitFullscreen(); } catch { return false; }
+    if (document.fullscreenElement) return false;
+  }
   return showConsentBar(args, { inert: frame });
 };
 

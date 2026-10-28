@@ -10568,10 +10568,10 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         verdict('full screen with the side panel already open shows no P handle', again === true
           && reentry.chip === 'Close the peerd side panel' && reentry.handle === 'none', JSON.stringify({ again, ...reentry }));
         const consent = await evalIn(app, `(async () => {
-          const bar = await new Promise((resolve, reject) => {
+          const { bar, fullAtPrompt } = await new Promise((resolve, reject) => {
             const observer = new MutationObserver(() => {
               const found = document.querySelector('[role="alertdialog"]');
-              if (found) { observer.disconnect(); clearTimeout(timer); resolve(found); }
+              if (found) { observer.disconnect(); clearTimeout(timer); resolve({ bar: found, fullAtPrompt: document.fullscreenElement !== null }); }
             });
             const timer = setTimeout(() => { observer.disconnect(); reject(new Error('consent bar missing')); }, 5000);
             observer.observe(document.body, { childList: true });
@@ -10586,9 +10586,9 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
           const box = deny.getBoundingClientRect();
           const onTop = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === deny;
           deny.click();
-          return { full: document.fullscreenElement !== null, onTop };
+          return { full: document.fullscreenElement !== null, fullAtPrompt, onTop };
         })()`, true);
-        verdict('a consent prompt leaves full screen and shows on top of the App', again === true && consent?.full === false && consent.onTop === true,
+        verdict('a consent prompt leaves full screen and shows on top of the App', again === true && consent?.full === false && consent.fullAtPrompt === false && consent.onTop === true,
           JSON.stringify({ again, ...consent }));
         await evalIn(app, `document.getElementById('mode-toggle').click()`);
         const editing = await waitFor(() => evalIn(app, `document.body.classList.contains('mode-edit')`), { budgetMs: 10_000, pollMs: 100 });
