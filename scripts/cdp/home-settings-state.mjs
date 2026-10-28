@@ -121,8 +121,8 @@ export const HOME_SETTINGS_STATES = [
           if (rows.length > 16) rows.shift();
         });
       })()`;
-      // Set bounds at creation: moving an already opened window is too late to
-      // prevent a real visibilitychange in the Home it temporarily covers.
+      // why: native window creation can briefly cover another window before the
+      // requested bounds settle. Prepare both blank shells before loading Homes.
       const windowBounds = (offset) => evalIn(ctx.page, `({
         left: screen.availLeft + Math.min(${offset}, Math.floor(screen.availWidth / 4)),
         top: screen.availTop + Math.min(${offset}, Math.floor(screen.availHeight / 4)),
@@ -153,7 +153,9 @@ export const HOME_SETTINGS_STATES = [
       };
       try {
         // why: A tab switch inside one Home window intentionally closes a nonsticky panel.
-        page = await openWidePage(ctx, 'home/home.html#discover', { newWindow: true, windowBounds: await windowBounds(80) });
+        page = await openWidePage(ctx, 'home/home.html#discover', { newWindow: true, windowBounds: await windowBounds(80), deferNavigation: true });
+        other = await openWidePage(ctx, 'home/home.html#discover', { newWindow: true, windowBounds: await windowBounds(160), deferNavigation: true });
+        await page.navigate();
         await evalIn(page, visibilitySource);
         ownedHomes.push(await readWindow(page));
         const choice = await waitFor(() => evalIn(page, `!!document.querySelector('[data-network-choice="enable"]:not(:disabled)')`), { budgetMs: 15_000 });
@@ -169,7 +171,7 @@ export const HOME_SETTINGS_STATES = [
         rec.check('real opt-in and the Start route receive successful receipts', enabled.reply?.ok === true
           && started?.ok === true, JSON.stringify({ enabled, started }));
         if (started?.ok !== true) throw new Error('The real network Start did not settle');
-        other = await openWidePage(ctx, 'home/home.html#discover', { newWindow: true, windowBounds: await windowBounds(160) });
+        await other.navigate();
         await evalIn(other, visibilitySource);
         ownedHomes.push(await readWindow(other));
         rec.check('the native panel and both real Home pages own three distinct windows',

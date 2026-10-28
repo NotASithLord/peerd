@@ -349,9 +349,9 @@ export async function capturePage(page, { bringToFront = true } = {}) {
  * it (both themes) and closes it. Used for the full-tab / large-view baselines.
  * @param {object} ctx  from launchPeerd
  * @param {string} path  extension-relative, e.g. 'home/home.html'
- * @param {{ metrics?: object, newWindow?: boolean, windowBounds?: object }} [opts]
+ * @param {{ metrics?: object, newWindow?: boolean, windowBounds?: object, deferNavigation?: boolean }} [opts]
  */
-export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, newWindow = false, windowBounds = {} } = {}) {
+export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, newWindow = false, windowBounds = {}, deferNavigation = false } = {}) {
   const url = `chrome-extension://${ctx.sw.id}/${String(path).replace(/^\//, '')}`;
   let created;
   if (newWindow) {
@@ -385,29 +385,33 @@ export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, n
     await page.send('Emulation.setDeviceMetricsOverride', metrics);
     await setEmulatedTheme(page, 'light');
     await page.send('Page.addScriptToEvaluateOnNewDocument', { source: stableStyleSource });
-    await page.send('Page.bringToFront');
-    await page.send('Page.navigate', { url });
-    // why `ready` is overridable: the default probe waits for a Mithril mount at
-    // `#app`, which is right for the SPA pages and WRONG for every standalone tab
-    // page - the engine tabs render into their own ids (and their hard-fail cards
-    // replace <body> outright), so they would time out here forever despite having
-    // painted. Those pages are exactly the ones with no visual coverage, so the
-    // probe has to be the caller's to choose.
-    const probe = ready
-      ? `document.readyState !== 'loading' && !!document.querySelector(${JSON.stringify(ready)})`
-      : `document.readyState === 'complete' && !!document.querySelector('#app > *')`;
-    const mounted = await waitFor(() => evalIn(page, probe), { budgetMs: READY_BUDGET_MS });
-    if (!mounted) {
-      const state = await evalIn(page, `({
-        href: location.href,
-        readyState: document.readyState,
-        visibilityState: document.visibilityState,
-        title: document.title,
-        body: document.body?.innerText?.slice(0, 500) ?? null,
-        app: document.querySelector('#app')?.innerHTML?.slice(0, 500) ?? null,
-      })`).catch((error) => ({ error: String(error) }));
-      throw new Error(`wide page never mounted: ${path} ${JSON.stringify({ state, events: page.events })}`);
-    }
+    // why: prepare every native window before any observed Home starts its lifecycle.
+    page.navigate = async () => {
+      await page.send('Page.bringToFront');
+      await page.send('Page.navigate', { url });
+      // why `ready` is overridable: the default probe waits for a Mithril mount at
+      // `#app`, which is right for the SPA pages and WRONG for every standalone tab
+      // page - the engine tabs render into their own ids (and their hard-fail cards
+      // replace <body> outright), so they would time out here forever despite having
+      // painted. Those pages are exactly the ones with no visual coverage, so the
+      // probe has to be the caller's to choose.
+      const probe = ready
+        ? `document.readyState !== 'loading' && !!document.querySelector(${JSON.stringify(ready)})`
+        : `document.readyState === 'complete' && !!document.querySelector('#app > *')`;
+      const mounted = await waitFor(() => evalIn(page, probe), { budgetMs: READY_BUDGET_MS });
+      if (!mounted) {
+        const state = await evalIn(page, `({
+          href: location.href,
+          readyState: document.readyState,
+          visibilityState: document.visibilityState,
+          title: document.title,
+          body: document.body?.innerText?.slice(0, 500) ?? null,
+          app: document.querySelector('#app')?.innerHTML?.slice(0, 500) ?? null,
+        })`).catch((error) => ({ error: String(error) }));
+        throw new Error(`wide page never mounted: ${path} ${JSON.stringify({ state, events: page.events })}`);
+      }
+    };
+    if (!deferNavigation) await page.navigate();
     return page;
   } catch (error) {
     try { disconnect?.(); } catch { /* */ }
