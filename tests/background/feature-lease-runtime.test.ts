@@ -1003,6 +1003,102 @@ describe('production feature-lease runtime', () => {
     expect(runtime.snapshot().leases.dweb).toMatchObject({ status: 'active' });
   });
 
+  test('renderer recovery retires an unknown dweb start beside a recovered vault lease', async () => {
+    const env = makeEnvironment();
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a', {
+      recoveryAttempts: 4,
+      wait: async () => {},
+    });
+    await runtime.ready;
+    await runtime.acquire('vault-authority');
+    await runtime.acquire('dweb');
+    const oldHostEpoch = env.host!.hostEpoch;
+    env.crashHost();
+    let failDweb = true;
+    env.onStart(async (scope) => {
+      if (scope === 'dweb' && failDweb) {
+        failDweb = false;
+        throw new Error('replacement-dweb-start-unknown');
+      }
+    });
+    await runtime.handleHostLoss(oldHostEpoch);
+    expect(runtime.snapshot().leases['vault-authority'].status).toBe('active');
+    expect(runtime.snapshot().leases.dweb.status).toBe('active');
+    expect(runtime.snapshot().leases.dweb.poisonedHostEpoch).toBeNull();
+    expect(env.host!.hostEpoch).not.toBe(oldHostEpoch);
+    expect(env.closeCount).toBeGreaterThan(0);
+  });
+
+  test('unknown replacement starts share a finite recovery budget across host epochs', async () => {
+    const env = makeEnvironment();
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a', {
+      recoveryAttempts: 3, wait: async () => {},
+    });
+    await runtime.ready;
+    await runtime.acquire('vault-authority');
+    await runtime.acquire('dweb');
+    const oldHostEpoch = env.host!.hostEpoch;
+    env.crashHost();
+    env.onStart(async (scope) => {
+      if (scope === 'dweb') throw new Error('persistent-unknown-start');
+    });
+    const recovered = await runtime.handleHostLoss(oldHostEpoch);
+    expect(env.starts.filter((scope) => scope === 'dweb')).toHaveLength(4);
+    expect(env.starts.filter((scope) => scope === 'vault-authority')).toHaveLength(4);
+    expect(recovered.results).toContainEqual(expect.objectContaining({
+      scope: 'dweb', code: 'feature-lease-recovery-exhausted',
+    }));
+    expect(env.host).toBeNull();
+    expect(runtime.snapshot().leases.dweb.poisonedHostEpoch).toBeNull();
+  });
+
+  test('network disable during replacement backoff does not replay dweb intent', async () => {
+    const env = makeEnvironment();
+    const waiting = deferred<void>();
+    const resume = deferred<void>();
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a', {
+      wait: async () => { waiting.resolve(); await resume.promise; },
+    });
+    await runtime.ready;
+    await runtime.acquire('vault-authority');
+    await runtime.acquire('dweb');
+    const oldHostEpoch = env.host!.hostEpoch;
+    env.crashHost();
+    env.onStart(async (scope) => {
+      if (scope === 'dweb') throw new Error('replacement-start-failed');
+    });
+    const recovery = runtime.handleHostLoss(oldHostEpoch);
+    await waiting.promise;
+    await runtime.disable('dweb');
+    resume.resolve();
+    const result = await recovery;
+    expect(result.results).toContainEqual(expect.objectContaining({
+      scope: 'dweb', code: 'feature-lease-recovery-cancelled',
+    }));
+    expect(env.starts.filter((scope) => scope === 'dweb')).toHaveLength(2);
+    expect(runtime.snapshot().leases['vault-authority'].status).toBe('active');
+    expect(env.host!.isActive('dweb')).toBe(false);
+  });
+
+  test('failed physical retirement never replays the unknown replacement start', async () => {
+    const env = makeEnvironment();
+    const runtime = makeRuntime(env, makeStore(), 'kernel-epoch-a', {
+      closeOffscreen: async () => { throw new Error('renderer-close-failed'); },
+      wait: async () => {},
+    });
+    await runtime.ready;
+    await runtime.acquire('vault-authority');
+    await runtime.acquire('dweb');
+    const oldHostEpoch = env.host!.hostEpoch;
+    env.crashHost();
+    env.onStart(async (scope) => {
+      if (scope === 'dweb') throw new Error('replacement-start-failed');
+    });
+    await expect(runtime.handleHostLoss(oldHostEpoch)).rejects.toThrow('feature-lease-host-close-timeout');
+    expect(env.starts.filter((scope) => scope === 'dweb')).toHaveLength(2);
+    expect(runtime.snapshot().leases.dweb.poisonedHostEpoch).toBe(env.host!.hostEpoch);
+  });
+
   test('renderer recovery retries transient replacement failures under the same durable intent', async () => {
     const env = makeEnvironment();
     const waits: number[] = [];
