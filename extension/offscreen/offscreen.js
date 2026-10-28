@@ -33,7 +33,7 @@ const loadVoiceChannelHost = makeBoundedModuleLoader(
   () => import('./voice-channel-host.js').then((module) => (voiceChannelHost = module)),
   { loadCode: 'voice-host-load-failed', timeoutCode: 'voice-host-load-timeout' },
 );
-const loadDwebHost = makeBoundedModuleLoader(
+const loadDweb = makeBoundedModuleLoader(
   () => import('./dweb-base.js'),
   { loadCode: 'dweb-host-load-failed', timeoutCode: 'dweb-host-load-timeout' },
 );
@@ -113,7 +113,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((
   const policy = msg.type === 'dweb/base-host/peer-policy';
   const claim = policy ? null : claimLease('dweb', sendResponse);
   if (!policy && !claim) return false;
-  loadDwebHost()
+  loadDweb()
     .then(({ handleDwebBaseMessage }) => {
       if (!policy && rejectStaleClaim('dweb', claim, sendResponse)) return;
       const handled = handleDwebBaseMessage(msg, sender, sendResponse);
@@ -458,15 +458,15 @@ const ensureFeatureLeaseHost = makeBoundedModuleLoader(
       expectedBuildId: `${EXTENSION_VERSION}:${CONTROLLER_BUILD_DIGEST}`,
       connectPort: () => browser.runtime.connect({ name: FEATURE_LEASE_KEEPALIVE_PORT }),
       startScope: async (scope, lease) => {
-        if (scope === 'dweb') return (await loadDwebHost()).startDwebFeatureLease(lease);
+        if (scope === 'dweb') return (await loadDweb()).startDwebFeatureLease(lease);
         return { ready: true, scope };
       },
       adoptScope: async (scope, _prior, lease) => {
-        if (scope === 'dweb') return (await loadDwebHost()).adoptDwebFeatureLease(lease);
+        if (scope === 'dweb') return (await loadDweb()).adoptDwebFeatureLease(lease);
         return { adopted: true, scope };
       },
       stopScope: async (scope) => {
-        if (scope === 'dweb') return (await loadDwebHost()).stopDwebFeatureLease();
+        if (scope === 'dweb') return (await loadDweb()).stopDwebFeatureLease();
         if (scope === 'controller') return stopControllerFeature();
         if (scope === 'model-host') return stopModelFeature();
         if (scope === 'dom-host') return stopDomFeature();
