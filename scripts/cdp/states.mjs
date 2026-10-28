@@ -3590,8 +3590,17 @@ export const STATES = [
                 const data = response.data;
                 if (data?.type !== 'private-transfer/response') return;
                 const code = data.reply?.error ?? data.error;
+                // why: classify known static messages without retaining arbitrary exception text.
+                const known = {
+                  'Temporarily unavailable. Try again.': 'startup-unavailable',
+                  'sealed controller worker retired before readiness': 'controller-retired-before-ready',
+                  'sealed controller worker did not become ready': 'controller-not-ready',
+                  'controller ambient capability denied': 'controller-ambient-denied',
+                };
                 globalThis.__backupReplyCodes.push({ transportOk: data.ok === true, ok: data.reply?.ok === true,
-                  error: typeof code === 'string' && /^[a-z0-9-]{1,100}$/.test(code) ? code : code == null ? null : 'non-code-error' });
+                  error: typeof code === 'string' && /^[a-z0-9-]{1,100}$/.test(code) ? code
+                    : typeof code === 'string' && Object.hasOwn(known, code) ? known[code]
+                    : code == null ? null : 'non-code-error' });
               });
             });
             for (const id of ['exppass', 'exppass2']) {
