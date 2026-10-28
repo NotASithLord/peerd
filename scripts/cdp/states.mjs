@@ -3576,71 +3576,10 @@ export const STATES = [
       const exportBackup = async (mode, expectedDid = null) => {
         evidence.phase = mode;
         const start = { events: evidence.events.length,
-          hosts: await evalIn(fresh.swConn, 'globalThis.__backupHostCalls.length'),
-          closes: await evalIn(fresh.swConn, 'globalThis.__backupHostCloses.length') };
-        // Read-only lease posture separates export demand from host recovery.
-        rec.observe(`backup lease posture before ${mode}`,
-          (await rpc(fresh.page, { type: 'bootstrap/ready' }))?.featureLeases);
+          hosts: await evalIn(fresh.swConn, 'globalThis.__backupHostCalls.length') };
         const destination = await mkdtemp(join(directory, `${mode}-`));
-        let page;
-        const exceptions = [];
-        const endpoint = await (await fetch(`http://127.0.0.1:${fresh.port}/json/version`)).json();
-        const debug = await attach(endpoint.webSocketDebuggerUrl);
-        const { sessionId } = await debug.send('Target.attachToTarget', { targetId: fresh.sw.targetId, flatten: true });
-        const debugSend = (method, params = {}) => debug.send(method, params, sessionId);
-        const scriptPaths = new Map();
-        const onPause = async (method, params, message) => {
-          if (message.sessionId !== sessionId) return;
-          if (method === 'Debugger.scriptParsed' && scriptPaths.size < 2000
-            && /^chrome-extension:\/\/[a-p]{32}\/[a-zA-Z0-9_./-]+\.js$/.test(params.url ?? '')) {
-            scriptPaths.set(params.scriptId, new URL(params.url).pathname);
-          }
-          if (method !== 'Debugger.paused') return;
-          // why: the public transfer reply deliberately hides arbitrary errors.
-          // Keep bounded static locations and allowlisted refusal codes, never
-          // exception text, scopes, arguments, or exported secret material.
-          const receipt = exceptions.length < 24 ? {
-            kind: ['Error', 'TypeError', 'DOMException', 'ReferenceError', 'RangeError']
-              .includes(params.data?.className) ? params.data.className : 'other',
-            frames: (params.callFrames ?? []).slice(0, 12).map((frame) => ({
-              path: scriptPaths.get(frame.location?.scriptId) ?? 'non-static-source',
-              line: frame.location?.lineNumber,
-              column: frame.location?.columnNumber,
-            })),
-          } : null;
-          if (receipt) exceptions.push(receipt);
-          try {
-            if (receipt && params.data?.objectId) {
-              // why: projectTools returns finite refusal codes; project only
-              // that data property, without evaluating getters or error text.
-              const projection = await debugSend('Runtime.callFunctionOn', {
-                objectId: params.data.objectId,
-                functionDeclaration: `function() {
-                  'use strict';
-                  const code = Object.getOwnPropertyDescriptor(this, 'code')?.value;
-                  return ['host-concurrency', 'module-load-failed', 'module-load-timeout',
-                    'controller-module-load-failed', 'controller-call-aborted',
-                    'controller-capability-unimplemented', 'controller-deadline-expired',
-                    'controller-worker-lost', 'kernel-channel-lost', 'kernel-operation-denied',
-                    'turn-tool-projection-failed', 'turn-payload-invalid', 'turn-authority-invalid']
-                    .includes(code) ? code : 'unclassified';
-                }`,
-                returnByValue: true, silent: true,
-              });
-              receipt.code = projection.result?.value ?? 'unavailable';
-            }
-          } catch { if (receipt) receipt.code = 'unavailable'; }
-          finally { await debugSend('Debugger.resume').catch(() => {}); }
-          // Observation changes scheduling; it is diagnostic evidence, not a
-          // replacement for a passing uninstrumented release qualification.
-        };
-        debug.on(onPause);
+        const page = await openWidePage(fresh, 'options/options.html#!/transfer', { ready: '#exppass2' });
         try {
-          await debugSend('Debugger.enable');
-          await debugSend('Debugger.setPauseOnExceptions', { state: 'all' });
-          // Attach before page startup so observation does not add a settling
-          // delay between opening Settings and the real export gesture.
-          page = await openWidePage(fresh, 'options/options.html#!/transfer', { ready: '#exppass2' });
           await page.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: destination });
           // Observe only result codes from the real private channel. Never
           // retain the passphrase, exported payload, secrets or identity capsule.
@@ -3704,12 +3643,9 @@ export const STATES = [
           const off = mode !== 'identity-on';
           const noHost = hosts.length === 0 && !events.some((event) => event.href?.includes('/offscreen/offscreen.html'));
           const noTransport = !events.some((event) => ['WebSocket', 'RTCPeerConnection', 'native-websocket'].includes(event.kind));
-          const closes = await evalIn(fresh.swConn, 'globalThis.__backupHostCloses.slice(' + start.closes + ')');
-          const result = { status, files, hosts, closes, noHost, noTransport, did: identity?.did ?? null,
+          const result = { status, files, hosts, noHost, noTransport, did: identity?.did ?? null,
             format: payload?.format ?? null, summary: inspected?.summary ?? null };
           rec.observe(`actual backup ${mode}`, result);
-          rec.observe(`backup lease posture after ${mode}`,
-            (await rpc(fresh.page, { type: 'bootstrap/ready' }))?.featureLeases);
           if (baseRender && off) rec.observe(`merge-base backup ${mode}`, result);
           else if (expectedDid && off) {
             rec.check('identity-off refuses the download with distinct network guidance', !status.success && status.retained
@@ -3726,14 +3662,7 @@ export const STATES = [
           if (!baseRender && off) rec.check(`${mode} constructs no host or network transport`, noHost && noTransport);
           rec.check(`${mode} export makes no model inference`, fresh.modelCallCount() === 0);
           await rec.visualPage(mode === 'no-choice' ? 'backup-network-policy' : `backup-${mode}`, page);
-        } finally {
-          await debugSend('Debugger.setPauseOnExceptions', { state: 'none' }).catch(() => {});
-          await debugSend('Debugger.disable').catch(() => {});
-          debug.off(onPause);
-          debug.close();
-          rec.observe(`backup exception locations ${mode}`, exceptions);
-          await page?.close();
-        }
+        } finally { await page.close(); }
       };
       try {
         const initial = await rpc(fresh.page, { type: 'state/get' });
@@ -3743,59 +3672,13 @@ export const STATES = [
         await evalIn(fresh.swConn, `(() => {
           'use strict';
           globalThis.__backupHostCalls = [];
-          globalThis.__backupHostCloses = [];
-          const closeDocument = chrome.offscreen.closeDocument.bind(chrome.offscreen);
-          chrome.offscreen.closeDocument = (...args) => {
-            globalThis.__backupHostCloses.push({ at: Date.now(),
-              stack: new Error('backup host retirement').stack?.slice(0, 3000) });
-            return closeDocument(...args);
-          };
           const createDocument = chrome.offscreen.createDocument.bind(chrome.offscreen);
           chrome.offscreen.createDocument = (...args) => {
-            globalThis.__backupHostCalls.push({ at: Date.now(), url: args[0]?.url,
+            globalThis.__backupHostCalls.push({ url: args[0]?.url,
               stack: new Error('backup host creation').stack?.slice(0, 3000) }); return createDocument(...args);
           };
         })()`);
-        const shellSource = await readFile(join(ctx.extensionDir, 'offscreen/controller-shell.js'), 'utf8');
-        const refusalLine = shellSource.split('\n').findIndex(line => line.includes("ok: false, code: 'host-concurrency'"));
-        if (refusalLine < 0) throw new Error('controller refusal diagnostic location missing');
-        const configureHostDebugger = async (connection, sessionId) => {
-          const send = (method, params = {}) => connection.send(method, params, sessionId);
-          const { breakpointId } = await send('Debugger.setBreakpointByUrl', {
-            url: `chrome-extension://${fresh.sw.id}/offscreen/controller-shell.js`, lineNumber: refusalLine,
-          });
-          evidence.controllerOccupancyArmed = (evidence.controllerOccupancyArmed ?? 0) + 1;
-          connection.on(async (method, params, message) => {
-            if (message.sessionId === sessionId && method === 'Debugger.breakpointResolved'
-              && params.breakpointId === breakpointId) {
-              evidence.controllerOccupancyResolved = (evidence.controllerOccupancyResolved ?? 0) + 1;
-            }
-            if (method !== 'Debugger.paused' || message.sessionId !== sessionId
-              || !params.hitBreakpoints?.includes(breakpointId)) return;
-            try {
-              evidence.controllerOccupancy ??= [];
-              if (evidence.controllerOccupancy.length < 12) {
-                // why: only finite capability/phase labels leave the paused frame;
-                // never retain request identifiers, payloads or authority objects.
-                const result = await send('Debugger.evaluateOnCallFrame', {
-                  callFrameId: params.callFrames[0].callFrameId,
-                  expression: `(() => {
-                    const label = value => typeof value === 'string' && /^[a-z][a-z0-9./-]{0,63}$/.test(value) ? value : 'other';
-                    return { refused: label(operation.capability), concurrent, stopConcurrent, maxConcurrent,
-                      operations: Array.from(operations.values()).slice(0, 16).map(item => ({
-                        capability: label(item.capability), phase: ['accepted', 'committed'].includes(item.phase) ? item.phase : 'other',
-                        stopLane: item.stopLane === true, pendingCalls: item.kernelCalls.size,
-                      })) };
-                  })()`, returnByValue: true, silent: true,
-                });
-                if (result.exceptionDetails) throw new Error('controller occupancy projection failed');
-                evidence.controllerOccupancy.push(result.result.value);
-              }
-            } catch { evidence.observerErrors.push('controller occupancy diagnostic failed'); }
-            finally { await send('Debugger.resume').catch(() => {}); }
-          });
-        };
-        observer = await observeHosts(fresh, evidence, diagnostic, () => {}, undefined, configureHostDebugger);
+        observer = await observeHosts(fresh, evidence, diagnostic, () => {});
         const initialized = await rpc(fresh.page, { type: 'vault/initialize', passphrase: PASSPHRASE }, { timeoutMs: 120_000 });
         if (initialized?.ok !== true) throw new Error('the fresh backup vault did not initialize');
         const noChoice = (await rpc(fresh.page, { type: 'state/get' }))?.state?.settings;

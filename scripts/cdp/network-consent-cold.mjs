@@ -190,7 +190,7 @@ export const ROOT_TARGET_FILTER = ['page', 'iframe', 'other', 'service_worker', 
 export const CHILD_TARGET_FILTER = ['worker', 'shared_worker', 'iframe']
   .map(type => ({ type })).concat([{ exclude: true }]);
 
-export async function observeHosts(ctx, evidence, diagnostic, persist, connect = attach, configureHostDebugger = null) {
+export async function observeHosts(ctx, evidence, diagnostic, persist, connect = attach) {
   const version = await diagnostic('observer browser endpoint', () => fetch(`http://127.0.0.1:${ctx.port}/json/version`, { signal: AbortSignal.timeout(15_000) }).then(r => r.json()));
   const connection = await attachConsentObserver(version.webSocketDebuggerUrl, diagnostic, connect);
   const nativeSend = connection.send.bind(connection);
@@ -314,12 +314,6 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
       // immediately; Page.enable keeps the preload active for future documents.
       const pageTarget = ['page', 'iframe', 'other'].includes(targetInfo.type);
       if (pageTarget) {
-        // New offscreen targets initially have an empty URL. The diagnostic
-        // itself pins its breakpoint to the exact extension script URL.
-        if (configureHostDebugger) {
-          await send('Debugger.enable');
-          await configureHostDebugger(connection, sessionId);
-        }
         await send('Page.enable');
         await send('Page.addScriptToEvaluateOnNewDocument', { source: OBSERVER_SOURCE, runImmediately: true });
       }
