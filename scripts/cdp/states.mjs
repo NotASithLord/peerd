@@ -3602,7 +3602,12 @@ export const STATES = [
                 globalThis.__backupReplyCodes.push({ transportOk: data.ok === true, ok: data.reply?.ok === true,
                   error: typeof code === 'string' && /^[a-z0-9-]{1,100}$/.test(code) ? code
                     : typeof code === 'string' && Object.hasOwn(known, code) ? known[code]
-                    : code == null ? null : 'non-code-error' });
+                    : code == null ? null : 'non-code-error',
+                  code: typeof data.reply?.code === 'string' && /^[a-z0-9-]{1,100}$/.test(data.reply.code)
+                    ? data.reply.code : null,
+                  phase: ['startup', 'pre-dispatch'].includes(data.reply?.phase) ? data.reply.phase : null,
+                  outcomeKnown: typeof data.reply?.outcomeKnown === 'boolean' ? data.reply.outcomeKnown : null,
+                  retryable: typeof data.reply?.retryable === 'boolean' ? data.reply.retryable : null });
               });
             });
             for (const id of ['exppass', 'exppass2']) {
