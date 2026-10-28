@@ -1241,6 +1241,9 @@ describe('operation-lazy offscreen repository split', () => {
       if (message.type === 'repository/host-cancel') return { ok: true };
       return new Promise(() => {});
     }, {
+      // Isolate host timeout/retry from wall-clock pauses before dispatch.
+      // The next test advances the clock to cover the total read deadline.
+      now: () => 1_000,
       readTimeoutMs: 5,
       effectTimeoutMs: 5,
       newId: (() => { let id = 0; return () => `call-timeout-${++id}`; })(),
@@ -1252,8 +1255,7 @@ describe('operation-lazy offscreen repository split', () => {
       code: 'repository-host-timeout', outcomeKnown: true,
     });
     const calls = messages.filter((entry) => entry.type === 'repository/host-call').length;
-    expect(calls).toBeGreaterThanOrEqual(2);
-    expect(calls).toBeLessThanOrEqual(4);
+    expect(calls).toBe(4);
   });
 
   test('expires abandoned sibling reads before dispatch so a later mutation is not starved', async () => {
