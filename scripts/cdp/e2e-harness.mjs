@@ -433,7 +433,9 @@ export async function attach(wsUrl, onEvent, { commandTimeoutMs = 180_000 } = {}
   let id = 0;
   const pending = new Map();
   let closed = false;
+  let closeReason = null;
   const closePending = (reason) => {
+    closeReason ??= reason;
     closed = true;
     for (const finish of pending.values()) finish({ error: { message: reason } });
   };
@@ -471,7 +473,7 @@ export async function attach(wsUrl, onEvent, { commandTimeoutMs = 180_000 } = {}
     for (const listener of eventListeners) listener(m.method, m.params, m);
   };
   const send = (method, params = {}, sessionId) => new Promise((res, rej) => {
-    if (closed || ws.readyState !== WebSocket.OPEN) { rej(new Error(`${method}: CDP connection is closed`)); return; }
+    if (closed || ws.readyState !== WebSocket.OPEN) { rej(new Error(`${method}: CDP connection is closed (${closeReason ?? 'socket unavailable'})`)); return; }
     const i = ++id;
     // why: a page-side deadline cannot settle a lost CDP response. Retire the
     // connection on timeout; never replay a command with an unknown outcome.

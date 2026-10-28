@@ -37,7 +37,7 @@ test('lost CDP response retires the connection and never replays the command', a
   const connection = await attach(server.url, undefined, { commandTimeoutMs: 100 });
   try {
     await expect(connection.send('Page.captureScreenshot')).rejects.toThrow('outcome unknown');
-    await expect(connection.send('ok')).rejects.toThrow('connection is closed');
+    await expect(connection.send('ok')).rejects.toThrow('CDP command Page.captureScreenshot timed out; outcome unknown');
     expect(server.commands).toEqual(['Page.captureScreenshot']);
   } finally { connection.close(); server.close(); }
 });
