@@ -14,7 +14,7 @@ import { matchesWords, searchWords } from './explore-order.js';
 /**
  * Effect custody that must outlive one mount of the section: the page says
  * "You can leave this page. The install keeps going." (see createEffects).
- * `commons` fences "Add and open Commons" until a refusal, a failure before
+ * `commons` fences "Add and open Chat rooms" until a refusal, a failure before
  * the send, or a Library read confirms the outcome. `link` is the share-link
  * install in flight, so a view
  * mounted while it runs follows the same outcome. `reads` counts Library
@@ -171,28 +171,51 @@ export const rootView = ({ enabled, net, heardCount, loading, failed, included }
  * The Library line on the root and the app page. Until one catalog read
  * lands, an installed app looks new, so Install stays off. The offline root
  * offers neither Install nor Surprise me, so its lines name what it shows.
+ * why "Try again in a moment": the poll reads the Library again, and so does
+ * a manual refresh. why "peerd tries again by itself" offline: that root has
+ * no Refresh, and its one Try again starts the peer network, not a read.
  * @param {{ready:boolean, failed:boolean, offline?:boolean}} library
  * @returns {string|null}
  */
 export const libraryStatus = ({ ready, failed, offline = false }) => {
   if (!failed) return ready ? null : 'Checking your Library…';
   if (offline) {
-    return ready ? 'Could not refresh your Library. This list may be out of date.'
-      : 'peerd could not read your Library. Try again in a moment.';
+    return ready ? 'peerd could not refresh your Library. This list may be out of date. peerd tries again by itself.'
+      : 'peerd could not read your Library. peerd tries again by itself.';
   }
-  return ready ? 'Could not refresh your Library. Surprise me stays off until peerd can read it.'
-    : 'Could not read your Library. Install stays off until peerd can read it.';
+  return ready ? 'peerd could not refresh your Library. Surprise me stays off until peerd can read it. Try again in a moment.'
+    : 'peerd could not read your Library. Install stays off until peerd can read it. Try again in a moment.';
 };
 
 /**
- * Why Surprise me opened no page. Only a filter or a search can be changed to
- * find more, so the line names them only while one is on.
+ * Why the browse list is empty, and what to do. An empty pill says how its
+ * apps get there; a search says that nothing matches. why "right now", never
+ * "up to date": peerd knows only the versions that people share with it.
+ * @param {{pill:Pill, searching:boolean}} grid
+ * @returns {{title:string, text:string}}
+ */
+export const emptyBrowse = ({ pill, searching }) => {
+  if (!searching && pill === 'updates') {
+    return { title: 'No updates right now', text: 'When someone shares a new version of an app in your Library, it shows up here.' };
+  }
+  if (!searching && pill === 'contacts') {
+    return { title: 'No apps from people you know yet',
+      text: 'People you know are makers you added a name for. To add one, open an app and select who made it. '
+        + 'Then open the menu on their page and choose Add a name.' };
+  }
+  return { title: 'No matching apps', text: 'Try other words.' };
+};
+
+/**
+ * Why Surprise me opened no page. A pill or a search can hide apps, so while
+ * one is on, the line says to show all apps. why not "filters": the screen
+ * never uses that word.
  * @param {{filtered:boolean, allInLibrary:boolean, recentMisses?:boolean}} grid
  * @returns {string}
  */
 export const noSuggestionNote = ({ filtered, allInLibrary, recentMisses = false }) => {
   if (recentMisses) return 'No new suggestions right now. Recent attempts found no sharing peers. You can open an app to retry, or try Surprise me again shortly.';
-  if (filtered) return 'No new suggestions match these filters. Change your search or filters.';
+  if (filtered) return 'No new suggestions here. Show all apps, then try again.';
   return allInLibrary ? 'No new suggestions. Every app here is already in your Library.' : 'No new suggestions.';
 };
 
@@ -260,6 +283,7 @@ const STEPS = Object.freeze([
   { title: 'Install', sub: 'peerd checks every file, then adds the app to your Library' },
   { title: 'Open', sub: 'It opens in its own tab' },
 ]);
+const UPDATE_STEP = Object.freeze({ title: 'Update', sub: 'peerd checks every file, then updates the app in your Library' });
 /** @type {Record<InstallState, StepState[]>} */
 const STEP_STATES = {
   review: ['current', 'pending', 'pending'],
@@ -268,12 +292,14 @@ const STEP_STATES = {
   failed: ['done', 'failed', 'pending'],
   unknown: ['done', 'unknown', 'pending'],
 };
-// why "You are here" only on a current first step: under a done step it
-// points at a step the user already left.
-/** @param {InstallState} state */
-export const installSteps = (state) => STEPS.map((step, i) => {
+// why a done step is a check and a title only: its line describes a step the
+// user already left, as "You are here" under Look at it would.
+// why `action`: an update page says update in its steps too, as in its status.
+/** @param {InstallState} state @param {'install'|'update'} [action] the effect the panel shows */
+export const installSteps = (state, action = 'install') => STEPS.map((step, i) => {
   const stepState = STEP_STATES[state][i];
-  return { title: step.title, sub: i === 0 && stepState !== 'current' ? null : step.sub, state: stepState };
+  const { title, sub } = i === 1 && action === 'update' ? UPDATE_STEP : step;
+  return { title, sub: stepState === 'done' ? null : sub, state: stepState };
 });
 
 /** @type {ReadonlyArray<[keyof Declared, string]>} */
@@ -300,24 +326,28 @@ export const verifiedDeclared = (value, version) => {
 
 /**
  * "The app says it". `checked` names where peerd read the app's own files: a
- * share link it looked at, or the version the Library holds. Unchecked, the
+ * share link it looked at, or the version the Library holds, which peerd
+ * installed or, on this visit, updated. Unchecked, the
  * page says how peerd finds out, never what an app or a peer claims. Checked
  * with nothing recorded (installed before peerd kept it), no section: "Not
  * known yet" would contradict "peerd checked" in What to know.
  * why strong: the agent can then see and use the app, the furthest reach.
  * why the note says when: an edit on this device can change the files after
- * the check, so the facts belong to that check.
- * @param {{declared:Declared|null, checked:'link'|'installed'|null, action?:'install'|'update'}} input
+ * the check, so the facts belong to that check. why `changed` for the
+ * Library's copy: an edit keeps the version, so the facts show only while
+ * the service worker says the files are still the ones peerd checked.
+ * @param {{declared:Declared|null, checked:'link'|'installed'|'updated'|null, action?:'install'|'update', changed?:boolean|null}} input
  * @returns {{kind:'unknown'|'nothing'|'checked', chips:{text:string, strong:boolean}[], line:string|null, note:string|null}|null}
  */
-export const saysIt = ({ declared, checked, action = 'install' }) => {
+export const saysIt = ({ declared, checked, action = 'install', changed = null }) => {
   if (!checked) {
     return { kind: 'unknown', chips: [], note: null,
       line: `Not known yet. peerd reads this from the app itself when it checks it. Paste its link or ${action} it, and peerd checks every file first.` };
   }
-  if (!declared) return null;
+  if (!declared || (checked !== 'link' && changed !== false)) return null;
   const chips = SAYS.filter(([key]) => declared[key]).map(([key, text]) => ({ text, strong: key === 'observeAct' }));
-  const note = `From the app’s own files, checked when peerd ${checked === 'link' ? 'looked at it' : 'installed it'}.`;
+  const note = `From the app’s own files, checked when peerd ${checked === 'link' ? 'looked at it'
+    : checked === 'updated' ? 'updated it' : 'installed it'}.`;
   return chips.length
     ? { kind: 'checked', chips, line: null, note }
     : { kind: 'nothing', chips, line: 'It does not use the peer network and has no instructions for peerd.', note };
@@ -383,9 +413,20 @@ export const keptCards = (cache, latest, keep) => {
 };
 
 /**
+ * The description under an app's name. A heard card always carries the
+ * maker's text, so an empty one means the maker gave none. With no card,
+ * peerd does not know, so the line claims nothing.
+ * @param {unknown} description a heard card's, or undefined without a card
+ * @returns {{text:string, missing:boolean}|null}
+ */
+export const descriptionLine = (description) => typeof description !== 'string' ? null
+  : description ? { text: description, missing: false } : { text: 'No description from the maker.', missing: true };
+
+/**
  * Library records that came from peers, for the offline grid. The catalog
  * carries no description or size, so a card heard earlier this visit fills
- * them, but only a card for the version the Library holds.
+ * them, but only a card for the version the Library holds. Without that
+ * card both stay undefined: not known (see descriptionLine).
  * @param {ReadonlyArray<CatalogRecord>} records the 'apps/list' apps
  * @param {ReadonlyMap<string, DwebApp>} heard last heard card per dwapp_id
  * @returns {DwebApp[]}
@@ -417,6 +458,25 @@ export const matchQuery = (items, query) => {
   return words.length ? items.filter(item => matchesWords(`${item.name ?? ''} ${item.description ?? ''}`, words)) : items;
 };
 
+// why a copy of the seed's own name: Home draws the tile before it loads the
+// dweb module.
+export const COMMONS_NAME = 'Chat rooms';
+// The names that Chat rooms had before. A Library copy from that time still
+// has one. peerd gave that name, not the user, so Discover shows the new one.
+const FORMER_COMMONS_NAMES = Object.freeze(['commons', 'Peerd-to-Peerd Commons']);
+
+/**
+ * The name Discover shows for a Library app: the name the Library holds, or
+ * COMMONS_NAME for Chat rooms with no name or a former name. A name that the
+ * user gave it stays.
+ * @param {CatalogRecord|undefined} record
+ * @returns {string} '' for another app with no name
+ */
+export const libraryName = (record) => {
+  const name = typeof record?.name === 'string' ? record.name.trim() : '';
+  return record?.dweb?.seed === 'commons' && (!name || FORMER_COMMONS_NAMES.includes(name)) ? COMMONS_NAME : name;
+};
+
 /** @param {CatalogRecord} record */
 const addedAt = (record) => typeof record.createdAt === 'number' && Number.isFinite(record.createdAt) ? record.createdAt : null;
 
@@ -429,11 +489,11 @@ const addedAt = (record) => typeof record.createdAt === 'number' && Number.isFin
  * @returns {{apps: LibraryApp[], total: number}}
  */
 export const yourApps = (records, max) => {
-  /** @type {{record:CatalogRecord, id:string, at:number|null, index:number}[]} */
-  const rows = records.flatMap((record, index) => typeof record?.id === 'string' && record.id
-    ? [{ record, id: record.id, at: addedAt(record), index }] : []);
-  rows.sort((a, b) => (a.at === null || b.at === null
-    ? Number(a.at === null) - Number(b.at === null) : b.at - a.at) || a.index - b.index);
+  /** @type {{record:CatalogRecord, id:string, at:number|null}[]} */
+  const rows = records.flatMap(record => typeof record?.id === 'string' && record.id
+    ? [{ record, id: record.id, at: addedAt(record) }] : []);
+  // why no tie-break: the sort is stable, so ties and records with no time keep their Library order.
+  rows.sort((a, b) => (a.at === null || b.at === null ? Number(a.at === null) - Number(b.at === null) : b.at - a.at));
   return {
     total: rows.length,
     apps: rows.slice(0, max).map(({ record, id }) => {
@@ -442,7 +502,7 @@ export const yourApps = (records, max) => {
       // its seed and a peer app by its dwapp_id.
       const key = [dweb?.seed, dweb?.dwapp_id, dweb?.uri].find(value => typeof value === 'string' && value);
       return {
-        id, name: typeof record.name === 'string' && record.name.trim() ? record.name : 'Unnamed app',
+        id, name: libraryName(record) || 'Unnamed app',
         toneKey: typeof key === 'string' ? key : id,
       };
     }),

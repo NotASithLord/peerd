@@ -26,10 +26,10 @@ import { blockedSet, effectOutcome, withoutBlocked } from './blocked-makers.js';
 import { discoveryAddress } from './discovery-address.js';
 import { exploreOrder, EXPLORE_WINDOW, nextSuggestion, recentRetrievalMiss, suggestionKey } from './explore-order.js';
 import {
-  BLOCKED, BLOCKED_ERROR, bytesLabel, createEffects, FAILED, failureHint, isFailure, kbLabel, keptCards, letterOf, libraryPeerApps,
-  libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, pillFilter, appCountLabel, peerCountLabel, rootView,
-  savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, tileAction, toneOf, UNKNOWN, unknownLines, updateOffer,
-  verifiedDeclared, wasmLabel, yourApps,
+  BLOCKED, BLOCKED_ERROR, bytesLabel, COMMONS_NAME, createEffects, emptyBrowse, FAILED, failureHint, isFailure, kbLabel, keptCards,
+  letterOf, libraryName, libraryPeerApps, libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, pillFilter,
+  appCountLabel, peerCountLabel, rootView, savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, tileAction, toneOf,
+  UNKNOWN, unknownLines, updateOffer, verifiedDeclared, wasmLabel, yourApps,
 } from './discover-model.js';
 import {
   actionView, appHead, appRow, backLink, blockDialog, blockedLine, cantRunPanel, conflictPanel, emptyState, installPanel,
@@ -49,7 +49,7 @@ import {
 /** @typedef {{page:'root'}|{page:'app', key:string}|{page:'link'}|{page:'maker', did:string}} Route */
 /** @typedef {ReturnType<typeof immutableAppRoot>} LinkTarget */
 /** @typedef {LinkTarget & {name:string|null, decodedBytes?:number, containsWasm?:boolean, runtimeCompatibility?:{status:string,message:string}, declared?:unknown}} LinkSummary */
-/** @typedef {{id:string, name?:string, dweb?:{uri?:string, dwapp_id?:string, version_id?:string|null, seq?:number, seed?:string, hash?:string, publisher?:string, declared?:unknown}}} LibraryRecord */
+/** @typedef {{id:string, name?:string, dweb?:{uri?:string, dwapp_id?:string, version_id?:string|null, seq?:number, seed?:string, hash?:string, publisher?:string, declared?:unknown, local?:boolean}}} LibraryRecord */
 /**
  * @typedef {{
  *   send: Send,
@@ -68,16 +68,21 @@ const RUNTIME_CODES = Object.freeze(['app-runtime-invalid', 'app-runtime-unsuppo
 const POLL_MS = 4000;
 const COPIED_MS = 2000;
 const TECH_ID = 'disc-tech-facts';
-const COMMONS_NAME = 'Peerd-to-Peerd Commons';
 const CHOICE_ERROR = 'peerd could not confirm that the peer network is on. Check again before you try again.';
 const RECEIPT_HELD = 'peerd is not sure the install finished. It may still finish by itself. Install stays off until peerd knows.';
 const KEEPS_GOING = 'You can leave this page. The install keeps going.';
 const CHECKING_LINK = 'Checking the link. peerd downloads the app and checks every file…';
-const COMMONS_UNKNOWN = 'peerd is not sure Commons was added or opened. Check your Library and your tabs before you try again.';
-const COMMONS_FAILED = 'peerd could not add or open Commons. Try again.';
+// why "the Chat rooms app" in a sentence: the name alone reads as many rooms.
+const COMMONS_UNKNOWN = 'peerd is not sure the Chat rooms app was added or opened. Check your Library and your tabs before you try again.';
+const COMMONS_FAILED = 'peerd could not add or open the Chat rooms app. Try again.';
+// why the words of every other Open: the line sits in the tile, which may
+// carry the name the Library gave the app.
+const OPEN_FAILED = 'peerd could not open this app. Try again.';
+const OPEN_UNKNOWN = 'peerd is not sure the app opened. Check your tabs.';
 const NEEDS_NETWORK = 'New apps need the peer network.';
 const OFFLINE_EMPTY = `You can still open the apps in your Library. ${NEEDS_NETWORK}`;
 const MAKER_EMPTY = 'This maker’s apps show up here when the people you are connected to share them.';
+const OWN_EMPTY = 'Your apps show up here when the people you are connected to share them.';
 const AUDIT_FAILED = 'peerd could not add it to the security log.';
 const SHARING = 'Sharing means other people can get this app from you while your peer network is on.';
 const BLOCKED_LINK = 'You blocked the maker of this app. To look at it, unblock them in Contacts.';
@@ -133,6 +138,12 @@ export const DiscoverSection = (initialVnode) => {
   let contactReads = 0;
   let contactsChanged = 0;
   /** @type {string|null} */ let myDid = null;
+  // What the service worker says of an installed copy, by app id and version:
+  // true (its files changed on this device), false (they are the release
+  // peerd checked), null (not known yet, or the read failed). `epoch` is the
+  // ask the value answers; `asking` is a read in flight.
+  /** @type {Map<string, {value:boolean|null, epoch:number, asking:boolean}>} */ const localChanges = new Map();
+  let localChangesEpoch = 0;
   /** @type {NetworkState|null} */ let net = null;
   let retrying = false;
 
@@ -149,7 +160,8 @@ export const DiscoverSection = (initialVnode) => {
   /** @type {{route:Route, name:string}|null} */ let makerFrom = null;
   // The page key whose share dialog is open.
   /** @type {string|null} */ let shareFor = null;
-  // The maker page's menu, name form and block confirm. A page change closes them.
+  // The maker page's menu, name form and block confirm. Opening a page closes them.
+  // why not Back: a name that a running save stores then shows at once.
   let menuOpen = false;
   /** @type {{did:string, value:string, busy:boolean, failed:boolean}|null} */ let renaming = null;
   /** @type {{did:string, name:string}|null} */ let renameUnknown = null;
@@ -159,6 +171,9 @@ export const DiscoverSection = (initialVnode) => {
   // Installs this view finished, so their line says "Installed." and names
   // the app. A remount or a later visit says only where the app is.
   /** @type {Set<string>} */ const fresh = new Set();
+  // Updates this view finished: their page says update, not install, and its
+  // line says "Updated.", as an install's says "Installed.".
+  /** @type {Set<string>} */ const updatedNow = new Set();
   let linkFresh = false;
   /** @type {{key:string, epoch:number, route:Route, answered:boolean}|null} */ let keyAsk = null;
   /** @type {{selector:string|null, scroll:number|null, fallback?:string, ifLost?:boolean}|null} */ let pendingFocus = null;
@@ -249,7 +264,7 @@ export const DiscoverSection = (initialVnode) => {
           if (identityMatches || uriOnlyMatches) {
             installedId[id] = local?.appId ?? /** @type {string} */ (byUri.get(/** @type {string} */ (target.uri)));
             busy[id] = 'installed';
-            if (target.action === 'install') fresh.add(id);
+            if (target.action === 'install') { fresh.add(id); updatedNow.delete(id); } else updatedNow.add(id);
             unconfirmed.delete(id);
           }
           // Absence is not a causal receipt: the original install/update send
@@ -391,6 +406,39 @@ export const DiscoverSection = (initialVnode) => {
     return blockedInFlight;
   };
 
+  // why on demand, never in the poll: the check reads every file of the app,
+  // under its write lock. A page change and a return to the tab ask again,
+  // and so does a new version, as the key holds it. why not a manual refresh:
+  // no page that shows a Library copy's facts offers one.
+  // Keep a previous changed-copy warning while checking again, but never
+  // present stale unchanged-copy facts after a return or navigation. why one read at a
+  // time: each read waits for the app's lock, so a read that a later return
+  // made stale answers nothing, and then one more read starts.
+  const forgetLocalChanges = () => { localChangesEpoch++; };
+  /** @param {string} appId @param {string|undefined} version @returns {boolean|null} */
+  const localChangesOf = (appId, version) => {
+    const key = `${appId}\0${version ?? ''}`;
+    const entry = localChanges.get(key) ?? { value: null, epoch: -1, asking: false };
+    if (!entry.asking && entry.epoch !== localChangesEpoch) {
+      const epoch = localChangesEpoch;
+      entry.asking = true;
+      localChanges.set(key, entry);
+      void (async () => {
+        /** @type {boolean|null} */ let changed = null;
+        try {
+          const reply = await attrs.send({ type: 'dweb/app-local-changes', appId });
+          if (reply?.ok && typeof reply.changed === 'boolean') changed = reply.changed;
+        } catch { /* not known: the page claims nothing peerd checked */ }
+        entry.asking = false;
+        if (dead) return;
+        if (epoch === localChangesEpoch) { entry.value = changed; entry.epoch = epoch; }
+        // why a redraw for a stale answer too: the next draw asks once more.
+        redraw();
+      })();
+    }
+    return entry.epoch === localChangesEpoch || entry.value === true ? entry.value : null;
+  };
+
   const poll = () => { void loadLocal(); void refresh(); void readStatus(); };
   // why only while enabled: with the peer network off Discover sends nothing.
   // Some dweb reads start the host, and the user has not chosen to join.
@@ -403,7 +451,7 @@ export const DiscoverSection = (initialVnode) => {
     // Returning to the tab should re-sync at once, not after the next 4s tick.
     // why contacts here, not in the poll: another Home tab can save a maker
     // as a contact meanwhile, and the read also walks the audit log.
-    onVisible = () => { if (!document.hidden) { poll(); void loadContacts(); void loadBlocked(); } };
+    onVisible = () => { if (!document.hidden) { poll(); void loadContacts(); void loadBlocked(); forgetLocalChanges(); } };
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', onVisible);
   };
@@ -539,6 +587,7 @@ export const DiscoverSection = (initialVnode) => {
       if (r?.ok) {
         busy[id] = 'installed';
         fresh.add(id);
+        updatedNow.delete(id);
         if (r.warning === 'audit-write-failed') notices[id] = `Installed, but ${AUDIT_FAILED}`;
         installedId[id] = r.app?.id ?? r.appId ?? null;
         if (installedId[id]) {
@@ -580,6 +629,7 @@ export const DiscoverSection = (initialVnode) => {
       });
       if (r?.ok) {
         busy[id] = 'installed';
+        updatedNow.add(id);
         conflicts.delete(id);
         // why: until a Library read that starts after this commit lands, the
         // updated version is the one installed, whatever an older read says.
@@ -593,16 +643,17 @@ export const DiscoverSection = (initialVnode) => {
         // its own bidi controls first, so none can close the isolate early.
         const forkName = disarmText(r.fork?.name);
         if (forkName) warningMessages.push(`Kept your changed copy as “\u2068${forkName}\u2069” and updated this app.`);
-        if (warnings.has('audit-write-failed')) {
-          warningMessages.push(`Updated, but ${AUDIT_FAILED}`);
-        } else if (warnings.has('previous-version-cleanup-pending') && !forkName) {
-          warningMessages.push('Updated.');
-        }
+        // why no plain "Updated." here: the installed line says it.
+        if (warnings.has('audit-write-failed')) warningMessages.push(`Updated, but ${AUDIT_FAILED}`);
+        // why: the host could not stop sharing the old version's files, and it
+        // tries again at the next update or delete of this app.
         if (warnings.has('previous-version-cleanup-pending')) {
-          warningMessages.push('Older shared bytes will be cleaned up on the next update or delete.');
+          warningMessages.push('peerd still shares the old version. Sharing stops the next time you update or remove this app.');
         }
         if (warningMessages.length) notices[id] = warningMessages.join(' ');
         announceInstalled(appId);
+        // why: the Update button is gone. Focus moves to the "Updated." line, as after an install.
+        if (route.page === 'app' && route.key === id) pendingFocus = { selector: '.disc-panel .disc-installed', scroll: null, ifLost: true };
         void reloadLocal();
       } else if (r?.error === 'local-changes' && Number.isSafeInteger(r.conflictToken)) {
         conflicts.set(id, { token: r.conflictToken, versionId: app.version_id ?? null });
@@ -622,8 +673,8 @@ export const DiscoverSection = (initialVnode) => {
     try {
       const result = await attrs.send({ type: 'apps/open', appId });
       if (result?.outcomeKnown === false) throw new Error('app-open-outcome-unknown');
-      if (!result?.ok) alertLine = { key, text: 'peerd could not open this app. Try again.' };
-    } catch { alertLine = { key, text: 'peerd is not sure the app opened. Check your tabs.', unknown: true }; }
+      if (!result?.ok) alertLine = { key, text: OPEN_FAILED };
+    } catch { alertLine = { key, text: OPEN_UNKNOWN, unknown: true }; }
     redraw();
   };
 
@@ -821,12 +872,12 @@ export const DiscoverSection = (initialVnode) => {
     let sent = false;
     try {
       const client = await loadDweb();
-      if (!client.loadSeedApp) throw new Error('Commons is not in this version of peerd.');
+      if (!client.loadSeedApp) throw new Error('The Chat rooms app is not in this version of peerd.');
       const commonsSeed = await client.loadSeedApp({ fetchText: async (/** @type {string} */ path) => {
         // The seed loader selects only our own packaged extension asset.
         // eslint-disable-next-line no-restricted-globals
         const response = await fetch(path);
-        if (!response.ok) throw new Error('peerd could not load Commons. Reload the page, then try again.');
+        if (!response.ok) throw new Error('peerd could not load the Chat rooms app. Reload the page, then try again.');
         return response.text();
       } });
       sent = true;
@@ -849,9 +900,9 @@ export const DiscoverSection = (initialVnode) => {
     try {
       const result = await attrs.send({ type: 'apps/open', appId: commonsId });
       if (result?.outcomeKnown === false) throw new Error('app-open-outcome-unknown');
-      if (!result?.ok) alertLine = { key: 'commons', text: 'peerd could not open Commons. Try again.' };
+      if (!result?.ok) alertLine = { key: 'commons', text: OPEN_FAILED };
     }
-    catch { alertLine = { key: 'commons', text: 'peerd is not sure Commons opened. Check your tabs.', unknown: true }; }
+    catch { alertLine = { key: 'commons', text: OPEN_UNKNOWN, unknown: true }; }
     finally { commonsBusy = false; redraw(); }
   };
 
@@ -859,7 +910,16 @@ export const DiscoverSection = (initialVnode) => {
   // root keeps its scroll and the tile that opened the page, so Back can
   // return both.
   // why not a block in flight: its outcome still lands, on whatever page is open.
-  const closeMakerParts = () => { menuOpen = false; renaming = null; renameUnknown = null; if (!blockBusy) { blockFor = null; blockIssue = null; } };
+  // why a save that runs or failed, or whose outcome is not known, stays for
+  // its maker's page: Back keeps it, and only that page can say how it ended.
+  /** @param {Route} next */
+  const closeMakerParts = (next) => {
+    const same = next.page === 'maker' ? next.did : null;
+    menuOpen = false;
+    if (!(renaming?.did === same && (renaming.busy || renaming.failed))) renaming = null;
+    if (renameUnknown?.did !== same) renameUnknown = null;
+    if (!blockBusy) { blockFor = null; blockIssue = null; }
+  };
   /** @param {Route} next @param {string} originKey */
   const openPage = (next, originKey) => {
     if (route.page === 'root') origin = { key: originKey, scroll: scrollHost()?.scrollTop ?? 0 };
@@ -870,7 +930,8 @@ export const DiscoverSection = (initialVnode) => {
     surpriseNote = null;
     shareFor = null;
     makerFrom = null;
-    closeMakerParts();
+    closeMakerParts(next);
+    forgetLocalChanges();
     pendingFocus = { selector: '.disc-back', scroll: 0 };
   };
   /** @param {DwebApp} app */
@@ -889,7 +950,6 @@ export const DiscoverSection = (initialVnode) => {
     void loadBlocked();
   };
   const goBack = () => {
-    closeMakerParts();
     if (route.page === 'maker' && makerFrom) {
       route = makerFrom.route;
       makerFrom = null;
@@ -1091,6 +1151,12 @@ export const DiscoverSection = (initialVnode) => {
     pendingFocus = { selector: '.disc-search', fallback: 'h1', scroll: null };
   };
 
+  // why the Library too: the host names the user's key only while it runs. A
+  // share from this device marks its record (dweb.local), and an install never
+  // does, so the maker of that record is the user.
+  const ownDid = () => myDid ?? records.find(record => record?.dweb?.local === true && typeof record.dweb.publisher === 'string')
+    ?.dweb?.publisher ?? null;
+
   /** @param {DwebApp} app */
   const facts = (app) => {
     const id = app.dwapp_id ?? '';
@@ -1105,6 +1171,7 @@ export const DiscoverSection = (initialVnode) => {
     // why: until the Library shows the app, a share-link install of it decides
     // its state here too: running, or unconfirmed with Check again.
     const held = !localId && linkHolds(app);
+    const self = ownDid();
     return {
       id, localId,
       // why: the Library can hold another version of this app. Only this
@@ -1116,7 +1183,8 @@ export const DiscoverSection = (initialVnode) => {
         && app.version_id !== tracked.version_id && (app.seq ?? 0) > (tracked.seq ?? 0),
       uncertain: unconfirmed.has(id) || (held && linkBusy !== 'install'),
       incompatible: app.runtimeCompatibility?.status === 'unsupported',
-      mine: !!myDid && (app.publisher === myDid || app.from === myDid),
+      mine: (!!self && (app.publisher === self || app.from === self))
+        || (!!localId && records.find(record => record.id === localId)?.dweb?.local === true),
       state: held ? (linkBusy === 'install' ? 'installing' : UNKNOWN) : busy[id],
     };
   };
@@ -1151,7 +1219,8 @@ export const DiscoverSection = (initialVnode) => {
       : records.find(record => record.id === localId)?.dweb?.declared, app.version_id);
   };
   /** @param {string|undefined} did */
-  const makerOf = (did) => typeof did === 'string' ? { name: contactNames.get(did) ?? null, key: shortKey(did) } : null;
+  const makerOf = (did) => typeof did === 'string'
+    ? { name: contactNames.get(did) ?? null, key: shortKey(did), you: did === ownDid() } : null;
   /** @param {DwebApp} app */
   const nameOf = (app) => app.name || (app.dwapp_id ?? '').slice(0, 12);
 
@@ -1313,7 +1382,7 @@ export const DiscoverSection = (initialVnode) => {
       // opens from the Library. Discover cannot tell when it is there.
       FEATURED ? startRow({
         icon: 'cube', title: 'Try an app that comes with peerd',
-        text: `Add ${FEATURED.name} to your Library, then open it from there. It needs no network and no setup.`, action: tryStarter(),
+        text: `Add the ${FEATURED.name} app to your Library, then open it from there. It needs no network and no setup.`, action: tryStarter(),
       }) : null,
       startRow({
         icon: 'globe', title: 'See apps other people share',
@@ -1402,17 +1471,20 @@ export const DiscoverSection = (initialVnode) => {
   const includedTiles = () => {
     const starters = starterKeys.flatMap(key => {
       const starter = packagedStarter(key);
+      // why the name starts with the label: a person who says "Try it" to
+      // voice control reaches the button they see.
       return starter ? [{ key: `starter:${key}`, tone: key, name: starter.name, description: starter.description,
-        action: tileButton({ label: 'Try it', ariaLabel: `Try ${starter.name}`, onclick: () => openOptions(`transfer?starter=${key}`) }) }] : [];
+        action: tileButton({ label: 'Try it', ariaLabel: `Try it: ${starter.name}`, onclick: () => openOptions(`transfer?starter=${key}`) }) }] : [];
     });
+    // why the Library's name: the user can rename the app there.
     const commons = {
-      key: 'commons', tone: 'commons', name: COMMONS_NAME,
+      key: 'commons', tone: 'commons', name: libraryName(records.find(record => record.id === commonsId)) || COMMONS_NAME,
       description: 'Chat with other people who use peerd. Adding it does not join a room. You choose one inside the app.',
       // why keyed: a Commons deleted elsewhere must not turn a focused Open into an add.
       action: keyedParts(commonsId
         ? { open: tileButton({ label: 'Open', open: true, disabled: commonsBusy, onclick: () => { void openCommons(); } }) }
         : { add: tileButton({
-          label: commonsBusy || effects.commons === 'adding' ? 'Opening…' : 'Add and open Commons',
+          label: commonsBusy || effects.commons === 'adding' ? 'Opening…' : 'Add and open Chat rooms',
           disabled: commonsBusy || !!effects.commons || !localReady, onclick: () => { void addCommons(); },
         }) }),
     };
@@ -1427,9 +1499,12 @@ export const DiscoverSection = (initialVnode) => {
   const gridView = (offline) => {
     const list = offline ? offlineApps() : apps;
     const shownApps = pill === 'included' ? [] : ordered(list, offline);
-    const tiles = pill === 'included' ? includedTiles()
-      : shownApps.slice(0, limit).map(app => tile(appTileProps(app, offline)));
+    // why the apps that come with peerd after the shared ones in a search on
+    // All: their words match too, and the design draws them in that grid.
+    const included = pill === 'included' || (pill === 'all' && !!query.trim());
+    const tiles = [...shownApps.slice(0, limit).map(app => tile(appTileProps(app, offline))), ...included ? includedTiles() : []];
     const browse = !offline || list.length > 0 || pill !== 'all' || !!query;
+    const empty = browse && !tiles.length ? emptyBrowse({ pill, searching: !!query.trim() }) : null;
     return rootFrame({
       title: m('h1.type-page-title', 'Discover'),
       status: statusFor(offline ? 'offline' : 'connected', shownApps),
@@ -1437,20 +1512,22 @@ export const DiscoverSection = (initialVnode) => {
       library: libraryLine(offline),
       suggestion: surpriseNote ? m('p.type-small.disc-footnote', { role: 'status', 'aria-live': 'polite' }, surpriseNote) : null,
       // why neutral: the add may still finish, as an unknown install may.
-      commons: pill === 'included' && effects.commons === 'unknown' && !commonsId
+      commons: included && effects.commons === 'unknown' && !commonsId
         ? m('p.type-body-sm', { role: 'status' }, COMMONS_UNKNOWN) : null,
       share: shareList(),
       // why not offline with Library apps from peers: the grid then lists them, each with Open.
       yours: offline && list.length ? null : yoursRow(),
       search: browse ? searchInput({ value: query, oninput: setQuery }) : null,
       pills: pills({ value: pill, onSelect: selectPill }),
+      // why a stable status node: a live region must exist before its text
+      // changes, and the empty box below is new each time the list empties.
+      emptyStatus: m('p.sr-only', { role: 'status' }, empty ? `${empty.title}. ${empty.text}` : ''),
       // why after a good read only: the line says what the Library holds.
       // Until then the Library line says it is checking or could not read it.
       offlineEmpty: browse || !localReady ? null : emptyState({ text: OFFLINE_EMPTY, actions: [] }),
       tiles: browse && tiles.length ? m('.disc-grid', tiles) : null,
-      noMatch: browse && !tiles.length ? emptyState({
-        title: 'No matching apps', text: 'Change your search or filters.', boxed: true, status: true,
-        actions: [secondaryButton({ label: 'Clear filters', onclick: clearFilters })],
+      noMatch: empty ? emptyState({
+        ...empty, boxed: true, actions: [secondaryButton({ label: 'Show all apps', onclick: clearFilters })],
       }) : null,
       more: pill !== 'included' && shownApps.length > limit
         ? showMore(() => { focusTile(shownApps[limit]); limit += EXPLORE_WINDOW; }) : null,
@@ -1518,22 +1595,39 @@ export const DiscoverSection = (initialVnode) => {
     const offline = net?.kind === 'offline';
     // why the Library decides the word: Try again updates when it holds another version.
     const action = f.localId ? 'update' : 'install';
+    // why one word in the panel: its steps name the effect that runs, failed,
+    // may still finish or finished on this visit, as its status lines do.
+    const effect = state === 'installing' ? (f.state === 'updating' ? 'update' : 'install')
+      : state === 'unknown' ? unconfirmed.get(f.id)?.action ?? 'install' : state === 'failed' ? action
+        : state === 'installed' && updatedNow.has(f.id) ? 'update' : 'install';
     const failure = state === 'failed' && isFailure(f.state) ? failureHint(/** @type {string} */ (f.state), action) : null;
+    // why no Try again for a blocked maker: only an unblock in Contacts helps,
+    // and the hint says so.
+    const blockedMaker = state === 'failed' && f.state === BLOCKED;
     /** @type {ButtonProps|null} */ let primary = null;
     if (state === 'review') {
       primary = { label: 'Install and share', disabled: !app.uri || !localReady || offline, onclick: () => { void install(app); } };
     }
-    if (state === 'installed') primary = { label: 'Open', disabled: !localId, onclick: () => { void openApp(localId, f.id); } };
-    if (state === 'failed') {
+    if (state === 'installed') primary = { label: 'Open', open: true, disabled: !localId, onclick: () => { void openApp(localId, f.id); } };
+    if (state === 'failed' && !blockedMaker) {
       primary = { label: 'Try again', disabled: offline, onclick: () => { void (f.localId ? update(app, f.localId) : install(app)); } };
     }
     if (state === 'unknown') primary = { label: 'Check again', disabled: refreshing, onclick: () => { void manualRefresh(); } };
     // why Open next to them on an update page: the installed version still runs.
-    const secondary = (state === 'failed' || state === 'unknown') && localId
-      ? { label: 'Open', onclick: () => { void openApp(localId, f.id); } } : null;
+    /** @type {ButtonProps|null} */ const open = localId ? { label: 'Open', onclick: () => { void openApp(localId, f.id); } } : null;
+    const secondary = (state === 'failed' || state === 'unknown') && primary ? open : null;
+    if (blockedMaker && open) primary = { ...open, open: true };
     const notice = notices[f.id] ?? (state === 'review' && !localReady ? libraryStatus({ ready: false, failed: localFailed })
       : offline && (state === 'review' || state === 'failed') ? NEEDS_NETWORK : null);
     const error = rootAlert(f.id);
+    // why checked only for the version the Library holds: peerd checked
+    // every file of it when it installed it. A card heard from peers is only
+    // what they said, so it never fills The app says it, whatever it claims.
+    // An app the user made here has no facts recorded, so it gets no section.
+    // why the service worker's word on the copy: an edit on this device keeps
+    // the version, so only the files can say it is still the one peerd checked.
+    const checked = f.localId && f.sameVersion ? (updatedNow.has(f.id) ? 'updated' : 'installed') : null;
+    const changed = checked && f.localId && !f.mine ? localChangesOf(f.localId, app.version_id) : null;
     const panel = state === 'cant-run' ? cantRunPanel()
       : state === 'conflict' ? conflictPanel({
         disabled: effectBusy || !f.localId,
@@ -1546,38 +1640,36 @@ export const DiscoverSection = (initialVnode) => {
           open: { label: 'Open', onclick: () => { void openApp(localId, f.id); } }, notice, error,
         })
           : installPanel({
-            state, name, fresh: fresh.has(f.id),
+            state, name, fresh: fresh.has(f.id), updated: updatedNow.has(f.id), changed: changed === true, action: effect,
             transfer: state === 'installing' && discoveryAddress(app) ? m(InstallTransfer, {
               key: `${f.id}:${f.state}`, send: attrs.send, address: discoveryAddress(app),
               kind: f.state === 'updating' ? 'update' : 'install', ...(f.state === 'updating' && localId ? { appId: localId } : {}),
             }) : null,
-            message: state === 'installing' ? `You can leave this page. The ${f.state === 'updating' ? 'update' : 'install'} keeps going.` : null,
+            message: state === 'installing' ? `You can leave this page. The ${effect} keeps going.` : null,
             failure: failure ? { action, ...failure } : null,
-            unknown: state === 'unknown' ? unknownLines(unconfirmed.get(f.id)?.action ?? 'install') : null,
+            unknown: state === 'unknown' ? unknownLines(effect) : null,
             notice, error, primary, secondary, otherVersion: !f.sameVersion,
+            // why no steps for the user's own app: they made it, so it never went through them.
+            steps: !(f.mine && state === 'installed'),
             sharing: state === 'review' ? SHARING : null, onLibrary: toLibrary,
           });
     const address = discoveryAddress(app);
     if (shareFor === f.id && !address) shareFor = null;
     const maker = makerOf(app.publisher);
     const tone = toneOf(f.id);
-    // why checked only for the version the Library holds: peerd checked
-    // every file of it when it installed it. A card heard from peers is only
-    // what they said, so it never fills The app says it, whatever it claims.
-    // An app the user made here has no facts recorded, so it gets no section.
-    const checked = f.localId && f.sameVersion ? 'installed' : null;
-    const says = saysIt({ declared: checked && f.localId ? installedDeclared(app, f.localId) : null, checked, action });
+    const says = saysIt({ declared: checked && f.localId ? installedDeclared(app, f.localId) : null, checked, action, changed });
     return m('.disc-home.disc-view.disc-page', { key: `app:${key}` }, [
       backLink({ onclick: goBack }),
       appHead({
         name, letter: letterOf(name), tone, maker,
         onMaker: () => { if (app.publisher) openMaker(app.publisher, name); },
-        meta: f.localId ? 'In your Library' : kbLabel(app.size), modified: state === 'conflict', description: app.description,
-        onShare: address ? () => openShareDialog(f.id) : null,
+        meta: f.localId ? 'In your Library' : kbLabel(app.size), modified: state === 'conflict' || changed === true,
+        description: app.description, onShare: address ? () => openShareDialog(f.id) : null,
       }),
       panel,
       state === 'cant-run' || state === 'conflict' || offer === 'update-cant-run' ? null
-        : [safetyLines({ maker, checked, action, mine: f.mine }), says ? saysItSection(says) : null],
+        : [safetyLines({ maker, checked, action, mine: f.mine, installed: !!f.localId, changed: changed === true }),
+          says ? saysItSection(says) : null],
       techView(appFacts(app, failure?.runtime ?? null), typeof app.includes_wasm === 'boolean' ? WASM_HINT : null),
       shareFor === f.id && address ? shareView(f.id, { name, letter: letterOf(name), tone, address, maker }) : null,
     ]);
@@ -1604,11 +1696,13 @@ export const DiscoverSection = (initialVnode) => {
     const failure = state === 'failed' && linkFailure ? (linkFailure === RECEIPT_FAILED
       ? { hint: 'Reload the page, then try again.', runtime: null } : failureHint(linkFailure)) : null;
     const blocked = !attrs.enabled || !!linkBusy;
+    // why no Try again for a blocked maker: only an unblock in Contacts helps, and the hint says so.
     /** @type {ButtonProps|null} */ const primary = state === 'review'
       ? { label: 'Install and share', disabled: blocked || !linkPreview, onclick: () => { void installLink(); } }
-      : state === 'failed' ? { label: 'Try again', disabled: blocked || !linkPreview, onclick: () => { void installLink(); } }
+      : state === 'failed' ? (linkFailure === BLOCKED ? null
+        : { label: 'Try again', disabled: blocked || !linkPreview, onclick: () => { void installLink(); } })
         : state === 'unknown' ? { label: 'Check again', disabled: !!linkBusy || refreshing, onclick: () => { void (linkPending ? reconcileLink() : manualRefresh()); } }
-          : state === 'installed' ? { label: 'Open', disabled: !!linkBusy, onclick: () => { void openLinkApp(localId); } } : null;
+          : state === 'installed' ? { label: 'Open', open: true, disabled: !!linkBusy, onclick: () => { void openLinkApp(localId); } } : null;
     const bytes = bytesLabel(linkPreview?.decodedBytes);
     /** @type {Fact[]} */ const list = [
       { label: 'Made by', value: target.publisher, code: true, copy: copyButton('link:did', target.publisher) },
@@ -1620,22 +1714,26 @@ export const DiscoverSection = (initialVnode) => {
     list.push({ label: 'Runtime', value: failure?.runtime ?? linkPreview?.runtimeCompatibility?.message ?? 'Runtime requirements not specified.' });
     const tone = toneOf(card?.dwapp_id ?? target.uri);
     const maker = makerOf(target.publisher);
+    const mine = !!maker?.you;
+    // why the Library's copy even with the link's own check: Open runs that
+    // copy, and an edit on this device can change it after the install.
+    const changed = localId && !mine ? localChangesOf(localId, target.hash) : null;
     // why the link's own check first: it read this exact version's files. A
     // page restored after a reload has only the Library's record of them.
     const fromLink = verifiedDeclared(linkPreview?.declared, target.hash);
-    const says = saysIt(fromLink ? { declared: fromLink, checked: 'link' } : {
+    const says = localId && changed !== false ? null : saysIt(fromLink ? { declared: fromLink, checked: 'link' } : {
       declared: localId ? verifiedDeclared(records.find(record => record.id === localId)?.dweb?.declared, target.hash) : null,
-      checked: 'installed',
+      checked: 'installed', changed,
     });
     return m('.disc-home.disc-view.disc-page', { key: 'link' }, [
       backLink({ onclick: goBack }),
       appHead({
         name, letter: letterOf(name), tone, maker, onMaker: () => openMaker(target.publisher, name),
-        meta: localId ? 'In your Library' : kbLabel(linkPreview?.decodedBytes), description: card?.description,
-        onShare: () => openShareDialog('link'),
+        meta: localId ? 'In your Library' : kbLabel(linkPreview?.decodedBytes), modified: changed === true,
+        description: card?.description, onShare: () => openShareDialog('link'),
       }),
       state === 'cant-run' ? cantRunPanel() : installPanel({
-        state: state === 'conflict' ? 'review' : state, name, fresh: linkFresh,
+        state: state === 'conflict' ? 'review' : state, name, fresh: linkFresh, changed: changed === true, action: held?.action ?? 'install',
         transfer: state === 'installing' && linkBusy === 'install' ? m(InstallTransfer, {
           key: target.address, send: attrs.send, address: target.address, kind: 'address',
         }) : null,
@@ -1644,10 +1742,12 @@ export const DiscoverSection = (initialVnode) => {
         unknown: state === 'unknown' ? unknownLines(held?.action ?? 'install') : null,
         notice: linkNotice || null,
         error: rootAlert('link'),
-        primary, sharing: state === 'review' ? SHARING : null, onLibrary: toLibrary,
+        primary, steps: !(mine && state === 'installed'), sharing: state === 'review' ? SHARING : null, onLibrary: toLibrary,
       }),
       // why checked: the page opens only after peerd checked every file of the link.
-      state === 'cant-run' ? null : [safetyLines({ maker, checked: 'link' }), says ? saysItSection(says) : null],
+      // why `mine`: a link to the user's own app speaks to them, as its app page does.
+      state === 'cant-run' ? null : [safetyLines({ maker, checked: 'link', mine, installed: !!localId, changed: changed === true }),
+        says ? saysItSection(says) : null],
       techView(list),
       shareFor === 'link' ? shareView('link', { name, letter: letterOf(name), tone, address: target.address, maker }) : null,
     ]);
@@ -1656,19 +1756,21 @@ export const DiscoverSection = (initialVnode) => {
   /** @param {string} did */
   const makerPage = (did) => {
     const name = contactNames.get(did) ?? null;
-    const title = name ?? shortKey(did);
+    // why "You" on the user's own page: their key is a code, so it stays in Technical details.
+    const you = did === ownDid();
+    const title = you ? 'You' : name ?? shortKey(did);
     // why the Library list offline: the offline root lists only Library apps,
     // each with Open, and a card heard before may name a version to fetch.
     const offline = net?.kind === 'offline';
     const made = (offline ? offlineApps() : apps).filter(app => app.publisher === did);
-    const maker = { name, key: shortKey(did) };
+    const maker = { name, key: shortKey(did), you };
     const isBlocked = blockedDids.has(did);
     const menu = makerMenu({ did, myDid, saved: !!name, blocked: isBlocked });
     const form = renaming?.did === did ? renaming : null;
     return m('.disc-home.disc-view.disc-page', { key: `maker:${did}` }, [
       backLink({ onclick: goBack, label: makerFrom?.name ?? 'Discover' }),
       makerHead({
-        title, letter: letterOf(title), tone: toneOf(did), saved: !!name,
+        title, letter: letterOf(title), tone: toneOf(did), saved: !!name, you: maker.you,
         menu: makerMenuView({
           maker, open: menuOpen, rename: menu.rename, block: menu.block,
           onToggle: () => { menuOpen = !menuOpen; }, onClose: closeMenu,
@@ -1683,10 +1785,10 @@ export const DiscoverSection = (initialVnode) => {
       renameUnknown?.did === did && contactNames.get(did) !== renameUnknown.name
         ? m('p.type-body-sm', { role: 'status' }, 'peerd is not sure the name was saved. Check Contacts before you try again.') : null,
       isBlocked ? blockedLine({ maker }) : m('.disc-section.disc-section--tight', [
-        m('.type-label-strong', ['Apps from ', name ? m('bdi', name) : m('bdi.type-code.disc-maker-key', title)]),
+        m('.type-label-strong', you ? 'Apps you made' : ['Apps from ', name ? m('bdi', name) : m('bdi.type-code.disc-maker-key', title)]),
         // why a line: a share link's maker often has no app that peers share.
         made.length ? m('ul.disc-app-list', made.slice(0, makerLimit).map(app => appRow(appTileProps(app, offline, true))))
-          : m('p.type-body-sm.disc-footnote', MAKER_EMPTY),
+          : m('p.type-body-sm.disc-footnote', you ? OWN_EMPTY : MAKER_EMPTY),
       ]),
       made.length > makerLimit ? showMore(() => { focusTile(made[makerLimit]); makerLimit += EXPLORE_WINDOW; }) : null,
       techView([{ label: 'Made by', value: did, code: true, copy: copyButton(`maker:${did}:did`, did) }]),

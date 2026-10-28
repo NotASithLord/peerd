@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { buildAppManifest } from '../../extension/peerd-engine/app-manifest.js';
-import { bundleDeclaration, verifiedDeclaration, withDeclaration } from '../../extension/offscreen/app-declaration.js';
+import { bundleDeclaration, verifiedDeclaration } from '../../extension/shared/app-declaration.js';
 
 const dwapp = buildAppManifest({ entry: 'index.html', dwapp: true });
 const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
@@ -22,12 +22,10 @@ test('what a verified bundle asks of peerd is three facts from its own peerd.jso
   }
 });
 
-test('the facts name the hash of the version they describe and ride in its dweb slot', () => {
+test('the facts name the hash of the version they describe', () => {
   const hash = 'a'.repeat(64);
   const app = { name: 'App', entryFile: 'index.html', files: { 'index.html': '<h1>App</h1>' }, dweb: { uri: `peerd://did/${hash}`, hash } };
   const facts = { hash, dweb: true, instructions: false, observeAct: false };
   expect(verifiedDeclaration(app)).toEqual(facts);
-  expect(withDeclaration(app)).toEqual({ ...app, dweb: { ...app.dweb, declared: facts } });
-  expect(app.dweb).not.toHaveProperty('declared');
-  expect(withDeclaration({ ...app, files: { ...app.files, 'peerd.json': '{}' } }).dweb.declared).toBe(null);
+  expect(verifiedDeclaration({ ...app, files: { ...app.files, 'peerd.json': '{}' } })).toBe(null);
 });

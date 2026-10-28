@@ -227,13 +227,16 @@ const OptionsApp = {
     }
 
     const count = ui.suggestionsCount ?? 0;
+    // why Backup & restore is not current on the page Discover's Try opens:
+    // that page is titled Try an app, and only adds the app.
+    const trying = section === 'transfer' && m.route.param('starter') !== undefined;
     /** @param {[string, string]} entry */
     const navItem = ([id, label]) => m('a.options-nav-item', {
       href: `#!/${id}`,
-      class: section === id ? 'is-active' : '',
+      class: section === id && !trying ? 'is-active' : '',
       // why aria-current: the class alone marks the active entry visually;
       // a screen reader needs the programmatic current-page state.
-      'aria-current': section === id ? 'page' : undefined,
+      'aria-current': section === id && !trying ? 'page' : undefined,
     }, [
       label,
       // Memory carries the pending-suggestions badge so proposals are
@@ -259,7 +262,7 @@ const OptionsApp = {
       m('main.options-content', m('.options-page', [
         // why its own title: Discover's Try opens Backup & restore with a
         // starter, and that page only adds the app to the Library.
-        m('h2', section === 'transfer' && m.route.param('starter') !== undefined ? 'Try an app' : SECTION_TITLES[section] ?? 'Settings'),
+        m('h2', trying ? 'Try an app' : SECTION_TITLES[section] ?? 'Settings'),
         m(ActorIsolationBanner, { capability: state.capabilities?.actorExecution, send }),
         OptionsApp.section(vnode),
       ])),

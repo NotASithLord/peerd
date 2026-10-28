@@ -5,7 +5,7 @@ import { openHome } from '/shared/open-home.js';
 import { isUnknownMutationOutcome } from '../mutation-custody.js';
 /** @typedef {import('./reset-row.js').Send} Send */
 // why these words: Discover's "Try" opens this page, so it says what the app
-// is and adds it in one step. peerd still checks the packaged files first.
+// is and does, and adds it in one step. peerd still checks the packaged files first.
 // why Go to Library leads after an add: the app opens from there, and peerd
 // cannot tell a second add from the first, so the line says what it makes.
 export const StarterReview = () => {
@@ -43,6 +43,7 @@ export const StarterReview = () => {
     /** @param {{attrs:{starter:unknown,send:Send}}} vnode */
     view: ({ attrs: { starter, send } }) => m('section.starter-review', [
       m('h3', packagedStarter(starter)?.name ?? 'Unknown app'),
+      packagedStarter(starter)?.description ? m('p.starter-review-what', packagedStarter(starter)?.description) : null,
       m('p', 'Comes with peerd. It runs on this device and needs no network.'),
       loading ? m('p', { role: 'status' }, 'Checking the app…') : null,
       error ? m('p', { role: 'alert' }, error) : null,

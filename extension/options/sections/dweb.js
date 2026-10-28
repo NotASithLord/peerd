@@ -169,11 +169,11 @@ export const DwebSection = {
       // Commons is an explicit starter choice; enabling the network does not
       // install or open it, and joining its named room remains a separate action.
       dwebEnabled ? m('div', { style: 'margin-top:14px; border-top:1px solid var(--hairline, #2a2a2a); padding-top:14px;' }, [
-        m('h3', 'commons - the dweb demo'),
+        m('h3', 'Chat rooms'),
         m('p', 'Chat with peers who join the same named room, with room chat '
           + 'and private one-to-one chats. This is not a global public chat. '
-          + 'In Discover, choose Add and open Commons. To try it with another '
-          + 'profile or machine, open Commons there and join the same room code.'),
+          + 'In Discover, choose Add and open Chat rooms. To try it with another '
+          + 'profile or machine, open the Chat rooms app there and join the same room code.'),
         m('button.secondary', { type: 'button', onclick: () => openHome('discover') }, 'Open Discover'),
       ]) : null,
 
