@@ -18,7 +18,6 @@
 // The recorder is what makes the loop legible to an agent: every state leaves a
 // screenshot to look at and a structured pass/fail with the "why".
 
-import { armBackupHostStages } from './backup-host-stages.mjs';
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSocket } from 'node:dgram';
@@ -3569,14 +3568,13 @@ export const STATES = [
       const diagnostic = createConsentDiagnostics(evidence, () => {});
       const fresh = await launchPeerd({ extensionDir: ctx.extensionDir, panelPath: 'home/home.html', resumeAuxiliaryWorkers: false });
       const directory = await mkdtemp(join(tmpdir(), 'peerd-backup-policy-'));
-      let observer, hostStages;
+      let observer;
       const click = async (selector) => {
         if (!await waitFor(() => evalIn(fresh.page, `!!document.querySelector(${JSON.stringify(selector)})`),
           { budgetMs: 20_000 }) || !await clickAndSyncRedraw(fresh.page, selector)) throw new Error(`missing real control ${selector}`);
       };
       const exportBackup = async (mode, expectedDid = null) => {
         evidence.phase = mode;
-        if (hostStages) await evalIn(fresh.swConn, 'globalThis.__backupStages = []');
         const start = { events: evidence.events.length,
           hosts: await evalIn(fresh.swConn, 'globalThis.__backupHostCalls.length') };
         const destination = await mkdtemp(join(directory, `${mode}-`));
@@ -3648,7 +3646,6 @@ export const STATES = [
           const result = { status, files, hosts, noHost, noTransport, did: identity?.did ?? null,
             format: payload?.format ?? null, summary: inspected?.summary ?? null };
           rec.observe(`actual backup ${mode}`, result);
-          if (hostStages) rec.observe(`backup scope stages ${mode}`, await hostStages.read());
           if (baseRender && off) rec.observe(`merge-base backup ${mode}`, result);
           else if (expectedDid && off) {
             rec.check('identity-off refuses the download with distinct network guidance', !status.success && status.retained
@@ -3682,7 +3679,6 @@ export const STATES = [
           };
         })()`);
         observer = await observeHosts(fresh, evidence, diagnostic, () => {});
-        if (process.env.PEERD_BACKUP_HOST_STAGES === '1') hostStages = await armBackupHostStages(fresh);
         const initialized = await rpc(fresh.page, { type: 'vault/initialize', passphrase: PASSPHRASE }, { timeoutMs: 120_000 });
         if (initialized?.ok !== true) throw new Error('the fresh backup vault did not initialize');
         const noChoice = (await rpc(fresh.page, { type: 'state/get' }))?.state?.settings;
@@ -3729,10 +3725,6 @@ export const STATES = [
         if (disabled?.ok !== true || disabled.settings?.dwebEnabled !== false) throw new Error('the peer network did not turn off');
         await exportBackup('identity-off', started.did);
       } finally {
-        if (hostStages) {
-          rec.observe('backup scope stages', await hostStages.read());
-          await hostStages.close();
-        }
         rec.observe('backup host and transport evidence', evidence);
         try { if (observer) await observer.close(); }
         finally { await fresh.close(); await rm(directory, { recursive: true, force: true }); }

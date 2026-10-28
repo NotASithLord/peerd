@@ -639,6 +639,14 @@ export const createProductionFeatureLeaseRuntime = ({
     const result = coordinator.revoke(scope, reason);
     return settleRevoke(scope, result);
   };
+  /** @type {Set<Promise<any>>} */
+  const repairs = new Set();
+  const trackLoss = (/** @type {Promise<any>} */ work) => {
+    repairs.add(work);
+    const clear = () => { repairs.delete(work); };
+    void work.then(clear, clear);
+    return work;
+  };
   /** @type {Map<string,Promise<any>>} */
   const disabling = new Map();
   const disable = (/** @type {string} */ scope) => {
@@ -647,8 +655,11 @@ export const createProductionFeatureLeaseRuntime = ({
     const result = coordinator.disable(scope);
     // why: OFF joins prior vault recovery outside the host lane.
     const finished = Promise.all([
-      disabling.get(scope), settleRevoke(scope, result),
-    ]).then(([, value]) => value);
+      disabling.get(scope), settleRevoke(scope, result), ...repairs,
+    ]).then(async ([, value]) => {
+      await Promise.all(repairs);
+      return value;
+    });
     disabling.set(scope, finished);
     const clear = () => { if (disabling.get(scope) === finished) disabling.delete(scope); };
     void finished.then(clear, clear);
@@ -668,11 +679,8 @@ export const createProductionFeatureLeaseRuntime = ({
   });
   const runTransition = async (/** @type {'initialize'|'unlock'|'resume'} */ transition,
     /** @type {{dwebEnabled?:boolean}} */ options = {}) => {
-    // why: a durable feature may have an intentionally slow startup (the dweb
-    // mesh can wait on identity/network). Its per-scope coordinator already
-    // serializes that lease. Holding the physical-host lane across the whole
-    // transition would head-of-line block the controller and therefore the
-    // first agent turn even though both scopes safely share one host.
+    // Scope lanes serialize startup. Keep slow dweb identity/network work
+    // outside the host lane so it cannot block the controller's first turn.
     if (options.dwebEnabled) {
       await hostLane(() => settleRetirement());
     }
@@ -688,28 +696,23 @@ export const createProductionFeatureLeaseRuntime = ({
     for (const item of affected) durableScopes.delete(item.scope);
     // why: duplicate loss is inert; stale status must not close a successor.
     if (affected.length === 0) return recoverDurable(hostEpoch, affected);
-    // why: a fresh dweb host must re-enter this lane for its vault-backed
-    // identity read. Keep physical retirement serialized, then release the
-    // lane before replaying durable scopes just like the normal transition
-    // path does for a cold dweb start.
-    return hostLane(() => retireHost(hostEpoch))
-      .then(() => recoverDurable(hostEpoch, affected));
+    // Retire serially, then release the lane before vault-backed dweb recovery.
+    return trackLoss(hostLane(() => retireHost(hostEpoch))
+      .then(() => recoverDurable(hostEpoch, affected)));
   };
 
   /** @param {string} hostEpoch @param {string|undefined} reason */
-  const retireHostEpoch = (hostEpoch, reason) => hostLane(async () => {
+  const retireHostEpoch = (hostEpoch, reason) => trackLoss(hostLane(async () => {
     await coordinator.ready;
     await writeRetirement(hostEpoch, reason ?? 'operation-outcome-unknown');
     const affected = coordinator.hostLost(hostEpoch);
     for (const item of affected) durableScopes.delete(item.scope);
-    // why: a late operation belongs to the epoch in its lease, not whichever
-    // host happens to be current. An observed successor proves the old epoch
-    // is gone and must never be closed to settle stale operation cleanup.
+    // Retire the lease's epoch; a successor must survive stale cleanup.
     await retireMarked(hostEpoch);
     await clearRetirement(hostEpoch);
     return Object.freeze({ hostEpoch, affected });
   }).then(({ hostEpoch: retiredHostEpoch, affected }) =>
-    recoverDurable(retiredHostEpoch, affected));
+    recoverDurable(retiredHostEpoch, affected)));
 
   const retireActiveHost = (/** @type {string|undefined} */ reason) => {
     const snapshot = coordinator.snapshot();
