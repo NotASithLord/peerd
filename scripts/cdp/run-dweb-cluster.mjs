@@ -3,7 +3,7 @@
 // --local is explicitly a rehearsal and never reports a physical-Mac pass.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
@@ -11,12 +11,14 @@ import { createSignalingServer } from '../../signaling-node/bun-server.mjs';
 import { validateHosts, validateMesh, pathsReady, repairableEdge } from './dweb-cluster-checks.mjs';
 import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
 import { sshArguments } from './dweb-cluster-ssh.mjs';
+import { soakOptions, runSoak } from './dweb-cluster-soak.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const configPath = process.argv[2];
 if (!configPath || configPath.startsWith('--')) throw new Error('Pass a private cluster JSON config; see scripts/cdp/CLUSTER.md');
 const config = JSON.parse(readFileSync(configPath, 'utf8'));
 const local = process.argv.includes('--local');
+const soak = soakOptions(config.soak);
 const output = resolve(config.output ?? join(root, 'scripts/cdp/artifacts/cluster-result.json'));
 // why: remote agreement alone could certify identical but stale staged trees.
 const expectedSource = sourceFingerprint(root);
@@ -250,6 +252,23 @@ try {
     await waitUntil(reports, states => states.every(state => state.rendezvous === 'up'), 'signaling recovery');
     return { outagePaths, recovered: await gossip() };
   });
+  if (soak) await check('sustained authenticated traffic and verified content', async () =>
+    runSoak({ options: soak, now: () => performance.now(), sleep,
+      probe: async () => {
+        await meshReady();
+        await gossip();
+        verify(await workers[0].call('fetch', { uri: published.uri }));
+        await paths();
+      },
+      save: async evidence => {
+        report.soak = evidence;
+        // Preserve an incomplete receipt if the coordinator or host is lost.
+        // report.ok stays false until all checks have completed.
+        mkdirSync(dirname(output), { recursive: true });
+        writeFileSync(`${output}.pending`, `${JSON.stringify(report, null, 2)}\n`);
+        renameSync(`${output}.pending`, output);
+      },
+    }));
   report.finalStates = await reports();
   report.ok = true;
 } catch (error) {

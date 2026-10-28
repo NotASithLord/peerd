@@ -85,3 +85,18 @@ triangle, it records the repair check in `skipped`, with its reason, and still
 checks signaling-outage survival and recovery. An otherwise successful report
 with this skip does not qualify offline link repair; use a topology containing
 a triangle to cover that scenario.
+
+An optional `soak` object requests sustained transport checks, for example
+`"soak": { "durationMs": 14400000, "intervalMs": 30000 }`. The coordinator
+rechecks authenticated membership, fresh gossip, verified content and direct
+UDP paths throughout the requested duration. Limits are enforced by
+`dweb-cluster-soak.mjs`. A failed cycle fails the run; it is not retried into a
+passing receipt. The result is checkpointed as incomplete while running, with
+bounded recent timing samples and a total completed-cycle count. Successful
+control requests renew the host's idle watchdog; abandoned or hung work still
+expires. Run only while those physical hosts remain reserved for the test.
+
+This soak measures sustained transport and content availability. It does not
+qualify extension worker retirement, system sleep/wake, WAN/NAT diversity or
+capacity beyond the recorded host allocation. Keep those acceptance lanes
+separate; a local rehearsal is never physical-cluster evidence.
