@@ -3576,7 +3576,11 @@ export const STATES = [
       const exportBackup = async (mode, expectedDid = null) => {
         evidence.phase = mode;
         const start = { events: evidence.events.length,
-          hosts: await evalIn(fresh.swConn, 'globalThis.__backupHostCalls.length') };
+          hosts: await evalIn(fresh.swConn, 'globalThis.__backupHostCalls.length'),
+          closes: await evalIn(fresh.swConn, 'globalThis.__backupHostCloses.length') };
+        // Read-only lease posture separates export demand from host recovery.
+        rec.observe(`backup lease posture before ${mode}`,
+          (await rpc(fresh.page, { type: 'bootstrap/ready' }))?.featureLeases);
         const destination = await mkdtemp(join(directory, `${mode}-`));
         const page = await openWidePage(fresh, 'options/options.html#!/transfer', { ready: '#exppass2' });
         try {
@@ -3643,9 +3647,12 @@ export const STATES = [
           const off = mode !== 'identity-on';
           const noHost = hosts.length === 0 && !events.some((event) => event.href?.includes('/offscreen/offscreen.html'));
           const noTransport = !events.some((event) => ['WebSocket', 'RTCPeerConnection', 'native-websocket'].includes(event.kind));
-          const result = { status, files, hosts, noHost, noTransport, did: identity?.did ?? null,
+          const closes = await evalIn(fresh.swConn, 'globalThis.__backupHostCloses.slice(' + start.closes + ')');
+          const result = { status, files, hosts, closes, noHost, noTransport, did: identity?.did ?? null,
             format: payload?.format ?? null, summary: inspected?.summary ?? null };
           rec.observe(`actual backup ${mode}`, result);
+          rec.observe(`backup lease posture after ${mode}`,
+            (await rpc(fresh.page, { type: 'bootstrap/ready' }))?.featureLeases);
           if (baseRender && off) rec.observe(`merge-base backup ${mode}`, result);
           else if (expectedDid && off) {
             rec.check('identity-off refuses the download with distinct network guidance', !status.success && status.retained
@@ -3672,9 +3679,16 @@ export const STATES = [
         await evalIn(fresh.swConn, `(() => {
           'use strict';
           globalThis.__backupHostCalls = [];
+          globalThis.__backupHostCloses = [];
+          const closeDocument = chrome.offscreen.closeDocument.bind(chrome.offscreen);
+          chrome.offscreen.closeDocument = (...args) => {
+            globalThis.__backupHostCloses.push({ at: Date.now(),
+              stack: new Error('backup host retirement').stack?.slice(0, 3000) });
+            return closeDocument(...args);
+          };
           const createDocument = chrome.offscreen.createDocument.bind(chrome.offscreen);
           chrome.offscreen.createDocument = (...args) => {
-            globalThis.__backupHostCalls.push({ url: args[0]?.url,
+            globalThis.__backupHostCalls.push({ at: Date.now(), url: args[0]?.url,
               stack: new Error('backup host creation').stack?.slice(0, 3000) }); return createDocument(...args);
           };
         })()`);
