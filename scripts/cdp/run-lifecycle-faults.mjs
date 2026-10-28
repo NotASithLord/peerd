@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // Pipe-backed physical MV3 lifecycle fault lane.
 
+import { sandboxLaunchArgs } from './sandbox-launch.mjs';
 import {
   closeSync, constants, cpSync, fstatSync, mkdirSync, mkdtempSync, openSync,
   readFileSync, rmSync, writeFileSync,
@@ -440,7 +441,7 @@ const main = async (target = SOURCE_TARGET) => {
     timeout: 30_000,
     userDataDir: profile,
     args: [
-      '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--no-first-run', '--no-default-browser-check', ...sandboxLaunchArgs(),
     ],
   });
   try {

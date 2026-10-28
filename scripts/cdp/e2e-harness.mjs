@@ -24,6 +24,7 @@
 // --load-extension (a security restriction), so the extension never loads under
 // it. Point CHROME_PATH at Chrome for Testing (bun run e2e:chrome).
 
+import { sandboxLaunchArgs } from './sandbox-launch.mjs';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
@@ -57,7 +58,7 @@ export const hostMonotonicMs = () => Number(process.hrtime.bigint()) / 1_000_000
 
 export const visualSourceIdentity = ({ extensionDir = EXT, states = [] } = {}) => {
   const hash = createHash('sha256').update(JSON.stringify({ states,
-    headed: process.env.PEERD_BROWSER_WINDOW_EVIDENCE === '1', security: process.argv.includes('--enforce-web-security'),
+    headed: process.env.PEERD_BROWSER_WINDOW_EVIDENCE === '1', sandbox: process.env.PEERD_REQUIRE_SANDBOX, security: process.argv.includes('--enforce-web-security'),
     chrome: resolveChrome(), platform: process.env.VISUAL_PLATFORM || `${process.platform}-${process.arch}`, timezone: process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone }));
   const listed = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', 'extension', 'scripts/cdp', 'packaging'],
     { cwd: ROOT, encoding: 'utf8' }).split('\0').filter(Boolean);
@@ -711,7 +712,7 @@ export async function launchPeerd({
       `http://${NETWORK_GUARD_OWNED_HOST}:${NETWORK_GUARD_CONTROLLER_PORT}`,
       `http://${NETWORK_GUARD_UNRELATED_HOST}:${NETWORK_GUARD_CONTROLLER_PORT}`,
     ].join(',')}`,
-    '--disable-gpu', '--no-sandbox',
+    '--disable-gpu', ...sandboxLaunchArgs(),
     '--enable-unsafe-extension-debugging',
     `--ignore-certificate-errors-spki-list=${[
       GIT_FIXTURE_SPKI_SHA256_BASE64,
