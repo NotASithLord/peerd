@@ -11073,8 +11073,10 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         await rec.visualPage('app-editor-invalid-json', page);
         const repairedJson = '{"saved":true,"repaired":true}';
         await replaceDraft(repairedJson);
-        const repaired = await waitFor(async () => await savedText('data/first.json') === repairedJson
-          && await evalIn(page, `document.getElementById('app-save-status').hidden`), { budgetMs: 10_000, pollMs: 100 });
+        // why: the successful save clears this banner after replacing the OPFS
+        // file. Reading a File snapshot during that replacement can fail.
+        const repaired = await waitFor(async () => await evalIn(page, `document.getElementById('app-save-status').hidden`)
+          && await savedText('data/first.json') === repairedJson, { budgetMs: 10_000, pollMs: 100 });
         rec.check('valid JSON saves through the same editor after repair', !!repaired);
         if (!repaired) throw new Error('The JSON repair did not reach the durable file');
         await selectFile('index.html');
@@ -11107,8 +11109,8 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         if (unlocked?.ok !== true) throw new Error(`Vault unlock failed: ${JSON.stringify(unlocked)}`);
         vaultLocked = false;
         await evalIn(page, `document.getElementById('app-save-retry').click()`);
-        const retried = await waitFor(async () => await savedText('index.html') === lockedDraft
-          && await evalIn(page, `document.getElementById('app-save-status').hidden`), { budgetMs: 10_000, pollMs: 100 });
+        const retried = await waitFor(async () => await evalIn(page, `document.getElementById('app-save-status').hidden`)
+          && await savedText('index.html') === lockedDraft, { budgetMs: 10_000, pollMs: 100 });
         rec.check('unlock and the existing Retry save the exact draft', !!retried);
         if (!retried) throw new Error('The real save retry did not finish');
         ctx.setModelResponder(() => ({ sse: sseText('APP-DRAWER-RECOVERED') }));
