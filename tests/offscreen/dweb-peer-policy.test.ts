@@ -67,7 +67,7 @@ test('supervisor admits only the exact SW policy command without an active dweb 
   let release!: () => void;
   const loading = new Promise<void>(resolve => { release = resolve; });
   const sw = {};
-  new Function('browser', 'isServiceWorkerSender', 'claimLease', 'loadDwebHost', 'rejectStaleClaim', 'errorResponse', listenerSource)(
+  new Function('browser', 'isServiceWorkerSender', 'claimLease', 'loadDweb', 'rejectStaleClaim', 'errorResponse', listenerSource)(
     { runtime: { onMessage: { addListener: (fn: any) => { listener = fn; } } } },
     (sender: any) => sender === sw,
     (_scope: string, reply: any) => { claims++; reply({ ok: false, error: 'no-lease' }); return null; },
