@@ -1,0 +1,64 @@
+name: Backup export diagnostic
+on:
+  push:
+    branches: [fix/backup-host-lifecycle]
+    paths:
+      - .github/workflows/backup-export-diagnostic.yml
+      - scripts/cdp/states.mjs
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      DISPLAY: ':99'
+      TZ: UTC
+      VISUAL_PLATFORM: linux-x64
+      PEERD_BROWSER_WINDOW_EVIDENCE: '1'
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.3'
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # v2.2.0
+      - name: Prepare the same isolated desktop as visual CI
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb openbox xdotool x11-utils imagemagick
+          Xvfb "$DISPLAY" -screen 0 1920x1280x24 -nolisten tcp > "$RUNNER_TEMP/backup-display.log" 2>&1 &
+          for attempt in {1..50}; do xdpyinfo >/dev/null 2>&1 && break; sleep 0.2; done
+          openbox > "$RUNNER_TEMP/backup-window-manager.log" 2>&1 &
+          for attempt in {1..50}; do
+            xprop -root _NET_SUPPORTING_WM_CHECK | grep -q 'window id' && exit 0
+            sleep 0.2
+          done
+          exit 1
+      - name: Select pinned Chrome
+        run: echo "CHROME_PATH=$(bun scripts/cdp/ensure-chrome-for-testing.mjs | tail -1)" >> "$GITHUB_ENV"
+      - name: Preserve the first backup failure
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/backup-samples
+          for sample in {1..10}; do
+            result=0
+            bun scripts/cdp/run-e2e-verify.mjs --only=backup-network-policy \
+              --artifacts="$PWD/artifacts/backup-samples/$sample" \
+              > "artifacts/backup-samples/$sample.log" 2>&1 || result=$?
+            echo "sample $sample exit $result"
+            # This is failure capture, never retry-to-green acceptance.
+            if [ "$result" -ne 0 ]; then
+              tail -40 "artifacts/backup-samples/$sample.log"
+              exit "$result"
+            fi
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: backup-export-samples
+          path: artifacts/backup-samples/
+          retention-days: 7
