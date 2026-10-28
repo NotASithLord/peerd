@@ -421,11 +421,24 @@ export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, n
 }
 
 // ---- raw CDP attach over Chrome's WebSocket (no npm client) -----------------
-export async function attach(wsUrl, onEvent) {
+export async function attach(wsUrl, onEvent, { commandTimeoutMs = 180_000 } = {}) {
+  if (!Number.isFinite(commandTimeoutMs) || commandTimeoutMs <= 0) throw new Error('Invalid CDP command timeout');
   const ws = new WebSocket(wsUrl);
-  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+  await new Promise((res, rej) => {
+    const timer = setTimeout(() => { ws.close(); rej(new Error('CDP connection timed out')); }, commandTimeoutMs);
+    ws.onopen = () => { clearTimeout(timer); res(); };
+    ws.onerror = () => { clearTimeout(timer); rej(new Error('CDP connection failed')); };
+    ws.onclose = () => { clearTimeout(timer); rej(new Error('CDP connection closed before opening')); };
+  });
   let id = 0;
   const pending = new Map();
+  let closed = false;
+  const closePending = (reason) => {
+    closed = true;
+    for (const finish of pending.values()) finish({ error: { message: reason } });
+  };
+  ws.onclose = () => closePending('CDP connection closed');
+  ws.onerror = () => { closePending('CDP connection failed'); ws.close(); };
   const eventListeners = new Set(onEvent ? [onEvent] : []);
   const events = [];
   const reqUrl = new Map();   // requestId → url; loadingFailed carries no url of its own
@@ -458,13 +471,26 @@ export async function attach(wsUrl, onEvent) {
     for (const listener of eventListeners) listener(m.method, m.params, m);
   };
   const send = (method, params = {}, sessionId) => new Promise((res, rej) => {
+    if (closed || ws.readyState !== WebSocket.OPEN) { rej(new Error(`${method}: CDP connection is closed`)); return; }
     const i = ++id;
-    pending.set(i, (m) => (m.error ? rej(new Error(`${method}: ${m.error.message}`)) : res(m.result)));
-    ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
+    // why: a page-side deadline cannot settle a lost CDP response. Retire the
+    // connection on timeout; never replay a command with an unknown outcome.
+    const timer = setTimeout(() => {
+      closePending(`CDP command ${method} timed out; outcome unknown`);
+      ws.close();
+    }, commandTimeoutMs);
+    pending.set(i, (m) => {
+      clearTimeout(timer);
+      pending.delete(i);
+      if (m.error) rej(new Error(`${method}: ${m.error.message}`));
+      else res(m.result);
+    });
+    try { ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) })); }
+    catch { closePending('CDP send failed; outcome unknown'); ws.close(); }
   });
   return {
     send,
-    close: () => ws.close(),
+    close: () => { closePending('CDP connection closed by caller'); ws.close(); },
     events,
     on: (listener) => eventListeners.add(listener),
     off: (listener) => eventListeners.delete(listener),
