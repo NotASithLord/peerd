@@ -8150,8 +8150,19 @@ export const STATES = [
         if (!await waitFor(() => evalIn(page, `document.querySelector('.notif-banner .home-popout')?.textContent === 'View in Discover'`),
           { budgetMs: 5_000, pollMs: 50 })) throw new Error('Home chat did not show the app notification');
         await evalIn(page, `(() => { const button = document.querySelector('.notif-banner .home-popout'); button.focus(); button.click(); })()`);
-        rec.check('the chat banner opens the notified app page in Discover',
-          !!await waitFor(() => evalIn(page, opened), { budgetMs: 10_000, pollMs: 50 }));
+        const bannerOpened = !!await waitFor(() => evalIn(page, opened), { budgetMs: 10_000, pollMs: 50 });
+        if (!bannerOpened) {
+          // why: distinguish lost navigation from a missing heard reply without recording chat contents.
+          rec.observe('notification banner navigation failure', await evalIn(page, `({
+            href: location.href, visibility: document.visibilityState,
+            discoverRoot: !!document.querySelector('.disc-home'),
+            appTitle: document.querySelector('.disc-app-title')?.textContent ?? null,
+            chatPresent: !!document.querySelector('.home-chat'),
+            fixturePresent: window.__e2eHeard?.apps?.some(app => app.dwapp_id === ${JSON.stringify(key)}) === true,
+            fixtureHeld: !!window.__e2eHeard?.hold,
+          })`));
+        }
+        rec.check('the chat banner opens the notified app page in Discover', bannerOpened);
       } finally {
         try { await page.close(); } catch { /* */ }
         if (panelRetired) {
