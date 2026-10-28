@@ -43,13 +43,17 @@ const resolveTabId = () => {
   } catch { /* no tabs API in this context */ }
 };
 
-// Is there any panel surface to open at all? Chrome ships sidePanel; Firefox
-// ships sidebarAction. On neither (or an old build) the button is pointless.
-const panelApiAvailable = () => !!(sidePanelApi()?.open || browser.sidebarAction?.open);
+// Which panel surface can open here? Chrome ships sidePanel; Firefox ships
+// sidebarAction. On neither (or an old build) the button is pointless.
+/** @returns {'side-panel' | 'sidebar' | null} */
+export const panelKind = () => (typeof sidePanelApi()?.open === 'function' ? 'side-panel'
+  : typeof browser.sidebarAction?.open === 'function' ? 'sidebar' : null);
 
 // Open — synchronous inside the click gesture (see header note): Chrome's
 // window side panel, else Firefox's sidebar.
-const openPanel = () => {
+// why exported: the App tab's full-screen handle opens the same panel. Call
+// mountPullInPeerd() first, because it caches the tab ID.
+export const openPanel = () => {
   try {
     const sidePanel = sidePanelApi();
     if (sidePanel?.open) {
@@ -241,6 +245,9 @@ const renderToggle = () => {
   }
 };
 
+/** @type {((open: boolean) => void)[]} */
+const panelListeners = [];
+
 /** @param {boolean} open */
 const setPanelOpen = (open) => {
   const next = !!open;
@@ -248,6 +255,16 @@ const setPanelOpen = (open) => {
   panelOpen = next;
   if (next) removeHint();   // panel opened — the "pull in" reminder is moot
   renderToggle();
+  for (const listener of panelListeners) listener(next);
+};
+
+// Tell `listener` whether the panel is open: once now, then on each change.
+// mountPullInPeerd() keeps the state live.
+// why exported: the App tab's full-screen handle hides while the panel is open.
+/** @param {(open: boolean) => void} listener */
+export const onPanelOpenChange = (listener) => {
+  panelListeners.push(listener);
+  listener(panelOpen);
 };
 
 // ---- the shortcut hint: a brief, auto-dismissing reminder ----------------
@@ -365,7 +382,7 @@ const listenForSurfaceChanges = () => {
  */
 export const mountPullInPeerd = () => {
   if (typeof document === 'undefined') return null;
-  if (!panelApiAvailable()) return null;
+  if (!panelKind()) return null;
   const existing = document.querySelector('.peerd-pull');
   if (existing) return /** @type {HTMLButtonElement} */ (existing);
 

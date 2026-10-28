@@ -14,12 +14,13 @@ import {
   opfsHelpers,
 } from '/peerd-engine/index.js';
 import { loadDweb } from '/shared/dweb-loader.js';
-import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
+import { mountPullInPeerd, onPanelOpenChange, openPanel, panelKind } from '/shared/pull-in-peerd.js';
 import { isServiceWorkerSender } from '/shared/messaging.js';
 import { createAppDataClient } from './app-data-client.js';
 import { mithrilClassicSource } from './mithril-classic-source.js';
 import { createDwebBridgeLifecycle } from './dweb-bridge-lifecycle.js';
 import { showConsentBar } from './consent-bar.js';
+import { mountFullScreen } from './full-screen.js';
 import { makeAppActorAttachRecovery } from './actor-attach-recovery.js';
 import { mapError } from '/sidepanel/error-display.js';
 
@@ -780,7 +781,15 @@ const dwebBridgeLifecycle = createDwebBridgeLifecycle();
 let confirmationTail = Promise.resolve();
 
 /** @param {{ appName: string, detail: string, kind?: string, approveLabel?: string }} args @returns {Promise<boolean>} */
-const showConfirmation = (args) => showConsentBar(args, { inert: frame });
+const showConfirmation = async (args) => {
+  // why leave full screen first: for its first seconds, full screen shows the
+  // browser's own exit message at the top center, over this bar's text and buttons.
+  if (document.fullscreenElement) {
+    try { await document.exitFullscreen(); } catch { return false; }
+    if (document.fullscreenElement) return false;
+  }
+  return showConsentBar(args, { inert: frame });
+};
 
 /** Serialize every trusted-parent consent surface so App prompts cannot overlap.
  * @param {{ appName: string, detail: string, kind?: string, approveLabel?: string }} args */
@@ -1015,6 +1024,12 @@ const isolation = /** @type {{ ok?: boolean, error?: string, actorRequired?: boo
 // A peerd-owned tab carries the trigger to pull the side panel in — so you can
 // keep chatting from this App without a round-trip back to home.
 mountPullInPeerd();
+// Full screen keeps the trigger as the P handle at the left edge.
+mountFullScreen({
+  doc: document, target: document.documentElement, frame,
+  button: byId('fullscreen-btn'), handle: byId('peerd-handle'), status: byId('fullscreen-status'),
+  panelKind: panelKind(), openPanel, onPanelOpenChange, onFailure: showNotice,
+});
 
 if (!isolation?.ok) {
   showActorAttachFailure(isolation, 'This browser cannot enforce App isolation.');

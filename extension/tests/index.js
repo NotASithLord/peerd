@@ -79,6 +79,7 @@ import './unit/engine-tabs/notebook-tab/notebook-output-render.test.js';
 // --- chassis: app-tab ---
 import './unit/engine-tabs/app-tab/app-binary-assets.test.js';
 import './unit/engine-tabs/app-tab/consent-bar.test.js';
+import './unit/engine-tabs/app-tab/full-screen.test.js';
 
 // --- red-team (in-browser tier): real-realm sandbox escape + CSP fences ---
 import './unit/red-team/sandbox-escape.test.js';

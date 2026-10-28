@@ -6,7 +6,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { attach, evalIn, launchPeerd, PASSPHRASE, rpc, waitFor } from './e2e-harness.mjs';
+import { attach, CDPSessionDetachedError, evalIn, launchPeerd, PASSPHRASE, rpc, waitFor } from './e2e-harness.mjs';
 
 export const REPORT = resolve('artifacts/e2e/network-consent-cold.json');
 const BINDING = '__peerdConsentTransportObserved';
@@ -206,7 +206,9 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
     if (scope?.detached) return Promise.reject(scope.reason);
     return activeDiagnostic(label, operation, budgetMs, scope ? AbortSignal.any([scope.signal, signal]) : signal);
   };
-  connection.send = (method, params = {}, sessionId, signal = lifetime.signal) => scopedDiagnostic(sessionId,
+  connection.send = (method, params = {}, sessionId, signal = lifetime.signal) => {
+    const originalScope = scopes.get(sessionId);
+    return scopedDiagnostic(sessionId,
     `${method} session=${sessionId ?? 'browser'}`, () => {
       if (closing) throw cancelled;
       const scope = scopes.get(sessionId);
@@ -221,7 +223,18 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
         if (detachedScope) detachedScope.startupHeld = false;
       }
       return nativeSend(method, params, sessionId);
-    }, undefined, signal);
+    }, undefined, signal).catch(error => {
+      // Native detach rejects commands before the deferred scope abort. Only
+      // its exact observed, already-covered realm may enter retirement here;
+      // the barrier still requires that target's native destruction evidence.
+      if (error instanceof CDPSessionDetachedError && error.sessionId === sessionId
+          && originalScope && scopes.get(sessionId) === originalScope
+          && originalScope.detached && (originalScope.ready || originalScope.startupHeld)) {
+        throw originalScope.reason;
+      }
+      throw error;
+    });
+  };
   const sessions = new Map();
   const owners = new Map();
   const readiness = new Map();
