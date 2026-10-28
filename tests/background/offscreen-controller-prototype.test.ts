@@ -1702,3 +1702,97 @@ describe('controller protocol pure validation', () => {
     });
   }, 20_000);
 });
+
+test('startup bursts wait within admission bounds without exceeding execution slots', async () => {
+  let release!: () => void;
+  let entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  let executing = 0;
+  let maximum = 0;
+  let invocations = 0;
+  const controller = await connectController({
+    ensureOffscreen: async () => {}, capabilities: ['state.read'],
+    findHost: async () => ({
+      postMessage: (offer: any, transfer: Transferable[]) => bindControllerChannel({
+        port: transfer[0] as MessagePort, channelId: offer.channelId,
+        buildDigest: offer.buildDigest, kernelEpoch: offer.kernelEpoch,
+        hostEpoch: 'host-startup-burst', offeredCaps: offer.capabilities,
+        supportedCaps: ['state.read'], maxConcurrent: 1, maxPending: 2,
+        loadController: async () => ({ call: async () => {
+          invocations += 1;
+          executing += 1;
+          maximum = Math.max(maximum, executing);
+          if (invocations === 1) { entered(); await held; }
+          executing -= 1;
+          return { ok: true };
+        } }),
+      }),
+    }),
+  });
+  try {
+    const first = controller.call('state.read', {}, { timeoutMs: 2_000 });
+    await started;
+    let secondSettled = false;
+    const second = controller.call('state.read', {}, { timeoutMs: 2_000 })
+      .then(result => { secondSettled = true; return result; });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(secondSettled).toBe(false);
+    expect(invocations).toBe(1);
+    expect(await controller.call('state.read', {}, { timeoutMs: 2_000 }))
+      .toMatchObject({ ok: false, code: 'host-capacity', outcomeKnown: true });
+    release();
+    expect(await first).toMatchObject({ ok: true });
+    expect(await second).toMatchObject({ ok: true });
+    expect(maximum).toBe(1);
+    expect(invocations).toBe(2);
+  } finally { release(); controller.close(); }
+});
+
+for (const ending of ['cancel', 'deadline', 'close'] as const) {
+  test(`queued controller call never executes after ${ending}`, async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    let invocations = 0;
+    let closeHost: (() => void) | undefined;
+    const controller = await connectController({
+      ensureOffscreen: async () => {}, capabilities: ['state.read'],
+      findHost: async () => ({
+        postMessage: (offer: any, transfer: Transferable[]) => {
+          const host = bindControllerChannel({
+          port: transfer[0] as MessagePort, channelId: offer.channelId,
+          buildDigest: offer.buildDigest, kernelEpoch: offer.kernelEpoch,
+          hostEpoch: `host-queued-${ending}`, offeredCaps: offer.capabilities,
+          supportedCaps: ['state.read'], maxConcurrent: 1,
+          loadController: async () => ({ call: async () => {
+            invocations += 1;
+            if (invocations === 1) { entered(); await held; }
+            return { ok: true };
+          } }),
+          });
+          closeHost = host.close;
+        },
+      }),
+    });
+    try {
+      const first = controller.call('state.read', {}, { timeoutMs: 2_000 });
+      await started;
+      const abort = new AbortController();
+      const waiting = controller.call('state.read', {}, {
+        timeoutMs: ending === 'deadline' ? 40 : 2_000, signal: abort.signal,
+      });
+      await new Promise(resolve => setTimeout(resolve, 15));
+      if (ending === 'cancel') abort.abort();
+      if (ending === 'close') { closeHost?.(); controller.close(); }
+      const result = await waiting;
+      expect(result.ok).toBe(false);
+      if (ending === 'cancel') expect(result.outcomeKnown).toBe(true);
+      release();
+      await first;
+      await new Promise(resolve => setTimeout(resolve, 15));
+      expect(invocations).toBe(1);
+    } finally { release(); controller.close(); }
+  });
+}

@@ -95,14 +95,14 @@ export const createFeatureLeaseCoordinator = ({
   now = Date.now,
   vaultUnlocked = false,
 }) => {
-  const canonicalIdentity = parseKernelIdentity(identity);
-  if (!canonicalIdentity) throw new Error('feature-lease-identity-invalid');
+  const owner = parseKernelIdentity(identity);
+  if (!owner) throw new Error('feature-lease-identity-invalid');
   const ownsDocument = (/** @type {any} */ value) =>
-    value?.ownerKernelEpoch === canonicalIdentity.kernelEpoch
-    && value?.ownerBootId === canonicalIdentity.bootId
-    && value?.buildId === canonicalIdentity.buildId;
+    value?.ownerKernelEpoch === owner.kernelEpoch
+    && value?.ownerBootId === owner.bootId
+    && value?.buildId === owner.buildId;
   const receiptIdentityMatches = (/** @type {any} */ receipt) =>
-    kernelIdentityMatches(canonicalIdentity, receipt);
+    kernelIdentityMatches(owner, receipt);
   /** @type {Map<string, any>} */
   const states = new Map(FEATURE_LEASE_SCOPES.map((scope) => [scope, {
     scope, generation: 0, status: 'idle', leaseId: null, hostEpoch: null,
@@ -113,11 +113,11 @@ export const createFeatureLeaseCoordinator = ({
   const disabled = new Set();
   let locked = !vaultUnlocked;
   /** @type {FeatureLeaseIntentDocument} */
-  let document = emptyDocument(canonicalIdentity);
+  let document = emptyDocument(owner);
   const serializeStore = makeSerialLane();
 
   const ready = store.get(FEATURE_LEASE_INTENT_KEY).then(async (stored) => {
-    document = parseDocument(stored, canonicalIdentity);
+    document = parseDocument(stored, owner);
     // A successor starts provisionally locked until vault resume finishes.
     // Preserve durable intent during that window so it can adopt a surviving
     // dweb host. A real failed resume or user lock calls lock(), which clears
@@ -132,7 +132,7 @@ export const createFeatureLeaseCoordinator = ({
       if (!ownsDocument(stored)) {
         throw new Error('feature-lease-kernel-retired');
       }
-      document = mutate(parseDocument(stored, canonicalIdentity));
+      document = mutate(parseDocument(stored, owner));
       await store.set(FEATURE_LEASE_INTENT_KEY, document);
       return document;
     });
@@ -144,18 +144,18 @@ export const createFeatureLeaseCoordinator = ({
     }
   };
 
-  const persistDesired = (/** @type {string} */ scope, /** @type {boolean} */ desired,
+  const saveIntent = (/** @type {string} */ scope, /** @type {boolean} */ desired,
     /** @type {string} */ reason) => mutateDocument((current) => ({
       ...current,
-      ownerBootId: canonicalIdentity.bootId,
-      ownerKernelEpoch: canonicalIdentity.kernelEpoch,
+      ownerBootId: owner.bootId,
+      ownerKernelEpoch: owner.kernelEpoch,
       intents: desired
         ? [...current.intents.filter((/** @type {any} */ item) => item.scope !== scope),
           { scope, desired: true, reason }]
         : current.intents.filter((/** @type {any} */ item) => item.scope !== scope),
     }));
 
-  const validateReceipt = (/** @type {any} */ receipt, /** @type {any} */ lease) =>
+  const matchReceipt = (/** @type {any} */ receipt, /** @type {any} */ lease) =>
     receipt?.ok === true
     && receiptIdentityMatches(receipt)
     && receipt.hostEpoch === lease.hostEpoch
@@ -182,12 +182,17 @@ export const createFeatureLeaseCoordinator = ({
     }
     if (disabled.has(scope)) return outcome(false, 'feature-lease-disabled', true, { scope });
     if (options.signal?.aborted) return outcome(false, 'feature-lease-cancelled', true, { scope });
+    const before = state.generation;
     let hostEpoch;
     try {
       hostEpoch = options.hostEpoch ?? await resolveHostEpoch(scope);
     }
     catch {
       return outcome(false, 'feature-lease-host-unavailable', true, { scope });
+    }
+    // Host lookup must not outlive revocation.
+    if (state.generation !== before || options.signal?.aborted) {
+      return outcome(false, 'feature-lease-cancelled', true, { scope });
     }
     if (!validId(hostEpoch)) return outcome(false, 'feature-lease-host-invalid', true, { scope });
     if (state.poisonedHostEpoch === hostEpoch) {
@@ -199,7 +204,7 @@ export const createFeatureLeaseCoordinator = ({
       }
       if (options.durable !== false && !state.durable) {
         try {
-          await persistDesired(scope, true,
+          await saveIntent(scope, true,
             REASONS.has(options.reason) ? options.reason : 'feature-demand');
           state.durable = true;
         } catch {
@@ -208,7 +213,7 @@ export const createFeatureLeaseCoordinator = ({
       }
       return outcome(true, 'feature-lease-active', true, {
         scope, leaseId: state.leaseId, generation: state.generation,
-        ...canonicalIdentity, hostEpoch, coalesced: true,
+        ...owner, hostEpoch, coalesced: true,
       });
     }
     if (state.status === 'starting') {
@@ -224,7 +229,7 @@ export const createFeatureLeaseCoordinator = ({
       scope,
       leaseId: newId(),
       generation: state.generation,
-      ...canonicalIdentity,
+      ...owner,
       hostEpoch,
       reason: REASONS.has(options.reason) ? options.reason : 'feature-demand',
       requestedAt: now(),
@@ -242,21 +247,21 @@ export const createFeatureLeaseCoordinator = ({
     options.signal?.addEventListener?.('abort', abort, { once: true });
 
     try {
-      if (state.durable) await persistDesired(scope, true, lease.reason);
+      if (state.durable) await saveIntent(scope, true, lease.reason);
       else await assertOwner();
       if (controller.signal.aborted || state.leaseId !== lease.leaseId) {
-        if (state.durable) await persistDesired(scope, false, 'feature-disabled');
+        if (state.durable) await saveIntent(scope, false, 'feature-disabled');
         if (state.leaseId === lease.leaseId) state.status = 'idle';
         return outcome(false, 'feature-lease-cancelled', true, { scope });
       }
       const prepared = await dispatcher.prepare(Object.freeze({ ...lease }));
       if (!prepared || typeof prepared.dispatch !== 'function') {
-        if (state.durable) await persistDesired(scope, false, 'feature-disabled');
+        if (state.durable) await saveIntent(scope, false, 'feature-disabled');
         state.status = 'idle';
         return outcome(false, 'feature-lease-prepare-invalid', true, { scope });
       }
       if (controller.signal.aborted || state.leaseId !== lease.leaseId) {
-        if (state.durable) await persistDesired(scope, false, 'feature-disabled');
+        if (state.durable) await saveIntent(scope, false, 'feature-disabled');
         if (state.leaseId === lease.leaseId) state.status = 'idle';
         return outcome(false, 'feature-lease-cancelled', true, { scope });
       }
@@ -268,7 +273,7 @@ export const createFeatureLeaseCoordinator = ({
       if (controller.signal.aborted || state.leaseId !== lease.leaseId) {
         return finishUnknown(state, lease, 'feature-lease-cancelled-after-dispatch');
       }
-      if (!validateReceipt(receipt, lease)) {
+      if (!matchReceipt(receipt, lease)) {
         return finishUnknown(state, lease, 'feature-lease-receipt-invalid');
       }
       state.status = 'active';
@@ -276,7 +281,7 @@ export const createFeatureLeaseCoordinator = ({
       return outcome(true, 'feature-lease-started', true, lease);
     } catch (error) {
       if (crossedDispatch) return finishUnknown(state, lease, 'feature-lease-host-lost');
-      try { if (state.durable) await persistDesired(scope, false, 'feature-disabled'); }
+      try { if (state.durable) await saveIntent(scope, false, 'feature-disabled'); }
       catch { return finishUnknown(state, lease, 'feature-lease-intent-uncertain'); }
       if (state.leaseId === lease.leaseId) state.status = 'idle';
       return outcome(false, controller.signal.aborted
@@ -314,7 +319,7 @@ export const createFeatureLeaseCoordinator = ({
       scope,
       leaseId: state.leaseId,
       generation: state.generation,
-      ...canonicalIdentity,
+      ...owner,
       hostEpoch: state.hostEpoch,
       reason: REASONS.has(reason) ? reason : 'feature-disabled',
     });
@@ -330,7 +335,7 @@ export const createFeatureLeaseCoordinator = ({
       await ready;
       try {
         if (sharedIntentWrite) await sharedIntentWrite;
-        else await persistDesired(scope, false, lease.reason);
+        else await saveIntent(scope, false, lease.reason);
       }
       catch {
         return outcome(false, 'feature-lease-revoke-intent-uncertain', false, { scope });
@@ -345,7 +350,7 @@ export const createFeatureLeaseCoordinator = ({
       }
       try {
         const receipt = await stop(lease);
-        if (!validateReceipt(receipt, lease)) {
+        if (!matchReceipt(receipt, lease)) {
           state.poisonedHostEpoch = lease.hostEpoch;
           return outcome(false, 'feature-lease-stop-unknown', false, { scope });
         }
@@ -431,7 +436,7 @@ export const createFeatureLeaseCoordinator = ({
     if (!ownsDocument(stored)) {
       throw new Error('feature-lease-kernel-retired');
     }
-    const intents = parseDocument(stored, canonicalIdentity).intents;
+    const intents = parseDocument(stored, owner).intents;
     const results = [];
     for (const intent of intents) {
       if (disabled.has(intent.scope)) continue;
@@ -461,7 +466,7 @@ export const createFeatureLeaseCoordinator = ({
   };
 
   const snapshot = () => Object.freeze({
-    ...canonicalIdentity,
+    ...owner,
     locked,
     disabled: Object.freeze([...disabled]),
     leases: Object.freeze(Object.fromEntries([...states].map(([scope, state]) => [scope, {

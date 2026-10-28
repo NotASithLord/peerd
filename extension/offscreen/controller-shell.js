@@ -295,6 +295,7 @@ export const bindControllerChannel = ({
    *   deadlineAt: number,
    *   authority: NonNullable<ReturnType<typeof parseControllerAuthority>>,
    *   phase: 'accepted'|'committed',
+   *   commitRequested?: boolean,
    *   abort?: AbortController,
    *   deadlineTimer?: ReturnType<typeof setTimeout>,
    *   kernelCalls: Map<string, { resolve: (value:any) => void, operation:string, payload:unknown }>,
@@ -414,6 +415,7 @@ export const bindControllerChannel = ({
     // Never evict identities and reinterpret a late reply. Exhaustion retains
     // the original conservative settlement, then fails the whole channel closed.
     if (!retainedPendingReplies) close();
+    else queueMicrotask(drainCommitted);
   };
   const reject = (
     /** @type {string} */ requestId,
@@ -431,9 +433,10 @@ export const bindControllerChannel = ({
     if (operation.deadlineTimer) clearTimeout(operation.deadlineTimer);
     operation.deadlineTimer = setTimeout(() => {
       operation.abort?.abort();
-      const custody = controllerCustodyIsAuthoritative(operation.capability)
-          || operation.effectEntered
-        ? pendingCustody(operation) : { outcomeKnown: false, retryable: false };
+      const custody = operation.phase === 'accepted'
+        ? { outcomeKnown: true, retryable: true }
+        : controllerCustodyIsAuthoritative(operation.capability) || operation.effectEntered
+          ? pendingCustody(operation) : { outcomeKnown: false, retryable: false };
       settle(requestId, { ok: false, code: 'controller-deadline-expired', ...custody });
     }, Math.max(1, operation.deadlineAt - now()));
   };
@@ -530,6 +533,18 @@ export const bindControllerChannel = ({
           outcomeKnown: false,
         }),
       );
+  };
+  // why: admitted startup calls share a bounded queue rather than failing
+  // when module loading occupies every execution slot. Admission byte/count
+  // caps, original deadlines and the separate stop lane remain authoritative.
+  const drainCommitted = () => {
+    if (closed) return;
+    for (const [requestId, operation] of operations) {
+      if (operation.phase !== 'accepted' || !operation.commitRequested) continue;
+      const count = operation.stopLane ? stopConcurrent : concurrent - stopConcurrent;
+      const limit = operation.stopLane ? STOP_LANE_MAX_CONCURRENT : maxConcurrent;
+      if (count < limit) commitOperation(requestId, operation);
+    }
   };
   const close = () => {
     if (closed) return;
@@ -697,15 +712,9 @@ export const bindControllerChannel = ({
       return;
     }
     if (message.type !== 'kernel/commit' || operation.phase !== 'accepted') return;
-    const laneConcurrent = operation.stopLane ? stopConcurrent : concurrent - stopConcurrent;
-    const laneConcurrentCap = operation.stopLane ? STOP_LANE_MAX_CONCURRENT : maxConcurrent;
-    if (laneConcurrent >= laneConcurrentCap) {
-      settle(message.requestId, {
-        ok: false, code: 'host-concurrency', outcomeKnown: true,
-      });
-      return;
-    }
-    commitOperation(message.requestId, operation);
+    operation.commitRequested = true;
+    armDeadline(message.requestId, operation);
+    drainCommitted();
   };
   port.onmessageerror = close;
   port.addEventListener('close', close, { once: true });

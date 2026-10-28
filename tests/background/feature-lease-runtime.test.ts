@@ -1069,9 +1069,11 @@ describe('production feature-lease runtime', () => {
     });
     const recovery = runtime.handleHostLoss(oldHostEpoch);
     await waiting.promise;
-    await runtime.disable('dweb');
+    const disabled = runtime.disable('dweb');
+    // Revocation is immediate; acknowledgement now joins recovery completion.
+    expect(runtime.snapshot().disabled).toContain('dweb');
     resume.resolve();
-    const result = await recovery;
+    const [result] = await Promise.all([recovery, disabled]);
     expect(result.results).toContainEqual(expect.objectContaining({
       scope: 'dweb', code: 'feature-lease-recovery-cancelled',
     }));
@@ -1678,4 +1680,117 @@ describe('production feature-lease runtime', () => {
       expect.objectContaining({ scope: 'dweb', orphaned: false }),
     ]);
   });
+});
+
+test('overlapping network disables both await durable vault recovery', async () => {
+  const env = makeEnvironment();
+  const replacementEntered = deferred();
+  const releaseReplacement = deferred();
+  let refuseStop = true;
+  const runtime = makeRuntime(env, makeStore(), 'kernel-disable-overlap', {
+    sendHostMessage: async (message: any) => {
+      if (refuseStop && message.type === 'feature-lease/host-stop'
+          && message.lease?.scope === 'dweb') {
+        refuseStop = false;
+        throw new Error('lost-network-stop-receipt');
+      }
+      return env.sendHostMessage(message);
+    },
+  });
+  await runtime.ready;
+  await runtime.acquire('vault-authority');
+  await runtime.acquire('dweb');
+  env.onStart(async scope => {
+    if (scope === 'vault-authority') {
+      replacementEntered.resolve();
+      await releaseReplacement.promise;
+    }
+  });
+  const first = runtime.disable('dweb');
+  let secondFinished = false;
+  const second = runtime.disable('dweb').then(result => { secondFinished = true; return result; });
+  try {
+    await replacementEntered.promise;
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(secondFinished).toBe(false);
+  } finally {
+    releaseReplacement.resolve();
+    await Promise.all([first, second]);
+  }
+  expect(runtime.snapshot().leases['vault-authority'].status).toBe('active');
+  expect(runtime.snapshot().disabled).toContain('dweb');
+});
+
+test('overlapping disable does not hide an earlier physical retirement failure', async () => {
+  const env = makeEnvironment();
+  const runtime = makeRuntime(env, makeStore(), 'kernel-disable-failed-close', {
+    recoveryAttempts: 1, wait: async () => {},
+    sendHostMessage: async (message: any) => {
+      if (message.type === 'feature-lease/host-stop' && message.lease?.scope === 'dweb') {
+        throw new Error('lost-stop-receipt');
+      }
+      return env.sendHostMessage(message);
+    },
+    closeOffscreen: async () => {
+      throw new Error('physical-retirement-failed');
+    },
+  });
+  await runtime.ready;
+  await runtime.acquire('vault-authority');
+  await runtime.acquire('dweb');
+  const results = await Promise.allSettled([runtime.disable('dweb'), runtime.disable('dweb')]);
+  expect(results[0].status).toBe('rejected');
+  expect(results[1].status).toBe('rejected');
+  if (results[0].status === 'rejected' && results[1].status === 'rejected') {
+    expect(results[1].reason).toBe(results[0].reason);
+    expect(results[0].reason).toMatchObject({ message: 'feature-lease-host-close-timeout' });
+  }
+  expect(runtime.snapshot().disabled).toContain('dweb');
+});
+
+test('network disable awaits an already-running lost-host vault recovery', async () => {
+  const env = makeEnvironment();
+  const runtime = makeRuntime(env, makeStore(), 'kernel-loss-disable');
+  await runtime.ready;
+  await runtime.acquire('vault-authority');
+  await runtime.acquire('dweb');
+  const oldEpoch = env.host!.hostEpoch;
+  const entered = deferred();
+  const release = deferred();
+  env.onStart(async scope => {
+    if (scope === 'vault-authority') { entered.resolve(); await release.promise; }
+  });
+  env.crashHost();
+  const recovery = runtime.handleHostLoss(oldEpoch);
+  await entered.promise;
+  let finished = false;
+  const off = runtime.disable('dweb').then(value => { finished = true; return value; });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(finished).toBe(false);
+  } finally {
+    release.resolve();
+    await Promise.all([recovery, off]);
+  }
+  expect(runtime.snapshot().leases['vault-authority'].status).toBe('active');
+  expect(runtime.snapshot().disabled).toContain('dweb');
+});
+
+test('network disable propagates concurrent lost-host retirement failure', async () => {
+  const env = makeEnvironment();
+  const release = deferred();
+  const runtime = makeRuntime(env, makeStore(), 'kernel-loss-disable-failure', {
+    closeOffscreen: async () => { await release.promise; throw new Error('close-failed'); },
+    wait: async () => {},
+  });
+  await runtime.ready;
+  await runtime.acquire('vault-authority');
+  await runtime.acquire('dweb');
+  const recovery = runtime.handleHostLoss(env.host!.hostEpoch);
+  const off = runtime.disable('dweb');
+  const settled = Promise.allSettled([recovery, off]);
+  release.resolve();
+  const results = await settled;
+  expect(results.map(result => result.status)).toEqual(['rejected', 'rejected']);
+  expect(runtime.snapshot().disabled).toContain('dweb');
 });

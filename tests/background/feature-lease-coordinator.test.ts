@@ -259,6 +259,26 @@ describe('post-vault feature lease coordinator', () => {
     expect(order).toEqual(['dweb']);
   });
 
+  for (const transition of ['disable', 'lock', 'revoke'] as const) {
+    test(`${transition} during host resolution prevents a late network dispatch`, async () => {
+      const entered = deferred<void>();
+      const host = deferred<string>();
+      const { coordinator, dispatched } = setup({ resolveHostEpoch: () => {
+        entered.resolve();
+        return host.promise;
+      } });
+      const pending = coordinator.acquire('dweb');
+      await entered.promise;
+      if (transition === 'lock') await coordinator.lock();
+      else await coordinator[transition]('dweb');
+      host.resolve('dweb-host-late');
+      const result = await pending;
+      expect(result).toMatchObject({ ok: false, code: 'feature-lease-cancelled', outcomeKnown: true });
+      expect(dispatched).toHaveLength(0);
+      expect(coordinator.snapshot().leases.dweb.status).not.toBe('active');
+    });
+  }
+
   test('lock and feature disable revoke synchronously; late starts cannot reactivate', async () => {
     const dwebGate = deferred<any>();
     let dwebLease: any;
