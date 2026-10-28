@@ -22,6 +22,7 @@ import {
 } from '/shared/ui-effects.js';
 import { makeConfirmationAnswer } from '/sidepanel/confirmation-answer.js';
 import { CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
+import { BROWSER } from '/shared/build-config.js';
 import { openOptions } from '/shared/open-options.js';
 import { LibrarySection } from './library-section.js';
 import { NetworkSection } from './network-section.js';
@@ -34,6 +35,11 @@ import { ConfirmModal, NoticeBar, StateRuntimeFailure } from '../sidepanel/compo
 import { ActorIsolationBanner } from '../sidepanel/components/actor-isolation-banner.js';
 import { VaultGate } from '../sidepanel/components/vault-gate-lazy.js';
 import { peerNotifications } from '/shared/peer-notifications.js';
+import {
+  INITIAL_PRESENCE, clearReply, firstTabHintVisible, firstTabOfferVisible, nextPresence,
+  presenceAfterPortLoss, presenceIcon, presenceTitle, setupPending, viewBesidePanel,
+} from './first-tab.js';
+import { FirstTabHint, FirstTabOffer } from './first-tab-prompts.js';
 
 /** @typedef {import('./library-section.js').Send} Send */
 
@@ -164,7 +170,10 @@ const focusActiveContent = () => {
   requestAnimationFrame(() => {
     const active = document.activeElement;
     if (active && active !== before && active !== document.body && active.closest('.home-content')) return;
-    const target = document.querySelector('.home-content textarea, .home-content h1, .home-content h2');
+    // why skip the first tab prompts: they sit first in the content, and a
+    // view change must land in the view, not on a prompt's heading.
+    const target = [...document.querySelectorAll('.home-content textarea, .home-content h1, .home-content h2')]
+      .find((element) => !element.closest('.first-tab-hint, .first-tab-offer'));
     if (!(target instanceof HTMLElement)) return;
     if (!target.matches('textarea, button, input, select, a[href]')) target.setAttribute('tabindex', '-1');
     target.focus();
@@ -197,6 +206,85 @@ const toggleChatList = () => {
   m.redraw();
 };
 
+// ---- "Keep peerd as the first tab" (rules: ./first-tab.js) -----------------
+// A pinned tab shows only its icon, so Home's icon and title show what peerd
+// is doing. why outside Mithril: a hidden tab gets no animation frame, so a
+// view hook would not run until the user came back.
+let sawSetup = false;        // this document showed the first-run gate
+let offerAnswered = false;
+let presenceState = INITIAL_PRESENCE;
+let shownPresence = INITIAL_PRESENCE.presence;
+const idleTitle = document.title;
+// One origin, so every open Home tab shares these two keys.
+const LOOKED_KEY = 'peerd.home.lookedAt';
+const HINT_KEY = 'peerd.home.firstTabHintSeen';
+const readHintSeen = () => { try { return localStorage.getItem(HINT_KEY) === '1'; } catch { return false; } };
+let hintSeen = readHintSeen();
+// why redraw first, then focus the content: the prompt that had focus must
+// be gone before focus moves, or focus lands on the prompt's own heading.
+const dismissHint = () => {
+  hintSeen = true;
+  try { localStorage.setItem(HINT_KEY, '1'); } catch { /* private mode */ }
+  m.redraw.sync();
+  focusActiveContent();
+};
+// After "Keep it" this tab is pinned. Read it again, so the hint shows here.
+const answerOffer = () => {
+  offerAnswered = true;
+  m.redraw.sync();
+  focusActiveContent();
+  readHomeTab();
+};
+// "Keep it" makes this tab the pinned one at the start, so the user sees the
+// result here, and the kernel adds a tab only to the other windows.
+const pinThisTab = async () => {
+  try {
+    const tab = await browser.tabs.getCurrent();
+    if (typeof tab?.id !== 'number') return;
+    await browser.tabs.update(tab.id, { pinned: true });
+    await browser.tabs.move(tab.id, { index: 0 });
+  } catch { /* the kernel adds a pinned tab instead */ }
+};
+// why tell the other Home tabs: each window can have its own pinned Home, and
+// the user saw the reply once they look at any of them.
+const markLooked = () => {
+  try { localStorage.setItem(LOOKED_KEY, String(Date.now())); } catch { /* private mode */ }
+};
+/** @param {import('./first-tab.js').TabPresence} presence */
+const showPresence = (presence) => {
+  if (presence === shownPresence) return;
+  shownPresence = presence;
+  const title = presenceTitle(presence, idleTitle, BROWSER === 'firefox');
+  if (document.title !== title) document.title = title;
+  let icon = /** @type {HTMLLinkElement | null} */ (document.querySelector('link[rel="icon"]'));
+  if (!icon) {
+    icon = document.createElement('link');
+    icon.rel = 'icon';
+    document.head.append(icon);
+  }
+  icon.href = presenceIcon(presence);
+};
+const refreshPresence = () => {
+  presenceState = nextPresence(presenceState, {
+    streaming: currentState.streaming === true,
+    sessionId: currentState.session?.sessionId ?? null,
+    hidden: document.hidden,
+    panelOpen: sidePanelOpen,
+  });
+  if (presenceState.looked) markLooked();
+  showPresence(presenceState.presence);
+};
+/** @param {StorageEvent} event */
+const onStorage = (event) => {
+  if (event.key === LOOKED_KEY) {
+    presenceState = clearReply(presenceState);
+    showPresence(presenceState.presence);
+  } else if (event.key === HINT_KEY) {
+    hintSeen = readHintSeen();
+    m.redraw();
+  }
+};
+
 // ---- live port to the SW (home is an equal live surface, DESIGN-12) -------
 /** @param {any} msg @returns {boolean} */
 const handlePortMessage = (msg) => {
@@ -206,7 +294,11 @@ const handlePortMessage = (msg) => {
   // Surface presence (not chat state, so it bypasses the reducer): when a side
   // panel opens, hand Chat + Chats to it and drop to a tool view; when it closes,
   // take chat back to where we were.
-  if (msg.type === 'surfaces') { applySidePanelOpen(!!msg.sidePanelOpen); return true; }
+  if (msg.type === 'surfaces') {
+    applySidePanelOpen(!!msg.sidePanelOpen);
+    refreshPresence();
+    return true;
+  }
   // §4e: tag which surface this fold is FOR, so the answering surface doesn't
   // transcript-line its own click (mirrors the side panel).
   const folded = msg.type === 'confirm/resolved' ? { ...msg, confirmSurface: 'home' } : msg;
@@ -214,6 +306,8 @@ const handlePortMessage = (msg) => {
   if (next === currentState) return msg.type === 'state';
   currentState = next;
   if (msg.type === 'state') { booted = true; }
+  if (setupPending(currentState, DWEB_ENABLED)) sawSetup = true;
+  refreshPresence();
   redrawForRuntimeMessage(m.redraw, msg);
   return true;
 };
@@ -224,6 +318,8 @@ const resetAfterDisconnect = () => {
   currentState = INITIAL_STATE;
   booted = false;
   actorFetchInFlight.clear();
+  presenceState = presenceAfterPortLoss(presenceState);
+  showPresence(presenceState.presence);
   m.redraw();
 };
 
@@ -354,10 +450,23 @@ const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, op
 // windowId synchronously inside the click gesture — sidePanel.open() rejects
 // the WINDOW_ID_CURRENT sentinel, and tabs.getCurrent() is async (too late for
 // the gesture).
+// Re-read when the tab comes back into view: the user may have pinned or
+// unpinned it, and the first-tab hint shows only in a pinned tab.
 /** @type {import('webextension-polyfill').Tabs.Tab | null} */
 let homeTab = null;
-try { browser.tabs?.getCurrent?.()?.then?.((t) => { homeTab = t ?? null; }); }
-catch { /* no tabs API in this context */ }
+const readHomeTab = () => {
+  try {
+    browser.tabs?.getCurrent?.()?.then?.((t) => {
+      const pinnedChanged = !!t?.pinned !== !!homeTab?.pinned;
+      homeTab = t ?? null;
+      if (!pinnedChanged) return;
+      // The view picked when the panel took the chat depends on the pin.
+      if (sidePanelOpen && stashedChatView) activeView = besidePanel();
+      m.redraw();
+    });
+  } catch { /* no tabs API in this context */ }
+};
+readHomeTab();
 
 // "Pop the chat to the side" — open the window-global side panel so the chat
 // follows across tabs (DESIGN-12). sidePanel.open() needs a user gesture, so
@@ -402,9 +511,16 @@ const onVisibility = () => {
   if (homeWasHidden && !hidden) {
     if (sidePanelOpen && panelOpenedByCard) settleUiEffect(send({ type: 'sidepanel/close' }));
     panelOpenedByCard = false;
+    readHomeTab();
+    markLooked();
   }
   homeWasHidden = hidden;
+  refreshPresence();
 };
+
+const besidePanel = () => viewBesidePanel({
+  pinned: homeTab?.pinned, discover: DWEB_ENABLED && currentState.settings?.dwebEnabled === true,
+});
 
 // Apply the SW's side-panel-open signal — chat is SINGLE-HOMED: when the panel is
 // open it owns Chat + Chats, so home drops to a tool view (stashing where we were
@@ -416,8 +532,8 @@ function applySidePanelOpen(open) {
   if (open) {
     // Chat in the side panel + instance-wide Actors on the full tab is the
     // complementary two-level view: local work beside the page, global runtime
-    // topology on home.
-    if (activeView === 'chat') { stashedChatView = activeView; activeView = 'actors'; }
+    // topology on home. A pinned Home tab shows the apps instead.
+    if (activeView === 'chat') { stashedChatView = activeView; activeView = besidePanel(); }
   } else if (stashedChatView) { activeView = stashedChatView; stashedChatView = null; }
   m.redraw();
 }
@@ -747,8 +863,8 @@ const notifBanner = (n) => m('.notif-banner', [
   m('button.notif-banner-x', { 'aria-label': 'Dismiss', onclick: () => peerNotifications.dismiss(n.id) }, '×'),
 ]);
 
-/** @param {boolean} showDweb */
-const content = (showDweb) => {
+/** @param {boolean} showDweb @param {boolean} holdNudges a first tab prompt shows */
+const content = (showDweb, holdNudges) => {
   // Defensive: if a panel opened while the chat view was somehow still active, say
   // where the chat went rather than render a second live chat (single-homed).
   if (activeView === 'chat' && sidePanelOpen) {
@@ -779,7 +895,7 @@ const content = (showDweb) => {
         ]),
         // Newest peerd notification, surfaced in the chat.
         peerNotifications.list()[0] ? notifBanner(peerNotifications.list()[0]) : null,
-        m(ChatView, { state: currentState, send, voiceManager: undefined, uiActions, surface: 'home' }),
+        m(ChatView, { state: currentState, send, voiceManager: undefined, uiActions, surface: 'home', holdNudges }),
       ]),
     ]);
   }
@@ -836,9 +952,7 @@ const HomeApp = {
     // genuinely fresh install; a panel-first user who clicks Home mid-use lands
     // on home without replaying personal setup. A missing explicit network
     // choice adds only that decision for existing profiles.
-    const setupNeeded = currentState.profile?.onboardingComplete === false
-      || DWEB_ENABLED && currentState.settings?.dwebChoiceMade === false;
-    if (setupNeeded) {
+    if (setupPending(currentState, DWEB_ENABLED)) {
       if (OnboardingGate) return m('.options-gate', m(OnboardingGate, { state: currentState, send, reconcileState }));
       if (!onboardingFailed) loadOnboarding();
       return m('.options-gate', onboardingFailed
@@ -847,6 +961,8 @@ const HomeApp = {
     }
 
     const showDweb = DWEB_ENABLED && currentState.settings?.dwebEnabled;
+    const hintShown = firstTabHintVisible({ pinned: homeTab?.pinned, seen: hintSeen });
+    const offerShown = firstTabOfferVisible({ sawSetup, answered: offerAnswered, settings: currentState.settings });
     const items = navItems(showDweb);
     // Keep activeView valid if it vanished from the rail (dweb switched off, or the
     // side panel took Chat). Fall back to the FIRST available item, which is
@@ -906,6 +1022,8 @@ const HomeApp = {
       m('.home-shell', [
         rail,
         m('main.home-content', { class: `home-content--${activeView}` }, [
+          hintShown ? m(FirstTabHint, { onDismiss: dismissHint }) : null,
+          offerShown ? m(FirstTabOffer, { send, onAnswered: answerOffer, beforeKeep: pinThisTab }) : null,
           // System notices (/init progress, the grant-debugger nudge) — the SW
           // broadcasts these to every surface (DESIGN-12), so home must render
           // them too, not just the side panel's App.
@@ -923,7 +1041,8 @@ const HomeApp = {
                 m('button.home-popout', { onclick: bringChatHome }, 'Bring it here ⇤'),
               ])
             : null,
-          content(showDweb),
+          // why hold the nudges: one first-run card at a time.
+          content(showDweb, hintShown || offerShown),
         ]),
       ]),
       // The agent's permission prompt — broadcast to every open surface
@@ -953,5 +1072,6 @@ export const startHome = () => {
   statePort.start();
   document.addEventListener('visibilitychange', onVisibility);
   window.addEventListener('hashchange', onHashChange);
+  window.addEventListener('storage', onStorage);
   m.mount(root, HomeApp);
 };

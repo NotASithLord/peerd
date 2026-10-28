@@ -149,6 +149,17 @@ export const attachKernelFrontDoor = (deps) => {
         return { ok: true };
       }
       const sidePanel = deps.browser.sidePanel;
+      // why every window: the open flag is global (any side panel port), and
+      // Chrome 141+ closes a panel per window. A window with no panel resolves.
+      if (typeof sidePanel?.close === 'function') {
+        const windows = await deps.browser.windows.getAll({ windowTypes: ['normal'] });
+        const closed = await Promise.allSettled(windows.map((/** @type {{id:number}} */ window) =>
+          sidePanel.close({ windowId: window.id })));
+        if (closed.length === 0 || closed.some(({ status }) => status === 'fulfilled')) {
+          return { ok: true };
+        }
+      }
+      // Older Chrome has no close: disable the panel, then turn it back on.
       if (!sidePanel?.setOptions) return { ok: false, error: 'no-sidepanel' };
       await sidePanel.setOptions({ enabled: false });
       setTimeout(() => {

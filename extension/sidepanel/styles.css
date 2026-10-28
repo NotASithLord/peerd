@@ -2270,6 +2270,28 @@ button.tool-call-header:focus-visible {
   margin-top: 8px;
 }
 
+/* --- first-run extras ("Keep peerd as the first tab") --- */
+/* The one-time offer after the first setup, on Home or in the side panel. */
+.first-tab-offer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r4);
+  background: var(--bg-elev);
+}
+.first-tab-offer-text { flex: 1 1 260px; min-width: 0; }
+.first-tab-offer h2 { margin: 0 0 2px; font-size: 14px; font-weight: 600; line-height: 1.3; }
+.first-tab-offer p { margin: 0; font-size: 13px; line-height: 1.45; color: var(--fg-muted); }
+.first-tab-offer p.error { margin-top: 6px; color: var(--danger-ink); }
+.first-tab-offer-actions { display: flex; gap: 8px; margin-left: auto; }
+/* The side panel's answer to "Keep it": the new tabs open out of sight. */
+.first-tab-kept { flex: none; margin: 0 0 12px; font-size: 13px; color: var(--fg-muted); }
+
 /* --- Logs view --------------------------------------------------------- */
 .logs-view .logs-header { display: flex; align-items: center; gap: 8px; }
 .log-tabs { display: flex; gap: 4px; margin: 10px 0 12px; }

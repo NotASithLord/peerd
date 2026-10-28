@@ -45,6 +45,7 @@ import { APP_RUNTIME_STATES } from './app-runtime-state.mjs';
 import { PERF_CHAT_NOTEBOOK_STATES } from './perf-chat-notebook-state.mjs';
 import { CHAT_ONBOARDING_STATES } from './chat-onboarding-state.mjs';
 import { HOME_SETTINGS_STATES } from './home-settings-state.mjs';
+import { FIRST_TAB_STATES } from './first-tab-states.mjs';
 import { IMMUTABLE_ADDRESS_VISUAL_STATES } from './immutable-address-visuals.mjs';
 import { CONSENT_LOCK_VISUAL_STATES } from './consent-lock-visuals.mjs';
 import { PEER_NETWORK_STATUS_STATES } from './peer-network-status-states.mjs';
@@ -711,6 +712,7 @@ export const STATES = [
   ...PERF_CHAT_NOTEBOOK_STATES,
   ...CHAT_ONBOARDING_STATES,
   ...HOME_SETTINGS_STATES,
+  ...FIRST_TAB_STATES,
   WASMER_STATE,
   {
     name: 'pacing-wait-stop', kind: 'functional', phase: 'post-unlock',
@@ -8916,6 +8918,12 @@ export const STATES = [
           { budgetMs: 15_000, pollMs: 80 }).catch(() => {});
         await evalIn(page, `document.querySelector('.set-toggle')?.focus()`);
         await rec.visualPage('options-behavior', page);
+        const firstTabRow = await evalIn(page, `(() => {
+          const labels = [...document.querySelectorAll('.set-row-label')].map((label) => label.textContent);
+          return labels.indexOf('Keep peerd as the first tab') - labels.indexOf('Toolbar button');
+        })()`);
+        if (baseRender) rec.observe('merge-base first tab row', { offset: firstTabRow });
+        else rec.check('"Keep peerd as the first tab" sits under the toolbar button', firstTabRow === 1, String(firstTabRow));
         await evalIn(page, `(() => {
           const button = [...document.querySelectorAll('button')]
             .find((el) => el.textContent === 'Reset section to defaults');
@@ -10852,6 +10860,7 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         }, { budgetMs: 30_000, pollMs: 100 });
         if (!target) throw new Error('The created App did not render');
         page = await attach(target.webSocketDebuggerUrl);
+        await page.send('Runtime.enable');
         await page.send('Page.enable');
         await page.send('Page.bringToFront');
         await page.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: directory });
@@ -10929,6 +10938,7 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
             editorHidden: document.getElementById('editor-panel')?.hidden,
             files: [...document.querySelectorAll('.pe-node[data-path]')].map((node) => node.dataset.path),
           })`);
+          rec.observe('renewed App editor runtime errors', page.events.slice(-12));
           if (process.env.PEERD_VISUAL_BASE_RENDER === '1' && diagnostic.boot?.includes('is-failed') && diagnostic.bootMessage) {
             rec.observe('merge-base App editor', diagnostic);
             await rec.visualPage('app-editor-recovery', page);

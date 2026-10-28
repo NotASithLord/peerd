@@ -63,6 +63,7 @@ import {
 import { createKernelFeatureHost } from './kernel-feature-host.js';
 import { createKernelBrowserChildOutcomes } from './kernel-browser-child-outcomes.js';
 import { attachKernelFrontDoor } from './kernel-front-door.js';
+import { attachKernelFirstTab } from './kernel-first-tab.js';
 import { makeKernelDemandRoutes } from './kernel-demand-routes.js';
 import {
   createKernelPortOwners,
@@ -336,6 +337,11 @@ const coldReceipts = createKernelColdReceipts({
   selfHostedChrome: kernelSelfHostedChrome,
 });
 const kernelEvents = coldReceipts;
+const firstTab = attachKernelFirstTab({
+  browser, events: kernelEvents, session: sessionCache, store: kv, ready: vaultReady, homeUrl,
+  isEnabled: () => settingsStore.get().firstTabEnabled === true,
+  closeLoneWindows: kernelFirefox,
+});
 kernelEvents.event(
   'runtime.onInstalled', browser.runtime.onInstalled, 'kernel-vault-posture-install',
 )?.addListener((/** @type {any} */ details) => {
@@ -344,6 +350,8 @@ kernelEvents.event(
       console.error('[kernel] fresh-install vault posture failed', error);
     });
   }
+  // why: unloading peerd for an update closes its tabs, the pinned ones too.
+  if (details?.reason === 'update') void firstTab.restoreAfterUpdate();
 });
 firefoxActorLifetime = kernelFirefox
   ? featureHost.attachFirefoxActorLifetime(kernelEvents)
@@ -540,7 +548,9 @@ const pushState = async (authority) => {
 
 const normalizeVoiceEngine = (/** @type {string} */ value) =>
   ['auto', 'web-speech', 'moonshine'].includes(value) ? value : 'auto';
+let firstTabWasOn = false;
 const onKernelSettingsChanging = (/** @type {Record<string,any>} */ patch) => {
+  firstTabWasOn = settingsStore.get().firstTabEnabled === true;
   if (patch.dwebEnabled === false) {
     demandPlane?.invalidateDwebPublications?.();
     void featureHost.runtime.disable('dweb');
@@ -555,6 +565,9 @@ const onKernelSettingsChanged = async (/** @type {Record<string,any>} */ patch) 
     await vault.setAutoLockMs(autoLockMs);
   }
   if (patch.voiceEnabled === false) await voiceCustody.teardown();
+  // why only from off to on: an import or a sync that repeats "on" must not
+  // put back a tab the user closed.
+  if (patch.firstTabEnabled === true && !firstTabWasOn) void firstTab.coverEveryWindow();
   if (Object.hasOwn(patch, 'autoUpdateEnabled')) {
     await kernelUpdateCustody?.onSettingsChanged();
   }
@@ -921,7 +934,10 @@ attachKernelLifecycleEvents({
   registry: kernelEvents,
   firefox: kernelFirefox,
   selfHostedChrome: kernelSelfHostedChrome,
-  onStartup: browserEventOwners.lifecycle.onStartup,
+  onStartup: () => {
+    void firstTab.browserStarted();
+    return browserEventOwners.lifecycle.onStartup();
+  },
   alarmName: 'peerd-schedule',
   onAlarm: browserEventOwners.lifecycle.onAlarm,
   onUpdateAvailable: kernelSelfHostedChrome
@@ -934,6 +950,8 @@ attachKernelTabEvents({
   registry: kernelEvents,
   firefox: kernelFirefox,
   ...browserEventOwners.tabs,
+  // The first tab notes each window where the user closed or unpinned it.
+  ...firstTab.watchTabs(browserEventOwners.tabs),
 });
 if (kernelFirefox) {
   void browser.tabs.query({}).then((tabs) => childGuard.reconcile(tabs))

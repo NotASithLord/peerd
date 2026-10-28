@@ -183,6 +183,11 @@ export const startVaultShell = ({
     }
     if (snapshot.hydrated === true) {
       document.documentElement.dataset.peerdBootStage = 'vault-ready';
+      // This page shows the first vault setup. The app it loads next can offer
+      // its first-run extras once (sidepanel.js).
+      if (snapshot.vault?.initialized === false) {
+        document.documentElement.dataset.peerdFirstSetup = 'true';
+      }
     }
     m.redraw();
     return true;

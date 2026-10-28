@@ -63,6 +63,12 @@ describe('normalizeSettingsPatch — booleans + enums', () => {
     expect(norm({ reasoningEffort: 'high' })).toEqual({ reasoningEffort: 'high' });
     expect(norm({ reasoningEffort: 'ultra' })).toEqual({});
   });
+  test('the first tab switch and its one-time offer answer are booleans only', () => {
+    expect(norm({ firstTabEnabled: true, firstTabOffered: true }))
+      .toEqual({ firstTabEnabled: true, firstTabOffered: true });
+    expect(norm({ firstTabEnabled: false })).toEqual({ firstTabEnabled: false });
+    expect(norm({ firstTabEnabled: 'yes', firstTabOffered: 1 })).toEqual({});
+  });
   test('frontDoorView gated to panel|home; anything else dropped', () => {
     expect(norm({ frontDoorView: 'panel' })).toEqual({ frontDoorView: 'panel' });
     expect(norm({ frontDoorView: 'home' })).toEqual({ frontDoorView: 'home' });

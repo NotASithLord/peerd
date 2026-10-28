@@ -142,6 +142,7 @@ export const BehaviorSection = {
 
     // ── Behavior — changes how it works, not what it may do ─────────────────
     const frontDoor = s.frontDoorView === 'home' ? 'home' : 'panel';
+    const firstTabOn = s.firstTabEnabled === true;
     const reasoningEnabled = s.reasoningEnabled !== false;
     const effort = s.reasoningEffort ?? 'medium';
     const arOn = s.autoResumeInterruptedTurns !== false;
@@ -178,6 +179,21 @@ export const BehaviorSection = {
           },
         }, [['panel', 'side panel'], ['home', 'full-page home']]
           .map(([value, label]) => m('option', { value }, label))),
+      }),
+
+      // The kernel adds the tabs (background/kernel-first-tab.js).
+      toggleRow({
+        id: 'first-tab',
+        label: 'Keep peerd as the first tab',
+        on: firstTabOn,
+        busyKey: 'firstTabBusy',
+        summary: firstTabOn
+          ? 'Each window has a pinned peerd tab at the start, one click away.'
+          : 'peerd adds no tab to your windows.',
+        why: firstTabOn
+          ? 'On. Each window has a pinned peerd tab at the start of its tabs. It shows only the peerd icon, and a click opens peerd Home. New windows get one too. If you close or unpin it, peerd does not put it back.'
+          : 'Off. peerd adds no tab to your windows. Turn this on to keep a pinned peerd tab at the start of each window, so peerd is one click away. Turning it off does not close the tabs that are open.',
+        apply: () => send({ type: 'settings/update', patch: { firstTabEnabled: !firstTabOn } }),
       }),
 
       toggleRow({
@@ -403,7 +419,7 @@ export const BehaviorSection = {
       settingsBand({ name: 'Experimental & diagnostics', rows: experimentalRows }),
 
       resetRow(send, [
-        'frontDoorView',
+        'frontDoorView', 'firstTabEnabled',
         'reasoningEnabled', 'reasoningEffort', 'confirmWebWrites', 'schemaValidatedReplies',
         'advancedAutomationEnabled', 'devMode', 'webActorActionSurface',
         'autoResumeInterruptedTurns', 'autoUpdateEnabled',
