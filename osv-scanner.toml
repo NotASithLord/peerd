@@ -15,3 +15,13 @@
 id = "GHSA-86w9-cpqp-85rv"
 ignoreUntil = 2026-11-09T00:00:00Z
 reason = "No upstream fix. Current web-ext desktop lint/sign/test commands do not invoke adbkit TCP-USB RSA authentication; reviewed for web-ext 10.6.0 / adbkit 3.3.9 / node-forge 1.4.0. Not a general node-forge safety claim."
+
+# Owner approved 2026-10-28 through November 11. Build tools only:
+# addons-linter merges bundled schemas and literal patches; lint input is not
+# a schema merge input. Custom schema injection and new consumers require review.
+# Exact coordinates/integrities and usage tripwires are enforced by
+# packaging/check-deepmerge-exception.mjs. No general deepmerge safety claim.
+[[IgnoredVulns]]
+id = "GHSA-gcqx-w48m-w2h4"
+ignoreUntil = 2026-11-11T00:00:00Z
+reason = "No upstream patch. Reviewed addons-linter 10.10.0 uses deepmerge 4.3.1 only for bundled schemas and literal schema patches in desktop web-ext tooling; not shipped runtime. Exact dependency graph and schema-only usage guarded; re-triage any scope change."
