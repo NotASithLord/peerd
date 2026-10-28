@@ -1,10 +1,11 @@
+import { checkDeepmergeException } from './check-deepmerge-exception.mjs';
 // why: an advisory-only OSV exception must not silently cover a new dependency
 // graph or an enabled ADB authentication path. Remove this guard with the waiver.
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export function checkExceptionScope(root, now = Date.now()) {
+function checkNodeForgeScope(root, now) {
   const id = 'GHSA-86w9-cpqp-85rv';
   const expiry = '2026-11-09T00:00:00Z';
   const config = readFileSync(join(root, 'osv-scanner.toml'), 'utf8');
@@ -79,6 +80,11 @@ export function checkExceptionScope(root, now = Date.now()) {
       }
     }
   }
+}
+
+export function checkExceptionScope(root, now = Date.now()) {
+  checkNodeForgeScope(root, now);
+  checkDeepmergeException(root, now);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
