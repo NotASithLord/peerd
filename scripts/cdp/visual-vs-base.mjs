@@ -109,9 +109,25 @@ const materialiseBase = () => {
   try {
     if (!existsSync(baseTree)) execFileSync('git', ['worktree', 'add', '--detach', baseTree, baseRef], { cwd: ROOT, stdio: 'pipe' });
     execFileSync('bun', ['run', 'gen:dev'], { cwd: baseTree, stdio: 'pipe' });
+    // Keep capability probes bound to the committed base, before overlaying
+    // executable fixtures from the head. Re-read Git even for a reused worktree.
+    const fixtureSources = {};
+    const fixtureFiles = git('ls-tree', '-r', '--name-only', baseRef, '--', 'extension/tests/fixtures').split('\n');
+    for (const name of ['starters.js', 'explore.js', 'contacts.js']) {
+      const path = `extension/tests/fixtures/${name}`;
+      fixtureSources[name] = fixtureFiles.includes(path) ? git('show', `${baseRef}:${path}`) : '';
+    }
+    writeFileSync(join(baseTree, 'extension/tests/visual-base-fixtures.json'), JSON.stringify(fixtureSources));
     // why: both builds must use the same fixture pages as the state definitions.
     rmSync(join(baseTree, 'extension/tests/fixtures'), { recursive: true, force: true });
     cpSync(join(ROOT, 'extension/tests/fixtures'), join(baseTree, 'extension/tests/fixtures'), { recursive: true });
+    // Discover fixtures also click versioned UI labels. Preserve the base's
+    // drivers for supported screens; unsupported new frames are reported absent.
+    for (const [name, source] of Object.entries(fixtureSources)) {
+      const path = join(baseTree, 'extension/tests/fixtures', name);
+      if (source) writeFileSync(path, source);
+      else rmSync(path, { force: true });
+    }
     return true;
   } catch (error) {
     log(`Could not prepare the base: ${error.message}`);

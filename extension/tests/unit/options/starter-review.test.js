@@ -26,22 +26,31 @@ describe('packaged starters', () => {
       } });
       const root = view.root;
       const title = () => root.querySelector('.options-page > h2')?.textContent;
+      /** The Settings list entry marked as the page on screen. */
+      const current = () => [...root.querySelectorAll('.options-nav-item.is-active, .options-nav-item[aria-current="page"]')]
+        .map(item => item.textContent);
       expect(!!root.querySelector('#exppass')).toBe(true);
       expect(title()).toBe('Backup & restore');
+      expect(current()).toEqual(['Backup & restore']);
       starter = 'csv-lab'; await flush();
       await until(() => !!button(root, 'Add to Library'));
-      expect(root.textContent).toContain('CSV Lab');
-      // Discover's Try opens this page, and it only adds the app.
+      expect(root.textContent).toContain('Tables and charts');
+      // The line under the name says what the app does, as Discover's tile does.
+      expect(root.querySelector('.starter-review h3 + p')?.textContent).toBe('Explore tables, numbers and a chart, all on your device.');
+      // Discover's Try opens this page, and it only adds the app, so no Settings entry is marked as this page.
       expect(title()).toBe('Try an app');
+      expect(current()).toEqual([]);
       const first = calls.filter(call => call.type === 'import/inspect')[0].envelope;
       starter = 'wasm-image'; await flush();
       await until(() => !!button(root, 'Add to Library'));
-      expect(root.textContent).toContain('WebAssembly Image Lab');
+      expect(root.textContent).toContain('Desaturator');
+      expect(root.querySelector('.starter-review h3 + p')?.textContent).toBe('Make a picture gray, or black and white, all on your device.');
       expect(calls.filter(call => call.type === 'import/inspect').length).toBe(2);
       expect(calls.filter(call => call.type === 'import/inspect')[1].envelope === first).toBe(false);
       starter = undefined; await flush();
       expect(!!view.root.querySelector('#exppass')).toBe(true);
       expect(title()).toBe('Backup & restore');
+      expect(current()).toEqual(['Backup & restore']);
       expect(calls.some(call => call.type === 'import/apply')).toBe(false);
     } finally { try { view?.close(); } finally { m.route.param = originalParam; } }
   });
@@ -99,7 +108,7 @@ describe('packaged starters', () => {
     try {
       await until(() => !!button(view.root, 'Add to Library'));
       const text = view.root.textContent ?? '';
-      expect(view.root.querySelector('h3')?.textContent).toBe('CSV Lab');
+      expect(view.root.querySelector('h3')?.textContent).toBe('Tables and charts');
       expect(text).toContain('Comes with peerd. It runs on this device and needs no network.');
       for (const jargon of ['Peerd', 'App', 'bundle bytes', 'files;', 'packaged', 'local copy']) expect(text.includes(jargon)).toBe(false);
       button(view.root, 'Add to Library')?.click(); await flush();
@@ -126,6 +135,10 @@ describe('packaged starters', () => {
         expect(button(view.root, 'Add to Library')).toBe(undefined);
         expect(view.root.textContent).toContain('peerd is not sure the app was added. Check your Library before you add it again.');
         expect(/Refresh|reconcile/.test(view.root.textContent ?? '')).toBe(false);
+        // The add may still have happened, so the line is a neutral status, never an alert.
+        expect(view.root.querySelector('[role="alert"]')).toBe(null);
+        expect(view.root.querySelector('[role="status"]')?.textContent)
+          .toBe('peerd is not sure the app was added. Check your Library before you add it again.');
         expect(view.root.textContent?.includes('starter was not added')).toBe(false);
       } finally { view.close(); }
     }

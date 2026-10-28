@@ -38,7 +38,11 @@ export const createUserPeerPolicy = (kv) => {
       if ((await read()).blocked.includes(did)) throw new Error('publisher-user-blocked');
       return operation();
     }),
-    /** @param {string} did @param {boolean} blocked @param {(policy:any)=>Promise<any>} [enforce] @param {()=>boolean} [current] */
+    /**
+     * `enforce` learns whether this call wrote the policy: a block of a maker
+     * already blocked, or an unblock of one who is not, writes nothing.
+     * @param {string} did @param {boolean} blocked @param {(policy:any, changed:boolean)=>Promise<any>} [enforce] @param {()=>boolean} [current]
+     */
     set: (did, blocked, enforce = async policy => policy, current = () => true) => ordered(async () => {
       if (!current()) throw new Error('peer-policy-authority-retired');
       policyDid(did);
@@ -46,13 +50,13 @@ export const createUserPeerPolicy = (kv) => {
       const old = await read();
       if (!current()) throw new Error('peer-policy-authority-retired');
       const entries = new Set(old.blocked);
-      if (entries.has(did) === blocked) return enforce(old);
+      if (entries.has(did) === blocked) return enforce(old, false);
       if (blocked && entries.size >= MAX_USER_BANS) throw new Error('peer-policy-full');
       if (old.revision === Number.MAX_SAFE_INTEGER) throw new Error('peer-policy-revision-exhausted');
       if (blocked) entries.add(did); else entries.delete(did);
       const next = { v: /** @type {const} */ (1), revision: old.revision + 1, blocked: [...entries].sort() };
       await kv.set(USER_PEER_POLICY_KEY, next);
-      return enforce(next);
+      return enforce(next, true);
     }),
   };
 };
@@ -62,8 +66,9 @@ export const setUserPeerBlocked = async (deps, { did, block = true }) => {
   if (deps.vault.isLocked()) return { ok: false, error: 'vault-locked' };
   const current = () => !deps.vault.isLocked() && deps.current?.() !== false;
   try {
-    return await userPeerPolicy(deps.kv).set(did, block, async policy => {
-      const receipt = { durable: true, revision: policy.revision };
+    return await userPeerPolicy(deps.kv).set(did, block, async (policy, changed) => {
+      // why `changed`: a caller that logs the decision must not log a no-op.
+      const receipt = { durable: true, revision: policy.revision, changed };
       try {
         if (!current()) throw new Error('peer-policy-authority-retired');
         if (block) await deps.revokePeer?.(did);

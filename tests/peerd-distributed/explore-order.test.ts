@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { exploreOrder, matchesWords, nextSuggestion, searchWords, suggestionKey, SURPRISE_HISTORY_LIMIT } from '../../extension/home/explore-order.js';
+import { EXPLORE_WINDOW, exploreOrder, matchesWords, nextSuggestion, searchWords, suggestionKey, SURPRISE_HISTORY_LIMIT } from '../../extension/home/explore-order.js';
 import { encodeDidKey } from '../../extension/shared/address/did.js';
 const apps = Array.from({ length: 120 }, (_, i) => ({ dwapp_id: `app-${i}`, publisher: i < 100 ? 'prolific' : `publisher-${i}`, name: `App ${i}` }));
 test('Explore balances publisher rounds without duplicate apps or arrival-order ranking', () => {
@@ -70,6 +70,28 @@ test('an app that matches more words of the query comes first; ties keep the see
   const ranked = exploreOrder(cards, { query: 'plan a trip', seed: 42 }).map(a => a.dwapp_id);
   expect(ranked[0]).toBe('b');
   expect(ranked.slice(1)).toEqual(seeded.filter(id => id !== 'b'));
+});
+
+test('with a query, a maker whose many cards match more words still gets one place per round', () => {
+  const packed = Array.from({ length: 120 }, (_, i) => ({ dwapp_id: `packed-${i}`, publisher: 'packer', name: `Tool ${i}`, description: 'split bill plan trip budget' }));
+  const honest = Array.from({ length: 30 }, (_, i) => ({ dwapp_id: `honest-${i}`, publisher: `maker-${i}`, name: i % 2 ? 'Expense splitter' : 'Bill tracker' }));
+  const ordered = exploreOrder([...packed, ...honest], { query: 'split a bill', seed: 42 });
+  expect(ordered).toHaveLength(150);
+  // The first round holds one app from each of the 31 makers, the best match first.
+  expect(new Set(ordered.slice(0, 31).map(app => app.publisher)).size).toBe(31);
+  expect(ordered[0]?.publisher).toBe('packer');
+  expect(ordered.slice(0, EXPLORE_WINDOW).filter(app => app.publisher !== 'packer')).toHaveLength(30);
+  // One maker's own list puts its best matches first.
+  const own = [
+    { dwapp_id: 'weak', publisher: 'ana', name: 'Bill tracker' },
+    { dwapp_id: 'strong', publisher: 'ana', name: 'Split the bill' },
+    { dwapp_id: 'other', publisher: 'bob', name: 'Expense splitter' },
+  ];
+  for (const seed of [1, 2, 3, 42]) {
+    const ids = exploreOrder(own, { query: 'split a bill', seed }).map(app => app.dwapp_id);
+    expect(ids.indexOf('strong')).toBeLessThan(ids.indexOf('weak'));
+    expect(ids.at(-1)).toBe('weak');
+  }
 });
 
 test('Explore searches the saved contact name a tile shows, keyed by the full did', () => {

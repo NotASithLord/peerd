@@ -3592,8 +3592,17 @@ export const STATES = [
                 const data = response.data;
                 if (data?.type !== 'private-transfer/response') return;
                 const code = data.reply?.error ?? data.error;
+                // why: classify known static messages without retaining arbitrary exception text.
+                const known = {
+                  'Temporarily unavailable. Try again.': 'startup-unavailable',
+                  'sealed controller worker retired before readiness': 'controller-retired-before-ready',
+                  'sealed controller worker did not become ready': 'controller-not-ready',
+                  'controller ambient capability denied': 'controller-ambient-denied',
+                };
                 globalThis.__backupReplyCodes.push({ transportOk: data.ok === true, ok: data.reply?.ok === true,
-                  error: typeof code === 'string' && /^[a-z0-9-]{1,100}$/.test(code) ? code : code == null ? null : 'non-code-error' });
+                  error: typeof code === 'string' && /^[a-z0-9-]{1,100}$/.test(code) ? code
+                    : typeof code === 'string' && Object.hasOwn(known, code) ? known[code]
+                    : code == null ? null : 'non-code-error' });
               });
             });
             for (const id of ['exppass', 'exppass2']) {
@@ -5016,7 +5025,18 @@ export const STATES = [
           || (baseRender && final?.stopReason === 'max_tokens'))
           ? { sessionId: state.state.session.sessionId, messages } : null;
       }, { budgetMs: 20_000, pollMs: 100 });
-      if (!settled) throw new Error('The cut tool call did not settle');
+      if (!settled) {
+        const state = await rpc(ctx.page, { type: 'state/get' });
+        const context = await evalIn(ctx.page, `(async () => ({ visibility: document.visibilityState,
+          owner: await chrome.windows.getCurrent(), tabs: await chrome.tabs.query({}),
+          current: await chrome.tabs.query({currentWindow:true}), stop: !!document.querySelector('form.input-bar button.stop'),
+          streaming: !!document.querySelector('.message-assistant.streaming'),
+          brand: [...document.querySelectorAll('[class*=wordmark], [class*=channel-badge]')].map(node => ({
+            class: node.className, text: node.textContent, display: getComputedStyle(node).display,
+            opacity: getComputedStyle(node).opacity, color: getComputedStyle(node).color,
+          })) }))()`, true);
+        throw new Error('The cut tool call did not settle: ' + JSON.stringify({baseRender,calls:ctx.modelCallCount(), messages:state?.state?.session?.messages, context}));
+      }
       const cut = settled.messages.find(message => message.stopReason === 'max_tokens');
       const result = settled.messages.flatMap(message => message.toolResults ?? [])
         .find(result => result.tool_use_id === cut?.toolUses?.[0]?.id);
@@ -5556,7 +5576,7 @@ export const STATES = [
         }
         const name = `Pending permission ${mode}`;
         const args = { kind: 'app', name, files };
-        const sentText = `Create the packaged CSV Lab App named ${name}.`;
+        const sentText = `Create the packaged Tables and charts App named ${name}.`;
         const replyText = `PENDING-PERMISSION-${mode.toUpperCase()}-SETTLED`;
         let modelCalls = 0;
         ctx.setModelResponder(index => {
@@ -7948,7 +7968,7 @@ export const STATES = [
     name: narrow ? 'home-explore-narrow' : 'home-explore', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
-      const { flow, phase2 } = discoverSurface();
+      const { flow, phase2, plain, names } = discoverSurface();
       const page = await openExtPage(ctx, 'tests/fixtures/explore.html');
       try {
         // why 1400 narrow: the Your apps row and the search label sit above the one-column tiles.
@@ -7973,10 +7993,11 @@ export const STATES = [
           rec.check('From people you know keeps only the saved contact’s app',
             JSON.stringify(await pick(phase2 ? 'From people you know' : 'From contacts')) === JSON.stringify(['Field notes']));
           rec.check('Updates is empty while every installed app is current', (await pick('Updates')).length === 0
-            && await evalIn(page, `document.body.textContent.includes('No matching apps')`));
+            && await evalIn(page, `document.body.textContent.includes(${JSON.stringify(plain ? 'No updates right now' : 'No matching apps')})`));
           const included = await pick(phase2 ? 'Comes with peerd' : 'Included');
-          rec.check('Comes with peerd lists both packaged starters and Commons',
-            included.length === 3 && included.includes('Peerd-to-Peerd Commons'));
+          rec.check('Comes with peerd lists both packaged starters and Chat rooms', names
+            ? JSON.stringify(included) === JSON.stringify(['Tables and charts', 'Desaturator', 'Chat rooms'])
+            : included.length === 3 && included.includes('Peerd-to-Peerd Commons'));
           rec.check('All restores every shared app', (await pick('All')).length === 3);
           rec.check('Explore controls and cards fit the viewport',
             await evalIn(page, `document.documentElement.scrollWidth <= innerWidth`));
@@ -8015,7 +8036,7 @@ export const STATES = [
       } finally { try {page.close();} catch { /* */ } }
     },
   })),
-  // The Included pill: both packaged starters and Commons as tiles, read only.
+  // The Comes with peerd pill: both packaged starters and Commons as tiles, read only.
   {
     name: 'home-explore-included', kind: 'visual', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
@@ -8036,13 +8057,14 @@ export const STATES = [
           [...document.querySelectorAll('.disc-pill')].find(pill => pill.textContent === ${JSON.stringify(label)}).click();
           (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
         })()`, true);
-        // why wait for an enabled Commons action: it stays off until the Library read lands.
+        // why wait for an enabled Chat rooms action: it stays off until the Library read lands.
+        const add = discoverSurface().names ? 'Add and open Chat rooms' : 'Add and open Commons';
         const included = await waitFor(() => evalIn(page, `(() => {
           const metas = [...document.querySelectorAll('.disc-tile-meta')].map(node => node.textContent);
           return metas.length === 3 && metas.every(text => text === 'Comes with peerd')
-            && [...document.querySelectorAll('.disc-tile-action')].some(button => button.textContent === 'Add and open Commons' && !button.disabled);
+            && [...document.querySelectorAll('.disc-tile-action')].some(button => button.textContent === ${JSON.stringify(add)} && !button.disabled);
         })()`), {budgetMs:4000,pollMs:50});
-        rec.check('Included lists both packaged starters and Commons and sends only reads', !!included
+        rec.check('Comes with peerd lists both packaged starters and Chat rooms and sends only reads', !!included
           && await evalIn(page, `window.__exploreFixtureCalls.every(type =>
             ['apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distributed/info', 'contacts/list', 'dweb/blocked-peers'].includes(type))`));
         rec.check('Explore controls and cards fit the viewport', await evalIn(page, `document.documentElement.scrollWidth <= innerWidth`));
@@ -8286,9 +8308,11 @@ export const STATES = [
           };
         })()`), { budgetMs: 4_000, pollMs: 50 });
         const warningText = warningLayout?.texts?.join(' ') ?? '';
+        // why two wordings: Discover says in plain words that the old version is still shared.
         rec.check('Library and Discover render both committed warning details',
           warningText.includes('security audit entry could not be written')
-            && (warningText.match(/Older shared bytes will be cleaned up/g) ?? []).length === 2,
+            && (warningLayout?.texts?.[0] ?? '').includes('Older shared bytes will be cleaned up')
+            && (warningLayout?.texts?.[1] ?? '').includes('peerd still shares the old version.'),
           JSON.stringify({ discoverWarning, warningLayout }));
         // why its own check: only the Library says the words above.
         rec.check('Discover says in plain words that the security log missed the update',
@@ -10456,20 +10480,22 @@ export const STATES = [
       try {
         options = await openWidePage(ctx, 'options/options.html#!/transfer?starter=csv-lab', { ready: '.starter-review' });
         const apply = '.starter-review > button:first-of-type';
-        const phase2 = discoverSurface().phase2;
+        const { phase2, names } = discoverSurface();
+        // why the tree's own name: the merge-base tree packages its own starter.
+        const starterName = names ? 'Tables and charts' : 'CSV Lab';
         const applyLabel = phase2 ? 'Add to Library' : 'Apply: add local copy';
         const installedText = phase2 ? 'Added to your Library.' : 'Local copy added.';
         const reviewReady = await waitFor(() => evalIn(options,
           `document.querySelector(${JSON.stringify(apply)})?.textContent.trim() === ${JSON.stringify(applyLabel)}
             && document.querySelector(${JSON.stringify(apply)}).disabled === false`));
-        if (!reviewReady) throw new Error('The packaged CSV Lab review is not ready');
+        if (!reviewReady) throw new Error(`The packaged ${starterName} review is not ready`);
         await clickAndSyncRedraw(options, apply);
         const installed = await waitFor(() => evalIn(options,
           `document.querySelector('.starter-review')?.innerText.includes(${JSON.stringify(installedText)})`));
-        rec.check('the real packaged CSV Lab copy is installed', installed === true);
-        if (!installed) throw new Error('The CSV Lab Apply outcome is not known');
+        rec.check(`the real packaged ${starterName} copy is installed`, installed === true);
+        if (!installed) throw new Error(`The ${starterName} Apply outcome is not known`);
         const listed = await rpc(ctx.page, { type: 'apps/list' });
-        const added = listed?.apps?.filter((row) => !previousIds.has(row.id) && row.name === 'CSV Lab') ?? [];
+        const added = listed?.apps?.filter((row) => !previousIds.has(row.id) && row.name === starterName) ?? [];
         rec.check('the catalog contains one new durable App ID', listed?.ok === true && added.length === 1);
         if (added.length !== 1) throw new Error('The installed App ID is not unique');
         appId = added[0].id;
@@ -10520,11 +10546,11 @@ export const STATES = [
         const sealed = await waitFor(() => evalIn(runner, `(() => {
           'use strict';
           const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'peerd');
-          return globalThis.origin === 'null' && document.title === 'CSV Lab'
+          return globalThis.origin === 'null' && document.title === ${JSON.stringify(starterName)}
             && !!document.querySelector('#csv') && typeof document.querySelector('#analyze')?.onclick === 'function'
             && descriptor?.writable === false && descriptor.configurable === false && Object.isFrozen(descriptor.value);
         })()`));
-        rec.check('the exact opaque CSV Lab sandbox is initialized', sealed === true);
+        rec.check(`the exact opaque ${starterName} sandbox is initialized`, sealed === true);
         if (!sealed) throw new Error('The App sandbox identity is not qualified');
         const identities = [];
         for (const [target, page] of [[original, app], [sandbox, runner]]) {

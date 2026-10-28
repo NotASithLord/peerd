@@ -1,7 +1,8 @@
 // @ts-check
 // What a verified App bundle asks of peerd, for Discover's "The app says it".
-// why in the dweb host: it verifies the bundle, and the service worker's fixed
-// cold graph has no room to grow (scripts/bench/cold-start-budgets.js).
+// The dweb host reads it for a share link it checks. why the service worker
+// reads it again for an install or an update: it stores only what it read
+// from the files it decoded against their hash, never the host's word.
 
 import { buildAppManifest, parseAppManifest } from '/peerd-engine/app-manifest.js';
 
@@ -34,16 +35,9 @@ export const bundleDeclaration = (files, entry) => {
 /**
  * The facts bound to the hash of the version they describe, so a value kept
  * from another version never stands for this one.
- * @param {VerifiedApp} app a bundle prepareAppBundle verified
+ * @param {VerifiedApp} app files checked against `dweb.hash`
  */
 export const verifiedDeclaration = (app) => {
   const declared = bundleDeclaration(app.files, app.entryFile);
   return declared && { hash: app.dweb.hash, ...declared };
 };
-
-/**
- * The bundle with its facts in the dweb slot, so the install or update that
- * hands it to storage records them with the version.
- * @template {VerifiedApp} T @param {T} app
- */
-export const withDeclaration = (app) => ({ ...app, dweb: { ...app.dweb, declared: verifiedDeclaration(app) } });

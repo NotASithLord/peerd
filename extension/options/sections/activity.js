@@ -74,11 +74,15 @@ const EVENT_META = {
   dweb_room_joined:           { label: 'joined a dweb room',     level: 'ok' },
   dweb_room_left:             { label: 'left a dweb room',       level: 'info' },
   dweb_app_installed:         { label: 'installed a dweb app',   level: 'ok' },
-  dweb_seed_installed:        { label: 'commons app installed',  level: 'ok' },
+  dweb_seed_installed:        { label: 'Chat rooms app installed', level: 'ok' },
   dweb_app_shared:            { label: 'shared an app to a room', level: 'ok' },
   dweb_bridge_join_denied:    { label: 'dweb room join denied',  level: 'warn' },
   dweb_app_install_denied:    { label: 'dweb app install denied', level: 'warn' },
   dweb_peer_muted_by_app:     { label: 'muted a dweb peer',      level: 'info' },
+  // A block or an unblock from Discover or Contacts, the user's own choice.
+  // why the unblock reads louder: it removes a protection, as an un-learn does.
+  dweb_peer_blocked:          { label: 'blocked a maker',        level: 'info' },
+  dweb_peer_unblocked:        { label: 'unblocked a maker',      level: 'warn' },
 };
 
 /** The exact host receipt decides authority severity; operation labels are
@@ -197,6 +201,9 @@ const detailLine = (entry) => {
   if (d.reason) bits.push(d.reason);
   if (d.provider) bits.push(d.provider);
   if (d.primitive) bits.push(d.primitive);
+  // why the short key: a peer row is about one maker, and Discover and
+  // Contacts name an unnamed maker by the same last 8 characters.
+  if (typeof d.did === 'string') bits.push(d.did.slice(-8));
   bits.push(...browserPolicyDetail(d.browserPolicy));
   if (d.answer) bits.push(`answer=${d.answer}`);
   if (d.pattern) bits.push(d.pattern);

@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  appCountLabel, BLOCKED, bytesLabel, createEffects, FAILED, failureHint, installSteps, isFailure, kbLabel, keptCards, letterOf,
-  libraryPeerApps, libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, peerCountLabel, pillFilter, rootView,
-  savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, tileAction, toneOf, TONES, UNKNOWN, unknownLines, updateOffer,
-  verifiedDeclared, wasmLabel, yourApps,
+  appCountLabel, BLOCKED, bytesLabel, createEffects, descriptionLine, emptyBrowse, FAILED, failureHint, installSteps, isFailure, kbLabel,
+  keptCards, letterOf, libraryName, libraryPeerApps, libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, peerCountLabel,
+  pillFilter, rootView, savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, tileAction, toneOf, TONES, UNKNOWN,
+  unknownLines, updateOffer, verifiedDeclared, wasmLabel, yourApps,
 } from '../../extension/home/discover-model.js';
 import type { DwebApp } from '../../extension/home/discover-model.js';
 import { encodeDidKey } from '../../extension/shared/address/did.js';
@@ -115,7 +115,7 @@ describe('network and root state', () => {
     expect(rootView({ ...base, net: { kind: 'looking', linked: 0 } })).toBe('looking');
   });
 
-  test('the Included pill needs no peer: it lists apps with no heard app, but never with the network off', () => {
+  test('the Comes with peerd pill needs no peer: it lists apps with no heard app, but never with the network off', () => {
     const included = { enabled: true, net: null, heardCount: 0, loading: true, failed: false, included: true };
     expect(rootView(included)).toBe('grid');
     expect(rootView({ ...included, net: { kind: 'connected', linked: 2 }, loading: false })).toBe('grid');
@@ -125,21 +125,41 @@ describe('network and root state', () => {
   });
 
   test('the Library line: checking, never read, or refresh failed; silent after a good read', () => {
-    expect(libraryStatus({ ready: false, failed: false })).toBe('Checking your Library…');
-    expect(libraryStatus({ ready: false, failed: true })).toBe('Could not read your Library. Install stays off until peerd can read it.');
-    expect(libraryStatus({ ready: true, failed: true }))
-      .toBe('Could not refresh your Library. Surprise me stays off until peerd can read it.');
-    expect(libraryStatus({ ready: true, failed: false })).toBe(null);
-    // The offline root offers neither Install nor Surprise me, so its lines name what it shows.
     // An error says what failed, then what to do: the poll reads the Library again.
-    expect(libraryStatus({ ready: false, failed: true, offline: true })).toBe('peerd could not read your Library. Try again in a moment.');
-    expect(libraryStatus({ ready: true, failed: true, offline: true })).toBe('Could not refresh your Library. This list may be out of date.');
+    expect(libraryStatus({ ready: false, failed: false })).toBe('Checking your Library…');
+    expect(libraryStatus({ ready: false, failed: true }))
+      .toBe('peerd could not read your Library. Install stays off until peerd can read it. Try again in a moment.');
+    expect(libraryStatus({ ready: true, failed: true }))
+      .toBe('peerd could not refresh your Library. Surprise me stays off until peerd can read it. Try again in a moment.');
+    expect(libraryStatus({ ready: true, failed: false })).toBe(null);
+    // The offline root offers neither Install nor Surprise me, so its lines name what it shows. Its one
+    // button starts the peer network, so the line says that peerd reads the Library again by itself.
+    expect(libraryStatus({ ready: false, failed: true, offline: true })).toBe('peerd could not read your Library. peerd tries again by itself.');
+    expect(libraryStatus({ ready: true, failed: true, offline: true }))
+      .toBe('peerd could not refresh your Library. This list may be out of date. peerd tries again by itself.');
     expect(libraryStatus({ ready: false, failed: false, offline: true })).toBe('Checking your Library…');
     expect(libraryStatus({ ready: true, failed: false, offline: true })).toBe(null);
   });
 
-  test('Surprise me names the filters only while one is on, and the Library only when every app is in it', () => {
-    const filters = 'No new suggestions match these filters. Change your search or filters.';
+  test('an empty browse list says why: an empty pill says how its apps get there, a search says nothing matches', () => {
+    const search = { title: 'No matching apps', text: 'Try other words.' };
+    expect(emptyBrowse({ pill: 'updates', searching: false })).toEqual({
+      title: 'No updates right now', text: 'When someone shares a new version of an app in your Library, it shows up here.',
+    });
+    expect(emptyBrowse({ pill: 'contacts', searching: false })).toEqual({
+      title: 'No apps from people you know yet',
+      // The steps go as far as the name: Add a name is in the menu of the maker's page.
+      text: 'People you know are makers you added a name for. To add one, open an app and select who made it. '
+        + 'Then open the menu on their page and choose Add a name.',
+    });
+    // A search names the search on every pill.
+    for (const pill of ['all', 'updates', 'contacts', 'included'] as const) expect(emptyBrowse({ pill, searching: true })).toEqual(search);
+    expect(emptyBrowse({ pill: 'all', searching: false })).toEqual(search);
+  });
+
+  test('Surprise me says to show all apps only while a pill or a search hides some, and names the Library only when every app is in it', () => {
+    // why no "filters": the screen never uses that word.
+    const filters = 'No new suggestions here. Show all apps, then try again.';
     expect(noSuggestionNote({ filtered: true, allInLibrary: true })).toBe(filters);
     expect(noSuggestionNote({ filtered: true, allInLibrary: false })).toBe(filters);
     expect(noSuggestionNote({ filtered: false, allInLibrary: true })).toBe('No new suggestions. Every app here is already in your Library.');
@@ -230,16 +250,26 @@ describe('tile and page states', () => {
     });
   });
 
-  test('install steps for every state; "You are here" only on a current first step', () => {
+  test('install steps for every state; a done step is a check and a title only', () => {
     const table = (state: Parameters<typeof installSteps>[0]) => installSteps(state).map(step => [step.state, step.sub]);
     const install = 'peerd checks every file, then adds the app to your Library';
     const open = 'It opens in its own tab';
     expect(installSteps('review').map(step => step.title)).toEqual(['Look at it', 'Install', 'Open']);
     expect(table('review')).toEqual([['current', 'You are here'], ['pending', install], ['pending', open]]);
     expect(table('installing')).toEqual([['done', null], ['working', install], ['pending', open]]);
-    expect(table('installed')).toEqual([['done', null], ['done', install], ['current', open]]);
+    expect(table('installed')).toEqual([['done', null], ['done', null], ['current', open]]);
     expect(table('failed')).toEqual([['done', null], ['failed', install], ['pending', open]]);
     expect(table('unknown')).toEqual([['done', null], ['unknown', install], ['pending', open]]);
+  });
+
+  test('an update names its own step: the page says update throughout', () => {
+    const update = 'peerd checks every file, then updates the app in your Library';
+    for (const state of ['installing', 'failed', 'unknown'] as const) {
+      expect(installSteps(state, 'update').map(step => [step.title, step.sub])).toEqual([
+        ['Look at it', null], ['Update', update], ['Open', 'It opens in its own tab'],
+      ]);
+    }
+    expect(installSteps('failed', 'install')[1]?.title).toBe('Install');
   });
 
   test('effects start empty and are independent per call', () => {
@@ -303,18 +333,30 @@ describe('the app says it', () => {
       ],
       note: 'From the app’s own files, checked when peerd looked at it.',
     });
-    expect(saysIt({ declared: { dweb: false, instructions: true, observeAct: false }, checked: 'installed' })).toMatchObject({
+    expect(saysIt({ declared: { dweb: false, instructions: true, observeAct: false }, checked: 'installed', changed: false })).toMatchObject({
       chips: [{ text: 'Comes with instructions for peerd', strong: false }],
       note: 'From the app’s own files, checked when peerd installed it.',
     });
     // Nothing to show still says when peerd read it: an edit on this device can change the files later.
-    expect(saysIt({ declared: { dweb: false, instructions: false, observeAct: false }, checked: 'installed' })).toEqual({
+    expect(saysIt({ declared: { dweb: false, instructions: false, observeAct: false }, checked: 'installed', changed: false })).toEqual({
       kind: 'nothing', chips: [], note: 'From the app’s own files, checked when peerd installed it.',
       line: 'It does not use the peer network and has no instructions for peerd.',
     });
     expect(saysIt({ declared: { dweb: false, instructions: false, observeAct: false }, checked: 'link' })?.note)
       .toBe('From the app’s own files, checked when peerd looked at it.');
     for (const checked of ['link', 'installed'] as const) expect(saysIt({ declared: null, checked })).toBe(null);
+  });
+
+  test('the Library copy shows its facts only while the service worker says it is unchanged', () => {
+    const declared = { dweb: true, instructions: true, observeAct: true };
+    // Changed on this device, or not known yet: the facts peerd checked no longer stand for it.
+    for (const changed of [true, null, undefined]) expect(saysIt({ declared, checked: 'installed', changed })).toBe(null);
+    expect(saysIt({ declared, checked: 'installed', changed: false })?.chips).toHaveLength(3);
+    // A share link's facts are its own files: no copy here to change.
+    for (const changed of [true, null]) expect(saysIt({ declared, checked: 'link', changed })?.chips).toHaveLength(3);
+    // A copy this visit updated keeps the same rule, and its note says when peerd read the files.
+    for (const changed of [true, null]) expect(saysIt({ declared, checked: 'updated', changed })).toBe(null);
+    expect(saysIt({ declared, checked: 'updated', changed: false })?.note).toBe('From the app’s own files, checked when peerd updated it.');
   });
 });
 
@@ -393,6 +435,14 @@ describe('filters and contacts', () => {
     ]);
   });
 
+  test('the description line: the maker’s text, "none" only from a card that says so, nothing without a card', () => {
+    expect(descriptionLine('Split costs.')).toEqual({ text: 'Split costs.', missing: false });
+    // A heard card always carries the maker's text, so an empty one is the maker's own "none".
+    expect(descriptionLine('')).toEqual({ text: 'No description from the maker.', missing: true });
+    // No card: peerd does not know what the maker said, so it claims nothing.
+    for (const unknown of [undefined, null, 42]) expect(descriptionLine(unknown)).toBe(null);
+  });
+
   test('the heard cache keeps the latest read and only the earlier cards it is told to keep', () => {
     const old: DwebApp = { dwapp_id: 'kept', name: 'Old kept card' };
     const cache = new Map<string, DwebApp>([['kept', old], ['gone', { dwapp_id: 'gone' }], ['still', { dwapp_id: 'still', name: 'Old card' }]]);
@@ -409,7 +459,7 @@ describe('filters and contacts', () => {
   });
 
   test('included search matches name and description without case, by any word of the query', () => {
-    const items = [{ name: 'CSV Lab', description: 'Explore CSV tables' }, { name: 'Commons', description: 'Peer chat' }];
+    const items = [{ name: 'Tables and charts', description: 'Explore CSV tables' }, { name: 'Chat rooms', description: 'Peer chat' }];
     expect(matchQuery(items, 'chat')).toEqual([items[1]]);
     expect(matchQuery(items, '  csv ')).toEqual([items[0]]);
     expect(matchQuery(items, '')).toEqual(items);
@@ -421,24 +471,36 @@ describe('filters and contacts', () => {
 
   test('Your apps: the Library apps, the most recently added first, at most `max`, with a total', () => {
     const records = [
+      // Added at the same time as 'old': the Library order decides.
+      { id: 'tie', name: 'Tie app', createdAt: 100 },
       { id: 'old', name: 'Old app', createdAt: 100 },
       { id: 'undated', name: 'Undated app' },
       { id: 'new', name: 'New app', createdAt: 300 },
       { id: 'peer', name: 'Peer app', createdAt: 200, dweb: { uri: 'peerd://p/1', dwapp_id: 'peer-app' } },
-      { id: 'commons', name: 'Commons', createdAt: 50, dweb: { seed: 'commons' } },
+      { id: 'commons', name: 'Chat rooms', createdAt: 50, dweb: { seed: 'commons' } },
       { id: 'linked', name: '  ', dweb: { uri: 'peerd://l/2' } },
       { name: 'No id', createdAt: 999 },
       { id: 'bad-time', name: 'Bad time', createdAt: Number.NaN },
     ];
     const all = yourApps(records, 10);
-    expect(all.total).toBe(7);
-    expect(all.apps.map(app => app.id)).toEqual(['new', 'peer', 'old', 'commons', 'undated', 'linked', 'bad-time']);
+    expect(all.total).toBe(8);
+    expect(all.apps.map(app => app.id)).toEqual(['new', 'peer', 'tie', 'old', 'commons', 'undated', 'linked', 'bad-time']);
     // The tone key matches the app's tile: Commons by its seed, a peer app by its dwapp_id.
-    expect(all.apps.map(app => app.toneKey)).toEqual(['new', 'peer-app', 'old', 'commons', 'undated', 'peerd://l/2', 'bad-time']);
+    expect(all.apps.map(app => app.toneKey)).toEqual(['new', 'peer-app', 'tie', 'old', 'commons', 'undated', 'peerd://l/2', 'bad-time']);
     expect(all.apps.find(app => app.id === 'linked')?.name).toBe('Unnamed app');
     const few = yourApps(records, 2);
-    expect([few.apps.map(app => app.id), few.total]).toEqual([['new', 'peer'], 7]);
+    expect([few.apps.map(app => app.id), few.total]).toEqual([['new', 'peer'], 8]);
     expect(yourApps([], 6)).toEqual({ apps: [], total: 0 });
+  });
+
+  test('Chat rooms under a name that peerd gave it before shows its name now; a name the user gave it stays', () => {
+    const seed = { seed: 'commons' };
+    expect(['commons', 'Peerd-to-Peerd Commons', ' ', 'Team chat'].map(name => libraryName({ id: 'c', name, dweb: seed })))
+      .toEqual(['Chat rooms', 'Chat rooms', 'Chat rooms', 'Team chat']);
+    // Another app keeps its own name, whatever it is.
+    expect(libraryName({ id: 'p', name: 'Peerd-to-Peerd Commons' })).toBe('Peerd-to-Peerd Commons');
+    expect(libraryName(undefined)).toBe('');
+    expect(yourApps([{ id: 'c', name: 'Peerd-to-Peerd Commons', dweb: seed }], 6).apps.map(app => app.name)).toEqual(['Chat rooms']);
   });
 });
 

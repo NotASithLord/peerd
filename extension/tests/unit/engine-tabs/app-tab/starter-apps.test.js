@@ -32,6 +32,6 @@ const runStarter = async key => {
   });
 };
 describe('packaged starters in the actual App sandbox',()=>{
-  it('CSV Lab parses and renders the sample through the composed module script',async()=>{const result=/** @type {any} */(await runStarter('csv-lab'));expect(result.rows).toBe(6);expect(result.status).toContain('5 rows; 3 columns');expect(result.stats).toContain('mean: 1540');});
-  it('WASM Image Lab loads the binary asset and produces actual grayscale and threshold pixels',async()=>{const result=/** @type {any} */(await runStarter('wasm-image'));expect(result.gray).toEqual([247,247,247,255]);expect(result.threshold).toEqual([255,255,255,255]);expect(result.status).toContain('WebAssembly processed 49152 pixels with threshold');});
+  it('Tables and charts parses and renders the sample through the composed module script',async()=>{const result=/** @type {{rows:number,status:string,stats:string}} */(await runStarter('csv-lab'));expect(result.rows).toBe(6);expect(result.status).toContain('The table has 5 rows and 3 columns.');expect(result.stats).toContain('Average: 1540.');});
+  it('Desaturator loads the binary asset and produces actual grayscale and threshold pixels',async()=>{const result=/** @type {{gray:number[],threshold:number[],status:string}} */(await runStarter('wasm-image'));expect(result.gray).toEqual([247,247,247,255]);expect(result.threshold).toEqual([255,255,255,255]);expect(result.status).toBe('Done. The picture is now black and white.');});
 });

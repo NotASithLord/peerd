@@ -14,6 +14,10 @@ const fixture = () => {
         const message = JSON.parse(String(raw));
         commands.push(message.method);
         if (message.method === 'close') socket.close();
+        else if (message.method === 'detach') {
+          socket.send(JSON.stringify({ method: 'Target.detachedFromTarget', params: { sessionId: 'retired-worker' } }));
+          socket.send(JSON.stringify({ id: message.id, result: {} }));
+        }
         else if (message.method === 'ok') socket.send(JSON.stringify({ id: message.id, result: { accepted: true } }));
         else if (message.method === 'refuse') socket.send(JSON.stringify({ id: message.id, error: { message: 'refused' } }));
       },
@@ -52,5 +56,25 @@ test('socket closure rejects pending commands instead of leaving unresolved prom
       if (result.status === 'rejected') expect(String(result.reason)).toContain('CDP connection closed');
     }
     expect(server.commands).toEqual(['pending', 'close']);
+  } finally { connection.close(); server.close(); }
+});
+
+
+test('native child detach rejects only its pending commands and preserves the browser connection', async () => {
+  const server = fixture();
+  const connection = await attach(server.url, undefined, { commandTimeoutMs: 100 });
+  try {
+    const retired = connection.send('Runtime.enable', {}, 'retired-worker').then(
+      () => 'unexpected success', error => String(error));
+    const live = connection.send('ok', {}, 'live-worker');
+    await connection.send('detach');
+    expect(await retired).toContain('CDP session detached; outcome unknown');
+    expect(await live).toEqual({ accepted: true });
+    await expect(connection.send('Runtime.enable', {}, 'retired-worker'))
+      .rejects.toThrow('CDP session detached; outcome unknown');
+    // Cross the orphan command's original deadline: it must have been cleared.
+    await Bun.sleep(150);
+    expect(await connection.send('ok')).toEqual({ accepted: true });
+    expect(server.commands).toEqual(['Runtime.enable', 'ok', 'detach', 'ok']);
   } finally { connection.close(); server.close(); }
 });
