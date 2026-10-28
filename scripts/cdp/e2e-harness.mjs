@@ -432,12 +432,13 @@ export async function attach(wsUrl, onEvent, { commandTimeoutMs = 180_000 } = {}
   });
   let id = 0;
   const pending = new Map();
+  const detachedSessions = new Set();
   let closed = false;
   let closeReason = null;
   const closePending = (reason) => {
     closeReason ??= reason;
     closed = true;
-    for (const finish of pending.values()) finish({ error: { message: reason } });
+    for (const request of pending.values()) request.finish({ error: { message: reason } });
   };
   ws.onclose = () => closePending('CDP connection closed');
   ws.onerror = () => { closePending('CDP connection failed'); ws.close(); };
@@ -446,7 +447,19 @@ export async function attach(wsUrl, onEvent, { commandTimeoutMs = 180_000 } = {}
   const reqUrl = new Map();   // requestId → url; loadingFailed carries no url of its own
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data);
-    if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); return; }
+    if (m.id && pending.has(m.id)) { pending.get(m.id).finish(m); pending.delete(m.id); return; }
+    // why: a native child-session detach is terminal evidence for that worker,
+    // not a lost browser transport. Reject its unknown outcomes immediately so
+    // an orphaned command cannot later retire unrelated live page sessions.
+    if (m.method === 'Target.detachedFromTarget' && m.params?.sessionId) {
+      const sessionId = m.params.sessionId;
+      detachedSessions.add(sessionId);
+      for (const request of pending.values()) {
+        if (request.sessionId === sessionId) request.finish({ error: {
+          message: 'CDP session detached; outcome unknown',
+        } });
+      }
+    }
     if (m.method === 'Runtime.exceptionThrown') {
       events.push('EXC ' + (m.params?.exceptionDetails?.exception?.description || m.params?.exceptionDetails?.text));
     }
@@ -474,6 +487,7 @@ export async function attach(wsUrl, onEvent, { commandTimeoutMs = 180_000 } = {}
   };
   const send = (method, params = {}, sessionId) => new Promise((res, rej) => {
     if (closed || ws.readyState !== WebSocket.OPEN) { rej(new Error(`${method}: CDP connection is closed (${closeReason ?? 'socket unavailable'})`)); return; }
+    if (sessionId && detachedSessions.has(sessionId)) { rej(new Error(`${method}: CDP session detached; outcome unknown`)); return; }
     const i = ++id;
     // why: a page-side deadline cannot settle a lost CDP response. Retire the
     // connection on timeout; never replay a command with an unknown outcome.
@@ -481,12 +495,12 @@ export async function attach(wsUrl, onEvent, { commandTimeoutMs = 180_000 } = {}
       closePending(`CDP command ${method} timed out; outcome unknown`);
       ws.close();
     }, commandTimeoutMs);
-    pending.set(i, (m) => {
+    pending.set(i, { sessionId, finish: (m) => {
       clearTimeout(timer);
       pending.delete(i);
       if (m.error) rej(new Error(`${method}: ${m.error.message}`));
       else res(m.result);
-    });
+    } });
     try { ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) })); }
     catch { closePending('CDP send failed; outcome unknown'); ws.close(); }
   });
