@@ -10635,6 +10635,7 @@ export const STATES = [
         }, { budgetMs: 30_000, pollMs: 100 });
         if (!target) throw new Error('The created App did not render');
         page = await attach(target.webSocketDebuggerUrl);
+        await page.send('Runtime.enable');
         await page.send('Page.enable');
         await page.send('Page.bringToFront');
         await page.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: directory });
@@ -10712,6 +10713,7 @@ export const STATES = [
             editorHidden: document.getElementById('editor-panel')?.hidden,
             files: [...document.querySelectorAll('.pe-node[data-path]')].map((node) => node.dataset.path),
           })`);
+          rec.observe('renewed App editor runtime errors', page.events.slice(-12));
           if (process.env.PEERD_VISUAL_BASE_RENDER === '1' && diagnostic.boot?.includes('is-failed') && diagnostic.bootMessage) {
             rec.observe('merge-base App editor', diagnostic);
             await rec.visualPage('app-editor-recovery', page);
