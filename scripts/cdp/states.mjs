@@ -10655,10 +10655,13 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
           return document.hasFocus() && document.activeElement === button;
         })()`);
         if (!focusedForReentry) throw new Error('The Full screen button could not receive keyboard focus');
-        const enter = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 36 };
-        for (const type of ['rawKeyDown', 'keyUp']) await app.send('Input.dispatchKeyEvent', { type, ...enter });
+        // Enter activates native buttons through a carriage-return keypress;
+        // use the shared keyboard path, which includes that character stage.
+        await pressKey(app, 'Enter');
         if (!await waitFor(() => evalIn(app, `window.__fullScreenReentry.some(event => event.type === 'click' && event.trusted && event.target === 'fullscreen-btn')`), { budgetMs: 5_000, pollMs: 50 })) {
-          throw new Error('Keyboard reentry did not deliver a trusted Full screen click');
+          const evidence = await evalIn(app, `({ events: window.__fullScreenReentry,
+            focused: document.hasFocus(), activeElement: document.activeElement?.id ?? null })`);
+          throw new Error(`Keyboard reentry did not deliver a trusted Full screen click: ${JSON.stringify(evidence)}`);
         }
         const again = await waitFor(fullScreenOn, { budgetMs: 5_000, pollMs: 50 });
         // why: the panel that the handle opened is still open, as when a person asks peerd for an App and then clicks Full screen.
