@@ -34,15 +34,16 @@ export const discoverSurface = () => {
   const pages = join(tree, 'home/discover-pages.js');
   const flow = existsSync(pages);
   const source = flow ? readFileSync(pages, 'utf8') : '';
-  const starters = join(tree, 'tests/fixtures/starters.js');
+  // The executable fixtures are overlaid from head; capabilities belong to base.
+  const fixtureSources = JSON.parse(readFileSync(join(tree, 'tests/visual-base-fixtures.json'), 'utf8'));
+  const starters = fixtureSources['starters.js'];
   /** @param {string} name @param {string} frame */
-  const fixtureHas = (name, frame) => existsSync(join(tree, 'tests/fixtures', name))
-    && readFileSync(join(tree, 'tests/fixtures', name), 'utf8').includes(`'${frame}'`);
+  const fixtureHas = (name, frame) => fixtureSources[name].includes(`'${frame}'`);
   const catalog = join(tree, 'shared/starter-catalog.js');
   return {
     base: true, flow, phase2: source.includes('export const shareDialog'), says: source.includes('export const saysItSection'),
     blocks: source.includes('export const blockDialog'), mine: source.includes('You made this app.'),
-    added: existsSync(starters) && readFileSync(starters, 'utf8').includes("=== 'added'"),
+    added: starters.includes("=== 'added'"),
     changed: source.includes('It changed on this device after you installed it.'), plain: source.includes('This is you.'),
     lines: fixtureHas('explore.js', 'share-copied') && fixtureHas('contacts.js', 'unblock-failed'),
     names: existsSync(catalog) && readFileSync(catalog, 'utf8').includes("name: 'Tables and charts'"),

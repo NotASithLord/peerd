@@ -5737,7 +5737,16 @@ export const STATES = [
           rec.observe(`${label}: locked authority`, reply);
           return reply?.ok === true && reply.state?.vault?.locked === true ? reply : null;
         }, { budgetMs: 30_000, pollMs: 100 });
-        if (!authority) throw new Error(`PROBE-GAP: ${label} has no ready locked authority. No passphrase was submitted.`);
+        if (!authority) {
+          // Preserve existing observer evidence without waking or resuming the failed authority.
+          rec.observe(`${label}: readiness failure targets`, {
+            pageEvents: ctx.page.events.slice(-12),
+            targets: ctx.extensionTargetEvents().map(({ targetId, events }) => ({
+              targetId, events: events.slice(-12),
+            })).slice(-24),
+          });
+          throw new Error(`PROBE-GAP: ${label} has no ready locked authority. No passphrase was submitted.`);
+        }
         return authority;
       };
       const submit = async text => {
@@ -6307,6 +6316,11 @@ export const STATES = [
           throw new Error('The proposed site-client contracts are unavailable for visual review');
         }
         await rec.visual('site-client-contract-details');
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', NARROW_PANEL_METRICS);
+        await rec.visual('site-client-contract-details-narrow');
+        await evalIn(ctx.page, `document.querySelector('[aria-label="Proposed site-client contracts"]')?.closest('details')?.removeAttribute('open')`);
+        await rec.visual('site-client-confirm-narrow');
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
         const maximum = await evalIn(ctx.page, `(async () => {
           const m = (await import('/vendor/mithril/mithril.js')).default;
           const { ConfirmModal } = await import('/sidepanel/components/app.js');
@@ -6347,7 +6361,9 @@ export const STATES = [
             && maximum?.scrollable && maximum?.overflow === 'auto'
             && maximum?.actionPosition === 'sticky',
           JSON.stringify(maximum));
+        await rec.visual('site-client-maximum');
       } finally {
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
         await evalIn(ctx.page, `document.querySelector('#e2e-site-client-confirm')?.remove()`);
       }
     },
