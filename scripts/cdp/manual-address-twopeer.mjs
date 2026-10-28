@@ -220,8 +220,26 @@ try {
   evidence.published = published;
   await until('mutual authenticated link', async () => {
     const status = await rpc(ctx.page, { type: 'dweb/distributed/info' });
-    const other = await invoke(publisher, 'function(did) { return window.manualPublisher.room.mesh.hasLink(did); }', [receiver.did]);
-    return other && Array.isArray(status.peers) && status.peers.some(peer => peer.did === published.publisher && peer.linked);
+    // Activation's lastNetworkInfo predates the publisher. Keep the latest
+    // actual link probe separately, even if the publisher evaluation fails.
+    // Retain only bounded state/counts: no peer identities, SDP or addresses.
+    const receiverLinked = Array.isArray(status.peers)
+      && status.peers.some(peer => peer.did === published.publisher && peer.linked);
+    const rendezvousState = value => ['up', 'connecting', 'none'].includes(value) ? value : 'unknown';
+    const probe = evidence.lastMutualLinkProbe = {
+      at: Date.now(), receiver: { ok: status?.ok === true, running: status?.running === true,
+        rendezvous: rendezvousState(status?.rendezvous),
+        peerCount: Array.isArray(status?.peers) ? status.peers.length : null, linkedToPublisher: receiverLinked },
+      publisher: null,
+    };
+    const other = await invoke(publisher, `function(did) {
+      const room = window.manualPublisher.room;
+      const state = room.rendezvous();
+      return { linkedToReceiver: room.mesh.hasLink(did), peerCount: room.mesh.peers().length,
+        rendezvous: ['up', 'connecting', 'none'].includes(state) ? state : 'unknown' };
+    }`, [receiver.did]);
+    probe.publisher = other;
+    return other.linkedToReceiver && receiverLinked;
   });
   const baselineApps = await call({ type: 'apps/list' });
   check('catalog readable before inspection', baselineApps?.ok && Array.isArray(baselineApps.apps));
