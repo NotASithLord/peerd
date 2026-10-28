@@ -37,7 +37,7 @@ export const genBuildConfigSource = (
   return `// @ts-check
 // GENERATED FILE. Do not edit. Source of truth: the packaged manifest.
 // Chrome offscreen documents do not expose runtime.getManifest, so these
-// exact build facts are stamped into every artifact and the dev tree.
+// Build facts are stamped into artifacts and the dev tree.
 
 export const EXTENSION_VERSION = ${JSON.stringify(version)};
 export const BACKGROUND_MODULE_PATH = ${JSON.stringify(backgroundEntry)};
