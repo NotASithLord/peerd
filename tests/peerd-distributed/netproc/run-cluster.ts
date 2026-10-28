@@ -67,7 +67,7 @@ const main = async () => {
   });
   console.log(`[cluster] relay up at ${relayUrl} — spawning ${N} nodes (quorum ${QUORUM})`);
 
-  // node1, node2, … — stable, readable labels (run-node uses the label as its
+  // Stable labels node1, node2, etc. (run-node uses the label as its
   // gossip/direct/DHT payload, so the self-test reads cleanly in the log).
   const labels = Array.from({ length: N }, (_, i) => `node${i + 1}`);
   const children: ReturnType<typeof spawn>[] = [];
