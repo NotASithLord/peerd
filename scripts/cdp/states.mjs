@@ -8648,7 +8648,18 @@ export const STATES = [
           const client = makeUiRuntimeClient({ browser });
           const snapshot = await client.send({ type: 'state/get' });
           const status = await client.send({ type: 'provider/status' });
-          if (!snapshot?.state || !Array.isArray(status?.providers)) throw new Error('provider fixture snapshot missing');
+          if (!snapshot?.state || !Array.isArray(status?.providers)) {
+            // why: retain bounded reply classifications, never account state or
+            // provider/key data, when native controller startup refuses a fixture.
+            const classify = reply => ({ ok: reply?.ok === true,
+              code: typeof reply?.code === 'string' && /^[a-z0-9-]{1,100}$/.test(reply.code) ? reply.code : null,
+              phase: ['startup', 'pre-dispatch'].includes(reply?.phase) ? reply.phase : null,
+              outcomeKnown: typeof reply?.outcomeKnown === 'boolean' ? reply.outcomeKnown : null });
+            throw new Error('provider fixture snapshot missing: ' + JSON.stringify({
+              snapshot: { ...classify(snapshot), hasState: !!snapshot?.state },
+              status: { ...classify(status), hasProviders: Array.isArray(status?.providers) },
+            }));
+          }
           const state = snapshot.state;
           state.providers = { ...state.providers, current: 'anthropic', hasKey: true };
           state.settings = { ...state.settings, providerName: 'anthropic', providerModel: '' };
