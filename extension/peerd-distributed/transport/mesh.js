@@ -423,7 +423,15 @@ export const createRoomMesh = ({
     }
     if (verifying >= VERIFY_PER_MESH || link.verifying >= VERIFY_PER_PEER) {
       if (link.queued >= QUEUED_PER_PEER || verificationQueue.length >= QUEUED_PER_MESH) {
-        audit?.('peer_verification_overflow', { did: link.did });
+        // Unverified frame bytes never enter diagnostics. Fixed-size occupancy
+        // and channel classification distinguish local pressure from peer floods.
+        audit?.('peer_verification_overflow', {
+          did: link.did,
+          channel: Number.isInteger(msg.ch) && msg.ch >= 0 && msg.ch <= 4 ? msg.ch : -1,
+          claimedForwarded: msg.ch === 4 && msg.from !== link.did,
+          activePeer: link.verifying, activeMesh: verifying,
+          queuedPeer: link.queued, queuedMesh: verificationQueue.length,
+        });
         removeLink(link.did, 'verification-overflow');
         return;
       }
