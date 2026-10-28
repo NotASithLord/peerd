@@ -3583,7 +3583,39 @@ export const STATES = [
           (await rpc(fresh.page, { type: 'bootstrap/ready' }))?.featureLeases);
         const destination = await mkdtemp(join(directory, `${mode}-`));
         const page = await openWidePage(fresh, 'options/options.html#!/transfer', { ready: '#exppass2' });
+        const exceptions = [];
+        const endpoint = await (await fetch(`http://127.0.0.1:${fresh.port}/json/version`)).json();
+        const debug = await attach(endpoint.webSocketDebuggerUrl);
+        const { sessionId } = await debug.send('Target.attachToTarget', { targetId: fresh.sw.targetId, flatten: true });
+        const debugSend = (method, params = {}) => debug.send(method, params, sessionId);
+        const scriptPaths = new Map();
+        const onPause = (method, params, message) => {
+          if (message.sessionId !== sessionId) return;
+          if (method === 'Debugger.scriptParsed' && scriptPaths.size < 2000
+            && /^chrome-extension:\/\/[a-p]{32}\/[a-zA-Z0-9_./-]+\.js$/.test(params.url ?? '')) {
+            scriptPaths.set(params.scriptId, new URL(params.url).pathname);
+          }
+          if (method !== 'Debugger.paused') return;
+          // why: the public transfer reply deliberately hides arbitrary errors.
+          // Keep only bounded static source locations, never exception text,
+          // scopes, arguments, object values, or exported secret material.
+          if (exceptions.length < 24) exceptions.push({
+            kind: ['Error', 'TypeError', 'DOMException', 'ReferenceError', 'RangeError']
+              .includes(params.data?.className) ? params.data.className : 'other',
+            frames: (params.callFrames ?? []).slice(0, 12).map((frame) => ({
+              path: scriptPaths.get(frame.location?.scriptId) ?? 'non-static-source',
+              line: frame.location?.lineNumber,
+              column: frame.location?.columnNumber,
+            })),
+          });
+          // Observation changes scheduling; it is diagnostic evidence, not a
+          // replacement for a passing uninstrumented release qualification.
+          debugSend('Debugger.resume').catch(() => {});
+        };
+        debug.on(onPause);
         try {
+          await debugSend('Debugger.enable');
+          await debugSend('Debugger.setPauseOnExceptions', { state: 'all' });
           await page.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: destination });
           // Observe only result codes from the real private channel. Never
           // retain the passphrase, exported payload, secrets or identity capsule.
@@ -3669,7 +3701,14 @@ export const STATES = [
           if (!baseRender && off) rec.check(`${mode} constructs no host or network transport`, noHost && noTransport);
           rec.check(`${mode} export makes no model inference`, fresh.modelCallCount() === 0);
           await rec.visualPage(mode === 'no-choice' ? 'backup-network-policy' : `backup-${mode}`, page);
-        } finally { await page.close(); }
+        } finally {
+          await debugSend('Debugger.setPauseOnExceptions', { state: 'none' }).catch(() => {});
+          await debugSend('Debugger.disable').catch(() => {});
+          debug.off(onPause);
+          debug.close();
+          rec.observe(`backup exception locations ${mode}`, exceptions);
+          await page.close();
+        }
       };
       try {
         const initial = await rpc(fresh.page, { type: 'state/get' });
