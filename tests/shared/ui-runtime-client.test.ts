@@ -18,7 +18,7 @@ describe('bounded UI runtime client', () => {
       'memory/export', 'memory/suggestions', 'local-model/catalog', 'local-model/probe',
       'session/debugBundle', 'session/contextSnapshots', 'import/inspect', 'app/get-meta',
       'vault/prfStatus', 'pod/get-meta', 'vm/get-meta', 'transfer/inspectImport',
-      'export/artifact', 'dweb/blocked-peers',
+      'export/artifact', 'dweb/blocked-peers', 'dweb/app-local-changes',
     ]) {
       expect(uiMessageIsRead(type)).toBe(true);
     }

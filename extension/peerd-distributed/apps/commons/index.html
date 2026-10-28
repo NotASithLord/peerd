@@ -29,7 +29,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Peerd-to-Peerd Commons</title>
+<title>Chat rooms</title>
 <style>
   /* peerd theme: monochrome surfaces, the five brand colours as the only
      accents — here each participant wears one (cyan/red/amber/green/magenta,
@@ -118,7 +118,7 @@
 <body>
 
 <header>
-  <h1>Peerd-to-Peerd Commons<span class="dot">·</span></h1>
+  <h1>Chat rooms<span class="dot">·</span></h1>
   <span id="hdr-room" class="muted"></span>
   <span class="spacer"></span>
   <span id="hdr-me" class="muted mono"></span>
@@ -626,7 +626,7 @@
       $('j-room').value = h.launch?.room || $('j-room').value || 'peerd-global';
     } catch {
       $('join').innerHTML = '<p class="muted">the dweb bridge is not available here — '
-        + 'commons needs a peerd preview build with the dweb enabled.</p>';
+        + 'the Chat rooms app needs a peerd preview build with the dweb enabled.</p>';
     }
   })();
 })();

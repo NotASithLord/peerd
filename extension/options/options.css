@@ -118,6 +118,8 @@
 .options-page p { margin: 0 0 10px; color: var(--fg-muted); font-size: 13px; }
 .options-page p.error { color: var(--danger-ink); }
 .options-page .hint { font-size: 12px; margin-top: 4px; }
+/* why: the two buttons of the page Discover's Try opens must not touch. */
+.starter-review > button + button { margin-inline-start: 8px; }
 .sr-only {
   position: absolute;
   width: 1px;
@@ -376,6 +378,8 @@
 .disc-section--tight { gap: 4px; }
 .disc-btn { min-height: 40px; padding: 0 16px; }
 .disc-primary { min-height: 40px; padding: 0 18px; font-weight: 600; }
+/* why: Open runs the app in its own tab, so it carries the external-link icon. */
+.disc-primary--open { display: inline-flex; align-items: center; gap: 8px; }
 .disc-footnote { margin: 0; color: var(--secondary); }
 .disc-more { align-self: center; }
 
@@ -464,7 +468,8 @@ button.disc-tile-open { display: block; max-width: 100%; padding: 0; border: 0; 
 .disc-yours-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 12px; max-width: 100%; }
 .disc-yours-item { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 10px 14px 10px 10px; border: 1px solid var(--border); border-radius: var(--r4); background: var(--elev); }
 .disc-home .disc-yours-name { flex: 1 1 auto; min-width: 0; max-width: 24ch; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.disc-yours-open { flex: none; min-height: 36px; padding: 0 12px; font-size: 13px; }
+/* why the auto margin: a line about a failed Open widens the item, and Open stays at its end. */
+.disc-yours-open { flex: none; min-height: 36px; padding: 0 12px; font-size: 13px; margin-inline-start: auto; }
 .disc-yours-item > p { flex: 1 1 100%; margin: 0; }
 .disc-yours > button.linklike.disc-link-btn { min-height: 32px; padding: 0; }
 /* why one line that scrolls on a narrow column: six stacked cards push the

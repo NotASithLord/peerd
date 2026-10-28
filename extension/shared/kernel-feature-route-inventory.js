@@ -73,7 +73,7 @@ export const KERNEL_TRANSFER_ROUTE_NAMES = Object.freeze(
 );
 
 export const KERNEL_DWEB_ROUTE_NAMES = Object.freeze(
-  'app-authority-generations app-install app-record-served app-snapshot app-update audit base/announce base/find base/heard base/install base/inspect-address base/install-address base/install-status base/cancel-install base/room base/share-app base/start base/status base/stop base/update-app base/updates blocked-peers distributed/info ensure-seed-app peer-block peer-policy peer-unblock meta-admit open-commons self-apply-surface self-prepare-offer self-read-surface self-restore self-status'.split(' ').map((name) => `dweb/${name}`),
+  'app-authority-generations app-install app-local-changes app-record-served app-snapshot app-update audit base/announce base/find base/heard base/install base/inspect-address base/install-address base/install-status base/cancel-install base/room base/share-app base/start base/status base/stop base/update-app base/updates blocked-peers distributed/info ensure-seed-app peer-block peer-policy peer-unblock meta-admit open-commons self-apply-surface self-prepare-offer self-read-surface self-restore self-status'.split(' ').map((name) => `dweb/${name}`),
 );
 
 

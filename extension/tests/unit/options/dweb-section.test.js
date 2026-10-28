@@ -27,7 +27,7 @@ const rowState = (root) => ({
 });
 
 describe('options.dweb live-stop status', () => {
-  it('routes Commons to an explicit Discover choice without changing network consent', async () => {
+  it('routes Chat rooms to an explicit Discover choice without changing network consent', async () => {
     const root = document.createElement('div'); document.body.appendChild(root);
     const state = {settings:{dwebEnabled:true,dwebAgentEnabled:false}};
     let writes = 0;
@@ -43,7 +43,12 @@ describe('options.dweb live-stop status', () => {
       tabs.query = async () => [];
       tabs.create = async (/** @type {{url:string}} */ options) => {opened=options.url; return {id:1};};
       m.mount(root,{view:()=>m(DwebSection,{state,send:async()=>{writes++;return {ok:true};},loadStatus:async()=>null})});
-      expect(root.textContent).toContain('Add and open Commons');
+      // The heading is the app's plain name, and a sentence names it as an app, never as rooms.
+      expect([...root.querySelectorAll('h3')].map(node => node.textContent)).toContain('Chat rooms');
+      expect(root.textContent).toContain('In Discover, choose Add and open Chat rooms.');
+      expect(root.textContent).toContain('open the Chat rooms app there and join the same room code.');
+      expect(root.textContent.includes('dweb demo')).toBe(false);
+      expect(/commons/i.test(root.textContent ?? '')).toBe(false);
       expect(root.textContent).toContain('same named room');
       expect(root.textContent.includes('pre-loaded')).toBe(false);
       /** @type {HTMLButtonElement} */ ([...root.querySelectorAll('button')].find(button=>button.textContent==='Open Discover')).click();

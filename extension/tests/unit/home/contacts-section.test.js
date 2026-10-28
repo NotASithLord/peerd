@@ -16,6 +16,9 @@ const CONTACTS = [
   },
 ];
 const LIVE_PEERS = [{ did: DID_LIVE, name: null, linked: true, path: 'direct-ipv6', lastSeen: 999 }];
+// The empty list says who shows up here and what the user can do, in Discover's words.
+const EMPTY = 'Nobody here yet. People you install an app from, and people you meet on the peer network, show up here. '
+  + 'You can add a name for each one.';
 
 /** @typedef {{ type: string } & Record<string, any>} Msg */
 /** @typedef {Record<string, (msg: Msg) => any>} Overrides */
@@ -96,12 +99,28 @@ const need = (root, sel, _ctor) => {
 
 describe('home.contacts', () => {
   it('lists known peers — a named contact and a live-only peer', async () => {
-    const { root, unmount } = await mountView(makeSend());
+    const UNNAMED = 'did:key:z6MkUNNAMEDUNNAMED';
+    const send = makeSend({ 'contacts/list': () => ({ ok: true, contacts: [...structuredClone(CONTACTS), {
+      did: UNNAMED, name: null, notes: '', tags: [], favorite: false, saved: false, createdAt: null, updatedAt: null,
+      activity: { appsInstalled: [{ appId: 'app-2', name: 'Kanban' }], appCount: 1, installCount: 1, updateCount: 0, eventCount: 1,
+        firstEventAt: null, lastEventAt: null },
+    }] }) });
+    const { root, unmount } = await mountView(send);
     try {
       const names = [...root.querySelectorAll('.peerd-disc-name')].map((n) => n.textContent);
       expect(names.some((t) => t === 'Alice')).toBe(true);          // the saved overlay name
-      // the live-only peer shows as an unnamed "peer …<short did>" (last 8 chars)
-      expect(root.textContent).toContain('peer LIVELIVE');
+      // The live-only peer shows its short key alone (the last 8 characters), as
+      // Discover and Blocked makers show a person, and the line under it does not repeat it.
+      const live = rowWith(root, 'LIVELIVE');
+      expect(need(live, '.peerd-disc-name').textContent).toBe('LIVELIVE');
+      expect(live.querySelector('.peerd-disc-pub')).toBe(null);
+      expect(root.textContent.includes('peer LIVELIVE')).toBe(false);
+      // Someone unnamed with an app: the line under the key names the app count only.
+      expect(need(rowWith(root, 'UNNAMED'), '.peerd-disc-pub').textContent).toBe('1 app');
+      // Under a name, the key shows the same way, and only the key is a code.
+      const alice = need(rowWith(root, 'Alice'), '.peerd-disc-pub');
+      expect(alice.textContent).toBe('AAAAAAAA · 1 app');
+      expect(need(alice, 'bdi.contact-key').textContent).toBe('AAAAAAAA');
       // its live status is rendered honestly
       expect(root.textContent).toContain('direct · IPv6');
     } finally { unmount(); }
@@ -116,6 +135,15 @@ describe('home.contacts', () => {
       await flush();
       expect(root.textContent).toContain('1 app installed from them');
       expect(root.textContent).toContain('Chess');
+      // Someone with no apps yet is "them", as in Discover, never "this peer".
+      clickText(rowWith(root, 'LIVELIVE'), 'button', 'Activity');
+      await flush();
+      expect(root.textContent).toContain('No apps installed from them yet.');
+      expect(root.textContent.includes('this peer')).toBe(false);
+      // The full key is a code, so it waits behind Technical details, as in Discover.
+      const tech = need(rowWith(root, 'LIVELIVE'), 'details.contact-tech', HTMLDetailsElement);
+      expect([need(tech, 'summary').textContent, tech.open]).toEqual(['Technical details', false]);
+      expect(need(tech, '.contact-did').textContent).toBe(DID_LIVE);
     } finally { unmount(); }
   });
 
@@ -123,8 +151,8 @@ describe('home.contacts', () => {
     const send = makeSend();
     const { root, unmount } = await mountView(send);
     try {
-      // The live-only peer offers "Name"; the named one offers "Rename".
-      clickText(root, 'button', 'Name');
+      // The live-only peer offers "Add a name", as Discover does; the named one offers "Rename".
+      clickText(root, 'button', 'Add a name');
       await flush();
       const input = need(root, '.contact-name-input', HTMLInputElement);
       expect(input).toBeTruthy();
@@ -161,7 +189,7 @@ describe('home.contacts', () => {
     try { mounted = await mountView(send); } finally { window.setInterval = realSetInterval; }
     const { root, unmount } = mounted;
     try {
-      clickText(rowWith(root, 'BBBBBBBB'), 'button', 'Name');
+      clickText(rowWith(root, 'BBBBBBBB'), 'button', 'Add a name');
       await flush();
       const input = need(root, '.contact-name-input', HTMLInputElement);
       input.value = 'Bo';
@@ -183,7 +211,7 @@ describe('home.contacts', () => {
     });
     const { root, unmount } = await mountView(send);
     try {
-      expect(root.textContent).toContain('No known peers yet');
+      expect(root.textContent).toContain(EMPTY);
     } finally { unmount(); }
   });
 
@@ -203,12 +231,12 @@ describe('home.contacts', () => {
       expect(root.textContent).toContain('Contacts took too long to load. Nothing was changed.');
       expect(root.textContent).toContain('Retry');
       expect(root.textContent.includes('Loading contacts…')).toBe(false);
-      expect(root.textContent.includes('No known peers yet')).toBe(false);
+      expect(root.textContent.includes(EMPTY)).toBe(false);
       clickText(root, 'button', 'Retry');
       await flush();
       await flush();
       expect(lists).toBe(2);
-      expect(root.textContent).toContain('No known peers yet');
+      expect(root.textContent).toContain(EMPTY);
       expect(root.textContent.includes('Retry')).toBe(false);
     } finally { unmount(); }
   });
@@ -246,16 +274,37 @@ describe('home.contacts', () => {
       await flush();
       expect(send.calls.filter((call) => call.type === 'contacts/set').length).toBe(1);
       expect(send.calls.filter((call) => call.type === 'contacts/list').length).toBe(2);
-      expect(root.textContent).toContain('could not confirm whether updating this favorite finished');
-      expect(root.textContent).toContain('read-only contacts refresh to reconcile');
+      // Neutral words: the change may have happened, and peerd reads the list again.
+      expect(need(root, '.peerd-disc-err[role="alert"]').textContent)
+        .toBe('peerd is not sure the favorite changed. Check the list before you try again.');
       expect([...root.querySelectorAll('button')].some((button) =>
         button.textContent === 'Retry' || button.textContent === 'Retry update')).toBe(false);
       expect(need(rowWith(root, 'Alice'), '.contact-detail-actions button', HTMLButtonElement).disabled)
         .toBe(true);
-      clickText(rowWith(root, 'Alice'), 'button', 'I checked this contact; allow changes');
+      clickText(rowWith(root, 'Alice'), 'button', 'Allow changes again');
       await flush();
       expect(need(rowWith(root, 'Alice'), '.contact-detail-actions button', HTMLButtonElement).disabled)
         .toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('a name that peerd could not save says what failed, then what to do', async () => {
+    const send = makeSend({
+      'contacts/set': () => ({ ok: false, error: 'contact-store-unavailable', outcomeKnown: true }),
+      'dweb/distributed/info': () => ({ ok: true, peers: [] }),
+    });
+    const { root, unmount } = await mountView(send, 20);
+    try {
+      clickText(rowWith(root, 'Alice'), 'button', 'Rename');
+      await flush();
+      const input = need(root, '.contact-name-input', HTMLInputElement);
+      input.value = 'Alicia';
+      input.dispatchEvent(new Event('input'));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      await flush();
+      await flush();
+      expect(need(root, '.peerd-disc-err[role="alert"]').textContent).toBe('peerd could not save the name. Try again.');
+      expect(send.calls.filter((call) => call.type === 'contacts/set').length).toBe(1);
     } finally { unmount(); }
   });
 
@@ -273,8 +322,8 @@ describe('home.contacts', () => {
       await flush();
       expect(send.calls.filter((call) => call.type === 'contacts/forget').length).toBe(1);
       expect(send.calls.filter((call) => call.type === 'contacts/list').length).toBe(2);
-      expect(root.textContent).toContain('could not confirm whether forgetting this contact finished');
-      expect(root.textContent).toContain('Review the current state before trying again.');
+      expect(root.textContent).toContain('peerd is not sure the contact was forgotten. Check the list before you try again.');
+      expect(root.textContent.includes('Peerd')).toBe(false);
       expect(root.textContent.includes('Loading contacts…')).toBe(false);
     } finally { unmount(); }
   });
@@ -325,7 +374,9 @@ describe('home.contacts blocked makers', () => {
       const line = need(root, '.contacts-unblocked');
       expect([line.textContent, line.getAttribute('role')])
         .toEqual(['After you unblock someone, their apps show up again the next time peerd hears from them.', 'status']);
-      expect(root.textContent).toContain('You have not blocked anyone.');
+      // Nobody is left, so the list says so, and the line about what a block does goes.
+      expect(root.textContent).toContain('Nobody is blocked now.');
+      expect(root.textContent.includes('Their apps are hidden')).toBe(false);
       expect(document.activeElement).toBe(line);
     } finally { unmount(); }
   });
@@ -338,24 +389,31 @@ describe('home.contacts blocked makers', () => {
     const row = () => need(root, '.contacts-blocked-row');
     const press = async (/** @type {string} */ label) => { clickText(row(), 'button', label); await flush(); await flush(); };
     try {
+      // The pressed button is off while each request runs, so focus comes back to the row's button.
       await press('Unblock');
       const alert = need(row(), '[role="alert"]');
       expect([alert.textContent, alert.classList.contains('error')]).toEqual(['peerd could not unblock Alice. Try again.', true]);
+      expect(document.activeElement).toBe(need(row(), '[data-unblock]'));
       await press('Unblock');
       const status = need(row(), 'p[role="status"]');
       expect([status.textContent, status.classList.contains('error')])
         .toEqual(['peerd is not sure Alice is unblocked. Check again before you try again.', false]);
       expect(row().querySelector('[role="alert"]')).toBe(null);
+      // The unblock may be done, so the row claims neither outcome.
+      expect(row().querySelector('.contacts-blocked-meta')).toBe(null);
       expect(need(row(), 'button').textContent).toBe('Check again');
+      expect(document.activeElement).toBe(need(row(), '[data-unblock]'));
       // The list still names them, so the unblock did not happen.
       await press('Check again');
       expect(need(row(), '[role="alert"]').textContent).toBe('peerd could not unblock Alice. Try again.');
+      expect(document.activeElement).toBe(need(row(), '[data-unblock]'));
       await press('Unblock');
       // This time it was stored after all: the list is the receipt.
       blocked = [];
       await press('Check again');
       expect(root.querySelector('.contacts-blocked-row')).toBe(null);
       expect(root.textContent).toContain('After you unblock someone, their apps show up again the next time peerd hears from them.');
+      expect(document.activeElement).toBe(need(root, '.contacts-unblocked'));
       expect(sent(send, 'dweb/peer-unblock').length).toBe(3);
     } finally { unmount(); }
   });
@@ -426,6 +484,37 @@ describe('home.contacts blocked makers', () => {
       expect(root.textContent).toContain('After you unblock someone, their apps show up again the next time peerd hears from them.');
       expect(sent(send, 'dweb/peer-unblock').length).toBe(1);
     } finally { for (const release of held) release(); unmount(); }
+  });
+
+  it('the poll settles an unknown unblock once the list drops the maker, and a later block of them starts fresh', async () => {
+    let blocked = [DID_A];
+    const send = makeSend({
+      'dweb/blocked-peers': () => ({ ok: true, blocked }),
+      'dweb/peer-unblock': () => ({ ok: false, outcomeKnown: false }),
+    });
+    const { root, unmount } = await mountView(send, undefined, 20);
+    /** @param {() => boolean} ready */
+    const polled = async (ready) => {
+      for (let tries = 0; tries < 200 && !ready(); tries++) { await new Promise((resolve) => setTimeout(resolve, 10)); m.redraw.sync(); }
+    };
+    try {
+      clickText(root, '.contacts-blocked-row button', 'Unblock');
+      await flush();
+      await flush();
+      expect(need(root, '.contacts-blocked-row button').textContent).toBe('Check again');
+      // Stored after all, or unblocked in another tab: the next list the poll reads is the receipt.
+      blocked = [];
+      await polled(() => !root.querySelector('.contacts-blocked-row'));
+      expect(root.querySelector('.contacts-blocked-row')).toBe(null);
+      expect(need(root, '.contacts-unblocked').textContent)
+        .toBe('After you unblock someone, their apps show up again the next time peerd hears from them.');
+      // Blocked again in Discover: the row offers Unblock, and nothing is left of the last try.
+      blocked = [DID_A];
+      await polled(() => !!root.querySelector('.contacts-blocked-row'));
+      expect(need(root, '.contacts-blocked-row button').textContent).toBe('Unblock');
+      expect(need(root, '.contacts-blocked-row').querySelector('p[role="status"]')).toBe(null);
+      expect(sent(send, 'dweb/peer-unblock').length).toBe(1);
+    } finally { unmount(); }
   });
 
   it('after an unblock, focus moves to the line that says so only when it was lost, never from a control the user moved to', async () => {

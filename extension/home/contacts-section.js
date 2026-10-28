@@ -54,10 +54,16 @@ const boundedRequest = (promise, timeoutMs, outcomeKnown) => new Promise((resolv
   }));
 });
 
-/** @param {any} result @param {string} action */
-const mutationFailureCopy = (result, action) => result?.outcomeKnown !== true
-  ? `Peerd could not confirm whether ${action} finished. Peerd requested a read-only contacts refresh to reconcile. Review the current state before trying again.`
-  : `Peerd could not ${action}. Review the current contacts and try again if needed.`;
+// What a change that did not finish says, in each action's own words: what
+// failed and what to do, or a neutral line when the outcome is not known.
+const SAVE_NAME = Object.freeze({ failed: 'peerd could not save the name. Try again.',
+  unsure: 'peerd is not sure the name was saved. Check the list before you try again.' });
+const FAVORITE = Object.freeze({ failed: 'peerd could not change the favorite. Try again.',
+  unsure: 'peerd is not sure the favorite changed. Check the list before you try again.' });
+const FORGET = Object.freeze({ failed: 'peerd could not forget this contact. Try again.',
+  unsure: 'peerd is not sure the contact was forgotten. Check the list before you try again.' });
+/** @param {{outcomeKnown?:unknown}|null|undefined} result @param {{failed:string, unsure:string}} words */
+const mutationFailureCopy = (result, words) => result?.outcomeKnown !== true ? words.unsure : words.failed;
 
 /** @typedef {import('../options/sections/reset-row.js').Send} Send */
 /** @typedef {{ linked?: boolean | string, path?: string, lastSeen?: number, name?: string, did?: string }} LivePeer */
@@ -324,10 +330,10 @@ export const ContactsSection = () => {
         false,
       );
       mutationNotice = r?.ok && r?.outcomeKnown !== false
-        ? null : mutationFailureCopy(r, 'saving this name');
+        ? null : mutationFailureCopy(r, SAVE_NAME);
       if (!r?.ok && r?.outcomeKnown !== true) unconfirmedDids.add(row.did);
     } catch {
-      mutationNotice = mutationFailureCopy({ outcomeKnown: false }, 'saving this name');
+      mutationNotice = mutationFailureCopy({ outcomeKnown: false }, SAVE_NAME);
       unconfirmedDids.add(row.did);
     } finally {
       busyDid = null;
@@ -346,10 +352,10 @@ export const ContactsSection = () => {
         type: 'contacts/set', did: row.did, favorite: !row.favorite,
       })), timeoutMs, false);
       mutationNotice = r?.ok && r?.outcomeKnown !== false
-        ? null : mutationFailureCopy(r, 'updating this favorite');
+        ? null : mutationFailureCopy(r, FAVORITE);
       if (!r?.ok && r?.outcomeKnown !== true) unconfirmedDids.add(row.did);
     } catch {
-      mutationNotice = mutationFailureCopy({ outcomeKnown: false }, 'updating this favorite');
+      mutationNotice = mutationFailureCopy({ outcomeKnown: false }, FAVORITE);
       unconfirmedDids.add(row.did);
     } finally {
       busyDid = null;
@@ -370,12 +376,12 @@ export const ContactsSection = () => {
         false,
       );
       mutationNotice = (r?.ok && r?.outcomeKnown !== false) || r?.error === 'contact-not-found'
-        ? null : mutationFailureCopy(r, 'forgetting this contact');
+        ? null : mutationFailureCopy(r, FORGET);
       if (!r?.ok && r?.error !== 'contact-not-found' && r?.outcomeKnown !== true) {
         unconfirmedDids.add(row.did);
       }
     } catch {
-      mutationNotice = mutationFailureCopy({ outcomeKnown: false }, 'forgetting this contact');
+      mutationNotice = mutationFailureCopy({ outcomeKnown: false }, FORGET);
       unconfirmedDids.add(row.did);
     } finally {
       busyDid = null;
@@ -393,14 +399,13 @@ export const ContactsSection = () => {
     /** @type {any} */
     const a = row.activity || {};
     return m('.contact-detail', [
-      m('.contact-did', { title: row.did }, row.did),
       m('.contact-activity', [
         a.appCount
           ? m('div', [
               m('span.contact-stat-label', `${a.appCount} app${a.appCount === 1 ? '' : 's'} installed from them: `),
               a.appsInstalled.map((/** @type {any} */ app, /** @type {number} */ i) => m('span.contact-app', { key: app.appId || i }, (app.name || 'untitled') + (i < a.appsInstalled.length - 1 ? ', ' : ''))),
             ])
-          : m('.muted', 'No apps installed from this peer yet.'),
+          : m('.muted', 'No apps installed from them yet.'),
         (a.installCount || a.updateCount)
           ? m('.muted.contact-counts', `${a.installCount} install${a.installCount === 1 ? '' : 's'} · ${a.updateCount} update${a.updateCount === 1 ? '' : 's'}`)
           : null,
@@ -417,8 +422,10 @@ export const ContactsSection = () => {
             mutationNotice = null;
             m.redraw();
           },
-        }, 'I checked this contact; allow changes') : null,
+        }, 'Allow changes again') : null,
       ]),
+      // why behind Technical details: the full key is a code, as in Discover.
+      m('details.contact-tech', [m('summary', 'Technical details'), m('.contact-did', { title: row.did }, row.did)]),
     ]);
   };
 
@@ -433,6 +440,10 @@ export const ContactsSection = () => {
     const expanded = expandedDid === r.did;
     const editing = editingDid === r.did;
     const initial = (name || short(r.did)).trim().charAt(0).toUpperCase() || '?';
+    // why the short key alone without a name: Discover and Blocked makers show
+    // a person that way. The line under it then names the apps, not the key again.
+    // why the same key under a name: one person has one key wherever it shows.
+    const apps = r.activity?.appCount ? `${r.activity.appCount} app${r.activity.appCount === 1 ? '' : 's'}` : '';
     return m('li.peerd-disc-row.contact-row', { key: r.did }, [
       m('.contact-avatar', { style: `background:${colorOf(r.did)}`, 'aria-hidden': 'true' }, initial),
       m('.peerd-disc-meta', [
@@ -449,16 +460,16 @@ export const ContactsSection = () => {
               onblur: () => commitEdit(send, r, timeoutMs),
             })
           : m('.contact-name-line', [
-              m('span.peerd-disc-name', name || m('span.muted', `peer ${short(r.did)}`)),
+              m('span.peerd-disc-name', name || m('bdi.contact-key', short(r.did))),
               r.favorite ? m('span.contact-fav', { 'aria-label': 'favorite' }, '★') : null,
               status ? m('span.contact-status', { class: status.cls }, status.label) : null,
             ]),
-        m('span.peerd-disc-pub', name
-          ? `…${short(r.did)}${r.activity?.appCount ? ` · ${r.activity.appCount} app${r.activity.appCount === 1 ? '' : 's'}` : ''}`
-          : (r.activity?.appCount ? `${r.activity.appCount} app${r.activity.appCount === 1 ? '' : 's'} · …${short(r.did)}` : `…${short(r.did)}`)),
+        name ? m('span.peerd-disc-pub', [m('bdi.contact-key', short(r.did)), apps ? ` · ${apps}` : null])
+          : apps ? m('span.peerd-disc-pub', apps) : null,
       ]),
       m('.contact-row-actions', [
-        m('button.peerd-net-btn', { title: 'Edit name', disabled: busyDid === r.did || unconfirmedDids.has(r.did), onclick: () => startEdit(r) }, name ? 'Rename' : 'Name'),
+        m('button.peerd-net-btn', { title: 'Edit name', disabled: busyDid === r.did || unconfirmedDids.has(r.did), onclick: () => startEdit(r) },
+          name ? 'Rename' : 'Add a name'),
         m('button.peerd-net-btn', {
           'aria-expanded': String(expanded),
           title: expanded ? 'Hide activity' : 'Show activity',
@@ -479,9 +490,10 @@ export const ContactsSection = () => {
     const busy = unblockingDid === maker.did;
     // why a <bdi>: a saved name can run right to left, and text follows it.
     const who = () => (maker.name ? m('bdi', maker.name) : m('bdi.contacts-blocked-key', maker.key));
+    // why no "Blocked." while an unblock outcome is not known: it may be done.
     return m('li.contacts-blocked-row', { key: maker.did }, [
       m('.contacts-blocked-avatar', { class: maker.name ? '' : 'is-key', 'aria-hidden': 'true' }, maker.letter),
-      m('.contacts-blocked-id', [m('span.contacts-blocked-name', who()), m('span.contacts-blocked-meta', 'Blocked.')]),
+      m('.contacts-blocked-id', [m('span.contacts-blocked-name', who()), issue === 'unknown' ? null : m('span.contacts-blocked-meta', 'Blocked.')]),
       issue === 'unknown'
         ? m('button.secondary', {
             type: 'button', 'data-unblock': maker.did, disabled: !!unblockingDid,
@@ -500,7 +512,8 @@ export const ContactsSection = () => {
   };
 
   // why hidden when nobody is blocked, but kept after the last unblock: its
-  // status line says when their apps come back.
+  // status line says when their apps come back. The line about what a block
+  // does then has nobody to speak of, so it goes.
   /** @param {Send} send @param {number} timeoutMs */
   const blockedSection = (send, timeoutMs) => {
     if (!blockedDids) {
@@ -522,10 +535,10 @@ export const ContactsSection = () => {
     const makers = blockedRows(blockedDids, names);
     return m('section.contacts-blocked', { 'aria-labelledby': BLOCKED_TITLE }, [
       m('h2', { id: BLOCKED_TITLE }, 'Blocked makers'),
-      m('p.contacts-blocked-note', 'Their apps are hidden in Discover, and peerd does not connect to them.'),
+      makers.length ? m('p.contacts-blocked-note', 'Their apps are hidden in Discover, and peerd does not connect to them.') : null,
       makers.length
         ? m('ul.contacts-blocked-list', makers.map((maker) => blockedRow(send, maker, timeoutMs)))
-        : m('p.contacts-blocked-note', 'You have not blocked anyone.'),
+        : m('p.contacts-blocked-note', 'Nobody is blocked now.'),
       // why a stable status node: a live region must exist before its text changes.
       m('p.contacts-blocked-note.contacts-unblocked', {
         role: 'status', tabindex: -1, style: unblockedNote ? null : 'position:absolute',
@@ -586,8 +599,8 @@ export const ContactsSection = () => {
             ? null
             : list.length === 0
             ? m('.peerd-net-empty',
-                'No known peers yet. Peers you meet on the network — and anyone you '
-                + 'install an app from — show up here, ready to name.')
+                'Nobody here yet. People you install an app from, and people you meet on the peer network, show up here. '
+                + 'You can add a name for each one.')
             : m('ul.peerd-disc-list', list.map((r) => row(send, r, timeoutMs))),
         blockedSection(send, timeoutMs),
       ]);

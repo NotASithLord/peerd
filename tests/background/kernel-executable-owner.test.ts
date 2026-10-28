@@ -188,8 +188,8 @@ describe('kernel executable owner', () => {
     expect(admit('legacy/semantic-route', {}, sender)).toBe(false);
   });
 
-  test('only Home can block, unblock or list blocked makers, refused before the dweb routes load', async () => {
-    const routes = ['dweb/peer-block', 'dweb/peer-unblock', 'dweb/blocked-peers'];
+  test('only Home can block, unblock or list blocked makers, or ask if an app changed here, refused before the dweb routes load', async () => {
+    const routes = ['dweb/peer-block', 'dweb/peer-unblock', 'dweb/blocked-peers', 'dweb/app-local-changes'];
     for (const route of routes) expect(KERNEL_DWEB_ROUTE_NAMES).toContain(route);
     for (const owner of ['home', 'offscreen', 'app', 'notebook']) {
       const admit = makeKernelDwebAdmission({

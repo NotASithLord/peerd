@@ -22,7 +22,7 @@ el('level').oninput = () => { el('level-label').textContent = el('level').value;
 el('file').onchange = async (/** @type {any} */ event) => {
   const token = ++imageRead;
   const file = event.target.files[0]; if (!file) return;
-  if (file.size > 8_000_000) { el('status').textContent = 'Choose an image under 8 MB.'; return; }
+  if (file.size > 8_000_000) { el('status').textContent = 'This picture is too big. Choose one under 8 MB.'; return; }
   try {
     const bitmap = await createImageBitmap(file);
     if (token !== imageRead) { bitmap.close(); return; }
@@ -30,8 +30,8 @@ el('file').onchange = async (/** @type {any} */ event) => {
     original.width = filtered.width = Math.max(1, Math.round(bitmap.width * scale));
     original.height = filtered.height = Math.max(1, Math.round(bitmap.height * scale));
     input.drawImage(bitmap, 0, 0, original.width, original.height); bitmap.close();
-    el('status').textContent = 'Local image loaded and fitted to the preview. Choose Apply filter.';
-  } catch { el('status').textContent = 'Could not decode this image.'; }
+    el('status').textContent = 'Picture ready. Choose Apply.';
+  } catch { el('status').textContent = 'Desaturator could not open this picture. Choose another one.'; }
 };
 el('apply').onclick = () => {
   if (!kernels) return;
@@ -43,12 +43,12 @@ el('apply').onclick = () => {
     image.data[i] = image.data[i + 1] = image.data[i + 2] = value;
   }
   output.putImageData(image, 0, 0);
-  el('status').textContent = `WebAssembly processed ${image.width * image.height} pixels with ${threshold ? 'threshold' : 'grayscale'}.`;
+  el('status').textContent = `Done. The picture is now ${threshold ? 'black and white' : 'gray'}.`;
 };
 try {
   const bytes = /** @type {any} */ (window).peerd.assets.bytes('filter.wasm');
   kernels = /** @type {any} */ ((await WebAssembly.instantiate(bytes)).instance.exports);
-  el('apply').disabled = false; el('status').textContent = 'Bundled WebAssembly ready. Choose Apply filter.';
-} catch { el('status').textContent = 'This sandbox could not load the bundled WebAssembly module. Nothing was processed.'; }
+  el('apply').disabled = false; el('status').textContent = 'Ready.';
+} catch { el('status').textContent = 'Desaturator could not start. Close it, then open it again.'; }
 
 export {};

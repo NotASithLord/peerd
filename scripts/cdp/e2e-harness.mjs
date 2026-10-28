@@ -66,7 +66,7 @@ export const visualSourceIdentity = ({ extensionDir = EXT, states = [] } = {}) =
     { cwd: resolve(extensionDir), encoding: 'utf8' }).split('\0').filter(Boolean); }
   catch { extensionFiles = []; }
   if (!extensionFiles.length) extensionFiles = listed.filter((file) => file.startsWith('extension/')).map((file) => file.slice('extension/'.length));
-  extensionFiles.push('manifest.json', 'shared/channel-config.js', 'shared/build-config.js', 'shared/controller-build.js');
+  extensionFiles.push('manifest.json', 'shared/channel-config.js', 'shared/build-config.js', 'shared/controller-build.js', 'tests/visual-base-fixtures.json');
   for (const [root, files, prefix] of [[ROOT, listed.filter((file) => !file.startsWith('extension/')), 'harness'], [resolve(extensionDir), extensionFiles, 'extension']]) {
     for (const file of [...new Set(files)].sort()) {
       hash.update(`${prefix}/${file}\0`).update(existsSync(join(root, file)) ? readFileSync(join(root, file)) : '<missing>').update('\0');

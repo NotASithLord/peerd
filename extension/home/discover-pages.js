@@ -9,15 +9,15 @@
 // reason: a right-to-left contact name cannot reorder " · 48 KB".
 
 import m from '/vendor/mithril/mithril.js';
-import { installSteps } from './discover-model.js';
+import { descriptionLine, installSteps } from './discover-model.js';
 
 /** @typedef {import('./discover-model.js').InstallState} InstallState */
 /** @typedef {import('./discover-model.js').StepState} StepState */
 /** @typedef {import('./discover-model.js').Pill} Pill */
 /** @typedef {NonNullable<ReturnType<typeof import('./discover-model.js').saysIt>>} SaysIt */
-/** @typedef {{name:string|null, key:string}} Maker */
+/** `you`: the maker is the user. @typedef {{name:string|null, key:string, you?:boolean}} Maker */
 /** @typedef {{kind:'status', text:string}|{kind:'update'|'open'|'review'}} TileAction */
-/** @typedef {{label:string, onclick:()=>void, disabled?:boolean}} ButtonProps */
+/** `open`: the button opens the app in its own tab. @typedef {{label:string, onclick:()=>void, disabled?:boolean, open?:boolean}} ButtonProps */
 /** @typedef {{label:string, value:string, code?:boolean, copy?:ButtonProps}} Fact */
 
 /** @param {string} name sprite id without the ic- prefix @param {number} size */
@@ -32,9 +32,11 @@ export const letterAvatar = ({ letter, tone, variant }) => m(`div.disc-letter.di
 /** @param {Maker} maker */
 const makerName = (maker) => maker.name ? m('bdi', maker.name) : m('bdi.type-code.disc-maker-key', maker.key);
 // why the words outside the <bdi>: a saved name is one the user chose, so it
-// says so, and its direction stays inside its own element.
+// says so, and its direction stays inside its own element. why "you" first:
+// the user's own key is not a stranger's.
 /** @param {Maker} maker */
-export const makerText = (maker) => ['Made by ', makerName(maker), maker.name ? ', someone you know' : null];
+export const makerText = (maker) => maker.you ? ['Made by you']
+  : ['Made by ', makerName(maker), maker.name ? ', someone you know' : null];
 
 /** "Made by Ana · 48 KB", either part optional.
  * @param {Maker|null} maker @param {string|null} kb */
@@ -48,7 +50,9 @@ export const makerMeta = (maker, kb) => [maker ? makerText(maker) : null, kb ? `
 export const keyedParts = (parts) => Object.entries(parts).flatMap(([key, part]) => part ? [m.fragment({ key }, part)] : []);
 
 /** @param {ButtonProps} props */
-export const primaryButton = ({ label, onclick, disabled }) => m('button.disc-primary', { type: 'button', disabled, onclick }, label);
+export const primaryButton = ({ label, onclick, disabled, open }) => m('button.disc-primary', {
+  type: 'button', disabled, onclick, class: open ? 'disc-primary--open' : undefined,
+}, open ? [label, icon('ext', 15)] : label);
 /** @param {ButtonProps & {attrs?:Record<string, string>}} props */
 export const secondaryButton = ({ label, onclick, disabled, attrs }) => m('button.secondary.disc-btn', {
   type: 'button', disabled, onclick, ...attrs,
@@ -84,6 +88,14 @@ const nameView = ({ name, cls, onOpen }) => onOpen
   ? m(`button.disc-tile-open${cls}`, { type: 'button', dir: 'auto', title: name, onclick: onOpen }, name)
   : m(`div${cls}`, { dir: 'auto', title: name }, name);
 
+// why no line without a card: peerd then does not know what the maker said
+// (see descriptionLine).
+/** @param {unknown} description @param {string} selector */
+const descriptionView = (description, selector) => {
+  const line = descriptionLine(description);
+  return line ? m(selector, line.missing ? { class: 'is-missing' } : { dir: 'auto' }, line.text) : null;
+};
+
 // why the error inside the tile or row: a line above a long grid or list sits
 // off screen for the tile the user clicked.
 /**
@@ -97,9 +109,7 @@ export const tile = ({ key, name, letter, tone, meta, description, action, error
       nameView({ name, cls: '.type-heading.disc-tile-name', onOpen }),
       m('.type-small.disc-tile-meta', meta),
     ]),
-    description
-      ? m('p.type-body-sm.disc-tile-desc', { dir: 'auto' }, description)
-      : m('p.type-body-sm.disc-tile-desc.is-missing', 'No description from the maker.'),
+    descriptionView(description, 'p.type-body-sm.disc-tile-desc'),
     m('.disc-actions', action),
     error,
   ]);
@@ -201,10 +211,10 @@ export const searchInput = ({ value, oninput }) => m('.disc-search-field', [
 
 /**
  * `waiting`: the title is a status with a spinner, as the waiting card draws it.
- * @param {{title?:string, text:string, actions:unknown[], boxed?:boolean, status?:boolean, waiting?:boolean}} props
+ * @param {{title?:string, text:string, actions:unknown[], boxed?:boolean, waiting?:boolean}} props
  */
-export const emptyState = ({ title, text, actions, boxed, status, waiting }) => m('.disc-empty', {
-  class: boxed ? 'disc-empty--boxed' : '', role: status ? 'status' : undefined,
+export const emptyState = ({ title, text, actions, boxed, waiting }) => m('.disc-empty', {
+  class: boxed ? 'disc-empty--boxed' : '',
 }, [
   title && waiting ? m('.disc-empty-waiting', [
     m('span.peerd-spinner.peerd-spinner--sm', { 'aria-hidden': 'true' }), m('h2.type-heading', { role: 'status' }, title),
@@ -237,14 +247,14 @@ export const appHead = ({ name, letter, tone, maker, onMaker, meta, modified, de
       icon('share', 16), 'Share',
     ]) : null,
   ]),
-  description
-    ? m('p.type-body.disc-app-desc', { dir: 'auto' }, description)
-    : m('p.type-body.disc-app-desc.is-missing', 'No description from the maker.'),
+  descriptionView(description, 'p.type-body.disc-app-desc'),
 ];
 
 const ARIA_CURRENT = new Set(['current', 'working', 'failed', 'unknown']);
+// why words with the check: the icon is hidden from screen readers, and a
+// done step shows no line of its own, so only these words say it is done.
 /** @param {StepState} state @param {number} n */
-const stepMark = (state, n) => state === 'done' ? icon('check', 14)
+const stepMark = (state, n) => state === 'done' ? [icon('check', 14), m('span.sr-only', 'Done: ')]
   : state === 'working' ? m('span.peerd-spinner', { 'aria-hidden': 'true' })
     : state === 'failed' ? icon('x', 13) : String(n);
 
@@ -262,35 +272,46 @@ const linkButton = (label, onclick) => m('button.linklike.disc-link-btn', { type
  * is a committed warning after success; `error` is an Open failure.
  * `otherVersion`: the Library holds another version, so the installed line
  * claims no version. `fresh`: this visit installed it, so the line says so
- * and names it. `secondary` sits next to `primary`; `sharing` explains what
+ * and names it; `updated`: this visit updated it. `changed`: the copy changed
+ * on this device, and peers still get the version peerd checked, never the
+ * edits. `steps`: false for an app the user made, which they never installed.
+ * `secondary` sits next to `primary`; `sharing` explains what
  * Install and share does; `onLibrary` adds Go to Library next to Open.
- * @param {{state:InstallState, name:string, message:string|null,
+ * `action` names the effect that runs, failed, may still finish or finished
+ * on this visit; the steps list takes its name from it.
+ * @param {{state:InstallState, name:string, message:string|null, action?:'install'|'update',
  *   failure?:{action:'install'|'update', hint:string, cancelled?:boolean}|null, unknown?:{status:string, hint:string}|null,
  *   transfer?:any, notice:string|null, error:unknown, primary:ButtonProps|null, secondary?:ButtonProps|null,
- *   otherVersion?:boolean, fresh?:boolean, sharing?:string|null, onLibrary?:(()=>void)|null}} props
+ *   otherVersion?:boolean, fresh?:boolean, updated?:boolean, changed?:boolean, steps?:boolean,
+ *   sharing?:string|null, onLibrary?:(()=>void)|null}} props
  */
 export const installPanel = ({
-  state, name, message, failure, unknown, notice, error, transfer, primary, secondary, otherVersion, fresh, sharing, onLibrary,
+  state, name, message, action = 'install', failure, unknown, notice, error, transfer, primary, secondary, otherVersion, fresh, updated, changed,
+  steps = true, sharing, onLibrary,
 }) => {
   const actions = primary ? m('.disc-panel-actions', keyedParts({
     [primary.label]: primaryButton(primary), ...(secondary ? { [secondary.label]: secondaryButton(secondary) } : {}),
     library: state === 'installed' && onLibrary ? linkButton('Go to Library', onLibrary) : null,
   })) : null;
   return m('.disc-panel', [
-    m('ol.disc-steps', { 'aria-label': 'Install steps' }, installSteps(state).map((step, i) =>
+    steps ? m('ol.disc-steps', { 'aria-label': action === 'update' ? 'Update steps' : 'Install steps' }, installSteps(state, action).map((step, i) =>
       m(`li.disc-step.is-${step.state}`, { 'aria-current': ARIA_CURRENT.has(step.state) ? 'step' : undefined }, [
         m('span.disc-step-mark', stepMark(step.state, i + 1)),
         m('span.disc-step-text', [
           m('span.disc-step-title', step.title),
           step.sub ? m('span.type-small.disc-step-sub', step.sub) : null,
         ]),
-      ]))),
+      ]))) : null,
     state === 'installing' && transfer ? m.fragment({}, [transfer]) : null,
     state === 'installing' && message ? m('p.type-small.disc-footnote', { role: 'status' }, message) : null,
     state === 'installed' || (secondary && otherVersion) ? m('p.type-body-sm.disc-installed', { tabindex: -1, role: 'status' }, otherVersion
       ? 'Another version of this app is in your Library. Open runs the version you have.'
-      : fresh ? [m('strong', 'Installed.'), ' ', m('bdi', name), ' is now in your Library. Other people can get it from you while your peer network is on.']
-        : 'In your Library. Other people can get it from you while your peer network is on.') : null,
+      : changed ? 'In your Library. Other people can get the version its maker shared from you while your peer network is on. '
+        + 'They do not get your changes.'
+        : updated ? [m('strong', 'Updated.'), ' ', m('bdi', name), ' in your Library is now the new version. '
+          + 'Other people can get it from you while your peer network is on.']
+          : fresh ? [m('strong', 'Installed.'), ' ', m('bdi', name), ' is now in your Library. Other people can get it from you while your peer network is on.']
+            : 'In your Library. Other people can get it from you while your peer network is on.') : null,
     state === 'failed' && failure ? [
       failure.cancelled ? m('p.type-body-sm', { role: 'status' }, failure.action === 'update' ? 'Update cancelled. Your installed version is unchanged.' : 'Installation cancelled.')
         : m('p.error.disc-panel-error', { role: 'alert' }, ['peerd could not ', failure.action, ' ', m('bdi', name), '.']),
@@ -353,24 +374,34 @@ const safetyRow = (name, text) => m('.disc-safety-row', [
 // why "by itself": the app sandbox CSP blocks every network request of its
 // own, but an app can still reach peers through peerd.
 // why `checked`: a share link was inspected ('link'), or the Library holds
-// this version ('installed'), so peerd has checked every file. A heard card is
+// this version ('installed', or 'updated' on the visit that updated it), so
+// peerd has checked every file. A heard card is
 // only a claim. why the past for 'installed': an edit on this device can
 // change the files after the install, so the check belongs to the install.
 // `action` names what the page offers: an update page updates.
 // why `mine` outranks `checked`: the user made the app, so peerd may never have
-// checked it at an install. Its one line is true in every case.
+// checked it at an install. Its one line is true in every case. `installed`:
+// the Library holds the user's app. `changed`:
+// the copy in the Library is no longer the files peerd checked, so it says so.
 const SAFETY_TITLE = 'disc-safety-title';
-/** @param {{maker:Maker|null, checked:'link'|'installed'|null, action?:'install'|'update', mine?:boolean}} props */
-export const safetyLines = ({ maker, checked, action = 'install', mine = false }) => {
+/**
+ * @param {{maker:Maker|null, checked:'link'|'installed'|'updated'|null, action?:'install'|'update', mine?:boolean,
+ *   installed?:boolean, changed?:boolean}} props
+ */
+export const safetyLines = ({ maker, checked, action = 'install', mine = false, installed = true, changed = false }) => {
   const made = maker ? ['Made by ', makerName(maker), '. '] : [];
   const who = maker?.name ? m('bdi', maker.name) : 'its maker';
-  const check = checked === 'installed' ? ['When you installed it, peerd checked that it was exactly the app ', who, ' shared.']
-    : checked === 'link' ? ['peerd checked that this is exactly the app ', who, ' shared.']
-      : [`When you ${action} it, peerd checks that every file is exactly what `, who, ' shared.'];
+  const check = changed ? [checked === 'updated' ? 'It changed on this device after you updated it.'
+    : 'It changed on this device after you installed it.', ' It is no longer exactly the app ', who, ' shared.']
+    : checked === 'installed' ? ['When you installed it, peerd checked that it was exactly the app ', who, ' shared.']
+      : checked === 'updated' ? ['When you updated it, peerd checked that it was exactly the app ', who, ' shared.']
+        : checked === 'link' ? ['peerd checked that this is exactly the app ', who, ' shared.']
+          : [`When you ${action} it, peerd checks that every file is exactly what `, who, ' shared.'];
+  const own = installed ? 'You made this app. Other people get the files you share from your Library.'
+    : 'You made this app. It is not in your Library now. When you install it, peerd checks that every file is exactly what you shared.';
   return m('section.disc-section.disc-safety', { 'aria-labelledby': SAFETY_TITLE }, [
     m('h3.type-label-strong', { id: SAFETY_TITLE }, 'What to know'),
-    safetyRow('key', mine ? 'You made this app. Other people get the files you share from your Library.'
-      : [...made, ...check, ' Nobody reviewed it for safety.']),
+    safetyRow('key', mine ? own : [...made, ...check, ' Nobody reviewed it for safety.']),
     safetyRow('lock', 'It runs in its own tab and cannot reach the internet by itself.'),
     safetyRow('globe', 'You can remove it from your Library at any time.'),
   ]);
@@ -409,13 +440,15 @@ export const techDetails = ({ id, open, onToggle, facts, footnote, note }) => m(
 ]);
 
 // why the code style without a saved name: the title is then the short key,
-// drawn as "Made by" draws it everywhere else. `menu` ends the head.
-/** @param {{title:string, letter:string, tone:string, saved:boolean, menu?:unknown}} props */
-export const makerHead = ({ title, letter, tone, saved, menu }) => m('.disc-person-head', [
+// drawn as "Made by" draws it everywhere else. `menu` ends the head. `you`:
+// the page is the user's own, so it speaks to them, and its title is a word.
+/** @param {{title:string, letter:string, tone:string, saved:boolean, you?:boolean, menu?:unknown}} props */
+export const makerHead = ({ title, letter, tone, saved, you = false, menu }) => m('.disc-person-head', [
   letterAvatar({ letter, tone, variant: 'person' }),
   m('.disc-person-id', [
-    m('h2.type-page-title', { dir: 'auto' }, saved ? title : m('bdi.type-code', title)),
-    m('.type-small', saved ? 'Someone you know. You saved this name on this device.' : 'You have not saved a name for this maker.'),
+    m('h2.type-page-title', { dir: 'auto' }, saved || you ? title : m('bdi.type-code', title)),
+    m('.type-small', you ? 'This is you.'
+      : saved ? 'Someone you know. You saved this name on this device.' : 'You have not saved a name for this maker.'),
   ]),
   menu ?? null,
 ]);
@@ -437,12 +470,14 @@ const menuKeys = (onEscape) => (/** @type {KeyboardEvent & {redraw?:boolean}} */
 /**
  * The maker page menu, drawn as the Library's kebab menu. Focus moves to the
  * first item when it opens. `onClose(refocus)`: Escape closes it with focus
- * back on its button; Tab or a click elsewhere just closes it.
+ * back on its button; Tab or a click elsewhere just closes it. why the items
+ * are out of the Tab order: the arrow keys move between them, so Tab leaves.
  * @param {{maker:Maker, open:boolean, rename:string, block:boolean, onToggle:()=>void,
  *   onClose:(refocus:boolean)=>void, onRename:()=>void, onBlock:()=>void}} props
  */
 export const makerMenuView = ({ maker, open, rename, block, onToggle, onClose, onRename, onBlock }) => {
-  const label = `More for ${maker.name ?? maker.key}`;
+  // why no key on the user's own page: it names them only in Technical details.
+  const label = maker.you ? 'More options' : `More for ${maker.name ?? maker.key}`;
   return m('.disc-maker-menu', {
     onfocusout: (/** @type {FocusEvent & {redraw?:boolean}} */ event) => {
       const next = event.relatedTarget;
@@ -460,9 +495,11 @@ export const makerMenuView = ({ maker, open, rename, block, onToggle, onClose, o
         if (first instanceof HTMLElement) first.focus({ preventScroll: true });
       },
     }, [
-      m('button.library-menu-item', { type: 'button', role: 'menuitem', onclick: onRename }, rename),
+      m('button.library-menu-item', { type: 'button', role: 'menuitem', tabindex: -1, onclick: onRename }, rename),
       block ? m('.library-menu-sep', { role: 'separator' }) : null,
-      block ? m('button.library-menu-item.is-danger', { type: 'button', role: 'menuitem', onclick: onBlock }, ['Block ', makerName(maker)]) : null,
+      block ? m('button.library-menu-item.is-danger', {
+        type: 'button', role: 'menuitem', tabindex: -1, onclick: onBlock,
+      }, ['Block ', makerName(maker)]) : null,
     ]) : null,
   ]);
 };
@@ -567,10 +604,11 @@ export const shareDialog = ({ name, letter, tone, address, maker, status, copyDi
     m('p.type-small.disc-share-status', { role: 'status', style: status ? null : 'position:absolute' }, status === 'copied'
       ? [icon('check', 14), 'Link copied.']
       : status === 'failed' ? 'peerd could not copy the link. Select it and copy it yourself.' : null),
-    m('p.type-small.disc-footnote', [
-      'The link points to this exact version. If ', maker?.name ? m('bdi', maker.name) : 'its maker',
-      ' updates the app later, your friend gets the version you shared.',
-    ]),
+    // why `you` first: the user made the app, so the update is theirs to make.
+    m('p.type-small.disc-footnote', maker?.you
+      ? 'The link points to this exact version. If you update the app later, your friend still gets the version you shared.'
+      : ['The link points to this exact version. If ', maker?.name ? m('bdi', maker.name) : 'its maker',
+        ' updates the app later, your friend gets the version you shared.']),
   ]));
 
 const BLOCK_TITLE = 'disc-block-title';
