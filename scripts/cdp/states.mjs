@@ -10599,11 +10599,24 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         // why a native key code: without one, Chrome gives a DevTools key press to the page only,
         // and the browser's own Esc handling never sees it. On macOS, Chrome builds the key press
         // from the code (53). On Linux, the browser reads windowsVirtualKeyCode. 9 is the Linux code for Esc.
+        // fullscreenElement clears before the exit event and its focus handlers.
+        // Acknowledging that event prevents reentry input racing the old exit.
+        await evalIn(app, `(() => {
+          window.__fullScreenExitAcknowledged = false;
+          const exited = () => {
+            if (document.fullscreenElement !== null) return;
+            document.removeEventListener('fullscreenchange', exited);
+            window.__fullScreenExitAcknowledged = true;
+          };
+          document.addEventListener('fullscreenchange', exited);
+        })()`);
         const escape = { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: process.platform === 'darwin' ? 53 : 9 };
         for (const type of ['rawKeyDown', 'keyUp']) await app.send('Input.dispatchKeyEvent', { type, ...escape });
-        await waitFor(() => evalIn(app, `document.fullscreenElement === null`), { budgetMs: 5_000, pollMs: 50 });
-        // The DOM exits before the native window finishes resizing. A new
-        // pointer gesture needs the settled window, not the old screen bounds.
+        if (!await waitFor(() => evalIn(app, `window.__fullScreenExitAcknowledged === true && document.fullscreenElement === null`), { budgetMs: 5_000, pollMs: 50 })) {
+          throw new Error('The browser did not acknowledge full-screen exit');
+        }
+        // The DOM exits before the native window finishes resizing. Check the
+        // restored native window before inspecting the post-Esc controls.
         const windowRestored = await waitFor(async () => {
           const { bounds } = await browser.send('Browser.getWindowForTarget', { targetId: target.id });
           return bounds.windowState === 'normal';
@@ -10632,7 +10645,21 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
             if (window.__fullScreenReentry.length > 8) window.__fullScreenReentry.shift();
           }, true);
         })()`);
-        await click('#fullscreen-btn');
+        // The native window can still be resizing after exit. Keyboard activation
+        // tests reentry without stale native pointer coordinates; first entry and
+        // the P handle above still require real pointer gestures.
+        const focusedForReentry = await evalIn(app, `(() => {
+          const button = document.getElementById('fullscreen-btn');
+          if (button.hidden || getComputedStyle(button).display === 'none') return false;
+          button.focus();
+          return document.hasFocus() && document.activeElement === button;
+        })()`);
+        if (!focusedForReentry) throw new Error('The Full screen button could not receive keyboard focus');
+        const enter = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 36 };
+        for (const type of ['rawKeyDown', 'keyUp']) await app.send('Input.dispatchKeyEvent', { type, ...enter });
+        if (!await waitFor(() => evalIn(app, `window.__fullScreenReentry.some(event => event.type === 'click' && event.trusted && event.target === 'fullscreen-btn')`), { budgetMs: 5_000, pollMs: 50 })) {
+          throw new Error('Keyboard reentry did not deliver a trusted Full screen click');
+        }
         const again = await waitFor(fullScreenOn, { budgetMs: 5_000, pollMs: 50 });
         // why: the panel that the handle opened is still open, as when a person asks peerd for an App and then clicks Full screen.
         const reentry = await evalIn(app, `({
