@@ -3582,7 +3582,7 @@ export const STATES = [
         rec.observe(`backup lease posture before ${mode}`,
           (await rpc(fresh.page, { type: 'bootstrap/ready' }))?.featureLeases);
         const destination = await mkdtemp(join(directory, `${mode}-`));
-        const page = await openWidePage(fresh, 'options/options.html#!/transfer', { ready: '#exppass2' });
+        let page;
         const exceptions = [];
         const endpoint = await (await fetch(`http://127.0.0.1:${fresh.port}/json/version`)).json();
         const debug = await attach(endpoint.webSocketDebuggerUrl);
@@ -3616,6 +3616,9 @@ export const STATES = [
         try {
           await debugSend('Debugger.enable');
           await debugSend('Debugger.setPauseOnExceptions', { state: 'all' });
+          // Attach before page startup so observation does not add a settling
+          // delay between opening Settings and the real export gesture.
+          page = await openWidePage(fresh, 'options/options.html#!/transfer', { ready: '#exppass2' });
           await page.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: destination });
           // Observe only result codes from the real private channel. Never
           // retain the passphrase, exported payload, secrets or identity capsule.
@@ -3707,7 +3710,7 @@ export const STATES = [
           debug.off(onPause);
           debug.close();
           rec.observe(`backup exception locations ${mode}`, exceptions);
-          await page.close();
+          await page?.close();
         }
       };
       try {
