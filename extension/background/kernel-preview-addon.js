@@ -27,7 +27,7 @@ const normalize = (value) => ({ schema: 1,
 
 export const createKernelUpdateCustody = (/** @type {any} */ {
   runtime, session, ready, isEnabled, isBusy, listWindowClients, isBlockingWindow,
-  notify = () => false, now = Date.now,
+  notify = () => false, restartToInstall = () => false, now = Date.now,
   scheduleRetry = (/** @type {()=>void} */ fn, /** @type {number} */ delayMs) => setTimeout(fn, delayMs),
   cancelRetry = (/** @type {unknown} */ handle) => clearTimeout(/** @type {ReturnType<typeof setTimeout>} */ (handle)),
   log = () => {}, operationTimeoutMs = 15_000,
@@ -72,7 +72,11 @@ export const createKernelUpdateCustody = (/** @type {any} */ {
   const notePending = async (/** @type {string} */ version) => {
     const state = await read();
     if (state.notifiedVersion === version) return;
-    if (!notify(`peerd v${version} is downloaded - it installs when peerd goes quiet or the browser restarts.`)) return;
+    // why: with the first tab on, a pinned peerd tab stays open, so peerd
+    // does not go quiet.
+    if (!notify(restartToInstall()
+      ? `peerd v${version} is downloaded. Restart the browser to install it.`
+      : `peerd v${version} is downloaded - it installs when peerd goes quiet or the browser restarts.`)) return;
     await update((latest) => ({ ...latest, notifiedVersion: version }));
   };
 
@@ -1065,6 +1069,7 @@ const createUpdateCustody = (/** @type {any} */ c) => createKernelUpdateCustody(
     c.uiPorts.broadcast({ type: 'turn/system-note', text });
     return true;
   },
+  restartToInstall: () => c.settingsStore.get().firstTabEnabled === true,
   log: (/** @type {any[]} */ ...args) => console.log('[kernel]', ...args),
 });
 

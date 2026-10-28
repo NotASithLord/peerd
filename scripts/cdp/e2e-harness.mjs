@@ -421,11 +421,26 @@ export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, n
 }
 
 // ---- raw CDP attach over Chrome's WebSocket (no npm client) -----------------
-export async function attach(wsUrl, onEvent) {
+export async function attach(wsUrl, onEvent, { commandTimeoutMs = 180_000 } = {}) {
+  if (!Number.isFinite(commandTimeoutMs) || commandTimeoutMs <= 0) throw new Error('Invalid CDP command timeout');
   const ws = new WebSocket(wsUrl);
-  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+  await new Promise((res, rej) => {
+    const timer = setTimeout(() => { ws.close(); rej(new Error('CDP connection timed out')); }, commandTimeoutMs);
+    ws.onopen = () => { clearTimeout(timer); res(); };
+    ws.onerror = () => { clearTimeout(timer); rej(new Error('CDP connection failed')); };
+    ws.onclose = () => { clearTimeout(timer); rej(new Error('CDP connection closed before opening')); };
+  });
   let id = 0;
   const pending = new Map();
+  let closed = false;
+  let closeReason = null;
+  const closePending = (reason) => {
+    closeReason ??= reason;
+    closed = true;
+    for (const finish of pending.values()) finish({ error: { message: reason } });
+  };
+  ws.onclose = () => closePending('CDP connection closed');
+  ws.onerror = () => { closePending('CDP connection failed'); ws.close(); };
   const eventListeners = new Set(onEvent ? [onEvent] : []);
   const events = [];
   const reqUrl = new Map();   // requestId → url; loadingFailed carries no url of its own
@@ -458,13 +473,26 @@ export async function attach(wsUrl, onEvent) {
     for (const listener of eventListeners) listener(m.method, m.params, m);
   };
   const send = (method, params = {}, sessionId) => new Promise((res, rej) => {
+    if (closed || ws.readyState !== WebSocket.OPEN) { rej(new Error(`${method}: CDP connection is closed (${closeReason ?? 'socket unavailable'})`)); return; }
     const i = ++id;
-    pending.set(i, (m) => (m.error ? rej(new Error(`${method}: ${m.error.message}`)) : res(m.result)));
-    ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
+    // why: a page-side deadline cannot settle a lost CDP response. Retire the
+    // connection on timeout; never replay a command with an unknown outcome.
+    const timer = setTimeout(() => {
+      closePending(`CDP command ${method} timed out; outcome unknown`);
+      ws.close();
+    }, commandTimeoutMs);
+    pending.set(i, (m) => {
+      clearTimeout(timer);
+      pending.delete(i);
+      if (m.error) rej(new Error(`${method}: ${m.error.message}`));
+      else res(m.result);
+    });
+    try { ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) })); }
+    catch { closePending('CDP send failed; outcome unknown'); ws.close(); }
   });
   return {
     send,
-    close: () => ws.close(),
+    close: () => { closePending('CDP connection closed by caller'); ws.close(); },
     events,
     on: (listener) => eventListeners.add(listener),
     off: (listener) => eventListeners.delete(listener),
@@ -948,7 +976,7 @@ export async function launchPeerd({
       on: (listener) => listeners.add(listener),
       off: (listener) => listeners.delete(listener),
     };
-    // why: the kernel's sidepanel/close disables the browser-owned panel, which
+    // why: the kernel's sidepanel/close closes the browser-owned panel, which
     // destroys this document target and strands the handle above. A state that
     // closes the panel for real calls this afterwards: it binds the handle to
     // the panel's next document (opened through the action when no product
@@ -956,8 +984,8 @@ export async function launchPeerd({
     reopenNativePanel = async () => {
       const previousSessionId = sessionId;
       let next = await findNativePanelTarget();
-      // The kernel re-enables the panel 250 ms after closing it, and an action
-      // click inside that window opens nothing.
+      // An older Chrome without sidePanel.close re-enables the panel 250 ms
+      // after closing it, and an action click inside that window opens nothing.
       for (let attempt = 0; !next && attempt < 3; attempt += 1) next = await openNativePanelTarget(4_000);
       if (!next) throw new Error('browser-owned side panel target did not reappear');
       ({ sessionId } = await browserConn.send('Target.attachToTarget', { targetId: next.targetId, flatten: true }));
@@ -1400,7 +1428,11 @@ export async function unlockAndReady(page, { provider = 'ollama', model = 'qwen3
   if (!vault?.ok) throw new Error('vault/initialize failed: ' + JSON.stringify(vault));
   log('vault initialized + unlocked');
   await rpc(page, { type: 'onboarding/complete', peerName: 'peerd', facts: null });
-  const upd = await rpc(page, { type: 'settings/update', patch: { providerName: provider, providerModel: model } });
+  // why answer the first tab offer here: the panel that saw the vault setup
+  // asks once, and the harness finishes first-run setup for every state.
+  const upd = await rpc(page, {
+    type: 'settings/update', patch: { providerName: provider, providerModel: model, firstTabOffered: true },
+  });
   if (!upd?.ok) throw new Error('settings/update failed: ' + JSON.stringify(upd));
   log(`provider set to ${provider} (keyless)`);
 }

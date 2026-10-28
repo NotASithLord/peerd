@@ -38,6 +38,9 @@ export const KERNEL_COLD_EVENTS = Object.freeze([
   Object.freeze({ key: 'tabs.onRemoved', placement: 'kernel-authority', common: true }),
   Object.freeze({ key: 'tabs.onActivated', placement: 'durable-hint', common: true }),
   Object.freeze({ key: 'windows.onFocusChanged', placement: 'durable-hint', common: true }),
+  // The opt-in first tab acts on the live window once. A replay could add a
+  // tab the user has closed since, so this event keeps no receipt.
+  Object.freeze({ key: 'windows.onCreated', placement: 'kernel-immediate', common: true }),
   Object.freeze({ key: 'webNavigation.onCreatedNavigationTarget', placement: 'kernel-authority', common: true }),
   Object.freeze({ key: 'webRequest.onBeforeRequest', placement: 'kernel-authority', firefox: true }),
   Object.freeze({ key: 'action.onClicked', placement: 'kernel-immediate', common: true }),

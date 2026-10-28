@@ -46,12 +46,13 @@ export const App = {
  *   uiActions: UiActions, view: string, optionsActive: boolean,
  *   stateFailed?: boolean, retryState?: () => void,
    *   activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive',
+   *   firstTabPrompt?: unknown,
    * } }} vnode
    */
   view: ({ attrs }) => {
     const {
       state, send, voiceManager, uiActions, view, optionsActive, activeTabStatus,
-      stateFailed, retryState,
+      stateFailed, retryState, firstTabPrompt,
     } = attrs;
     if (stateFailed) return m('div.app-shell', [
       null,
@@ -90,7 +91,12 @@ export const App = {
       actorIsolation,
       m('.body', unlocked
         ? [
-            view === 'chat'   ? m(ChatView, { state, send, voiceManager, uiActions, surface: 'sidepanel', activeTabStatus })
+            // The one-time "Keep peerd as the first tab" offer (sidepanel.js).
+            view === 'chat' ? firstTabPrompt : null,
+            view === 'chat'   ? m(ChatView, {
+              state, send, voiceManager, uiActions, surface: 'sidepanel', activeTabStatus,
+              holdNudges: !!firstTabPrompt,
+            })
             : view === 'chats'  ? m(SessionsView, { state, send })
             : m(PlaceholderView, { label: 'Unknown view' }),
           ]
@@ -236,8 +242,8 @@ const TopBar = {
         // Close the panel. The toolbar action OPENS peerd (the side panel by
         // default, or Home via the frontDoorView setting) — only Chrome's
         // native action-click toggle ever closes it — so the panel keeps its
-        // own dismiss; this reuses the SW's sidepanel/close (disable+re-arm;
-        // Chrome-only, no-op on Firefox's sidebar).
+        // own dismiss; this reuses the SW's sidepanel/close (Chrome-only,
+        // no-op on Firefox's sidebar).
         m('button.icon', {
           'aria-label': 'Close panel',
           title: 'Close panel',

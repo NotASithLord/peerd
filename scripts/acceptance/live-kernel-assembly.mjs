@@ -40,6 +40,7 @@ const EVENT_OWNERS = Object.freeze({
   'tabs.onRemoved': 'kernel-tab-custody',
   'tabs.onActivated': 'kernel-tab-custody',
   'windows.onFocusChanged': 'kernel-front-door',
+  'windows.onCreated': 'kernel-first-tab',
   'webNavigation.onCreatedNavigationTarget': 'kernel-tab-custody',
   'webRequest.onBeforeRequest': 'kernel-tab-custody',
   'action.onClicked': 'kernel-front-door',

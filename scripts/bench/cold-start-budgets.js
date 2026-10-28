@@ -136,25 +136,31 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 // Vault bootstrap retirement now rejects pending readiness immediately. The
 // measured shared closure adds 556 source bytes and 141 packaged bytes per
 // worker target, with no module or timing-budget changes and no reserve.
+// The opt-in first tab adds one kernel module (the windows.onCreated owner and
+// its kept-window record), the faster side panel close, a same-window Home
+// pick and two default settings. Exact, no reserve.
+// The first tab owner also knows a reopened window by its tabs (3,630 source
+// bytes), and the preview update notice asks for a restart while the setting
+// is on (312 source bytes). No module. Exact, no reserve.
+// Combined first-tab custody and Discover declaration/read routes: measured
+// source and packaged closures, with no reserve or readiness changes.
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 408, graphBytes: 4_088_213 }),
-  target: Object.freeze({ modules: 411, graphBytes: 4_179_264 }),
+  shared: Object.freeze({ modules: 409, graphBytes: 4_104_517 }),
+  target: Object.freeze({ modules: 412, graphBytes: 4_195_880 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
-  exclusive: Object.freeze({ modules: 4, graphBytes: 91_251 }),
+  exclusive: Object.freeze({ modules: 4, graphBytes: 91_563 }),
   entryBytesCeiling: 236,
   directImportsCeiling: 3,
 });
-// The 23 added bytes in each Firefox graph name Home's new read route
-// (dweb/app-local-changes) in the shared route inventory. No module changes.
 export const FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Exact shared authority closure including synchronous session revocation.
-  modules: 90, graphBytes: 666_421, entryBytes: 239, directImports: 3,
+  modules: 91, graphBytes: 682_359, entryBytes: 239, directImports: 3,
 });
 export const PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  modules: 92, graphBytes: 674_052, entryBytes: 250, directImports: 2,
+  modules: 93, graphBytes: 689_990, entryBytes: 250, directImports: 2,
 });
 
 // The offscreen entry is a broker/supervisor, not a feature host. Its former
@@ -185,7 +191,9 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // Exact Settings/Home/Lab admission and chat-scoped integration metadata
   // repair existing leaves without new modules. Pin their measured closure
   // without reserve; Lab requests retain their narrow payload validators.
-  kernel: Object.freeze({ modules: 408, graphBytes: 4_088_213, entryBytes: 200, directImports: 2 }),
+  // The opt-in first tab owns windows.onCreated in one small module. Exact.
+  // It also knows a reopened window by its tabs. Same module. Exact.
+  kernel: Object.freeze({ modules: 409, graphBytes: 4_104_517, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -216,12 +224,11 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // not a supported demand boundary. This is the exact achieved minified
     // authored graph in the disposable, module-preserving release staging tree.
     // Pin the measured pacing/consent/revocation closure with no reserve.
-    // Home's new read route adds its name to the route inventory and a
-    // disabled answer to the Store dweb routes template: 63 bytes, no module.
-    // The peer policy owner tells its caller whether a block wrote: 22 bytes.
+    // The first tab owner (background/kernel-first-tab.js) joins it. Exact.
+    // Its reopened-window rows add 1,700 packaged bytes and no module. Exact.
     serviceWorker: Object.freeze({
-      modules: 404, graphBytes: 2_098_865, entryBytes: 173,
-      inputSha256: '5f67dd7fe4ed68e9f9cfb12d1cb482e873e3c4a54dcb00bb84d44297ad3b23d4',
+      modules: 405, graphBytes: 2_105_846, entryBytes: 173,
+      inputSha256: 'a92fe66eab988f0dd4274f793bde7685b281429cd1540119be4550d785efd8de',
     }),
     // One shared read-only authority schema/provenance validator rejects
     // corrupt or partial state before cold human controls become actionable.
@@ -233,11 +240,11 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // not expose in an offscreen document.
     // Exact supervisor closure with fixed document-extraction admission and
     // lease-bound Stop settlement; document parsing stays outside this graph.
-    offscreen: Object.freeze({ modules: 7, graphBytes: 21_997, entryBytes: 13_293 }),
+    // The stamped build facts carry the two first tab defaults.
+    offscreen: Object.freeze({ modules: 7, graphBytes: 22_035, entryBytes: 13_293 }),
   }),
   firefox: Object.freeze({
-    // +23 bytes: the route inventory names Home's new read route.
-    serviceWorker: Object.freeze({ modules: 90, graphBytes: 421_688, entryBytes: 210 }),
+    serviceWorker: Object.freeze({ modules: 91, graphBytes: 428_483, entryBytes: 210 }),
     sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
     home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
   }),
@@ -255,24 +262,21 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
       // The Home routes that block, unblock and list makers (the same durable
       // user peer policy dweb_block writes, with the same A2A consent
       // revocation through the turn relay) add thin handlers to an existing
-      // module and no module. The worker then reads what an installed App
-      // asks of peerd from the files it decoded (shared/app-declaration.js,
-      // the one added module), never from the host, and answers Discover's
-      // question whether a copy changed here with the update's own check.
-      // A block that stores nothing logs nothing. Remeasured with no reserve.
+      // module and no module. Remeasured with no reserve.
+      // The first tab owner joins it as one module. Exact.
+      // Its reopened-window rows and the restart notice add 1,877 bytes. Exact.
       serviceWorker: Object.freeze({
-        modules: 411, graphBytes: 2_220_849, entryBytes: 207,
-        inputSha256: 'a1f094c13a0a64c41b3e3b5fe27ecddd16751cf61575fb4ba36ffda5c865022d',
+        modules: 412, graphBytes: 2_221_147, entryBytes: 207,
+        inputSha256: '44fb39a6e1e4ebb9e57381dc4d77cbc0f34e2dfb4d6e917b59b22cabbafcb8f6',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 129_474, entryBytes: 564 }),
-      offscreen: Object.freeze({ modules: 7, graphBytes: 22_079, entryBytes: 13_293 }),
+      offscreen: Object.freeze({ modules: 7, graphBytes: 22_117, entryBytes: 13_293 }),
     }),
     // Firefox has no dweb host yet, but Preview still carries its distinct
-    // generated channel policy bytes. +23 bytes: the route inventory names
-    // Home's new read route.
+    // generated channel policy bytes.
     firefox: Object.freeze({
-      serviceWorker: Object.freeze({ modules: 92, graphBytes: 427_111, entryBytes: 81 }),
+      serviceWorker: Object.freeze({ modules: 93, graphBytes: 433_906, entryBytes: 81 }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
     }),

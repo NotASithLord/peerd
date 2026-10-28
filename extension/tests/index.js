@@ -161,5 +161,6 @@ import './unit/home/discover-section.test.js';
 import './unit/home/actors-section.test.js';
 import './unit/home/contacts-section.test.js';
 import './unit/home/network-section.test.js';
+import './unit/home/first-tab-prompts.test.js';
 
 import './unit/engine-tabs/app-tab/starter-apps.test.js';
