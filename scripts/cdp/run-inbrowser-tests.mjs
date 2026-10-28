@@ -17,6 +17,7 @@
 //         which is what packaging/gen-inbrowser-test-badge.ts badges.
 // Exit:   0 if all in-browser tests pass, 1 otherwise.
 
+import { sandboxLaunchArgs } from './sandbox-launch.mjs';
 import { resolve, join, dirname, extname, delimiter, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -123,10 +124,9 @@ const main = async () => {
   profile = mkdtempSync(join(tmpdir(), 'peerd-prof-'));
   chrome = spawn(CHROME, [
     '--headless=new', '--no-first-run', '--no-default-browser-check',
-    // why --no-sandbox: required inside CI containers/runners without
-    // user-namespace privileges; harmless for this throwaway profile that
-    // only ever loads 127.0.0.1.
-    '--disable-gpu', '--no-sandbox',
+    // Native qualification requires the sandbox; ordinary container CI keeps
+    // its explicit unsandboxed launch mode. See sandbox-launch.mjs.
+    '--disable-gpu', ...sandboxLaunchArgs(),
     `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank',
   ], { stdio: 'ignore' });
   const cdpPort = await waitForCdpPort();

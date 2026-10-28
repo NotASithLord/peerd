@@ -15,6 +15,7 @@
 // Env:    CHROME_PATH or CHROME — explicit Chrome/Chromium binary.
 // Exit:   0 if both peers link AND each hears the other's gossip; 1 otherwise.
 
+import { sandboxLaunchArgs } from './sandbox-launch.mjs';
 import { installPeerTransportDiagnostics } from './peer-transport-diagnostics.mjs';
 import { resolve, join, dirname, extname, delimiter, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -183,7 +184,7 @@ const main = async () => {
   profile = mkdtempSync(join(tmpdir(), 'peerd-dweb-'));
   chrome = spawn(CHROME, [
     '--headless=new', '--no-first-run', '--no-default-browser-check',
-    '--disable-gpu', '--no-sandbox',
+    '--disable-gpu', ...sandboxLaunchArgs(),
     '--disable-features=WebRtcHideLocalIpsWithMdns',
     `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
