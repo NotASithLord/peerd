@@ -20,6 +20,8 @@ import { toHex } from '../../../extension/shared/bundle/bytes.js';
 const URL = process.argv[2] ?? 'ws://localhost:8810';
 const LABEL = process.argv[3] ?? 'node';
 const QUORUM = Number(process.argv[4] ?? 3);
+const COORDINATED = Number(process.argv[5] ?? 0) > 0;
+const BUDGET = Number(process.argv[6] ?? 16);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (...a: any[]) => console.log(`[${LABEL}]`, ...a);
 const waitFor = async (cond: () => boolean, ms: number) => {
@@ -31,12 +33,21 @@ const waitFor = async (cond: () => boolean, ms: number) => {
 const main = async () => {
   const identity = await generateIdentity();
   const myDid = identity.did;
-  const mesh = createRoomMesh({ roomId: 'netproc', identity });
+  const mesh = createRoomMesh({ roomId: 'netproc', identity, budget: BUDGET });
   const links = new Map<string, any>();   // peerDid -> relay-backed Channel
   const linking = new Set<string>();
   let roster: any[] = [];
 
   const ws = new WebSocket(URL);
+  const gates = new Map<string, () => void>();
+  const barrier = (stage: string, fallbackMs: number) => {
+    if (!COORDINATED) return sleep(fallbackMs);
+    return new Promise<void>((resolve,reject) => {
+      const timeout=setTimeout(()=>{gates.delete(stage);reject(new Error('barrier timeout '+stage));},30000);
+      gates.set(stage,()=>{clearTimeout(timeout);gates.delete(stage);resolve();});
+      ws.send(JSON.stringify({t:'barrier',stage}));
+    });
+  };
   const linkTo = (peerDid: string) => {
     let ch = links.get(peerDid);
     if (!ch) {
@@ -71,7 +82,13 @@ const main = async () => {
 
   ws.onmessage = (e: any) => {
     let m: any; try { m = JSON.parse(e.data); } catch { return; }
-    if (m.t === 'roster') { roster = m.peers; for (const p of m.peers) ensureLink(p.did); }
+    if (m.t === 'barrier') {
+      // The fixture relay may release only these locally registered stages.
+      if (m.stage === 'ready') gates.get('ready')?.();
+      else if (m.stage === 'published') gates.get('published')?.();
+      else if (m.stage === 'complete') gates.get('complete')?.();
+    }
+    else if (m.t === 'roster') { roster = m.peers; for (const p of m.peers) ensureLink(p.did); }
     else if (m.t === 'msg') { linkTo(m.from).deliver(m.payload); ensureLink(m.from); }
   };
   await new Promise<void>((res, rej) => { ws.onopen = () => res(); ws.onerror = (e: any) => rej(new Error('ws error')); });
@@ -93,14 +110,15 @@ const main = async () => {
   const heardDirect = new Set<string>();
   node.gossip.subscribe('test', (m: any) => { if (m.from !== myDid) heardGossip.add(m.from); });
   node.direct.onMessage((m: any) => heardDirect.add(m.from));
-  await sleep(1500); // every node has its handlers up before anyone sends
+  await barrier('ready', 1500); // every receiver is registered before publication
 
   node.presence.announce();
   await node.gossip.publish('test', { from: LABEL });
   for (const p of others()) node.direct.send(p.did, { from: LABEL }).catch(() => {});
   await node.dht.put(await signItem({ value: { label: LABEL }, seq: 1 }, identity));
 
-  await sleep(3000); // let the network settle (cross-process timing)
+  await barrier('published', 0);
+  await sleep(3000); // retain the original delivery observation window
 
   results.presence = node.presence.list().length >= QUORUM - 1;
   results.gossip = heardGossip.size >= QUORUM - 1;
@@ -117,7 +135,7 @@ const main = async () => {
   log('RESULTS', JSON.stringify({ peers: mesh.peers().length, dhtHits, ...results }));
   log(pass ? '✅ ALL PASS' : '❌ SOME FAIL');
 
-  await sleep(2500); // linger so peers can finish their gets/receives before we drop
+  await barrier('complete', 2500); // no node retires while another is checking results
   ws.close();
   process.exit(pass ? 0 : 2);
 };

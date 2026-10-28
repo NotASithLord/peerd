@@ -1,3 +1,4 @@
+import { createBarrier } from './barrier.ts';
 // tests/peerd-distributed/netproc/relay.ts — a WebSocket message switchboard
 // for the multi-PROCESS node test. The in-process sim wires nodes with memory
 // pipes; separate OS processes need a real transport. This relay is NOT the
@@ -10,6 +11,8 @@
 // fixture is not evidence of DTLS identity binding; the browser lane owns that.
 type WsData = { did?: string; label?: string; fingerprint: string };
 const PORT = Number(process.argv[2] ?? 8810);
+const count = Number(process.argv[3] ?? 0);
+const barrier = count ? createBarrier(count) : null;
 const conns = new Map<string, any>(); // did -> ws
 
 const roster = () => [...conns.values()].map((ws) => ({ did: ws.data.did, label: ws.data.label, fingerprint: ws.data.fingerprint }));
@@ -29,10 +32,15 @@ const server = Bun.serve<WsData>({
       let m: any;
       try { m = JSON.parse(String(raw)); } catch { return; }
       if (m.t === 'hello') {
+        if (typeof m.did !== 'string' || (barrier && !barrier.join(m.did))) { ws.close(1008); return; }
         ws.data.did = m.did; ws.data.label = m.label;
         conns.set(m.did, ws);
         console.log(`+ ${m.label} (${conns.size} online)`);
         sendRoster();
+      } else if (m.t === 'barrier' && ws.data.did && typeof m.stage === 'string') {
+        if (barrier?.arrive(ws.data.did, m.stage)) {
+          for (const member of conns.values()) member.send(JSON.stringify({t:'barrier',stage:m.stage}));
+        }
       } else if (m.t === 'msg') {
         const to = conns.get(m.to);
         if (to) to.send(JSON.stringify({ t: 'msg', from: ws.data.did, payload: m.payload }));
@@ -40,6 +48,7 @@ const server = Bun.serve<WsData>({
     },
     close(ws) {
       if (ws.data?.did && conns.get(ws.data.did) === ws) {
+        barrier?.leave(ws.data.did);
         conns.delete(ws.data.did);
         console.log(`- ${ws.data.label} (${conns.size} online)`);
         sendRoster();

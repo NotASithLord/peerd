@@ -9,9 +9,10 @@
 // spawn the relay + N nodes, wait for every node to print its self-test
 // RESULTS, and exit non-zero unless ALL pass.
 //
-// Usage:  bun tests/peerd-distributed/netproc/run-cluster.ts [N] [quorum]
+// Usage:  bun tests/peerd-distributed/netproc/run-cluster.ts [N] [quorum] [test-degree=16]
 //   N       node count           (default 5)
 //   quorum  peers each must reach (default N — full mesh; run-node tests >= quorum-1)
+//   test-degree explicit mesh budget for experiments; production defaults are unchanged
 // Exit:   0 if every node PASS, 1 otherwise.
 //
 // Pure Bun + node:* builtins (no npm), same toolchain as the CDP harness, so
@@ -24,6 +25,11 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const N = Number(process.argv[2] ?? 5);
 const QUORUM = Number(process.argv[3] ?? N);
+const BUDGET = Number(process.argv[4] ?? 16);
+if (![N, QUORUM, BUDGET].every(Number.isSafeInteger) || N < 2 || N > 65
+    || QUORUM < 2 || QUORUM > N || BUDGET < 1 || BUDGET > 64 || QUORUM > BUDGET + 1) {
+  throw new Error('Require 2..65 nodes, quorum within nodes and degree+1, and test degree 1..64');
+}
 
 // Wall-clock ceiling: run-node settles for ~10s (handshake + gossip/DHT
 // rounds) and waits up to 20s for quorum, so 90s covers a slow CI runner
@@ -48,7 +54,7 @@ const main = async () => {
   // The relay binds an ephemeral port (arg 0) and prints the real one — read
   // it back so concurrent runs (or a leftover relay from a prior run) never
   // collide on a fixed port.
-  const relay = spawn(BUN, [join(HERE, 'relay.ts'), '0'], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const relay = spawn(BUN, [join(HERE, 'relay.ts'), '0', String(N)], { stdio: ['ignore', 'pipe', 'inherit'] });
   const relayUrl = await new Promise<string>((res, rej) => {
     const t = setTimeout(() => rej(new Error('relay did not announce a port within 10s')), 10_000);
     let buf = '';
@@ -61,12 +67,12 @@ const main = async () => {
   });
   console.log(`[cluster] relay up at ${relayUrl} — spawning ${N} nodes (quorum ${QUORUM})`);
 
-  // nodeA, nodeB, … — stable, readable labels (run-node uses the label as its
+  // Stable labels node1, node2, etc. (run-node uses the label as its
   // gossip/direct/DHT payload, so the self-test reads cleanly in the log).
-  const labels = Array.from({ length: N }, (_, i) => `node${String.fromCharCode(65 + i)}`);
+  const labels = Array.from({ length: N }, (_, i) => `node${i + 1}`);
   const children: ReturnType<typeof spawn>[] = [];
   const nodes = labels.map((label) => {
-    const proc = spawn(BUN, [join(HERE, 'run-node.ts'), relayUrl, label, String(QUORUM)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn(BUN, [join(HERE, 'run-node.ts'), relayUrl, label, String(QUORUM), String(N), String(BUDGET)], { stdio: ['ignore', 'pipe', 'pipe'] });
     children.push(proc);
     // run-node already prefixes its own lines with [label] — just indent.
     pipePrefixed(proc.stdout, '  ');
