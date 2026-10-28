@@ -10,6 +10,7 @@ import { resolve, join, dirname, extname, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { packageArtifact } from '../../packaging/package.ts';
+import { acceptanceRuntimeInput } from './acceptance-runtime-input.mjs';
 import { launchPeerd, attach, evalIn, rpc, unlockAndReady, waitFor, capturePage } from './e2e-harness.mjs';
 import { digestTree, PRODUCTION_PREVIEW_CHROME_BACKGROUND_ENTRY } from './passkey-signup-lane.mjs';
 import { GIT_FIXTURE_TLS_KEY, GIT_FIXTURE_TLS_CERT, GIT_FIXTURE_SPKI_SHA256_BASE64 } from '../acceptance/git-smart-http-fixture.mjs';
@@ -123,7 +124,8 @@ try {
     target.on('error', () => client.destroy());
   });
   const proxyPort = await listen(proxy);
-  const ext = join(repo, 'extension');
+  const supplied = acceptanceRuntimeInput(process.argv.slice(2), JSON.parse(readFileSync(join(repo, 'package.json'))).version);
+  const ext = supplied ?? join(repo, 'extension');
   const httpPort = await listen(httpServer((req, res) => {
     const path = resolve(ext, '.' + new URL(req.url, 'http://localhost').pathname);
     if (path === ext) { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<!doctype html><title>Manual address publisher</title>'); return; }
@@ -131,8 +133,11 @@ try {
     try { const bytes = readFileSync(path); res.writeHead(200, { 'content-type': extname(path) === '.js' ? 'text/javascript' : 'application/octet-stream' }); res.end(bytes); }
     catch { res.writeHead(404); res.end(); }
   }));
-  await bounded('package Preview', () => packageArtifact({ channel: 'preview', browser: 'chrome', version: JSON.parse(readFileSync(join(repo, 'package.json'))).version, sign: false, verify: true, sourceRoot: repo, artifactRoot: join(temp, 'package') }), 60_000);
-  const tree = join(temp, 'package/staging/preview-chrome');
+  if (!supplied) await bounded('package Preview', () => packageArtifact({ channel: 'preview', browser: 'chrome', version: JSON.parse(readFileSync(join(repo, 'package.json'))).version, sign: false, verify: true, sourceRoot: repo, artifactRoot: join(temp, 'package') }), 60_000);
+  const tree = supplied ?? join(temp, 'package/staging/preview-chrome');
+  evidence.runtimeInput = supplied ? 'supplied-runtime' : 'packaged-preview';
+  if (supplied) evidence.scope = evidence.scope.replace('Actual packaged Preview', 'Actual supplied runtime');
+  evidence.runtimeVersion = JSON.parse(readFileSync(join(tree, 'manifest.json'))).version;
   const originalDigest = await digestTree(tree);
   ctx = await bounded('launch actual Home', () => launchPeerd({ extensionDir: tree, panelPath: 'home/home.html', expectedBackgroundEntry: PRODUCTION_PREVIEW_CHROME_BACKGROUND_ENTRY,
     interceptModel: false, enforceWebSecurity: true, webRtcLoopbackAcceptance: true,
