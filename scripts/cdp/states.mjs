@@ -5001,6 +5001,7 @@ export const STATES = [
     ].join('\n\n') + '\n\n' }),
     async run(ctx, rec) {
       const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
+      await evalIn(ctx.page, `chrome.tabs.query({ currentWindow: true }).then(tabs => { const tab = tabs.find(tab => tab.url === 'about:blank'); return tab && !tab.active ? chrome.tabs.update(tab.id, { active: true }) : null; })`, true);
       const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Build a budget tracker App.' });
       rec.check('the App request is accepted', sent?.ok === true);
       const settled = await waitFor(async () => {
@@ -5008,9 +5009,9 @@ export const STATES = [
         const messages = state?.state?.session?.messages ?? [];
         const final = messages.at(-1);
         const idle = await evalIn(ctx.page, `!document.querySelector('form.input-bar button.stop')
-          && !document.querySelector('.message-assistant.streaming')`);
-        return idle && (baseRender ? final?.stopReason === 'max_tokens'
-          : final?.content === 'I will split the work into smaller calls.')
+          && !document.querySelector('.message-assistant.streaming, .wordmark--exit, .wordmark--gone, .channel-badge.is-exiting')`);
+        return idle && (final?.content === 'I will split the work into smaller calls.'
+          || (baseRender && final?.stopReason === 'max_tokens'))
           ? { sessionId: state.state.session.sessionId, messages } : null;
       }, { budgetMs: 20_000, pollMs: 100 });
       if (!settled) throw new Error('The cut tool call did not settle');
@@ -5716,7 +5717,16 @@ export const STATES = [
           rec.observe(`${label}: locked authority`, reply);
           return reply?.ok === true && reply.state?.vault?.locked === true ? reply : null;
         }, { budgetMs: 30_000, pollMs: 100 });
-        if (!authority) throw new Error(`PROBE-GAP: ${label} has no ready locked authority. No passphrase was submitted.`);
+        if (!authority) {
+          // Preserve existing observer evidence without waking or resuming the failed authority.
+          rec.observe(`${label}: readiness failure targets`, {
+            pageEvents: ctx.page.events.slice(-12),
+            targets: ctx.extensionTargetEvents().map(({ targetId, events }) => ({
+              targetId, events: events.slice(-12),
+            })).slice(-24),
+          });
+          throw new Error(`PROBE-GAP: ${label} has no ready locked authority. No passphrase was submitted.`);
+        }
         return authority;
       };
       const submit = async text => {
@@ -6286,6 +6296,11 @@ export const STATES = [
           throw new Error('The proposed site-client contracts are unavailable for visual review');
         }
         await rec.visual('site-client-contract-details');
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', NARROW_PANEL_METRICS);
+        await rec.visual('site-client-contract-details-narrow');
+        await evalIn(ctx.page, `document.querySelector('[aria-label="Proposed site-client contracts"]')?.closest('details')?.removeAttribute('open')`);
+        await rec.visual('site-client-confirm-narrow');
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
         const maximum = await evalIn(ctx.page, `(async () => {
           const m = (await import('/vendor/mithril/mithril.js')).default;
           const { ConfirmModal } = await import('/sidepanel/components/app.js');
@@ -6326,7 +6341,9 @@ export const STATES = [
             && maximum?.scrollable && maximum?.overflow === 'auto'
             && maximum?.actionPosition === 'sticky',
           JSON.stringify(maximum));
+        await rec.visual('site-client-maximum');
       } finally {
+        await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
         await evalIn(ctx.page, `document.querySelector('#e2e-site-client-confirm')?.remove()`);
       }
     },
@@ -10694,6 +10711,11 @@ export const STATES = [
             editorHidden: document.getElementById('editor-panel')?.hidden,
             files: [...document.querySelectorAll('.pe-node[data-path]')].map((node) => node.dataset.path),
           })`);
+          if (process.env.PEERD_VISUAL_BASE_RENDER === '1' && diagnostic.boot?.includes('is-failed') && diagnostic.bootMessage) {
+            rec.observe('merge-base App editor', diagnostic);
+            await rec.visualPage('app-editor-recovery', page);
+            return;
+          }
           throw new Error(`The renewed App editor did not expose notes.txt: ${JSON.stringify(diagnostic)}`);
         }
         await evalIn(page, `document.querySelector('.pe-node[data-path="notes.txt"]').click()`);

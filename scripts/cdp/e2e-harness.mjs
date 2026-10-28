@@ -24,7 +24,8 @@
 // --load-extension (a security restriction), so the extension never loads under
 // it. Point CHROME_PATH at Chrome for Testing (bun run e2e:chrome).
 
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname, delimiter } from 'node:path';
@@ -53,6 +54,26 @@ export const log = (...a) => console.log('[e2e]', ...a);
 // performance.now() values are useful diagnostics, but cannot be subtracted
 // from host launch or CDP milestone timestamps.
 export const hostMonotonicMs = () => Number(process.hrtime.bigint()) / 1_000_000;
+
+export const visualSourceIdentity = ({ extensionDir = EXT, states = [] } = {}) => {
+  const hash = createHash('sha256').update(JSON.stringify({ states,
+    headed: process.env.PEERD_BROWSER_WINDOW_EVIDENCE === '1', security: process.argv.includes('--enforce-web-security'),
+    chrome: resolveChrome(), platform: process.env.VISUAL_PLATFORM || `${process.platform}-${process.arch}`, timezone: process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone }));
+  const listed = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', 'extension', 'scripts/cdp', 'packaging'],
+    { cwd: ROOT, encoding: 'utf8' }).split('\0').filter(Boolean);
+  let extensionFiles;
+  try { extensionFiles = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', '.'],
+    { cwd: resolve(extensionDir), encoding: 'utf8' }).split('\0').filter(Boolean); }
+  catch { extensionFiles = []; }
+  if (!extensionFiles.length) extensionFiles = listed.filter((file) => file.startsWith('extension/')).map((file) => file.slice('extension/'.length));
+  extensionFiles.push('manifest.json', 'shared/channel-config.js', 'shared/build-config.js', 'shared/controller-build.js');
+  for (const [root, files, prefix] of [[ROOT, listed.filter((file) => !file.startsWith('extension/')), 'harness'], [resolve(extensionDir), extensionFiles, 'extension']]) {
+    for (const file of [...new Set(files)].sort()) {
+      hash.update(`${prefix}/${file}\0`).update(existsSync(join(root, file)) ? readFileSync(join(root, file)) : '<missing>').update('\0');
+    }
+  }
+  return hash.digest('hex');
+};
 
 // Acceptance-only HTTPS routing seam. It is intentionally not a generic
 // browser-argument escape hatch: only an ephemeral numeric loopback HTTP proxy
@@ -214,25 +235,11 @@ export const NARROW_PANEL_METRICS = Object.freeze({ width: 310, height: 900, dev
 
 const STABLE_STYLE_ID = 'e2e-visual-stable';
 
-// why NOT `animation:none` (what this used to inject): the wordmark blocks
-// (wmType / wmColor*) and the home path cards (pathFlickerIn) hold their
-// VISIBLE state through a `forwards` / `both` fill. Killing the animation
-// deletes the fill and reverts them to their base rules — transparent, and
-// opacity:0. The pre-2026-07 baselines therefore photographed a blank
-// rectangle where the brand mark belongs, and a home screen with none of its
-// six path cards. prefers-reduced-motion is the settled-state AUTHORITY
-// instead (styles.css maintains @media blocks for exactly this), emulated over
-// CDP before the document boots.
-//
-// What stays here is only what reduced-motion does NOT settle:
-//   - the blinking text caret;
-//   - canvas.code-stream, whose glyphs are placed by Math.random() — under
-//     reduced motion it paints one random static scatter (measured 0.48% drift
-//     at tolerance 8 across launches). It is aria-hidden atmosphere with zero
-//     product signal. Deliberate blind spot: if that canvas ever breaks, the
-//     visual gate will not see it.
+// why: reduced motion preserves the visible state of filled animations.
+// Hide the caret and random canvas. Fix the random send color for comparison.
 export const VISUAL_STABLE_CSS =
   '*{caret-color:transparent!important}'
+  + '.input-bar .composer-slot{--send-accent:var(--cyan)!important}'
   + 'canvas.code-stream{display:none!important}';
 
 const stableStyleSource = `(() => {
@@ -342,9 +349,9 @@ export async function capturePage(page, { bringToFront = true } = {}) {
  * it (both themes) and closes it. Used for the full-tab / large-view baselines.
  * @param {object} ctx  from launchPeerd
  * @param {string} path  extension-relative, e.g. 'home/home.html'
- * @param {{ metrics?: object, newWindow?: boolean }} [opts]
+ * @param {{ metrics?: object, newWindow?: boolean, windowBounds?: object, deferNavigation?: boolean }} [opts]
  */
-export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, newWindow = false } = {}) {
+export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, newWindow = false, windowBounds = {}, deferNavigation = false } = {}) {
   const url = `chrome-extension://${ctx.sw.id}/${String(path).replace(/^\//, '')}`;
   let created;
   if (newWindow) {
@@ -353,7 +360,7 @@ export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, n
     const browser = await attach(version.webSocketDebuggerUrl);
     let targetId;
     try {
-      ({ targetId } = await browser.send('Target.createTarget', { url: 'about:blank', newWindow: true }));
+      ({ targetId } = await browser.send('Target.createTarget', { ...windowBounds, url: 'about:blank', newWindow: true }));
       created = await waitFor(async () => (await cdpList(ctx.port)).find((target) => target.id === targetId),
         { budgetMs: READY_BUDGET_MS, pollMs: 25 });
       if (!created) throw new Error('The owned window target did not appear');
@@ -378,29 +385,33 @@ export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, n
     await page.send('Emulation.setDeviceMetricsOverride', metrics);
     await setEmulatedTheme(page, 'light');
     await page.send('Page.addScriptToEvaluateOnNewDocument', { source: stableStyleSource });
-    await page.send('Page.bringToFront');
-    await page.send('Page.navigate', { url });
-    // why `ready` is overridable: the default probe waits for a Mithril mount at
-    // `#app`, which is right for the SPA pages and WRONG for every standalone tab
-    // page - the engine tabs render into their own ids (and their hard-fail cards
-    // replace <body> outright), so they would time out here forever despite having
-    // painted. Those pages are exactly the ones with no visual coverage, so the
-    // probe has to be the caller's to choose.
-    const probe = ready
-      ? `document.readyState !== 'loading' && !!document.querySelector(${JSON.stringify(ready)})`
-      : `document.readyState === 'complete' && !!document.querySelector('#app > *')`;
-    const mounted = await waitFor(() => evalIn(page, probe), { budgetMs: READY_BUDGET_MS });
-    if (!mounted) {
-      const state = await evalIn(page, `({
-        href: location.href,
-        readyState: document.readyState,
-        visibilityState: document.visibilityState,
-        title: document.title,
-        body: document.body?.innerText?.slice(0, 500) ?? null,
-        app: document.querySelector('#app')?.innerHTML?.slice(0, 500) ?? null,
-      })`).catch((error) => ({ error: String(error) }));
-      throw new Error(`wide page never mounted: ${path} ${JSON.stringify({ state, events: page.events })}`);
-    }
+    // why: prepare every native window before any observed Home starts its lifecycle.
+    page.navigate = async () => {
+      await page.send('Page.bringToFront');
+      await page.send('Page.navigate', { url });
+      // why `ready` is overridable: the default probe waits for a Mithril mount at
+      // `#app`, which is right for the SPA pages and WRONG for every standalone tab
+      // page - the engine tabs render into their own ids (and their hard-fail cards
+      // replace <body> outright), so they would time out here forever despite having
+      // painted. Those pages are exactly the ones with no visual coverage, so the
+      // probe has to be the caller's to choose.
+      const probe = ready
+        ? `document.readyState !== 'loading' && !!document.querySelector(${JSON.stringify(ready)})`
+        : `document.readyState === 'complete' && !!document.querySelector('#app > *')`;
+      const mounted = await waitFor(() => evalIn(page, probe), { budgetMs: READY_BUDGET_MS });
+      if (!mounted) {
+        const state = await evalIn(page, `({
+          href: location.href,
+          readyState: document.readyState,
+          visibilityState: document.visibilityState,
+          title: document.title,
+          body: document.body?.innerText?.slice(0, 500) ?? null,
+          app: document.querySelector('#app')?.innerHTML?.slice(0, 500) ?? null,
+        })`).catch((error) => ({ error: String(error) }));
+        throw new Error(`wide page never mounted: ${path} ${JSON.stringify({ state, events: page.events })}`);
+      }
+    };
+    if (!deferNavigation) await page.navigate();
     return page;
   } catch (error) {
     try { disconnect?.(); } catch { /* */ }
@@ -605,7 +616,7 @@ export async function launchPeerd({
   interceptModel = true, resumeAuxiliaryWorkers = true, captureBootTimeline = false, beforePanelNavigate,
   panelPath = 'sidepanel/sidepanel.html', expectedBackgroundEntry, proxyServer,
   webRtcLoopbackAcceptance = false,
-  enforceWebSecurity = false, headless = true,
+  enforceWebSecurity = false, headless = process.env.PEERD_BROWSER_WINDOW_EVIDENCE !== '1',
 } = {}) {
   const launchStartedAt = hostMonotonicMs();
   const acceptanceProxy = normalizeAcceptanceProxyServer(proxyServer);
@@ -623,7 +634,7 @@ export async function launchPeerd({
   const downloadDir = mkdtempSync(join(tmpdir(), 'peerd-dl-'));
 
   const chrome = spawn(CHROME, [
-    ...(headless ? ['--headless=new'] : []), '--no-first-run', '--no-default-browser-check',
+    ...(headless ? ['--headless=new'] : ['--window-size=1440,1000', '--window-position=0,0']), '--no-first-run', '--no-default-browser-check',
     // Browser-policy fixtures need public-looking names while their local HTTP
     // servers stay deterministic and offline. Reserved .test names preserve the
     // documented DNS-resolution residual without weakening localhost coverage.
@@ -1037,6 +1048,55 @@ export async function launchPeerd({
   log('side panel mounted');
 
   const screenshot = () => capturePage(page);
+  const screenshotWindow = async (target) => {
+    if (headless) throw new Error('Browser window capture requires PEERD_BROWSER_WINDOW_EVIDENCE=1');
+    const targetId = target ? (await target.send('Target.getTargetInfo')).targetInfo.targetId : created.id;
+    await browserConn.send('Target.activateTarget', { targetId });
+    const { windowId, bounds } = await browserConn.send('Browser.getWindowForTarget', { targetId });
+    const surfaces = [...new Set([page, target].filter(Boolean))];
+    const metrics = await Promise.all(surfaces.map((surface) => evalIn(surface,
+      '({width:innerWidth,height:innerHeight,deviceScaleFactor:devicePixelRatio,mobile:false})')));
+    try {
+      await Promise.all(surfaces.map((surface) => surface.send('Emulation.clearDeviceMetricsOverride')));
+      // why: Chrome applies the cleared panel size after its host window resizes.
+      if (bounds.windowState === 'normal') {
+        await browserConn.send('Browser.setWindowBounds', { windowId, bounds: { width: bounds.width + 1 } });
+        await sleep(100);
+        await browserConn.send('Browser.setWindowBounds', { windowId, bounds: { width: bounds.width } });
+      }
+      await sleep(250);
+      const file = join(profile, 'browser-window.png');
+      if (process.platform === 'darwin') {
+        const source = `import Foundation; import CoreGraphics
+let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements], kCGNullWindowID) as? [[String:Any]] ?? []
+let matches = windows.filter { window in
+  guard window[kCGWindowOwnerPID as String] as? Int == ${chrome.pid}, window[kCGWindowLayer as String] as? Int == 0,
+    let box = window[kCGWindowBounds as String] as? [String:Double] else { return false }
+  return abs((box["X"] ?? -99999) - ${bounds.left}) < 2 && abs((box["Y"] ?? -99999) - ${bounds.top}) < 2 && abs((box["Width"] ?? 0) - ${bounds.width}) < 2 && abs((box["Height"] ?? 0) - ${bounds.height}) < 2
+}
+guard matches.count == 1, let id = matches[0][kCGWindowNumber as String] as? Int else { fputs("The exact test browser window is unavailable. Check screen recording access.\\n", stderr); exit(1) }
+print(id)`;
+        const id = execFileSync('swift', ['-module-cache-path', join(profile, 'swift-cache'), '-e', source], { encoding: 'utf8', timeout: 30_000 }).trim();
+        execFileSync('/usr/sbin/screencapture', ['-x', '-o', '-l', id, file], { timeout: 10_000 });
+      } else if (process.platform === 'linux') {
+        const id = await waitFor(() => {
+          const active = execFileSync('xdotool', ['getactivewindow'], { encoding: 'utf8', timeout: 10_000 }).trim();
+          const properties = execFileSync('xprop', ['-id', active, '_NET_WM_PID', '_NET_FRAME_EXTENTS'], { encoding: 'utf8', timeout: 10_000 });
+          if (Number(properties.match(/^_NET_WM_PID[^\n]*=\s*(\d+)\s*$/m)?.[1]) !== chrome.pid) return null;
+          const geometry = execFileSync('xdotool', ['getwindowgeometry', '--shell', active], { encoding: 'utf8', timeout: 10_000 });
+          const box = Object.fromEntries([...geometry.matchAll(/^(X|Y|WIDTH|HEIGHT)=(-?\d+)$/gm)].map(([, key, value]) => [key, Number(value)]));
+          const [left, right, top, bottom] = properties.match(/^_NET_FRAME_EXTENTS[^\n]*=([^\n]+)/m)?.[1].split(',').map(Number) ?? [0, 0, 0, 0];
+          const boxes = [[box.X, box.Y, box.WIDTH, box.HEIGHT], [box.X - left, box.Y - top, box.WIDTH + left + right, box.HEIGHT + top + bottom]];
+          return boxes.some((values) => values.every((value, index) => Math.abs(value - [bounds.left, bounds.top, bounds.width, bounds.height][index]) < 2)) ? active : null;
+        }, { budgetMs: 3_000, pollMs: 100 });
+        if (!id) throw new Error('The exact test browser window is not active');
+        execFileSync('import', ['-window', id, `PNG24:${file}`], { timeout: 10_000 });
+      } else throw new Error(`Browser window capture is unavailable on ${process.platform}`);
+      return readFileSync(file);
+    } finally {
+      await Promise.all(surfaces.map((surface, index) => surface.send('Emulation.setDeviceMetricsOverride', metrics[index])));
+    }
+  };
   const serviceWorkerVersions = new Map();
   let serviceWorkerTrackingEnabled = false;
   const onServiceWorkerVersion = (method, { versions = [] } = {}) => {
@@ -1053,7 +1113,7 @@ export async function launchPeerd({
   };
 
   const context = {
-    sw, swConn, page, port, profile, screenshot, extensionDir,
+    sw, swConn, page, port, profile, screenshot, screenshotWindow, extensionDir,
     releaseAuxiliaryFetchTarget: auxiliaryRetirement.release,
     ownsWorkerStartupPause: interceptModel === false || resumeAuxiliaryWorkers === false,
     bootTimeline: Object.freeze({

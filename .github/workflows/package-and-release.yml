@@ -550,20 +550,7 @@ jobs:
             scripts/cdp/artifacts/*.png
             badges/e2e-chrome.json
 
-  # The VISUAL lane: render the side panel, compare against the committed
-  # baselines, go red when the UI moved. NOT in required checks until it has a
-  # green history (same posture as `inbrowser` / `e2e`).
-  #
-  # why its OWN job rather than a step inside `e2e (side panel)`:
-  #   1. Opposite determinism contracts. The functional lane is deliberately
-  #      environment-independent and tracks whatever Chrome ships; this one
-  #      compares PIXELS, so it pins both the runner image and the Chrome build.
-  #      Folded together, a Chrome text-rasterization bump would red the
-  #      FUNCTIONAL gate — the one we actually want to require for merge.
-  #   2. Red means something different here ("the UI moved, go look") than in
-  #      the functional job ("something is broken"). Two rows keeps that legible.
-  #   3. Different outputs and permissions: this one uploads before/after/diff
-  #      PNGs and writes a PR comment; the functional job does neither.
+  # Compare rendered UI with the merge base. Pixel changes do not gate merges.
   visual:
     name: "visual (render)"
     # why serialize per ref: the publish step does `rm -rf pr<N>` before adding
@@ -599,6 +586,8 @@ jobs:
       # rendered HERE, in this job, so no cross-platform question arises.
       VISUAL_PLATFORM: linux-x64
       TZ: UTC
+      DISPLAY: ':99'
+      PEERD_BROWSER_WINDOW_EVIDENCE: '1'
     steps:
       - name: Harden runner (audit egress and source writes)
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
@@ -614,6 +603,18 @@ jobs:
       # why setup-chrome: installs the system libraries headless Chrome needs.
       # We then run the PINNED Chrome for Testing build against them.
       - uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # v2.2.0
+      - name: Start the isolated browser desktop
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb openbox xdotool x11-utils imagemagick
+          Xvfb "$DISPLAY" -screen 0 1920x1280x24 -nolisten tcp > "$RUNNER_TEMP/visual-display.log" 2>&1 &
+          for attempt in {1..50}; do xdpyinfo >/dev/null 2>&1 && break; sleep 0.2; done
+          openbox > "$RUNNER_TEMP/visual-window-manager.log" 2>&1 &
+          for attempt in {1..50}; do
+            xprop -root _NET_SUPPORTING_WM_CHECK | grep -q 'window id' && exit 0
+            sleep 0.2
+          done
+          exit 1
       - name: Read the pinned Chrome for Testing version
         id: pin
         run: echo "version=$(cat scripts/cdp/chrome-version.txt)" >> "$GITHUB_OUTPUT"
@@ -652,30 +653,24 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # The regression answer. Renders the SAME state definitions against the
-      # merge-base extension build and diffs the pairs - see the header of
-      # scripts/cdp/visual-vs-base.mjs for why nothing is stored in the repo.
-      #
-      # continue-on-error, deliberately: a computed reference cannot tell an
-      # intended redesign from a regression, so this REPORTS. The reviewer
-      # decides, from the before/after images in the PR comment below.
-      # Cancelled heads retain uploaded evidence but must not delay their replacement.
+      # Missing evidence fails this step. Pixel changes require review only.
+      # Later steps preserve partial evidence and post the result.
       - name: Compare every screen against the merge base
         if: always() && !cancelled() && github.event_name == 'pull_request'
-        continue-on-error: true
         env:
           CHROME_PATH: ${{ steps.cft.outputs.chrome-path }}
         id: vsbase
         run: |
+          set -o pipefail
           git fetch --no-tags origin main || true
-          bun scripts/cdp/visual-vs-base.mjs --reuse-head || true
+          bun scripts/cdp/visual-vs-base.mjs --reuse-head 2>&1 | tee "$RUNNER_TEMP/peerd-visual-compare.log"
 
       - name: Write the render report to the job summary
         if: always()
         run: |
           report=scripts/cdp/visual-runs/visual-vs-base.md
           {
-            echo "## visual — UI render (side panel + full tab, light + dark)"
+            echo "## visual - UI render (side panel + full tab, light + dark)"
             echo
             if [ -s "$report" ]; then
               cat "$report"
@@ -696,27 +691,18 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: visual-screens-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.sha }}-run${{ github.run_number }}.${{ github.run_attempt }}
-          path: scripts/cdp/visual-runs/screens/
+          path: |
+            scripts/cdp/visual-runs/screens/
+            scripts/cdp/visual-runs/visual-vs-base.json
+            scripts/cdp/visual-runs/visual-vs-base.md
+            scripts/cdp/visual-runs/base/result.json
+            ${{ runner.temp }}/peerd-visual-compare.log
           if-no-files-found: warn
           retention-days: 14
 
-      # Same-repo PRs only: a fork PR's GITHUB_TOKEN is read-only, so pushing the
-      # montages + commenting would fail. The summary + artifact above carry the
-      # same information and DO work on forks. Keep this on `pull_request`, never
-      # `pull_request_target` (untrusted head, write token = unsafe).
-      #
-      # Publishes each CHANGED screen's before|after montage to the `visual-diffs`
-      # branch (orphan; images only, never merges to main) under pr<N>/<sha>/, then
-      # posts a PR comment that embeds them by raw URL - so before/after renders
-      # INLINE, no artifact download. Keyed by head sha so re-runs bust GitHub's
-      # image cache; the PR's old sha dir is replaced each run to bound growth,
-      # and the whole pr<N>/ dir is removed when the PR closes (see visual-prune).
-      #
-      # ALWAYS, not only when something changed: a reviewer of a quiet PR had no
-      # way to know the lane ran at all, so "nothing moved" has to be a stated
-      # result rather than an absence. STICKY by a hidden marker, so a branch
-      # pushed ten times leaves one comment, not ten.
-      - name: Publish before/after montages + inline PR comment
+      # Fork PRs keep artifact evidence. Their token cannot publish images.
+      - name: Publish visual review images
+        id: publish
         if: always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         continue-on-error: true
         env:
@@ -724,47 +710,53 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REPO: ${{ github.repository }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           short="${HEAD_SHA:0:12}"
+          image_path="$short/run${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
           montage="scripts/cdp/visual-runs/montage"
           report="scripts/cdp/visual-runs/visual-vs-base.json"
-          base=""
-
-          # Compose only the screens the comparison flagged. No flagged screen
-          # means no montage and no push - just the "nothing moved" comment.
           if [ -f "$report" ] && bun scripts/cdp/visual-compare.mjs \
                --before scripts/cdp/visual-runs/screens/base \
                --after scripts/cdp/visual-runs/screens/head \
                --report "$report" --out "$montage"; then
-            # Publish to the visual-diffs branch via an authenticated clone. why a
-            # separate clone: the main checkout is on the PR head; this branch is
-            # orphan and unrelated. Fall back to creating it if it does not exist.
+            # why a separate clone: visual-diffs has unrelated history.
             auth="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
             pub="$RUNNER_TEMP/visual-diffs"
             git clone --branch visual-diffs --single-branch --depth 1 "$auth" "$pub" 2>/dev/null || {
               git clone --depth 1 "$auth" "$pub"
               git -C "$pub" checkout --orphan visual-diffs
               git -C "$pub" rm -rqf . || true
-              printf '# peerd visual diffs\n\nCI-published before/after montages for review. Orphan branch (never merges to main); images only under `pr<N>/<sha>/`, removed when the PR closes.\n' > "$pub/README.md"
+              printf '# peerd visual diffs\n\nCI publishes review images under `pr<N>/<sha>/run<id>.<attempt>/`. This branch never merges to main. Images are removed when the PR closes.\n' > "$pub/README.md"
             }
             rm -rf "$pub/pr${PR}"
-            mkdir -p "$pub/pr${PR}/$short"
-            cp "$montage"/*.before-after.png "$pub/pr${PR}/$short/"
+            mkdir -p "$pub/pr${PR}/$image_path"
+            cp "$montage"/*.png "$pub/pr${PR}/$image_path/"
             git -C "$pub" add -A
-            git -C "$pub" -c user.name='github-actions[bot]' \
-              -c user.email='github-actions[bot]@users.noreply.github.com' \
-              commit -q -m "visual diffs: PR #${PR} @ $short"
-            # A racing run on another PR can advance the branch; rebase-retry once.
-            git -C "$pub" push origin visual-diffs || {
-              git -C "$pub" pull --rebase origin visual-diffs && git -C "$pub" push origin visual-diffs
-            }
-            base="https://raw.githubusercontent.com/${REPO}/visual-diffs/pr${PR}/$short"
+            if ! git -C "$pub" diff --cached --quiet; then
+              git -C "$pub" -c user.name='github-actions[bot]' \
+                -c user.email='github-actions[bot]@users.noreply.github.com' \
+                commit -q -m "visual diffs: PR #${PR} @ $short"
+              git -C "$pub" push origin visual-diffs || {
+                git -C "$pub" pull --rebase origin visual-diffs && git -C "$pub" push origin visual-diffs
+              }
+            fi
+            echo "base_url=https://raw.githubusercontent.com/${REPO}/visual-diffs/pr${PR}/$image_path" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Publish the visual review comment
+        if: always() && !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BASE_URL: ${{ steps.publish.outputs.base_url }}
+        run: |
+          set -euo pipefail
           bun scripts/cdp/visual-review-comment.mjs \
-            --base-url "$base" --run-url "$RUN_URL" --montage-dir "$montage" > "$RUNNER_TEMP/visual-comment.md"
+            --base-url "$BASE_URL" --run-url "$RUN_URL" > "$RUNNER_TEMP/visual-comment.md"
           MARKER='<!-- peerd-visual -->'
           # why `|| true`: --paginate keeps writing after `head -1` closes the
           # pipe, so gh takes SIGPIPE (141); under `set -o pipefail` that would

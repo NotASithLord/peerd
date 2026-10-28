@@ -1,15 +1,5 @@
 #!/usr/bin/env bun
-// Emit the PR-comment markdown for the visual comparison, with the before/after
-// montages embedded INLINE (no artifact download). The montages are pushed to
-// the `visual-diffs` branch by the workflow; here we reference them by raw URL,
-// which GitHub renders in a comment.
-//
-//   bun scripts/cdp/visual-review-comment.mjs --base-url <url> --run-url <url> [--montage-dir <dir>]
-//
-// --base-url : raw prefix the montages live under, e.g.
-//   https://raw.githubusercontent.com/<owner>/<repo>/visual-diffs/pr123/<sha>
-// Reads scripts/cdp/visual-runs/visual-vs-base.json for what changed. Prints
-// markdown to stdout.
+// Write the visual review comment. Keep capture failures separate from changes.
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -27,13 +17,9 @@ const BASE_URL = (arg('base-url') || '').replace(/\/$/, '');
 const RUN_URL = arg('run-url') || '';
 const RUNS = join(HERE, 'visual-runs');
 const MONTAGE_DIR = arg('montage-dir') || join(RUNS, 'montage');
-const REPORT = join(RUNS, 'visual-vs-base.json');
+const REPORT = arg('report') || join(RUNS, 'visual-vs-base.json');
 
 const pct = (n) => `${(n * 100).toFixed(3)}%`;
-/** @param {number} n */
-const allMatch = (n) => (n === 1
-  ? 'The single screen renders exactly as it does at the merge base.'
-  : `All ${n} screens render exactly as they do at the merge base.`);
 const LABELS = {
   'initial-screen': 'Vault gate', 'idle-unlocked': 'Empty chat',
   'completed-turn': 'Completed turn', 'multi-turn-transcript': 'Multi-turn',
@@ -43,81 +29,69 @@ const LABELS = {
   'home-fulltab': 'Home (full tab)', 'options-fulltab': 'Settings (full tab)',
 };
 
-console.log('<!-- peerd-visual -->');
-console.log('### Visual regression');
-console.log('');
-
+const md = ['<!-- peerd-visual -->', '### Visual regression', ''];
 if (!existsSync(REPORT)) {
-  console.log('_The comparison did not get far enough to produce a report._');
+  md.push('⚠️ **The visual comparison is incomplete.** No comparison report is available.');
+  if (RUN_URL) md.push(`See the render evidence on [this run](${RUN_URL}).`);
+  console.log(md.join('\n'));
   process.exit(0);
 }
 const report = JSON.parse(readFileSync(REPORT, 'utf8'));
 const rows = report.rows ?? [];
 const notable = rows.filter((r) => r.verdict !== 'identical');
-
-// A montage exists per <state>.<theme> that we composed + pushed.
-const haveMontage = existsSync(MONTAGE_DIR)
-  ? new Set(readdirSync(MONTAGE_DIR).map((f) => f.replace(/\.before-after\.png$/, '')))
-  : new Set();
-
+const images = new Set(existsSync(MONTAGE_DIR) ? readdirSync(MONTAGE_DIR) : []);
 const shortBase = String(report.baseRef ?? '').slice(0, 12);
 const shortHead = String(report.headRef ?? '').slice(0, 12);
-
-if (!notable.length) {
-  console.log(`✅ **No visual change.** ${allMatch(rows.length)}`);
-  console.log('');
-  console.log(`<sub>\`${shortBase}\` (merge base) ⟶ \`${shortHead}\`. `
-    + 'peerd commits no reference screenshots, so both sides were rendered from source in this run.</sub>');
-  process.exit(0);
+md.push(report.ok === false || !rows.length ? '⚠️ **The visual comparison is incomplete.**'
+  : notable.length ? '⚠️ **Review the visual changes below.**' : '✅ **No visual change.**',
+`${rows.filter(r => r.status === 'changed').length} changed, `
+  + `${rows.filter(r => r.status === 'new').length} new captures, `
+  + `${rows.filter(r => r.status === 'missing').length} missing captures, `
+  + `${rows.filter(r => r.verdict === 'identical').length} identical.`, '');
+for (const [side, render] of Object.entries(report.render ?? {})) {
+  for (const error of (render.errors ?? []).slice(0, 6))
+    md.push(`- ${side}: ${error.state ?? 'render'} - ${String(error.detail).slice(0, 500)}`);
+  if (render.errors?.length > 6) md.push(`- ${side}: ${render.errors.length - 6} more errors. See the run evidence.`);
 }
-
-console.log(`⚠️ **The UI renders differently than the merge base** - ${notable.length} of ${rows.length}`
-  + ` screen${rows.length === 1 ? '' : 's'} moved.`);
-console.log('');
-
-// Group by base state so light + dark sit together.
+// why reserve space: GitHub limits comment size. The artifact keeps all captures.
+let budget = 60000 - md.join('\n').length;
+let omitted = false;
+for (const screen of report.browserScreens ?? []) {
+  const name = screen.file.split('/').pop();
+  const section = ['', `**Browser window: ${screen.state} - ${screen.label}**`, ''];
+  if (BASE_URL && images.has(name)) section.push(`![This branch browser window](${BASE_URL}/${name})`, '');
+  budget -= section.join('\n').length + 1;
+  if (budget < 0) { omitted = true; break; }
+  md.push(...section);
+}
 const byState = new Map();
-for (const r of notable) {
-  if (!byState.has(r.state)) byState.set(r.state, []);
-  byState.get(r.state).push(r);
+for (const row of notable) {
+  if (!byState.has(row.state)) byState.set(row.state, []);
+  byState.get(row.state).push(row);
 }
-
-// Worst-first: a reviewer's attention should land on the biggest movement, and
-// an alphabetical list buries a redesigned page under a 0.01% text reflow.
-const worstOf = (entries) => Math.max(...entries.map((e) => e.ratio ?? 1));
+const worstOf = (entries) => Math.max(...entries.map((entry) => entry.ratio ?? 0));
 const ordered = [...byState.entries()].sort((a, b) => worstOf(b[1]) - worstOf(a[1]));
-
 for (const [state, entries] of ordered) {
   const label = LABELS[state] || state;
   const worst = worstOf(entries);
-  console.log(`<details${worst > 0.05 ? ' open' : ''}><summary><b>${label}</b> - <code>${state}</code> · up to ${pct(worst)} changed</summary>`);
-  console.log('');
-  for (const e of entries.sort((a, b) => (a.theme || '').localeCompare(b.theme || ''))) {
-    const measure = e.ratio == null ? e.verdict : `${pct(e.ratio)} of pixels`;
-    console.log(`**${e.theme}** - ${measure} (merge base ⟶ this branch)`);
-    if (BASE_URL && haveMontage.has(e.key)) {
-      console.log('');
-      console.log(`![${label}, ${e.theme}: merge base then this branch](${BASE_URL}/${e.key}.before-after.png)`);
-    } else if (e.ratio == null) {
-      console.log('');
-      console.log('_(no pair to compose - see the run artifact)_');
-    } else {
-      console.log('');
-      console.log('_(montage unavailable - see the run artifact)_');
-    }
-    console.log('');
+  const measure = entries.some(e => e.status === 'changed' && e.ratio != null) ? `up to ${pct(worst)} changed` : entries[0].verdict;
+  const section = [`<details${worst > 0.05 ? ' open' : ''}><summary>${label} - ${measure}</summary>`, ''];
+  for (const entry of entries.sort((a, b) => (a.theme || '').localeCompare(b.theme || ''))) {
+    section.push(`**${entry.theme}** - ${entry.verdict}${entry.ratio == null ? '' : ` (${pct(entry.ratio)} of pixels)`}`, '');
+    if (BASE_URL && images.has(`${entry.key}.before-after.png`))
+      section.push(`![${entry.theme}: before then after](${BASE_URL}/${entry.key}.before-after.png)`);
+    else if (BASE_URL && images.has(`${entry.key}.after.png`))
+      section.push(`![${entry.theme}: this branch only](${BASE_URL}/${entry.key}.after.png)`);
+    else section.push('_(Review image unavailable. See the run evidence.)_');
+    section.push('');
   }
-  console.log('</details>');
-  console.log('');
+  section.push('</details>', '');
+  budget -= section.join('\n').length + 1;
+  if (budget < 0) { omitted = true; break; }
+  md.push(...section);
 }
-
-if (RUN_URL) {
-  console.log(`<sub>Every screen at full size, both sides, plus the diff masks: the \`visual-screens\` artifact on **[this run](${RUN_URL})**.</sub>`);
-  console.log('');
-}
-console.log('<sub>**Intended? Then there is nothing to do here.** peerd commits no reference screenshots, '
-  + 'so a deliberate redesign has no baseline to reseed - this lane reports, it does not gate. '
-  + 'Both sides above were rendered from source in this run.</sub>');
-console.log('');
-console.log(`<sub>\`${shortBase}\` (merge base) ⟶ \`${shortHead}\`. `
-  + 'The montages live on the `visual-diffs` branch and are deleted when this PR closes.</sub>');
+if (omitted) md.push('More captures are in the run evidence. The inline gallery reached the comment size limit.', '');
+if (RUN_URL) md.push(`Full captures and render errors: the \`visual-screens\` artifact on [this run](${RUN_URL}).`, '');
+md.push('<sub>Pixel changes do not gate merges. Browser window captures show this branch only.</sub>', '',
+  `<sub>\`${shortBase}\` (merge base) to \`${shortHead}\`. Review images are deleted when this PR closes.</sub>`);
+console.log(md.join('\n'));
