@@ -127,7 +127,7 @@ export async function attachConsentObserver(url, diagnostic, connect = attach) {
 
 // Startup-paused workers need a first-script trap;
 // inject on that script's call frame before releasing application code.
-export async function instrumentPausedTarget(connection, sessionId, diagnostic, recordPause = (/** @type {any} */ _pause) => {}, configureDebugger = null) {
+export async function instrumentPausedTarget(connection, sessionId, diagnostic, recordPause = (/** @type {any} */ _pause) => {}) {
   const send = (method, params = {}) => connection.send(method, params, sessionId);
   let pause;
   let ready;
@@ -169,7 +169,6 @@ export async function instrumentPausedTarget(connection, sessionId, diagnostic, 
     const result = await evaluate('observer injection', `${OBSERVER_SOURCE}; globalThis.__peerdConsentObserverInstalled === true`);
     requireResult(!result.exceptionDetails && result.result?.value === true, 'Target observer injection failed');
     await diagnostic(`target observer ready session=${sessionId}`, () => observed);
-    if (configureDebugger) await configureDebugger(connection, sessionId);
   } catch (error) { failure = error; throw error; }
   finally {
     connection.off(listener);
@@ -177,7 +176,7 @@ export async function instrumentPausedTarget(connection, sessionId, diagnostic, 
       let cleanupFailure;
       for (const [method, params] of [
         ...(breakpoint ? [['Debugger.removeBreakpoint', { breakpointId: breakpoint }]] : []),
-        ['Debugger.resume', {}], ...(!configureDebugger ? [['Debugger.disable', {}]] : []),
+        ['Debugger.resume', {}], ['Debugger.disable', {}],
       ]) {
         try { await send(method, params); } catch (error) { cleanupFailure ??= error; }
       }
@@ -191,7 +190,7 @@ export const ROOT_TARGET_FILTER = ['page', 'iframe', 'other', 'service_worker', 
 export const CHILD_TARGET_FILTER = ['worker', 'shared_worker', 'iframe']
   .map(type => ({ type })).concat([{ exclude: true }]);
 
-export async function observeHosts(ctx, evidence, diagnostic, persist, connect = attach, configureWorkerDebugger = null) {
+export async function observeHosts(ctx, evidence, diagnostic, persist, connect = attach, configureHostDebugger = null) {
   const version = await diagnostic('observer browser endpoint', () => fetch(`http://127.0.0.1:${ctx.port}/json/version`, { signal: AbortSignal.timeout(15_000) }).then(r => r.json()));
   const connection = await attachConsentObserver(version.webSocketDebuggerUrl, diagnostic, connect);
   const nativeSend = connection.send.bind(connection);
@@ -315,6 +314,10 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
       // immediately; Page.enable keeps the preload active for future documents.
       const pageTarget = ['page', 'iframe', 'other'].includes(targetInfo.type);
       if (pageTarget) {
+        if (configureHostDebugger && targetInfo.url.startsWith(`${origin}offscreen/offscreen.html`)) {
+          await send('Debugger.enable');
+          await configureHostDebugger(connection, sessionId);
+        }
         await send('Page.enable');
         await send('Page.addScriptToEvaluateOnNewDocument', { source: OBSERVER_SOURCE, runImmediately: true });
       }
@@ -327,8 +330,7 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
           evidence.pauses ??= [];
           if (evidence.pauses.length < 32) evidence.pauses.push({ sessionId, phase: evidence.phase, at: Date.now(), ...pause });
           persist();
-        }, targetInfo.url === `${origin}offscreen/controller-worker.js`
-          ? configureWorkerDebugger : null);
+        });
       } else if (pageTarget) {
         await scopedDiagnostic(sessionId, `page observer ready session=${sessionId}`, () => ready);
         if (waitingForDebugger) {

@@ -3759,7 +3759,7 @@ export const STATES = [
         const shellSource = await readFile(join(ctx.extensionDir, 'offscreen/controller-shell.js'), 'utf8');
         const refusalLine = shellSource.split('\n').findIndex(line => line.includes("ok: false, code: 'host-concurrency'"));
         if (refusalLine < 0) throw new Error('controller refusal diagnostic location missing');
-        const configureWorkerDebugger = async (connection, sessionId) => {
+        const configureHostDebugger = async (connection, sessionId) => {
           const send = (method, params = {}) => connection.send(method, params, sessionId);
           const { breakpointId } = await send('Debugger.setBreakpointByUrl', {
             url: `chrome-extension://${fresh.sw.id}/offscreen/controller-shell.js`, lineNumber: refusalLine,
@@ -3790,7 +3790,7 @@ export const STATES = [
             finally { await send('Debugger.resume').catch(() => {}); }
           });
         };
-        observer = await observeHosts(fresh, evidence, diagnostic, () => {}, undefined, configureWorkerDebugger);
+        observer = await observeHosts(fresh, evidence, diagnostic, () => {}, undefined, configureHostDebugger);
         const initialized = await rpc(fresh.page, { type: 'vault/initialize', passphrase: PASSPHRASE }, { timeoutMs: 120_000 });
         if (initialized?.ok !== true) throw new Error('the fresh backup vault did not initialize');
         const noChoice = (await rpc(fresh.page, { type: 'state/get' }))?.state?.settings;
