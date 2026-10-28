@@ -314,7 +314,9 @@ export async function observeHosts(ctx, evidence, diagnostic, persist, connect =
       // immediately; Page.enable keeps the preload active for future documents.
       const pageTarget = ['page', 'iframe', 'other'].includes(targetInfo.type);
       if (pageTarget) {
-        if (configureHostDebugger && targetInfo.url.startsWith(`${origin}offscreen/offscreen.html`)) {
+        // New offscreen targets initially have an empty URL. The diagnostic
+        // itself pins its breakpoint to the exact extension script URL.
+        if (configureHostDebugger) {
           await send('Debugger.enable');
           await configureHostDebugger(connection, sessionId);
         }

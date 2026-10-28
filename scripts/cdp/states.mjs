@@ -3764,7 +3764,12 @@ export const STATES = [
           const { breakpointId } = await send('Debugger.setBreakpointByUrl', {
             url: `chrome-extension://${fresh.sw.id}/offscreen/controller-shell.js`, lineNumber: refusalLine,
           });
+          evidence.controllerOccupancyArmed = (evidence.controllerOccupancyArmed ?? 0) + 1;
           connection.on(async (method, params, message) => {
+            if (message.sessionId === sessionId && method === 'Debugger.breakpointResolved'
+              && params.breakpointId === breakpointId) {
+              evidence.controllerOccupancyResolved = (evidence.controllerOccupancyResolved ?? 0) + 1;
+            }
             if (method !== 'Debugger.paused' || message.sessionId !== sessionId
               || !params.hitBreakpoints?.includes(breakpointId)) return;
             try {
