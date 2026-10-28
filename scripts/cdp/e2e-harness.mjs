@@ -349,9 +349,9 @@ export async function capturePage(page, { bringToFront = true } = {}) {
  * it (both themes) and closes it. Used for the full-tab / large-view baselines.
  * @param {object} ctx  from launchPeerd
  * @param {string} path  extension-relative, e.g. 'home/home.html'
- * @param {{ metrics?: object, newWindow?: boolean }} [opts]
+ * @param {{ metrics?: object, newWindow?: boolean, windowBounds?: object }} [opts]
  */
-export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, newWindow = false } = {}) {
+export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, newWindow = false, windowBounds = {} } = {}) {
   const url = `chrome-extension://${ctx.sw.id}/${String(path).replace(/^\//, '')}`;
   let created;
   if (newWindow) {
@@ -360,7 +360,7 @@ export async function openWidePage(ctx, path, { metrics = WIDE_METRICS, ready, n
     const browser = await attach(version.webSocketDebuggerUrl);
     let targetId;
     try {
-      ({ targetId } = await browser.send('Target.createTarget', { url: 'about:blank', newWindow: true }));
+      ({ targetId } = await browser.send('Target.createTarget', { ...windowBounds, url: 'about:blank', newWindow: true }));
       created = await waitFor(async () => (await cdpList(ctx.port)).find((target) => target.id === targetId),
         { budgetMs: READY_BUDGET_MS, pollMs: 25 });
       if (!created) throw new Error('The owned window target did not appear');
