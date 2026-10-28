@@ -19,6 +19,7 @@ jobs:
       VISUAL_PLATFORM: linux-x64
       PEERD_BROWSER_WINDOW_EVIDENCE: '1'
       BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0'
+      PEERD_BACKUP_HOST_STAGES: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
