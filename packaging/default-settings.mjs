@@ -134,6 +134,14 @@ export const defaults = {
 
   frontDoorView: { store: 'panel', preview: 'panel' },
 
+  // "Keep peerd as the first tab" (background/kernel-first-tab.js): one pinned
+  // Home tab at the start of each window, so peerd is one click away. OFF on
+  // BOTH channels: it adds a tab to every new window, so it is the user's
+  // choice. Home offers it once after onboarding; Settings, Behavior has the
+  // switch. firstTabOffered records that the user answered that offer.
+  firstTabEnabled: { store: false, preview: false },
+  firstTabOffered: { store: false, preview: false },
+
   // Web actor model override. '' is NO override — the web actor resolves to
   // the active provider's fast default (Haiku on Anthropic via
   // adapter.defaultRunnerModel; resolveRunnerModel), NOT the chat model. So out

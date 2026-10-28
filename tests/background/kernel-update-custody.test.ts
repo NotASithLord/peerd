@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   createKernelUpdateCustody,
   KERNEL_UPDATE_CUSTODY_KEY,
@@ -258,5 +260,21 @@ describe('native preview update custody', () => {
     expect(h.calls.reload).toBe(1);
     expect(h.calls.retries).toHaveLength(1);
     expect(h.calls.cancelled).toBe(1);
+  });
+
+  test('with the first tab on, the notice says to restart the browser', async () => {
+    const h = harness({ busy: true, deps: { restartToInstall: () => true } });
+    await h.custody.onUpdateAvailable({ version: '1.2.4' });
+    expect(h.calls.reload).toBe(0);
+    expect(h.calls.notifications).toEqual([
+      'peerd v1.2.4 is downloaded. Restart the browser to install it.',
+    ]);
+  });
+
+  test('the preview kernel asks for a restart while the first tab setting is on', () => {
+    const source = readFileSync(
+      join(import.meta.dir, '..', '..', 'extension', 'background', 'kernel-preview-addon.js'), 'utf8',
+    );
+    expect(source).toContain('restartToInstall: () => c.settingsStore.get().firstTabEnabled === true,');
   });
 });

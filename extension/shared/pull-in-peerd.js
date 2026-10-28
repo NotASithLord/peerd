@@ -66,9 +66,8 @@ const openPanel = () => {
   } catch (e) { console.warn('[pull-in-peerd] open threw', e); }
 };
 
-// Close — Chrome has no sidePanel.close(), so we ask the SW to disable + re-arm
-// the panel (the same path home's "bring it here" uses; only the SW owns
-// sidePanel.setOptions). Firefox closes the sidebar directly.
+// Close: on Chrome, ask the SW, which closes the panel in every window (the
+// same path home's "bring it here" uses). Firefox closes the sidebar directly.
 const closePanel = () => {
   try {
     if (sidePanelApi()?.open) {

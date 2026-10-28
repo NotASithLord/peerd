@@ -11,7 +11,7 @@ import { describe, it, expect } from '../../framework.js';
 import { BehaviorSection } from '/options/sections/behavior.js';
 
 const SETTINGS = {
-  frontDoorView: 'panel', reasoningEnabled: true, reasoningEffort: 'medium',
+  frontDoorView: 'panel', firstTabEnabled: false, reasoningEnabled: true, reasoningEffort: 'medium',
   confirmWebWrites: true, schemaValidatedReplies: false, advancedAutomationEnabled: true,
   devMode: false, autoResumeInterruptedTurns: true, providerFailoverEnabled: true,
   providerFallbacks: [], prewalkEnabled: false, enginePrewalkEnabled: false,
@@ -48,10 +48,10 @@ const confirmReset = async (root) => {
 };
 
 describe('options.behavior — settings rows', () => {
-  it('keeps every setting: eleven rows across three bands', async () => {
+  it('keeps every setting: twelve rows across three bands', async () => {
     const { root, unmount } = mount();
     try {
-      expect(root.querySelectorAll('.set-row').length).toBe(11);
+      expect(root.querySelectorAll('.set-row').length).toBe(12);
       const bands = [...root.querySelectorAll('.set-band-name')].map((e) => e.textContent);
       expect(bands).toEqual(['Safety', 'Behavior', 'Experimental & diagnostics']);
     } finally { unmount(); }
@@ -112,6 +112,19 @@ describe('options.behavior — settings rows', () => {
       // Confirm-before-actions rides permission/set, NOT settings/update — it
       // must not yank the user out of Plan as a side effect.
       expect(sent[0]).toEqual({ type: 'permission/set', confirmActions: true });
+    } finally { unmount(); }
+  });
+
+  it('"Keep peerd as the first tab" sits under the toolbar button and turns on with one switch', async () => {
+    const { root, sent, unmount } = mount();
+    try {
+      const labels = [...root.querySelectorAll('.set-row-label')].map((e) => e.textContent);
+      expect(labels.indexOf('Keep peerd as the first tab')).toBe(labels.indexOf('Toolbar button') + 1);
+      const sw = /** @type {HTMLButtonElement} */ (root.querySelector('button[aria-label="Keep peerd as the first tab - off"]'));
+      expect(root.textContent).toContain('peerd adds no tab to your windows.');
+      sw.click();
+      await settle();
+      expect(sent[0]).toEqual({ type: 'settings/update', patch: { firstTabEnabled: true } });
     } finally { unmount(); }
   });
 

@@ -4996,6 +4996,89 @@ const runPrivateNetworkDnrSmoke = async (driver, providerServer) => {
   }
 };
 
+// "Keep peerd as the first tab" in Firefox: the pinned Home tab shows peerd's
+// icon at rest, and a turn changes that icon without the attention mark that
+// Firefox draws when a pinned tab's title changes in the background (only a
+// click on the tab clears that mark). The turn uses an unreachable keyless
+// provider, so it ends at once and never reaches the provider server.
+const runFirstTabSmoke = async (driver) => {
+  console.log('Firefox first tab: the pinned Home tab');
+  await driver.navigate(`${EXTENSION_ORIGIN}/options/options.html`);
+  await waitFor(() => driver.execute(
+    "return document.readyState === 'complete' && (document.getElementById('app')?.childElementCount || 0) > 0;",
+  ), { budgetMs: 30_000 });
+  const send = (message) => driver.executeAsync(`
+    const done = arguments[arguments.length - 1];
+    browser.runtime.sendMessage(arguments[0]).then(done, (error) => done({ ok: false, error: String(error) }));
+  `, [message]);
+  const before = (await send({ type: 'state/get' }))?.state?.settings ?? {};
+  const pinnedTab = async () => {
+    await driver.setContext('chrome');
+    await driver.switchToFrame(null);
+    try {
+      return await driver.execute(`
+        const tab = gBrowser.tabs.find((item) => item.pinned
+          && item.linkedBrowser.currentURI.spec.startsWith(arguments[0]));
+        return tab ? { index: gBrowser.tabs.indexOf(tab), selected: tab.selected, label: tab.label,
+          image: tab.getAttribute('image'), titlechanged: tab.getAttribute('titlechanged'),
+          context: tab.linkedBrowser.browsingContext.id } : null;
+      `, [`${EXTENSION_ORIGIN}/home/home.html`]);
+    } finally { await driver.setContext('content'); }
+  };
+  try {
+    const on = await send({ type: 'settings/update', patch: { firstTabEnabled: true } });
+    assert(on?.ok === true && on.settings?.firstTabEnabled === true, 'Settings turns the first tab on in Firefox',
+      JSON.stringify(on?.settings?.firstTabEnabled ?? on));
+    const rest = await waitFor(async () => {
+      const tab = await pinnedTab();
+      return tab?.index === 0 && tab.image ? tab : null;
+    }, { budgetMs: 15_000, pollMs: 200 });
+    assert(!!rest && rest.selected === false && rest.image.startsWith('data:image/png'),
+      'Firefox shows the peerd icon on the pinned Home tab at rest, not a blank globe', JSON.stringify(rest));
+    const sent = JSON.parse(await executeInBrowsingContext(driver, rest.context, `
+      const done = arguments[arguments.length - 1];
+      (async () => {
+        const send = (message) => browser.runtime.sendMessage(message);
+        const provider = await send({ type: 'settings/update', patch: { providerName: 'ollama', providerModel: 'qwen3:8b' } });
+        // why a new chat first: the turn's streaming state applies to the chat Home shows.
+        await send({ type: 'session/reset' });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const turn = await send({ type: 'agent/send', text: 'Say hello.' });
+        return JSON.stringify({ provider: provider?.ok, turn: turn?.ok ?? turn, hidden: document.hidden });
+      })().then(done, (error) => done(JSON.stringify({ error: String(error) })));
+    `, [], true));
+    assert(sent?.provider === true && sent.turn === true && sent.hidden === true,
+      'the pinned Home tab sends a turn while it is out of view', JSON.stringify(sent));
+    const images = new Set();
+    let marked = null;
+    for (let sample = 0; sample < 30; sample += 1) {
+      const tab = await pinnedTab();
+      if (tab?.image) images.add(tab.image.slice(0, 40));
+      if (tab?.titlechanged) marked = tab;
+      await delay(250);
+    }
+    assert([...images].some((image) => !image.startsWith('data:image/png')),
+      'the pinned Home tab icon shows the turn', JSON.stringify([...images]));
+    assert(marked === null, 'a turn leaves no Firefox attention mark on the pinned Home tab', JSON.stringify(marked));
+  } finally {
+    const pinned = await pinnedTab().catch(() => null);
+    await send({
+      type: 'settings/update',
+      patch: { firstTabEnabled: false, ...(before.providerName ? { providerName: before.providerName } : {}),
+        ...(before.providerModel ? { providerModel: before.providerModel } : {}) },
+    }).catch(() => {});
+    if (!before.providerName) await send({ type: 'settings/reset', keys: ['providerName', 'providerModel'] }).catch(() => {});
+    if (pinned) {
+      await driver.setContext('chrome');
+      await driver.execute(`
+        const tab = gBrowser.tabs.find((item) => item.linkedBrowser.browsingContext.id === arguments[0]);
+        if (tab) gBrowser.removeTab(tab);
+      `, [pinned.context]).catch(() => {});
+      await driver.setContext('content');
+    }
+  }
+};
+
 const main = async () => {
   if (!firefoxBinary) throw new Error('Firefox not found. Set FIREFOX_PATH.');
   if (!geckodriverBinary) throw new Error('geckodriver not found. Set GECKODRIVER_PATH.');
@@ -5223,6 +5306,11 @@ const main = async () => {
       console.log('Firefox actor lifetime smoke OK');
       return;
     }
+    if (process.env.FIREFOX_RUNTIME_ONLY === 'first-tab') {
+      await runFirstTabSmoke(driver);
+      console.log('Firefox first tab smoke OK');
+      return;
+    }
 
     await runDirectControllerStopGoalSmoke(driver, providerServer);
     await runPrivateNetworkDnrSmoke(driver, providerServer);
@@ -5422,6 +5510,7 @@ const main = async () => {
     const screenshot = await driver.screenshot();
     writeFileSync(join(OUTPUT, 'sidepanel.png'), Buffer.from(screenshot, 'base64'));
 
+    await runFirstTabSmoke(driver);
     await runBrokenWorkerSmoke({ providerServer });
 
     console.log('Firefox Gecko web-platform suite: run shared browser tests');
