@@ -356,6 +356,25 @@ describe('kernel first tab: closed tabs and updates', () => {
     expect(tabs.seen).toEqual([`updated ${tab.id}`, `updated ${tab.id}`]);
   });
 
+  test('navigating the created Home tab away declines restoration after update', async () => {
+    const fake = makeBrowser({ windows: [{ id: 1, type: 'normal' }] });
+    const { api } = attach(fake);
+    await api.coverEveryWindow();
+    const watched = api.watchTabs(custody().owner);
+    const tab = fake.tabs[0];
+    tab.url = 'https://mail.example/';
+    delete tab.pendingUrl;
+    watched.onUpdated(tab.id, { url: tab.url }, { windowId: 1 });
+    await flush();
+    expect(fake.local.get(FIRST_TAB_KEPT_KEY)).toEqual([]);
+    expect(pinnedHomes([tab], HOME, new Set([tab.id]))).toHaveLength(0);
+    const count = fake.created.length;
+    fake.sessionStore.clear();
+    const restarted = attach(fake);
+    await restarted.api.restoreAfterUpdate();
+    expect(fake.created).toHaveLength(count);
+  });
+
   test('pinning some other tab adds nothing', async () => {
     const fake = makeBrowser({
       windows: [{ id: 1, type: 'normal' }],

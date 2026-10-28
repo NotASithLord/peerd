@@ -1,18 +1,7 @@
 // @ts-check
-// "Keep peerd as the first tab": one pinned Home tab at the start of each
-// normal window while the setting is on. An extension cannot draw in the tab
-// strip, and a pinned tab shows only its icon, so this is the closest thing
-// to a "P" button there.
-//
-// why the kernel: a new window must get its tab when no peerd page is open,
-// so the windows.onCreated listener lives in the worker. Keep this file small:
-// every byte here is in every cold boot.
-//
-// The user stays in charge. peerd never puts back a tab the user closed or
-// unpinned: after an update closes peerd's tabs, only the windows that still
-// had theirs get one again, and a window the user closes and then reopens
-// stays as it was. It never adds a tab to a window that already has a pinned
-// Home tab, because the browser restores pinned tabs after a restart.
+// One opt-in pinned Home per normal window. The worker owns windows.onCreated
+// so it works without an open page. Respect closed, unpinned or navigated tabs,
+// including restored windows; browser-restored pinned Homes must not duplicate.
 
 import { makeSerialLane } from '../shared/cold-util.js';
 
@@ -78,7 +67,8 @@ export const firstTabWindow = (window) => typeof window?.id === 'number'
  */
 export const pinnedHomes = (tabs, homeUrl, created = new Set()) => tabs.filter((tab) =>
   tab.pinned === true && ((tab.url || tab.pendingUrl || '').startsWith(homeUrl)
-    || typeof tab.id === 'number' && created.has(tab.id)))
+    || typeof tab.id === 'number' && created.has(tab.id)
+      && (!tab.url || tab.url === 'about:blank') && !tab.pendingUrl))
   .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
 
 /**
@@ -250,9 +240,9 @@ export const attachKernelFirstTab = ({
       if (typeof windowId !== 'number') return;
       const rows = await readDeclined();
       const row = rows.find((item) => item.window === windowId);
-      if (navigated && !row) return;
       const kept = await readKept();
       const listed = kept.includes(windowId);
+      if (navigated && !row && !listed) return;
       if (!listed && !pinned && !row) return;
       const rest = rows.filter((item) => item !== row);
       if (closing) {
@@ -276,12 +266,15 @@ export const attachKernelFirstTab = ({
    */
   const watchTabs = (owner) => ({
     onUpdated: (tabId, changeInfo, tab) => {
+      // why: creation only bridges the initial blank URL, never later navigation.
+      if (typeof changeInfo?.url === 'string' && changeInfo.url !== 'about:blank') created.delete(tabId);
       const pinned = changeInfo?.pinned;
       if (typeof pinned === 'boolean') void tabChanged(tab?.windowId, { pinned, early: tabsNow(tab?.windowId) });
       else if (typeof changeInfo?.url === 'string') void tabChanged(tab?.windowId, { navigated: true });
       return owner.onUpdated(tabId, changeInfo, tab);
     },
     onRemoved: (tabId, removeInfo) => {
+      created.delete(tabId);
       const closing = removeInfo?.isWindowClosing === true;
       void tabChanged(removeInfo?.windowId, { closing, early: closing ? null : tabsNow(removeInfo?.windowId) });
       return owner.onRemoved(tabId, removeInfo);

@@ -146,6 +146,9 @@ export const HOME_SETTINGS_STATES = [
       try {
         // why: A tab switch inside one Home window intentionally closes a nonsticky panel.
         page = await openWidePage(ctx, 'home/home.html#discover', { newWindow: true });
+        // Keep part of each real window exposed on the CI desktop. Identical
+        // bounds fully occlude a background Home and legitimately hide it.
+        await evalIn(page, `chrome.windows.getCurrent().then((window) => chrome.windows.update(window.id, { left: screen.availLeft + Math.min(80, Math.floor(screen.availWidth / 4)), top: screen.availTop + Math.min(80, Math.floor(screen.availHeight / 4)), width: Math.min(1000, Math.floor(screen.availWidth / 2)), height: Math.min(900, Math.floor(screen.availHeight / 2)) }))`, true);
         await evalIn(page, visibilitySource);
         ownedHomes.push(await readWindow(page));
         const choice = await waitFor(() => evalIn(page, `!!document.querySelector('[data-network-choice="enable"]:not(:disabled)')`), { budgetMs: 15_000 });
@@ -162,6 +165,7 @@ export const HOME_SETTINGS_STATES = [
           && started?.ok === true, JSON.stringify({ enabled, started }));
         if (started?.ok !== true) throw new Error('The real network Start did not settle');
         other = await openWidePage(ctx, 'home/home.html#discover', { newWindow: true });
+        await evalIn(other, `chrome.windows.getCurrent().then((window) => chrome.windows.update(window.id, { left: screen.availLeft + Math.min(160, Math.floor(screen.availWidth / 4)), top: screen.availTop + Math.min(160, Math.floor(screen.availHeight / 4)), width: Math.min(1000, Math.floor(screen.availWidth / 2)), height: Math.min(900, Math.floor(screen.availHeight / 2)) }))`, true);
         await evalIn(other, visibilitySource);
         ownedHomes.push(await readWindow(other));
         rec.check('the native panel and both real Home pages own three distinct windows',
