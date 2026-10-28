@@ -10575,12 +10575,22 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         })()`);
         verdict('a hidden Full screen button stays hidden', staysHidden === true);
         // why a prompt leaves full screen: the browser's own exit message shows at the top center, over the bar.
+        await evalIn(app, `(() => {
+          window.__fullScreenReentry = [];
+          for (const type of ['click', 'fullscreenerror', 'fullscreenchange']) document.addEventListener(type, event => {
+            window.__fullScreenReentry.push({ type, trusted: event.isTrusted,
+              target: event.target?.id ?? null, active: navigator.userActivation.isActive,
+              focused: document.hasFocus(), full: document.fullscreenElement !== null });
+            if (window.__fullScreenReentry.length > 8) window.__fullScreenReentry.shift();
+          }, true);
+        })()`);
         await click('#fullscreen-btn');
         const again = await waitFor(fullScreenOn, { budgetMs: 5_000, pollMs: 50 });
         // why: the panel that the handle opened is still open, as when a person asks peerd for an App and then clicks Full screen.
         const reentry = await evalIn(app, `({
           chip: document.querySelector('.peerd-pull').getAttribute('aria-label'),
           handle: getComputedStyle(document.getElementById('peerd-handle')).display,
+          events: window.__fullScreenReentry,
         })`);
         verdict('full screen with the side panel already open shows no P handle', again === true
           && reentry.chip === 'Close the peerd side panel' && reentry.handle === 'none', JSON.stringify({ again, ...reentry, windowRestored, errors: app.events.slice(-12) }));
