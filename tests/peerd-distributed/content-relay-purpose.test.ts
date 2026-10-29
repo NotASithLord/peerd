@@ -18,7 +18,7 @@ test('signed relay purpose and HELLO admit a content carrier while routing slots
  try {
   for(const i of [0,1]) {const pair=memoryPair();channels.push(...pair);rooms[i].mesh.addLink(pair[0],identities[2].did);rooms[2].mesh.addLink(pair[1],identities[i].did);rooms[i].mesh.addLink(createBufferedChannel({send(){}}),'routing-filler');}
   rooms[1].mesh.serveContent({getManifest:()=>null});
-  await rooms[0].dialVia(identities[2].did,identities[1].did,{purpose:'content'});
+  const leases=await Promise.all([rooms[0].acquireContentVia(identities[2].did,identities[1].did),rooms[0].acquireContentVia(identities[2].did,identities[1].did)]);
   // A sender's completion precedes the remote continuation. Await actual
   // authenticated admission, not a guessed sleep or a fake response.
   for(let i=0;i<100&&!rooms[1].mesh.hasContentLink(identities[0].did);i++) await new Promise(r=>setTimeout(r,1));
@@ -28,5 +28,7 @@ test('signed relay purpose and HELLO admit a content carrier while routing slots
   const client=createChannelClient(rooms[0].mesh.contentChannel(identities[1].did)!,500);
   try{expect((await client.manifest('a'.repeat(64))).t).toBe('NOMANIFEST');}finally{client.close();}
   expect(admission.stats().active).toBe(0);
+  leases[0].release();expect(rooms[0].mesh.hasContentLink(identities[1].did)).toBe(true);
+  leases[1].release();expect(rooms[0].mesh.hasContentLink(identities[1].did)).toBe(false);
  } finally {rooms.forEach(r=>r.leave());channels.forEach(c=>c.close());}
 });

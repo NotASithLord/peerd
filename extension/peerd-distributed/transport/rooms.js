@@ -28,6 +28,7 @@ import { TOPIC_SYNC_WINDOW, CONTENT_ONLY } from './capabilities.js';
 import { connectionPath } from './ice.js';
 import { AdmissionError, roomAdmission, MAX_ADMISSION_CANDIDATES } from './admission.js';
 import { createSignalingBuffer } from './signaling-buffer.js';
+import { createContentDials } from './content-dials.js';
 import { dlog, dwarn } from '../log.js';
 import { SPARSE_PUBLIC_PROFILE, sparsePublicProfile } from './rendezvous-profile.js';
 import { createNeighborMaintenance, NEIGHBOR_CANDIDATES } from './neighbors.js';
@@ -418,6 +419,15 @@ export const joinRoom = async ({
     }
   };
 
+  const contentDials = createContentDials({ limit: transferSlots,
+    has: mesh.hasContentLink, acquire: mesh.acquireContentLink,
+    connect: async (via, did, signal) => {
+      await dialViaRelay(via, did, { signal, purpose: 'content' });
+      // Own even a late success so abandoned attempts cannot leak a carrier.
+      return mesh.acquireContentLink(did);
+    },
+  });
+
   // Crawl the room through one connected member: their roster, then a
   // relayed dial to everyone we don't hold yet.
   /** @param {string} viaDid */
@@ -595,6 +605,7 @@ export const joinRoom = async ({
     // timeout. One hop only — `brokerDid` must be directly linked.
     /** @param {string} brokerDid @param {string} targetDid @param {{signal?: AbortSignal, purpose?: 'routing' | 'content'}} [opts] */
     dialVia: (brokerDid, targetDid, opts) => dialViaRelay(brokerDid, targetDid, opts),
+    acquireContentVia: contentDials.open,
     leave() {
       if (left) return;
       left = true;
@@ -602,6 +613,7 @@ export const joinRoom = async ({
       stopRepairObserver();
       stopOfflineRepair();
       lifetime.abort();
+      contentDials.stop();
       attempts.close();
       timers.clearTimeout(reconnectTimer ?? undefined);
       try { session?.close(); } catch { /* already closed */ }
