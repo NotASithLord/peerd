@@ -428,12 +428,30 @@ jobs:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
           P2P_RANDOM_DISCOVERY: '1'
           P2P_ACTIVATION_RACE: '1'
-        run: bun scripts/cdp/manual-address-twopeer.mjs
+        # Diagnostic branch only: independent fresh profiles, all failures retained.
+        # This is not retry-until-green: any failed trial fails the entire batch.
+        run: |
+          failed=0
+          mkdir -p artifacts/random-js-trials
+          for trial in $(seq 1 10); do
+            destination="artifacts/random-js-trials/trial-$trial"
+            mkdir -p "$destination"
+            if bun scripts/cdp/manual-address-twopeer.mjs > "$destination/run.log" 2>&1; then
+              echo 0 > "$destination/exit-code"
+            else
+              status=$?
+              echo "$status" > "$destination/exit-code"
+              failed=1
+            fi
+            cp -R artifacts/random-js-twopeer/. "$destination/"
+            rm -rf artifacts/random-js-twopeer
+          done
+          exit "$failed"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: random-js-twopeer
-          path: artifacts/random-js-twopeer/
+          path: artifacts/random-js-trials/
           if-no-files-found: warn
 
   # Additive job — the multi-PROCESS dweb node test (PHASE1-TESTING §A.2),
