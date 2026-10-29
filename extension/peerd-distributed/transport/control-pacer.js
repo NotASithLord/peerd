@@ -1,6 +1,9 @@
 // @ts-check
 // Receiver control admission allows 60 frames per 10 seconds. A small burst
 // plus four frames/second stays below that bound across window boundaries.
+export class ControlPacingCapacityError extends Error {
+ constructor(){super('control pacing capacity');this.name='ControlPacingCapacityError';}
+}
 export const CONTROL_BURST=8;
 export const CONTROL_WAITERS=32;
 const INTERVAL_MS=250;
@@ -26,7 +29,7 @@ export const createControlPacer=({now=Date.now,timers=globalThis}={})=>{
    if(closed||signal?.aborted)return Promise.reject(new Error('control pacing cancelled'));
    refill();
    if(!queue.length&&tokens>=1){tokens--;return Promise.resolve();}
-   if(queue.length>=CONTROL_WAITERS)return Promise.reject(new Error('control pacing capacity'));
+   if(queue.length>=CONTROL_WAITERS)return Promise.reject(new ControlPacingCapacityError());
    return new Promise((resolve,reject)=>{
     const waiter={resolve:()=>resolve(undefined),reject,signal,cancel:()=>{
      const index=queue.indexOf(waiter);if(index<0)return;queue.splice(index,1);detach(waiter);reject(new Error('control pacing cancelled'));
