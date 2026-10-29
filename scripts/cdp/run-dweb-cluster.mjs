@@ -12,6 +12,7 @@ import { validateHosts, validateMesh, pathsReady, repairableEdge } from './dweb-
 import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
 import { sshArguments } from './dweb-cluster-ssh.mjs';
 import {validateCapacityConfig, validateCapacityHosts, capacityTopology, capacityPathsReady} from './dweb-capacity-evidence.mjs';
+import {validateConversations} from './dweb-conversation-evidence.mjs';
 import { soakOptions, runSoak } from './dweb-cluster-soak.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -194,12 +195,14 @@ try {
     for (const [index, worker] of workers.entries()) for (const did of adjacency[index]) {
       const nonce = crypto.randomUUID();
       const result = await worker.call('conversation', { did, nonce });
-      results.push({ from: dids[index], to: did, ...result });
+      results.push({ from: dids[index], to: did, nonce, ...result });
+      if(result.skipped==='retired-before-start')continue;
       assert.equal(result.first.ok, true);
       assert.equal(result.first.reply, `PONG:${nonce}`);
       assert.equal(result.second?.reply, `PONG:${nonce}/followup`);
       assert.equal(result.second.convId, result.first.convId);
     }
+    report.conversationCoverage=validateConversations(results,dids);
     return results;
   });
   const seederIndex = dids.indexOf(adjacency[0][0]);
