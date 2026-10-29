@@ -154,11 +154,22 @@ test('real DHT RPC borrows a lookup carrier and never retains it as a routing ne
   for(const i of [0,1]){const pair=memoryPair();rooms[i].mesh.addLink(pair[0],identities[2].did);rooms[2].mesh.addLink(pair[1],identities[i].did);await bases[i].node.dht.learn(identities[2].did);await bases[2].node.dht.learn(identities[i].did);}
   const app=await bases[1].publishApp({name:'lookup',entry:'index.html',files:{'index.html':'directory'}});
   await bases[1].announceProvider(app.uri);
+  // Model an index with no provider claim but a live routing referral. Only
+  // the provider itself can answer who holds this version.
+  const handle=bases[2].node.dht.handle;
+  bases[2].node.dht.handle=async (from:string,message:any)=>{
+   const reply=await handle(from,message);
+   return message.t==='GET_PROVIDERS'?{...reply,providers:[]}:reply;
+  };
   const contacts=await bases[0].node.dht.findProviderContacts(await contentKey(app.uri));
   expect(contacts.some((c:any)=>c.did===identities[1].did)).toBe(true);
   expect(acquired).toBeGreaterThan(0);
   expect(rooms[0].mesh.hasLink(identities[1].did)).toBe(false);
   expect(bases[0].node.dht.routingTable.has(identities[1].did)).toBe(false);
+  expect(rooms[0].mesh.stats().transferDegree).toBe(0);
+  expect(contacts.find((c:any)=>c.did===identities[1].did).brokers).toEqual([identities[2].did]);
+  const fetched=await bases[0].fetchApp(app.uri);
+  expect(fetched.manifest.publisher).toBe(identities[1].did);
   expect(rooms[0].mesh.stats().transferDegree).toBe(0);
  }finally{bases.forEach(base=>base.close());rooms.forEach(room=>room.leave());}
 });

@@ -184,8 +184,14 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
                 const id = await nodeIdOf(did);
                 if (!signal?.aborted && (found.has(did) || found.size < 64)) {
                   const previous = found.get(did);
-                  // Local responders only: wire() never emits these routes.
-                  const brokers = [...new Set([...(previous?.brokers ?? []), c.did])].slice(0, MAX_PROVIDER_BROKERS);
+                  // A provider answering for itself cannot introduce a link
+                  // to itself. Preserve the local route used to query it, even
+                  // when that query used a temporary carrier that has closed.
+                  // No wire-supplied broker is accepted by this lookup.
+                  const routes = did === c.did ? [c.hints?.broker, ...(c.brokers ?? [])] : [c.did];
+                  const brokers = [...new Set([...(previous?.brokers ?? []), ...routes])]
+                    .filter((broker) => typeof broker === 'string' && broker !== did && broker !== identity.did)
+                    .slice(0, MAX_PROVIDER_BROKERS);
                   found.set(did, { did, id, hints: { broker: brokers[0] }, brokers });
                 }
               }

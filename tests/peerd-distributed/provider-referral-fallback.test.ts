@@ -114,3 +114,20 @@ test('content referral fallback preserves the caller lease after roster cleanup'
   lease.release();
   expect(released).toBe(true);
 });
+
+test('a temporary provider that answers for itself preserves its original introducer',async()=>{
+ const [reader,broker,provider]=await Promise.all([generateIdentity(),generateIdentity(),generateIdentity()]);
+ const node=createDhtNode({identity:reader,selfId:await nodeIdOf(reader.did),store:createDhtStore(),
+  rpc:async contact=>contact.did===broker.did
+   ? {t:'PROVIDERS',providers:[],nodes:[{did:provider.did}]}
+   : {t:'PROVIDERS',providers:[provider.did],nodes:[]},
+  retainContact:did=>did===broker.did,
+ });
+ await node.learn(broker.did);
+ const contacts=await node.findProviderContacts('ab'.repeat(32));
+ expect(contacts).toHaveLength(1);
+ expect(contacts[0].did).toBe(provider.did);
+ expect(contacts[0].brokers).toEqual([broker.did]);
+ expect(contacts[0].hints.broker).toBe(broker.did);
+ expect(node.routingTable.has(provider.did)).toBe(false);
+});
