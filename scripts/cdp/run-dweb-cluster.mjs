@@ -3,7 +3,7 @@
 // --local is explicitly a rehearsal and never reports a physical-Mac pass.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, renameSync, appendFileSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
@@ -150,6 +150,23 @@ try {
     else validateHosts(report.hosts, options);
     return report.hosts;
   });
+  assert(config.resourceMetrics === undefined || typeof config.resourceMetrics === 'boolean', 'resourceMetrics must be boolean');
+  let resourceAt = -Infinity;
+  const resourceOutput = `${output}.resources.jsonl`;
+  if (config.resourceMetrics) {
+    mkdirSync(dirname(output), {recursive:true});
+    writeFileSync(resourceOutput, '', {flag:'wx'});
+    report.resourceEvidence = {file:resourceOutput, samples:0, minimumIntervalMs:30000,
+      complete:false, missing:['FD counts','event-loop latency','idle-only baseline','queue and bandwidth budgets']};
+  }
+  const sampleResources = async (phase, force = false) => {
+    if (!config.resourceMetrics || (!force && Date.now() - resourceAt < 30000)) return;
+    const values = await Promise.all(workers.map(async worker => ({name:worker.target.name, ...await worker.call('resources')})));
+    resourceAt = Date.now();
+    appendFileSync(resourceOutput, `${JSON.stringify({at:resourceAt,phase,values})}\n`);
+    report.resourceEvidence.samples++;
+  };
+  await sampleResources('fixture-ready', true);
   const roomId = config.roomId ?? `cluster-${crypto.randomUUID()}`;
   assert(typeof roomId === 'string' && roomId.length > 0, 'roomId must be a non-empty string');
   const start = (worker, id = roomId) => worker.call('start', { roomId: id, signaling: worker.signaling,
@@ -318,6 +335,7 @@ try {
         await gossip();
         verify(await workers[0].call('fetch', { uri: published.uri }));
         await paths();
+        await sampleResources('sustained-workload');
       },
       save: async evidence => {
         report.soak = evidence;
@@ -329,6 +347,7 @@ try {
       },
     }));
   report.finalStates = await reports();
+  await sampleResources('final-workload', true);
   report.ok = true;
 } catch (error) {
   report.error = error.stack;
