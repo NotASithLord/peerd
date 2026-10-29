@@ -139,12 +139,14 @@ window.cluster = {
   },
   gossip: ({ nonce }) => base.node.gossip.publish(topic, { nonce }),
   async conversation({ did, nonce }) {
+    const linkedBefore = room.mesh.hasLink(did);
+    if(!linkedBefore)return {skipped:'retired-before-start',linkedBefore,linkedAfter:false,first:null,second:null};
     const permission = { signs: true, allowed: () => true };
     const first = await dispatch.dispatch('converse', { did, message: nonce, timeoutMs: 8000 }, permission);
     const second = first.convId && await dispatch.dispatch('say', {
       convId: first.convId, message: `${nonce}/followup`, timeoutMs: 8000,
     }, permission);
-    return { first, second };
+    return { first, second, linkedBefore, linkedAfter:room.mesh.hasLink(did) };
   },
   async publish({ slug }) {
     // why: random bytes resist compression, exercising chunking and SCTP

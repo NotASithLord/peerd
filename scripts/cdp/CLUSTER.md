@@ -100,3 +100,22 @@ This soak measures sustained transport and content availability. It does not
 qualify extension worker retirement, system sleep/wake, WAN/NAT diversity or
 capacity beyond the recorded host allocation. Keep those acceptance lanes
 separate; a local rehearsal is never physical-cluster evidence.
+
+For an explicitly shared-host capacity preflight, pass `--capacity` instead of
+`--local`. On the isolated coordinator, explicitly request the production sparse
+room and profile (see the rendezvous-profile module); a capped legacy room does
+not negotiate sparse maintenance and is rejected. Use `topology: "connected"`, zero temporary reserve, and more browser
+entries than the configured degree budget. Each entry launches an independent
+browser process and temporary profile. Repeated SSH hosts need different free
+`signalingPort` values; entry names remain unique. At least two physical Macs
+must participate. The existing distinct-Mac lane continues rejecting repeated
+hardware identities.
+
+The capacity preflight records hardware count, browser-process count, logical
+membership, achieved degrees, and same-host versus cross-host edges separately.
+Cross-host paths retain the physical lane's direct UDP requirements. Same-host
+paths cannot stand in for remote links. A successful preflight only qualifies
+this placement and workload: the report explicitly leaves full capacity
+qualification incomplete until paired degree comparisons, whole-browser
+resource metrics, adverse workloads, and sustained/overnight runs are collected.
+It does not change production degree or establish a supported network size.
