@@ -196,13 +196,13 @@ try {
       const nonce = crypto.randomUUID();
       const result = await worker.call('conversation', { did, nonce });
       results.push({ from: dids[index], to: did, nonce, ...result });
-      if(result.skipped==='retired-before-start')continue;
+      if(result.skipped==='retired-before-start'){assert(capacity,'A required conversation edge retired');continue;}
       assert.equal(result.first.ok, true);
       assert.equal(result.first.reply, `PONG:${nonce}`);
       assert.equal(result.second?.reply, `PONG:${nonce}/followup`);
       assert.equal(result.second.convId, result.first.convId);
     }
-    report.conversationCoverage=validateConversations(results,dids);
+    report.conversationCoverage=validateConversations(results,dids,{allowRetired:capacity});
     return results;
   });
   const seederIndex = dids.indexOf(adjacency[0][0]);

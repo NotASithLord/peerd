@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 // Churn may retire a snapshot edge before its turn. Such a non-attempt is not
 // a successful conversation; every executed operation must still succeed and
 // successful reciprocal conversations must connect the entire participant set.
-export const validateConversations = (results, dids) => {
+export const validateConversations = (results, dids, {allowRetired=false}={}) => {
   const known=new Set(dids), directed=new Set();let retiredBeforeStart=0,completed=0;
   const key=(from,to)=>JSON.stringify([from,to]);
   for(const result of results){
     assert(known.has(result.from)&&known.has(result.to)&&result.from!==result.to,'Unknown conversation participant');
     if(result.skipped==='retired-before-start'){
+      assert(allowRetired,'Retired snapshot exclusions require the explicit capacity lane');
       assert.equal(result.linkedBefore,false);assert.equal(result.first,null);assert.equal(result.second,null);
       retiredBeforeStart++;continue;
     }
