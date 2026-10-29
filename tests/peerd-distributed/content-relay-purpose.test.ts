@@ -76,3 +76,32 @@ for (const cancel of [false, true]) test(`actual provider fetch releases its tem
   expect(rooms[0].mesh.hasLink(identities[2].did)).toBe(true);
  }finally{bases.forEach(b=>b.close());rooms.forEach(r=>r.leave());}
 });
+
+import {createSession} from '../../extension/peerd-distributed/transport/session.js';
+import {CONTENT_ONLY} from '../../extension/peerd-distributed/transport/capabilities.js';
+
+for (const purpose of ['routing','content'] as const) test(`signed HELLO cannot substitute the opposite role for ${purpose} admission`,async()=>{
+ const [local,remote,broker]=await Promise.all([generateIdentity(),generateIdentity(),generateIdentity()]);
+ const channels:ReturnType<typeof memoryPair>[number][]=[];
+ const sessions:Promise<unknown>[]=[];
+ const admission=createAdmissionGovernor();
+ const room=await joinRoom({identity:local,roomId:'role-conflict',url:null,budget:3,transferSlots:1,admission,
+  transport:{
+   async connect(){
+    const pair=memoryPair();channels.push(...pair);
+    sessions.push(createSession({channel:pair[1],identity:remote,caps:purpose==='content'?['content']:['content',CONTENT_ONLY]}).catch(error=>error));
+    return pair[0];
+   },
+   async accept(){throw new Error('unexpected accept');}
+  }
+ });
+ try{
+  room.mesh.addLink(createBufferedChannel({send(){}}),broker.did);
+  await expect(room.dialVia(broker.did,remote.did,{purpose})).rejects.toThrow('peer connection purpose mismatch');
+  expect(room.mesh.hasLink(remote.did)).toBe(false);
+  expect(room.mesh.hasContentLink(remote.did)).toBe(false);
+  expect(room.mesh.stats().totalDegree).toBe(1);
+  expect(admission.stats().active).toBe(0);
+  expect(channels.every(channel=>channel.isClosed?.())).toBe(true);
+ }finally{room.leave();channels.forEach(channel=>channel.close());await Promise.all(sessions);}
+});

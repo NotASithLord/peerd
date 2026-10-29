@@ -470,7 +470,7 @@ export const createBaseNetwork = async ({
       const provided = candidates.map((/** @type {any} */ contact) => contact.did);
       const providers = [...new Set([...provided, ...linked])];
       if (!providers.length && lookupCompleted && !contacts.length) throw new NoAppProviderError(uri);
-      if (!providers.length) throw new Error(`no peer is serving ${uri} right now — the peer may have dropped; try again`);
+      if (!providers.length) throw new Error(`no peer is serving ${uri} right now. The peer may have dropped; try again`);
       return await swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress, signal: callerSignal, isAllowed, acceptManifest });
     } finally { for (const lease of leases) lease.release(); }
   };
