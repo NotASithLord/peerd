@@ -2,7 +2,7 @@ import {test,expect} from 'bun:test';
 import {createRoomMesh,MAX_ROTATION_HOLDS,ROTATION_HOLD_MS} from '../../extension/peerd-distributed/transport/mesh.js';
 import {generateIdentity} from '../../extension/peerd-distributed/identity/keypair.js';
 import {memoryPair} from '../../extension/peerd-distributed/transport/channel.js';
-import {NEIGHBOR_GRACE_MS} from '../../extension/peerd-distributed/transport/neighbor-policy.js';
+import {NEIGHBOR_GRACE_MS,TRANSFER_PROTECTION_MS} from '../../extension/peerd-distributed/transport/neighbor-policy.js';
 const fixture=async()=>{
  let now=1,id=0;const callbacks=new Map<number,{at:number,fn:()=>void}>();
  const timers={setTimeout:(fn:()=>void,ms:number)=>{const key=++id;callbacks.set(key,{at:now+ms,fn});return key;},clearTimeout:(key:number)=>callbacks.delete(key)};
@@ -117,5 +117,25 @@ test('young-edge recovery reservations cannot evict without a live bound witness
   expect(mesh.addLink(memoryPair()[0],'new',{}, {locallySelected:true,reservation:proved})).toBe(true);
   // A live proof never exempts recovery from the room's rotation rate limit.
   expect(()=>mesh.reserveAdmission('another',{locallySelected:true,requireWitness:true})).toThrow();
+ }finally{mesh.close();}
+});
+
+
+test('witnessed young-edge recovery preserves one bounded busy-transfer window',async()=>{
+ let time=1;
+ const mesh=createRoomMesh({identity:await generateIdentity(),roomId:'young-busy',budget:1,sparse:true,now:()=>time});
+ try{
+  expect(mesh.addLink(memoryPair()[0],'old',{}, {locallySelected:true})).toBe(true);
+  const content=mesh.contentChannel('old');expect(content).not.toBeNull();
+  content!.setHandler(()=>false);
+  expect(()=>mesh.reserveAdmission('new',{locallySelected:true,requireWitness:true})).toThrow();
+  time+=TRANSFER_PROTECTION_MS-1;
+  expect(()=>mesh.reserveAdmission('new',{locallySelected:true,requireWitness:true})).toThrow();
+  expect(mesh.hasLink('old')).toBe(true);
+  time++;
+  expect(time-1).toBeLessThan(NEIGHBOR_GRACE_MS);
+  const ticket=mesh.reserveAdmission('new',{locallySelected:true,requireWitness:true});
+  expect(ticket.victim).toBe('old');ticket.release();
+  content!.setHandler(null);
  }finally{mesh.close();}
 });

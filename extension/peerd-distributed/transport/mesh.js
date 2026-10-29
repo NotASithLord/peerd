@@ -634,7 +634,9 @@ export const createRoomMesh = ({
             const busy = link.serving > 0 || link.contentHandlers.size > 0;
             // One bounded protection window per link begins on first pressure,
             // not each remote request. Continuous work cannot pin a slot forever.
-            if (pressure && busy && time - link.admittedAt >= NEIGHBOR_GRACE_MS && link.protectedUntil === 0) link.protectedUntil = time + TRANSFER_PROTECTION_MS;
+            // Witnessed recovery may consider young edges, so their active
+            // transfers need the same bounded protection before grace expires.
+            if (pressure && busy && (requireWitness || time - link.admittedAt >= NEIGHBOR_GRACE_MS) && link.protectedUntil === 0) link.protectedUntil = time + TRANSFER_PROTECTION_MS;
             return { did: link.did, locallySelected: link.locallySelected, admittedAt: link.admittedAt,
               protectedUntil: link.protectedUntil, busy, rotationHeld: (rotationHolds.get(link)?.expiresAt ?? 0) > time };
           });
