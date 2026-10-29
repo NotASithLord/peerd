@@ -28,7 +28,7 @@ export class RoutingRpcError extends Error {
  * carrier generations. No generic relay or new-peer dialing is granted.
  * @param {{identity:{did:string,sign:(bytes:Uint8Array)=>Promise<Uint8Array>},roomId:string,
  * mesh:{routingCarrier:(did:string)=>Carrier|null,onRoutingControl:(handler:(event:{env:any,carrier:Carrier})=>void)=>()=>void,
- * peers:()=>Array<{did:string}>},holds:{acquire:(request:any,previous:Carrier|null,options:{signal:AbortSignal})=>Promise<Hop>},
+ * peers:()=>Array<{did:string}>},holds:{canSuggestEdge:(did:string)=>boolean,acquire:(request:any,previous:Carrier|null,options:{signal:AbortSignal})=>Promise<Hop>},
  * now?:()=>number,timers?:any}} options
  */
 export const createRoutingRpc=({identity,roomId,mesh,holds,now=Date.now,timers=globalThis})=>{
@@ -46,7 +46,7 @@ export const createRoutingRpc=({identity,roomId,mesh,holds,now=Date.now,timers=g
     &&(env.body.op==='neighbors'?env.body.payload===null:env.body.op==='hold'&&envelopeBytes(env.body.payload)<=8_192);
   const sweep=()=>{for(const [key,expiry] of seen)if(now()>=expiry)seen.delete(key);};
   const neighbors=()=>{
-    const peers=mesh.peers().filter(peer=>mesh.routingCarrier(peer.did)).map(peer=>peer.did).sort();
+    const peers=mesh.peers().filter(peer=>mesh.routingCarrier(peer.did)&&holds.canSuggestEdge(peer.did)).map(peer=>peer.did).sort();
     const result=Array.from({length:Math.min(MAX_ROUTING_PATH_NEIGHBORS,peers.length)},(_,i)=>peers[(neighborCursor+i)%peers.length]);
     neighborCursor=peers.length?(neighborCursor+result.length)%peers.length:0;return result;
   };
