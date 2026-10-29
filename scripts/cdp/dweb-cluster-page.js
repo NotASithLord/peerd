@@ -11,6 +11,7 @@ let room, base, dispatch, originalChunk;
 let messages = [];
 const received = new Map();
 const audit = [];
+const contentDials = {started:0,succeeded:0,failed:0};
 const connections = [];
 // why: keep candidate evidence for ICE attempts that do not enter the mesh.
 class ObservedConnection extends RTCPeerConnection {
@@ -44,12 +45,15 @@ window.cluster = {
     if (acquire) dial.acquireContent = async (contact, options) => {
       const started = performance.now();
       const routes = [...new Set([contact.hints?.broker, ...(contact.brokers ?? [])])].filter(Boolean);
+      contentDials.started++;
       recordAudit('content-dial-start', { routes: routes.length, linkedRoutes: routes.filter(did => room.mesh.hasLink(did)).length });
       try {
         const lease = await acquire(contact, options);
+        contentDials.succeeded++;
         recordAudit('content-dial-end', { ok: true, ms: Math.round(performance.now() - started) });
         return lease;
       } catch (error) {
+        contentDials.failed++;
         const reason = ['content broker unavailable', 'content capacity', 'content dial cancelled', 'room peer admission refused'].includes(error.message) ? error.message : 'other';
         recordAudit('content-dial-end', { ok: false, reason, ms: Math.round(performance.now() - started) });
         throw error;
@@ -57,6 +61,14 @@ window.cluster = {
     };
     base = await createBaseNetwork({ identity, mesh: room.mesh, meta: () => ({ name }),
       dial, audit: recordAudit });
+    const findContacts = base.node.dht.findProviderContacts;
+    base.node.dht.findProviderContacts = async (key, options = {}) => {
+      let failures = 0;
+      const started = performance.now();
+      const contacts = await findContacts(key, {...options, onQueryFailure: () => { failures++; options.onQueryFailure?.(); }});
+      recordAudit('provider-lookup-end', { contacts:contacts.length, withRoutes:contacts.filter(c => c.hints?.broker || c.brokers?.length).length, failures, aborted:!!options.signal?.aborted, ms:Math.round(performance.now()-started) });
+      return contacts;
+    };
     originalChunk = base.node.content.getChunk;
     base.node.gossip.subscribe(topic, ({ from, data }) => {
       messages.push({ from, data });
@@ -91,7 +103,7 @@ window.cluster = {
   }))),
   report() {
     return { did: identity.did, online: !!base, rendezvous: room?.rendezvous(),
-      peers: base?.snapshot().peers ?? [], messages, cards: base?.heardDwapps() ?? [], audit,
+      contentDials: {...contentDials}, peers: base?.snapshot().peers ?? [], messages, cards: base?.heardDwapps() ?? [], audit,
       // Local protocol work, not wire bandwidth or remote delivery receipts.
       dissemination: base ? { mesh: base.mesh.stats(), gossip: base.node.gossip.stats(),
         discovery: base.discovery.stats() } : null };

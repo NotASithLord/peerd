@@ -186,6 +186,19 @@ try {
     assert.equal(value.chunks, published.chunks);
     return value;
   };
+  if (transferSlots > 0) await check('nonadjacent provider fetch uses and releases a temporary carrier', async () => {
+    const before = await reports();
+    const candidates = before.map((state, index) => ({state,index})).filter(({state,index}) =>
+      index !== 0 && !state.peers.some(peer => peer.did === dids[0]));
+    assert(candidates.length > 0, 'Need a nonadjacent reader to exercise temporary transfer');
+    const {state,index} = candidates[0];
+    const value = verify(await workers[index].call('fetch', {uri:published.uri}));
+    const after = await workers[index].call('report');
+    assert(after.contentDials.succeeded > state.contentDials.succeeded, 'Fetch did not exercise a temporary content lease');
+    assert.equal(after.dissemination.mesh.transferDegree, 0, 'Completed fetch leaked a temporary carrier');
+    assert(after.dissemination.mesh.peerDegree <= (config.budget ?? 16) - transferSlots);
+    return {reader:index, value, before:state.contentDials, after:after.contentDials, degrees:after.dissemination.mesh};
+  });
   await check('signed multi-chunk download verifies every byte', async () => verify(await workers[seederIndex].call('fetch', { uri: published.uri })));
   await check('parallel downloads verify every byte', async () =>
     (await workers[seederIndex].call('fetchMany', { uri: published.uri, count: 3 })).map(verify));
