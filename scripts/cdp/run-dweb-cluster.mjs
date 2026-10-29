@@ -189,7 +189,7 @@ try {
   if (transferSlots > 0) await check('nonadjacent provider fetch uses and releases a temporary carrier', async () => {
     const before = await reports();
     const candidates = before.map((state, index) => ({state,index})).filter(({state,index}) =>
-      index !== 0 && !state.peers.some(peer => peer.did === dids[0]));
+      index !== 0 && !state.peers.some(peer => peer.linked && peer.did === dids[0]));
     assert(candidates.length > 0, 'Need a nonadjacent reader to exercise temporary transfer');
     const {state,index} = candidates[0];
     const value = verify(await workers[index].call('fetch', {uri:published.uri}));
