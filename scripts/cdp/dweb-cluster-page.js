@@ -39,8 +39,24 @@ window.cluster = {
     // the selected pair below proves the actual cross-host data path.
     room = await joinRoom({ roomId, identity, url: signaling, iceServers: [], audit: recordAudit,
       RTCPeerConnection: ObservedConnection, budget, profile, transferSlots });
+    const dial = makeDhtDialer(room);
+    const acquire = dial.acquireContent;
+    if (acquire) dial.acquireContent = async (contact, options) => {
+      const started = performance.now();
+      const routes = [...new Set([contact.hints?.broker, ...(contact.brokers ?? [])])].filter(Boolean);
+      recordAudit('content-dial-start', { routes: routes.length, linkedRoutes: routes.filter(did => room.mesh.hasLink(did)).length });
+      try {
+        const lease = await acquire(contact, options);
+        recordAudit('content-dial-end', { ok: true, ms: Math.round(performance.now() - started) });
+        return lease;
+      } catch (error) {
+        const reason = ['content broker unavailable', 'content capacity', 'content dial cancelled', 'room peer admission refused'].includes(error.message) ? error.message : 'other';
+        recordAudit('content-dial-end', { ok: false, reason, ms: Math.round(performance.now() - started) });
+        throw error;
+      }
+    };
     base = await createBaseNetwork({ identity, mesh: room.mesh, meta: () => ({ name }),
-      dial: makeDhtDialer(room), audit: recordAudit });
+      dial, audit: recordAudit });
     originalChunk = base.node.content.getChunk;
     base.node.gossip.subscribe(topic, ({ from, data }) => {
       messages.push({ from, data });
@@ -128,7 +144,7 @@ window.cluster = {
     // why: this lane qualifies production behavior across real links; a tighter
     // harness-only deadline misclassifies healthy WAN transfer as product loss.
     const result = provider ? await base.mesh.fetchFrom(provider, uri)
-      : await base.fetchApp(uri);
+      : await base.fetchApp(uri, { onProgress: progress => recordAudit('fetch-progress', { phase: progress.phase, providers: progress.providers, done: progress.done }) });
     const decoded = await unpackTransportBundle(result);
     received.set(uri, result);
     return { digest: await sha256hex(decoded.files['payload.bin']), size: decoded.files['payload.bin'].length,
