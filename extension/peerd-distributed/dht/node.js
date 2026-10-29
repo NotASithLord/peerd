@@ -18,6 +18,7 @@
 // disjoint-path lookups (the Sybil hardening) are a documented v1.1 follow-up
 // layered on this same shortlist machinery.
 
+import { MAX_PROVIDER_BROKERS } from './provider-routes.js';
 import { createRoutingTable } from './routing-table.js';
 import { nodeIdOf, byDistanceTo } from './distance.js';
 import { itemKey } from './records.js';
@@ -37,12 +38,12 @@ const isDhtKeyHex = (h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h);
  *   selfId: Uint8Array,
  *   store: ReturnType<typeof import('./store.js').createDhtStore>,
  *   providers?: ReturnType<typeof import('./provider-store.js').createProviderStore> | null,
- *   rpc: (contact: any, msg: any, opts?: {signal?: AbortSignal}) => Promise<any>,
- *   k?: number, alpha?: number, now?: () => number,
+ *   rpc: (contact: any, msg: any, opts?: {signal?: AbortSignal,traversal?:any}) => Promise<any>,
+ *   k?: number, alpha?: number, now?: () => number, retainContact?: (did:string)=>boolean,
  * }} opts
  */
-export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, k = 8, alpha = 3, now = Date.now }) => {
-  /** @typedef {{ did: string, id: Uint8Array, hints?: any }} Contact */
+export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, k = 8, alpha = 3, now = Date.now, retainContact = () => true }) => {
+  /** @typedef {{ did: string, id: Uint8Array, hints?: any, brokers?: string[] }} Contact */
   const rt = createRoutingTable({ selfId, k, now });
 
   // Add a peer that just ANSWERED us. id is recomputed from the did (never
@@ -131,7 +132,7 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
         try { resp = await rpc(c, wantValue ? { t: 'FIND_VALUE', key: targetHex } : { t: 'FIND_NODE', target: targetHex }, { signal }); }
         catch { if (!signal?.aborted) rt.remove(c.did); return; } // unreachable → drop (reachable-only)
         if (signal?.aborted) return;
-        await learn(c.did, c.hints); // it answered → reachable
+        if (retainContact(c.did)) await learn(c.did, c.hints); // it answered → reachable
         if (wantValue && resp?.t === 'VALUE') { value = resp.item; return; }
         for (const n of (resp?.nodes ?? [])) {
           if (n?.did && n.did !== identity.did && !known.has(n.did)) {
@@ -146,8 +147,8 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
     return { value, closest: shortlist() };
   };
 
-  /** @param {string} key @param {{signal?: AbortSignal,onQueryFailure?:()=>void}} [opts] */
-  const findProviderContacts = async (key, { signal, onQueryFailure } = {}) => {
+  /** @param {string} key @param {{signal?: AbortSignal,onQueryFailure?:()=>void,traversal?:any}} [opts] */
+  const findProviderContacts = async (key, { signal, onQueryFailure, traversal } = {}) => {
       const keyBytes = fromHex(key);
       /** @type {Map<string, Contact>} */
       const found = new Map();
@@ -166,22 +167,33 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
         await Promise.all(batch.map(async (c) => {
           queried.add(c.did);
           let resp;
-          try { resp = await rpc(c, { t: 'GET_PROVIDERS', key }, { signal }); }
+          try { resp = await rpc(c, { t: 'GET_PROVIDERS', key }, { signal, traversal }); }
           catch { onQueryFailure?.(); if (!signal?.aborted) rt.remove(c.did); return; }
           if (signal?.aborted) return;
           // why: an error or malformed reply is not a successful empty lookup.
           // Keep partial usable referrals, but don't label absence as evidence.
           if (resp?.t !== 'PROVIDERS' || !Array.isArray(resp.providers) || !Array.isArray(resp.nodes)) onQueryFailure?.();
-          await learn(c.did, c.hints);
+          if (retainContact(c.did)) await learn(c.did, c.hints);
           // why: a provider identity alone is not a route. Retain the peer
           // that supplied it as a local signaling broker, without trusting it
           // enough to insert the provider into the reachable routing table.
           for (const did of (Array.isArray(resp?.providers) ? resp.providers.slice(0, 64) : [])) {
             if (signal?.aborted || typeof did !== 'string' || did.length > 128 || did === identity.did) continue;
             try {
-              if (!found.get(did)?.hints && (found.has(did) || found.size < 64)) {
+              if (found.has(did) || found.size < 64) {
                 const id = await nodeIdOf(did);
-                if (!signal?.aborted && (found.has(did) || found.size < 64)) found.set(did, { did, id, hints: { broker: c.did } });
+                if (!signal?.aborted && (found.has(did) || found.size < 64)) {
+                  const previous = found.get(did);
+                  // A provider answering for itself cannot introduce a link
+                  // to itself. Preserve the local route used to query it, even
+                  // when that query used a temporary carrier that has closed.
+                  // No wire-supplied broker is accepted by this lookup.
+                  const routes = did === c.did ? [c.hints?.broker, ...(c.brokers ?? [])] : [c.did];
+                  const brokers = [...new Set([...(previous?.brokers ?? []), ...routes])]
+                    .filter((broker) => typeof broker === 'string' && broker !== did && broker !== identity.did)
+                    .slice(0, MAX_PROVIDER_BROKERS);
+                  found.set(did, { did, id, hints: { broker: brokers[0] }, brokers });
+                }
               }
             } catch { /* malformed identity is not a referral */ }
           }

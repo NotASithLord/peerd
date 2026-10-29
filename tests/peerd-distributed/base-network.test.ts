@@ -670,3 +670,27 @@ test('cancelled linked retrieval does not fall through to DHT and permits a fres
     expect(reader.mesh.hasLink(publisher.identity.did)).toBe(true);
   } finally { for (const peer of [reader, publisher]) { peer.base.close(); peer.mesh.close(); } }
 });
+
+test('provider deadline retains completed referrals while caller cancellation still prevents dialing', async () => {
+  for (const cancelCaller of [false, true]) {
+    const publisher = await spawn('partial-provider');
+    let reader: Awaited<ReturnType<typeof spawn>>;
+    let dials = 0;
+    const caller = new AbortController();
+    reader = await spawn('partial-reader', {dial: async () => { dials++; await link(reader, publisher); return true; }});
+    const app = await publisher.base.publishApp({name:'partial',entry:'index.html',files:{'index.html':'verified partial lookup'}});
+    reader.base.node.dht.findProviderContacts = async (_key: string, {signal}: {signal: AbortSignal}) => {
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), {once:true}));
+      if (cancelCaller) caller.abort(new Error('caller cancelled'));
+      return [{did:publisher.identity.did}];
+    };
+    const original = globalThis.setTimeout;
+    globalThis.setTimeout = ((fn: (...args:any[])=>void, delay?:number, ...args:any[]) =>
+      original(fn, delay === 5000 ? 5 : delay, ...args)) as typeof setTimeout;
+    try {
+      const result = await reader.base.fetchApp(app.uri,{signal:caller.signal}).then(value=>({value,error:null}),error=>({value:null,error}));
+      if (cancelCaller) { expect(dials).toBe(0); expect(result.error).toBeTruthy(); }
+      else { expect(result.error).toBeNull(); expect(result.value!.manifest.publisher).toBe(publisher.identity.did); expect(dials).toBe(1); }
+    } finally {globalThis.setTimeout=original;reader.base.close();publisher.base.close();}
+  }
+});

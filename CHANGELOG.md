@@ -10,7 +10,7 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
-## [0.11.0] - 2026-10-28
+## [0.11.0] - 2026-10-29
 
 ### Added
 
@@ -32,6 +32,12 @@ and storage formats may move until the surface stabilizes.
 
 ### Fixed
 
+- App retrieval retains authenticated provider routes until completion or
+  cancellation, and bounded directory traversal recovers stale introductions.
+- Full routing meshes replace a connection only after proving a live alternate
+  path that survives both peers' proposed replacements. Expired or cancelled
+  reservations preserve the existing connection, and active transfers retain
+  their fixed protection window even on newly established links.
 - Network disable waits for vault recovery already in flight, and revoked
   feature starts cannot recreate a host after the disable acknowledgement.
 - Concurrent controller startup work uses the bounded admission queue while
