@@ -55,6 +55,7 @@ const newId = () =>
 // why 16: matches the reducer's ROOM_CAP — a full-mesh room never needs
 // more links than members (NORTH-STAR D-9).
 const DEFAULT_BUDGET = 16;
+export const CONTENT_LINK_LIFETIME_MS = 60_000;
 // One retired cohort plus its replacements fits without an unbounded identity
 // history. This is timing custody, not reputation: cache eviction/new DIDs can
 // still bypass it, so it is not a Sybil defense.
@@ -82,6 +83,8 @@ const QUEUED_PER_MESH = 128;
  * @typedef {{
  *   did: string,
  *   purpose: 'routing' | 'content',
+ *   leases: number,
+ *   expiry?: ReturnType<typeof setTimeout>,
  *   channel: Channel,
  *   retired: AbortController,
  *   pinging?: boolean,
@@ -108,6 +111,7 @@ const QUEUED_PER_MESH = 128;
  *   budget?: number,
  *   sparse?: boolean,
  *   transferSlots?: number,
+ *   timers?: any,
  *   isBlocked?: (did:string)=>boolean,
  *   pingIntervalMs?: number,
  *   idleTimeoutMs?: number,
@@ -122,6 +126,7 @@ export const createRoomMesh = ({
   budget = DEFAULT_BUDGET,
   sparse = false,
   transferSlots = 0,
+  timers = globalThis,
   isBlocked = () => false,
   // "Are you still there?" cadence — the BACKSTOP for total silence (when neither
   // a clean data-channel close nor ICE 'disconnected' fired, which is rare). PING
@@ -310,6 +315,7 @@ export const createRoomMesh = ({
     if (!link) return;
     rememberNeighbor(link);
     links.delete(did);
+    timers.clearTimeout(link.expiry);
     link.retired.abort();
     link.contentHandlers.clear();
     cancelVerification(link);
@@ -564,7 +570,7 @@ export const createRoomMesh = ({
       // exploration ownership is never inherited from a retired connection.
       if (links.has(did)) removeLink(did, 'replaced');
       /** @type {Link} */
-      const link = { did, channel, purpose, locallySelected: locallySelected || previous?.locallySelected || false,
+      const link = { did, channel, purpose, leases: 0, locallySelected: locallySelected || previous?.locallySelected || false,
         admittedAt: timing?.admittedAt ?? now(), protectedUntil: timing?.protectedUntil ?? 0, serving: 0, retired: new AbortController(), contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
       // Own this exact generation before an already-closed channel can invoke
       // its immediate observer. A close during handoff must not become connected.
@@ -575,6 +581,7 @@ export const createRoomMesh = ({
           if (isRawProtocolClose(reason)) { penalize(link, /** @type {string} */ (reason), true); return; }
           rememberNeighbor(link);
           links.delete(did);
+          timers.clearTimeout(link.expiry);
           link.retired.abort();
           link.contentHandlers.clear();
           cancelVerification(link);
@@ -587,6 +594,11 @@ export const createRoomMesh = ({
         handle(link, msg).catch(() => { if (links.get(did) === link) removeLink(did, 'service-or-send-failed'); });
       });
       if (links.get(did) !== link) return false;
+      // why: continuous traffic cannot pin scarce temporary capacity forever.
+      // The expiry belongs to this carrier generation, never to a DID alone.
+      if (purpose === 'content') link.expiry = timers.setTimeout(() => {
+        if (links.get(did) === link) removeLink(did, 'content-lifetime');
+      }, CONTENT_LINK_LIFETIME_MS);
       audit?.('peer_connected', { did, room: roomId });
       if (purpose === 'routing') emit(peerCbs, { did, info });
       return true;
@@ -597,6 +609,26 @@ export const createRoomMesh = ({
     hasLink: (did) => links.get(did)?.purpose === 'routing',
     /** @param {string} did */
     hasContentLink: (did) => links.has(did),
+    // Local consumers share one carrier but own separate cancellation. A
+    // routing neighbor is borrowed without acquiring teardown authority.
+    /** @param {string} did @param {{signal?: AbortSignal}} [options] */
+    acquireContentLink(did, { signal } = {}) {
+      const link = links.get(did);
+      if (!link || closed || signal?.aborted) throw new Error('content lease unavailable');
+      link.leases++;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        signal?.removeEventListener('abort', release);
+        link.retired.signal.removeEventListener('abort', release);
+        link.leases--;
+        if (link.purpose === 'content' && link.leases === 0 && links.get(did) === link) removeLink(did, 'content-released');
+      };
+      signal?.addEventListener('abort', release, { once: true });
+      link.retired.signal.addEventListener('abort', release, { once: true });
+      return Object.freeze({ release });
+    },
     // Merge telemetry onto a link (e.g. the ICE path once stats settle).
     /** @param {string} did @param {any} patch */
     tagLink(did, patch) {

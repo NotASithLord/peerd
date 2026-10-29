@@ -94,7 +94,7 @@ export const joinRoom = async ({
   // caller-owned capabilities array must not change negotiation after joining.
   const sessionCaps = [...caps];
   const t = transport ?? createWebrtcTransport({ iceServers, RTCPeerConnection });
-  const mesh = createRoomMesh({ roomId, identity, now, budget, audit, isBlocked, transferSlots });
+  const mesh = createRoomMesh({ roomId, identity, now, budget, audit, isBlocked, transferSlots, timers });
   const releaseMesh = onMesh?.(mesh);
   /** @type {Set<(arg: { rendezvous: string }) => void>} */
   const statusCbs = new Set();
@@ -399,7 +399,7 @@ export const joinRoom = async ({
     if (purpose === 'content' && !transferSlots) throw new AdmissionError('content links disabled');
     if (left || signal?.aborted) throw new AdmissionError('cancelled');
     if (isBlocked(targetDid)) throw new Error('peer-user-blocked');
-    if (mesh.hasLink(targetDid)) return;
+    if (purpose === 'content' ? mesh.hasContentLink(targetDid) : mesh.hasLink(targetDid)) return;
     if (typeof targetDid !== 'string' || targetDid.length > 512) throw new AdmissionError('invalid candidate');
     const incoming = attempts.pending(`incoming-did/${targetDid}`);
     if (incoming) throw new AdmissionError('duplicate');

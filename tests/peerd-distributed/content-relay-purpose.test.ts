@@ -23,6 +23,8 @@ test('signed relay purpose and HELLO admit a content carrier while routing slots
   // authenticated admission, not a guessed sleep or a fake response.
   for(let i=0;i<100&&!rooms[1].mesh.hasContentLink(identities[0].did);i++) await new Promise(r=>setTimeout(r,1));
   for(const i of [0,1]) {expect(rooms[i].mesh.stats().totalDegree).toBe(3);expect(rooms[i].mesh.stats().peerDegree).toBe(2);expect(rooms[i].mesh.hasLink(identities[1-i].did)).toBe(false);}
+  await rooms[0].dialVia(identities[2].did,identities[1].did,{purpose:'content'});
+  expect(next).toBe(1); // reuse the established carrier without replacing owners
   const client=createChannelClient(rooms[0].mesh.contentChannel(identities[1].did)!,500);
   try{expect((await client.manifest('a'.repeat(64))).t).toBe('NOMANIFEST');}finally{client.close();}
   expect(admission.stats().active).toBe(0);

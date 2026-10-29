@@ -54,3 +54,36 @@ test('authenticated content carriers serve content but never route envelopes or 
     expect(envelopes).toHaveLength(0);
   } finally {for(const mesh of meshes)mesh.close();}
 });
+
+test('shared leases release only their own carrier and never tear down a routing neighbor', async () => {
+ const mesh=createRoomMesh({roomId:'r',identity:await generateIdentity(),budget:3,transferSlots:1});
+ const original=channel();
+ try {
+  mesh.addLink(original,'content',{caps:[CONTENT_ONLY]},{purpose:'content'});
+  const cancel=new AbortController();
+  const first=mesh.acquireContentLink('content',{signal:cancel.signal});
+  const second=mesh.acquireContentLink('content');
+  cancel.abort(); first.release();
+  expect(original.isClosed()).toBe(false);
+  second.release();expect(original.isClosed()).toBe(true);
+  const replacement=channel();mesh.addLink(replacement,'content',{caps:[CONTENT_ONLY]},{purpose:'content'});
+  first.release();second.release();expect(replacement.isClosed()).toBe(false);
+  const routing=channel();mesh.addLink(routing,'routing');
+  mesh.acquireContentLink('routing').release();expect(routing.isClosed()).toBe(false);
+ } finally {mesh.close();}
+});
+
+test('temporary expiry is generation-owned and shutdown removes its timer', async () => {
+ const tasks=new Map<number,()=>void>();let id=0;
+ const mesh=createRoomMesh({roomId:'r',identity:await generateIdentity(),budget:3,transferSlots:1,
+  timers:{setTimeout:(fn:()=>void)=>{tasks.set(++id,fn);return id;},clearTimeout:(key:number)=>tasks.delete(key)}});
+ const old=channel();mesh.addLink(old,'peer',{caps:[CONTENT_ONLY]},{purpose:'content'});
+ const late=[...tasks.values()][0]!;
+ mesh.removeLink('peer');expect(tasks.size).toBe(0);
+ const current=channel();mesh.addLink(current,'peer',{caps:[CONTENT_ONLY]},{purpose:'content'});
+ const lease=mesh.acquireContentLink('peer');late();expect(current.isClosed()).toBe(false);
+ [...tasks.values()][0]!();expect(current.isClosed()).toBe(true);expect(tasks.size).toBe(0);
+ lease.release();
+ mesh.addLink(channel(),'another',{caps:[CONTENT_ONLY]},{purpose:'content'});expect(tasks.size).toBe(1);
+ mesh.close();expect(tasks.size).toBe(0);
+});
