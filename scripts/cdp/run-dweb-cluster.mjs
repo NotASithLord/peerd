@@ -11,7 +11,7 @@ import { createSignalingServer } from '../../signaling-node/bun-server.mjs';
 import { validateHosts, validateMesh, pathsReady, repairableEdge } from './dweb-cluster-checks.mjs';
 import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
 import { sshArguments } from './dweb-cluster-ssh.mjs';
-import {validateCapacityHosts, capacityTopology, capacityPathsReady} from './dweb-capacity-evidence.mjs';
+import {validateCapacityConfig, validateCapacityHosts, capacityTopology, capacityPathsReady} from './dweb-capacity-evidence.mjs';
 import { soakOptions, runSoak } from './dweb-cluster-soak.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -117,9 +117,7 @@ try {
   assert.equal(new Set(config.hosts.map(host => host.name)).size, config.hosts.length, 'Host names must be unique');
   const topology = config.topology ?? 'all-pairs';
   if (capacity) {
-    assert.equal(topology, 'connected', 'Capacity preflight requires sparse connected topology');
-    assert.equal(transferSlots, 0, 'Capacity baseline keeps temporary reserve zero');
-    assert(config.hosts.length > (config.budget ?? 16), 'Capacity membership must exceed degree budget');
+    validateCapacityConfig(config);
     report.capacityQualification = {complete:false, missing:['paired degree comparisons', 'whole-browser resource metrics', 'adversarial workloads', 'sustained finalist and overnight runs']};
   }
   assert(['all-pairs', 'connected'].includes(topology), 'topology must be all-pairs or connected');

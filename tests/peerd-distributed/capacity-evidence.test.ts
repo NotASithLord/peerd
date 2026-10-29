@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'bun:test';
-import {validateCapacityHosts, capacityTopology, capacityPathsReady} from '../../scripts/cdp/dweb-capacity-evidence.mjs';
+import {validateCapacityConfig, validateCapacityHosts, capacityTopology, capacityPathsReady} from '../../scripts/cdp/dweb-capacity-evidence.mjs';
 import {validateHosts} from '../../scripts/cdp/dweb-cluster-checks.mjs';
 
 const source = 'a'.repeat(64);
@@ -20,6 +20,13 @@ const paths = [
 ];
 
 describe('explicit shared-host capacity evidence', () => {
+  test('requires explicit production sparse negotiation before launching peers', () => {
+    const config = {hosts, budget:2, topology:'connected', roomId:'peerd/base/1', profile:'sparse-public-v1'};
+    expect(() => validateCapacityConfig(config)).not.toThrow();
+    for (const invalid of [{...config, profile:undefined}, {...config,roomId:'legacy-room'}, {...config,budget:3}, {...config,transferSlots:1}]) {
+      expect(() => validateCapacityConfig(invalid)).toThrow();
+    }
+  });
   test('separates hardware from browser count without relaxing the physical lane', () => {
     expect(validateCapacityHosts(hosts, options)).toEqual({physicalHosts:2,browserProcesses:3});
     expect(() => validateHosts(hosts, options)).toThrow('different physical machines');

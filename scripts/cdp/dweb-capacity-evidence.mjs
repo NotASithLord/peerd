@@ -1,5 +1,15 @@
 import assert from 'node:assert/strict';
 import {validateHosts, validateMesh, validatePaths} from './dweb-cluster-checks.mjs';
+import {sparsePublicProfile} from '../../extension/peerd-distributed/transport/rendezvous-profile.js';
+
+export const validateCapacityConfig = config => {
+  assert(sparsePublicProfile(config.roomId, config.profile), 'Capacity placement requires the production sparse profile on an isolated coordinator');
+  assert.equal(config.topology, 'connected', 'Capacity preflight requires sparse connected topology');
+  assert.equal(config.transferSlots ?? 0, 0, 'Capacity baseline keeps temporary reserve zero');
+  const budget = config.budget ?? 16;
+  assert(Number.isSafeInteger(budget) && budget > 0, 'Capacity budget must be positive');
+  assert(config.hosts.length > budget, 'Capacity membership must exceed degree budget');
+};
 
 // A shared-host placement must be explicit; it never qualifies the distinct-Mac
 // lane or proves WAN reachability. Each identity still owns a real browser.

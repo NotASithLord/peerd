@@ -102,7 +102,9 @@ capacity beyond the recorded host allocation. Keep those acceptance lanes
 separate; a local rehearsal is never physical-cluster evidence.
 
 For an explicitly shared-host capacity preflight, pass `--capacity` instead of
-`--local`. Use `topology: "connected"`, zero temporary reserve, and more browser
+`--local`. On the isolated coordinator, explicitly request the production sparse
+room and profile (see the rendezvous-profile module); a capped legacy room does
+not negotiate sparse maintenance and is rejected. Use `topology: "connected"`, zero temporary reserve, and more browser
 entries than the configured degree budget. Each entry launches an independent
 browser process and temporary profile. Repeated SSH hosts need different free
 `signalingPort` values; entry names remain unique. At least two physical Macs
