@@ -23,7 +23,8 @@ const transport={
  async connect(_peer,{signaling}){const pair=memoryPair();const id=String(++next);pending.set(id,pair[1]);await signaling.send({type:'offer',sdp:id});return pair[0];},
  async accept({offer}){const channel=pending.get(offer.sdp);pending.delete(offer.sdp);return {channel};}
 };
-const rooms=await Promise.all(identities.map((identity,i)=>joinRoom({identity,roomId:'fixed-chain',url:null,transport,budget:i===0||i===4?2:3,transferSlots:1})));
+const reserve=process.argv.includes('--handoff')?2:1;
+const rooms=await Promise.all(identities.map((identity,i)=>joinRoom({identity,roomId:'fixed-chain',url:null,transport,budget:(i===0||i===4?1:2)+reserve,transferSlots:reserve})));
 const bases=await Promise.all(rooms.map((room,i)=>{
  const dial=makeDhtDialer(room);
  for(const kind of ['acquireLookup','acquireContent']){
@@ -36,7 +37,7 @@ const bases=await Promise.all(rooms.map((room,i)=>{
  }
  return createBaseNetwork({identity:identities[i],mesh:room.mesh,dial});
 }));
-const report={ok:false,topology:'0-1-2-3-4',events};
+const report={ok:false,topology:'0-1-2-3-4',reserve,events};
 try{
  for(let i=0;i<4;i++){
   const pair=memoryPair();

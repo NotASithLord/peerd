@@ -2,6 +2,7 @@
 // Locally observed authenticated referrals remain bounded; content retrieval
 // borrows a separate lease while routing discovery retains routing authority.
 import { MAX_PROVIDER_BROKERS } from '../dht/provider-routes.js';
+import {createDirectoryTraversal} from './directory-traversal.js';
 
 /** @typedef {Awaited<ReturnType<typeof import('./rooms.js').joinRoom>>} Room */
 /** @typedef {{did:string,hints?:{broker?:string},brokers?:string[]}} Contact */
@@ -52,7 +53,7 @@ export const makeDhtDialer = (room) => {
       return !active.aborted && room.mesh.hasLink(contact.did) ? true : null;
     }) ?? false;
   };
-  return Object.assign(dial, {acquireLookup: room.contentTransfersEnabled ?
+  return Object.assign(dial, {createTraversal: room.temporaryCapacity >= 2 ? (/** @type {Parameters<typeof createDirectoryTraversal>[1]} */ options = {}) => createDirectoryTraversal(room,options) : undefined, acquireLookup: room.contentTransfersEnabled ?
     /** @param {Contact} contact @param {{signal?:AbortSignal}} options */
     async (contact, options) => {
       options.signal?.throwIfAborted();

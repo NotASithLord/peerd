@@ -362,6 +362,7 @@ export const createBaseNetwork = async ({
   const fetchAllowedApp = async (uri, { timeoutMs = 15_000, onProgress, signal: callerSignal, expectedRuntime } = {}) => {
     /** @type {Array<{release:()=>void}>} */
     const leases = [];
+    const traversal = dial?.createTraversal?.({signal:callerSignal});
     try {
       callerSignal?.throwIfAborted();
       /** @param {string} did */
@@ -438,7 +439,7 @@ export const createBaseNetwork = async ({
         const key = await contentKey(uri);
         signal.throwIfAborted();
         let queryFailed = false;
-        const found = await node.dht.findProviderContacts(key, { signal, onQueryFailure: () => { queryFailed = true; } });
+        const found = await node.dht.findProviderContacts(key, { signal, traversal, onQueryFailure: () => { queryFailed = true; } });
         // A deadline ends exploration, not referrals already received. The
         // caller's cancellation is checked below before any provider is dialed.
         lookupCompleted = !queryFailed && !signal.aborted;
@@ -454,10 +455,11 @@ export const createBaseNetwork = async ({
           onProgress?.({ phase: 'connecting' });
           callerSignal?.throwIfAborted();
           try { await withNetworkBudget(async (signal) => {
-            if (dial.acquireContent) {
+            const acquireContent = traversal?.acquireContent ?? dial.acquireContent;
+            if (acquireContent) {
               // Dial deadline cleanup must not cancel an admitted transfer. The
               // caller owns its lease until fetch completion/cancellation.
-              const lease = await dial.acquireContent(contact, { signal, leaseSignal: callerSignal ?? null });
+              const lease = await acquireContent(contact, { signal, leaseSignal: callerSignal ?? null });
               leases.push(lease);
             } else await dial(contact, { signal });
           }, undefined, callerSignal); }
@@ -472,7 +474,7 @@ export const createBaseNetwork = async ({
       if (!providers.length && lookupCompleted && !contacts.length) throw new NoAppProviderError(uri);
       if (!providers.length) throw new Error(`no peer is serving ${uri} right now. The peer may have dropped; try again`);
       return await swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress, signal: callerSignal, isAllowed, acceptManifest });
-    } finally { for (const lease of leases) lease.release(); }
+    } finally { for (const lease of leases) lease.release(); traversal?.close(); }
   };
 
   /** @param {string} uri @param {{timeoutMs?:number,onProgress?:(p:any)=>void,signal?:AbortSignal,expectedRuntime?:{value:unknown}}} [options] */

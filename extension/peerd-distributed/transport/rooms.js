@@ -23,7 +23,7 @@
 import { openRendezvous, DEFAULT_SIGNALING } from './signaling-client.js';
 import { createWebrtcTransport } from './transports/webrtc.js';
 import { createRoomMesh } from './mesh.js';
-import { createSession } from './session.js';
+import { createSession, ADMISSION_READY } from './session.js';
 import { TOPIC_SYNC_WINDOW, CONTENT_ONLY, LOOKUP_ONLY } from './capabilities.js';
 import { connectionPath } from './ice.js';
 import { AdmissionError, roomAdmission, MAX_ADMISSION_CANDIDATES } from './admission.js';
@@ -94,7 +94,7 @@ export const joinRoom = async ({
 } = /** @type {{ roomId: string, identity: import('./mesh.js').Identity }} */ ({})) => {
   // why: protocol support is mutual and fixed for this room lifetime; a
   // caller-owned capabilities array must not change negotiation after joining.
-  const sessionCaps = [...caps];
+  const sessionCaps = [...new Set([...caps,ADMISSION_READY])];
   const t = transport ?? createWebrtcTransport({ iceServers, RTCPeerConnection });
   const mesh = createRoomMesh({ roomId, identity, now, budget, audit, isBlocked, transferSlots, timers });
   const releaseMesh = onMesh?.(mesh);
@@ -133,7 +133,17 @@ export const joinRoom = async ({
   const admit = async (channel, expectedDid = null, via = null, signal, locallySelected = false, purpose = 'routing') => {
     if (left || signal?.aborted || channel.isClosed?.()) { channel.close(); throw new Error('room dial cancelled or channel closed'); }
     const selectedCaps = purpose === 'content' ? ['content', CONTENT_ONLY] : purpose === 'lookup' ? [LOOKUP_ONLY] : purpose === 'directory' ? [DIRECTORY_INTRODUCTIONS] : sessionCaps;
-    const { remoteDid, remoteCaps } = await createSession({ channel, identity, caps: selectedCaps, now, signal, timers });
+    /** @type {{release:()=>void}|undefined} */let reservation;
+    let admissionChecked=false;
+    try {
+    const { remoteDid, remoteCaps } = await createSession({ channel, identity, caps: selectedCaps, now, signal, timers,
+      prepareAdmission:async did=>{
+        if(purpose!=='routing')return;
+        if(expectedDid&&did!==expectedDid)throw new Error('peer authenticated as a different did than expected');
+        if((admitPeer&&!await admitPeer(did))||isBlocked(did))throw new Error('peer-user-blocked');
+        if(left||signal?.aborted||channel.isClosed?.())throw new Error('room admission retired');
+        reservation=mesh.reserveAdmission(did,{locallySelected,signal});admissionChecked=true;
+      }});
     // why: the relay hint chooses resource admission, but only signed HELLO
     // binds both endpoints to content-only authority. Legacy peers fail closed.
     if (remoteCaps.includes(CONTENT_ONLY) !== (purpose === 'content') || remoteCaps.includes(LOOKUP_ONLY) !== (purpose === 'lookup') || remoteCaps.includes(DIRECTORY_INTRODUCTIONS) !== (purpose === 'directory')) { channel.close(); throw new Error('peer connection purpose mismatch'); }
@@ -143,7 +153,7 @@ export const joinRoom = async ({
       audit?.('peer_did_mismatch', { expected: expectedDid, got: remoteDid });
       throw new Error('peer authenticated as a different did than expected');
     }
-    if ((admitPeer && !await admitPeer(remoteDid)) || isBlocked(remoteDid)) {
+    if ((!admissionChecked && admitPeer && !await admitPeer(remoteDid)) || isBlocked(remoteDid)) {
       channel.close(); throw new Error('peer-user-blocked');
     }
     if (left || signal?.aborted || channel.isClosed?.() || isBlocked(remoteDid)) {
@@ -154,7 +164,7 @@ export const joinRoom = async ({
       channel.close();
       return remoteDid;
     }
-    if (!mesh.addLink(channel, remoteDid, { caps: remoteCaps.filter((cap) => selectedCaps.includes(cap)) }, { locallySelected, purpose })) throw new Error('room peer admission refused');
+    if (!mesh.addLink(channel, remoteDid, { caps: remoteCaps.filter((cap) => selectedCaps.includes(cap)) }, { locallySelected, purpose, reservation, allowRotation:!!reservation })) throw new Error('room peer admission refused');
     repairTargets.delete(remoteDid);
     if (via) mesh.tagLink(remoteDid, { via });
     dlog('room', `✅ CONNECTED to peer ${short(remoteDid)} — data channel open, in the mesh`);
@@ -167,6 +177,7 @@ export const joinRoom = async ({
       });
     }
     return remoteDid;
+    } finally {reservation?.release();}
   };
 
   // ---- shared trickle signaling ------------------------------------------
@@ -624,6 +635,7 @@ export const joinRoom = async ({
     /** @param {string} brokerDid @param {string} targetDid @param {{signal?: AbortSignal, purpose?: 'routing' | 'content' | 'lookup' | 'directory'}} [opts] */
     dialVia: (brokerDid, targetDid, opts) => dialViaRelay(brokerDid, targetDid, opts),
     contentTransfersEnabled: transferSlots > 0,
+    temporaryCapacity: transferSlots,
     acquireContentVia: contentDials.open,
     acquireLookupVia: lookupDials.open,
     acquireDirectoryVia: directoryDials.open,

@@ -38,7 +38,7 @@ const isDhtKeyHex = (h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h);
  *   selfId: Uint8Array,
  *   store: ReturnType<typeof import('./store.js').createDhtStore>,
  *   providers?: ReturnType<typeof import('./provider-store.js').createProviderStore> | null,
- *   rpc: (contact: any, msg: any, opts?: {signal?: AbortSignal}) => Promise<any>,
+ *   rpc: (contact: any, msg: any, opts?: {signal?: AbortSignal,traversal?:any}) => Promise<any>,
  *   k?: number, alpha?: number, now?: () => number, retainContact?: (did:string)=>boolean,
  * }} opts
  */
@@ -147,8 +147,8 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
     return { value, closest: shortlist() };
   };
 
-  /** @param {string} key @param {{signal?: AbortSignal,onQueryFailure?:()=>void}} [opts] */
-  const findProviderContacts = async (key, { signal, onQueryFailure } = {}) => {
+  /** @param {string} key @param {{signal?: AbortSignal,onQueryFailure?:()=>void,traversal?:any}} [opts] */
+  const findProviderContacts = async (key, { signal, onQueryFailure, traversal } = {}) => {
       const keyBytes = fromHex(key);
       /** @type {Map<string, Contact>} */
       const found = new Map();
@@ -167,7 +167,7 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
         await Promise.all(batch.map(async (c) => {
           queried.add(c.did);
           let resp;
-          try { resp = await rpc(c, { t: 'GET_PROVIDERS', key }, { signal }); }
+          try { resp = await rpc(c, { t: 'GET_PROVIDERS', key }, { signal, traversal }); }
           catch { onQueryFailure?.(); if (!signal?.aborted) rt.remove(c.did); return; }
           if (signal?.aborted) return;
           // why: an error or malformed reply is not a successful empty lookup.

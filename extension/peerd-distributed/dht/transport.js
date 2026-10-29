@@ -44,7 +44,7 @@ export const attachDht = ({ mesh, identity, selfId, store, providers = null, dia
    * @param {{ did: string }} contact
    * @param {any} msg
    */
-  const rpc = async (contact, msg, { signal } = /** @type {{signal?: AbortSignal}} */ ({})) => {
+  const rpc = async (contact, msg, { signal, traversal } = /** @type {{signal?: AbortSignal,traversal?:{acquireLookup:(contact:any,options:{signal?:AbortSignal})=>Promise<{release:()=>void}>}}} */ ({})) => {
     const did = contact.did;
     if (closed || signal?.aborted) throw new Error('dht: closed or cancelled');
     if (did === identity.did) throw new Error('dht: refusing to rpc self');
@@ -61,8 +61,9 @@ export const attachDht = ({ mesh, identity, selfId, store, providers = null, dia
     const owned = {lease:null};
     const run = async () => {
       if (!mesh.hasLink(did)) {
-        if (dial?.acquireLookup) {
-          owned.lease = await dial.acquireLookup(contact, {signal:ac.signal});
+        const acquireLookup = traversal?.acquireLookup ?? dial?.acquireLookup;
+        if (acquireLookup) {
+          owned.lease = await acquireLookup(contact, {signal:ac.signal});
           if (ac.signal.aborted) { owned.lease.release(); ac.signal.throwIfAborted(); }
         }
         else if (!dial || !(await dial(contact, { signal: ac.signal }))) throw new Error(`dht: no path to ${did.slice(-8)}`);
@@ -100,7 +101,7 @@ export const attachDht = ({ mesh, identity, selfId, store, providers = null, dia
       try { resp = await node.handle(env.from, env.body.msg); }
       catch { resp = { t: 'ERR', reason: 'handler-error' }; }
       const response = await mesh.sign(CH_DHT, RESP, { reqId: env.body.reqId, resp });
-      if (purpose === 'lookup') await mesh.sendLookup(env.from, response);
+      if (purpose === 'lookup' || purpose === 'directory') await mesh.sendLookup(env.from, response);
       else await mesh.send(env.from, response);
     } else if (env.typ === RESP) {
       const p = pending.get(env.body.reqId);

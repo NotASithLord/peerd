@@ -17,9 +17,10 @@ export const establishedAdmission = ({ peers, budget, locallySelected, now, last
   // Keep locally selected diversity when admitting unsolicited neighbors.
   // Local exploration may eventually rotate a local edge, but prefers inbound
   // slots; every replacement is authenticated and rate limited, never a ban.
-  const candidates = (inboundFull || inbound.length ? inbound : peers)
+  const candidates = (inboundFull ? inbound : locallySelected ? peers : inbound.length ? inbound : peers)
     .filter((peer) => now - peer.admittedAt >= NEIGHBOR_GRACE_MS
       && (!peer.busy || now >= peer.protectedUntil))
-    .sort((a, b) => a.admittedAt - b.admittedAt || a.did.localeCompare(b.did));
+    .sort((a, b) => (locallySelected ? Number(a.locallySelected) - Number(b.locallySelected) : 0)
+      || a.admittedAt - b.admittedAt || a.did.localeCompare(b.did));
   return candidates[0] ? { allowed: true, evict: candidates[0].did } : { allowed: false };
 };

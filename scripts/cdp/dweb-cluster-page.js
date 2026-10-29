@@ -48,9 +48,8 @@ window.cluster = {
       const result = await routing(contact, options);
       recordAudit('routing-dial-end', {ok:result, linkedBefore, routes:routes.length, linkedRoutes});
       return result;
-    }, {acquireContent:routing.acquireContent,acquireLookup:routing.acquireLookup});
-    const acquire = dial.acquireContent;
-    if (acquire) dial.acquireContent = async (contact, options) => {
+    }, {acquireContent:routing.acquireContent,acquireLookup:routing.acquireLookup,createTraversal:routing.createTraversal});
+    const observeContent = acquire => async (contact, options) => {
       const started = performance.now();
       const routes = [...new Set([contact.hints?.broker, ...(contact.brokers ?? [])])].filter(Boolean);
       contentDials.started++;
@@ -66,6 +65,11 @@ window.cluster = {
         recordAudit('content-dial-end', { ok: false, reason, ms: Math.round(performance.now() - started) });
         throw error;
       }
+    };
+    if (dial.acquireContent) dial.acquireContent = observeContent(dial.acquireContent);
+    if (routing.createTraversal) dial.createTraversal = options => {
+      const traversal = routing.createTraversal({...options,onAttempt:event=>recordAudit('directory-attempt',event)});
+      return {...traversal, acquireContent: observeContent(traversal.acquireContent)};
     };
     base = await createBaseNetwork({ identity, mesh: room.mesh, meta: () => ({ name }),
       dial, audit: recordAudit });

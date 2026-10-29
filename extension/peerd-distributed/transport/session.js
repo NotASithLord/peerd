@@ -4,6 +4,8 @@
 
 import { buildEnvelope, signEnvelope, verifyEnvelope } from './envelope.js';
 
+export const ADMISSION_READY = 'admission-ready-v1';
+
 const newId = () => crypto.randomUUID();
 const NONCE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -29,14 +31,17 @@ const validEnvelope = (env, typ) => exactKeys(env, ['v', 'ch', 'typ', 'from', 'b
  *   channel: { send:(msg:any, options?: import('./outgoing.js').SendOptions)=>void | Promise<void>, setHandler:(h:any)=>void, deliver:(msg:any)=>void,
  *     onClose?:(cb:()=>void)=>(()=>void), close?:()=>void, isClosed?:()=>boolean, getSessionBinding?:()=>(SessionBinding|null) },
  *   identity: {did:string,sign:(bytes:Uint8Array)=>Promise<Uint8Array>},
+ *   prepareAdmission?:(did:string,caps:readonly string[])=>void|Promise<void>,
  *   caps?:string[], now?:()=>number, timeoutMs?:number, signal?:AbortSignal, timers?:any,
  * }} opts
  * @returns {Promise<{remoteDid:string,remoteCaps:readonly string[]}>}
  */
 export const createSession = ({ channel, identity, caps = ['content'], now = Date.now,
-  timeoutMs = 10_000, signal, timers = globalThis,
+  timeoutMs = 10_000, signal, timers = globalThis, prepareAdmission,
 }) => new Promise((resolve, reject) => {
   let settled = false;
+  let preparing=false, readySent=false, readyReceived=false, verifyingReady=false;
+  /** @type {any} */let remoteReady=null;
   let helloStarted = false;
   let helloSent = false;
   let proofStarted = false;
@@ -74,7 +79,32 @@ export const createSession = ({ channel, identity, caps = ['content'], now = Dat
       resolve({ remoteDid: remoteHello.from, remoteCaps: Object.freeze([...remoteHello.body.caps]) });
     }
   };
-  const complete = () => { if (helloSent && proofSent && proofReceived) finish(null); };
+  const complete = () => {
+    if(settled||!helloSent||!proofSent||!proofReceived)return;
+    const negotiated=caps.includes(ADMISSION_READY)&&remoteHello.body.caps.includes(ADMISSION_READY);
+    if(!negotiated){if(remoteReady)finish(new Error('unnegotiated admission readiness'));else finish(null);return;}
+    if(readySent&&readyReceived){finish(null);return;}
+    if(!preparing){
+      preparing=true;
+      Promise.resolve().then(()=>{if(!settled)return prepareAdmission?.(remoteHello.from,Object.freeze([...remoteHello.body.caps]));}).then(async()=>{
+        if(settled)return;
+        const env=await signEnvelope(buildEnvelope({ch:0,typ:2,from:identity.did,
+          body:{proto:2,to:remoteHello.from,hello:helloId,challenge:remoteHello.id,binding:{...binding}},id:newId(),ts:now()}),identity);
+        if(settled)return;
+        await channel.send({__t:'ADMISSION_READY',env},{signal,priority:'control'});
+        if(settled)return;readySent=true;complete();
+      }).catch(error=>finish(error instanceof Error?error:new Error(String(error))));
+    }
+    if(remoteReady&&!verifyingReady){
+      verifyingReady=true;
+      const env=remoteReady,b=env.body;
+      if(env.from!==remoteHello.from||b.to!==identity.did||b.hello!==remoteHello.id||b.challenge!==helloId
+        ||b.binding.kind!==binding.kind||b.binding.streamId!==binding.streamId
+        ||b.binding.localFingerprint!==binding.remoteFingerprint||b.binding.remoteFingerprint!==binding.localFingerprint){finish(new Error('admission readiness does not match this channel'));return;}
+      verifyEnvelope(env).then(valid=>{if(settled)return;if(!valid){finish(new Error('invalid admission readiness signature'));return;}readyReceived=true;complete();})
+        .catch(error=>finish(error instanceof Error?error:new Error(String(error))));
+    }
+  };
   const abort = () => finish(new Error('peer HELLO cancelled'));
   const timer = timers.setTimeout(() => finish(new Error('peer HELLO timed out')), timeoutMs);
   signal?.addEventListener('abort', abort, { once: true });
@@ -142,6 +172,17 @@ export const createSession = ({ channel, identity, caps = ['content'], now = Dat
       remoteHello = owned;
       await Promise.all([sendProof(), verifyProof()]);
       return;
+    }
+    if(msg?.__t==='ADMISSION_READY'){
+      if(remoteReady)return;
+      const env=msg.env;
+      if(!validEnvelope(env,2)||!exactKeys(env.body,['proto','to','hello','challenge','binding'])
+        ||env.body.proto!==2||typeof env.body.to!=='string'||env.body.to.length>128
+        ||typeof env.body.hello!=='string'||!NONCE.test(env.body.hello)
+        ||typeof env.body.challenge!=='string'||!NONCE.test(env.body.challenge)||!validBinding(env.body.binding)){
+        finish(new Error('invalid admission readiness'));return;
+      }
+      remoteReady={...env,body:{...env.body,binding:{...env.body.binding}}};complete();return;
     }
     if (msg?.__t === 'HELLO_PROOF') {
       if (remoteProof) return;

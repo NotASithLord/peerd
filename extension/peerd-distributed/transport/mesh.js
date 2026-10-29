@@ -35,6 +35,7 @@ import { establishedAdmission, TRANSFER_PROTECTION_MS, NEIGHBOR_GRACE_MS } from 
 import { createContentResponder, fetchBundle } from '../content/transfer.js';
 import { dlog } from '../log.js';
 import { createLocalCounters } from '../local-counters.js';
+import { createControlPacer } from './control-pacer.js';
 import { CONTENT_ONLY, LOOKUP_ONLY } from './capabilities.js';
 import { DIRECTORY_INTRODUCTIONS, createDirectoryIntroductions } from './directory-introductions.js';
 
@@ -85,6 +86,7 @@ const QUEUED_PER_MESH = 128;
  *   did: string,
  *   purpose: 'routing' | 'content' | 'lookup' | 'directory',
  *   leases: number,
+ *   controlPacer: ReturnType<typeof createControlPacer>,
  *   introductions?: ReturnType<typeof createDirectoryIntroductions>,
  *   expiry?: ReturnType<typeof setTimeout>,
  *   channel: Channel,
@@ -254,6 +256,8 @@ export const createRoomMesh = ({
     link.retired.signal.addEventListener('abort', abort, { once: true });
     options.signal?.addEventListener('abort', abort, { once: true });
     try {
+      if(env?.ch===0)await link.controlPacer.take({signal:ac.signal});
+      if(ac.signal.aborted||links.get(link.did)!==link)throw new Error('mesh link retired during pacing');
       await link.channel.send(env, { ...options, signal: ac.signal });
       if (closed || links.get(link.did) !== link || ac.signal.aborted) throw new Error('mesh link retired during send');
       counts.add('completed');
@@ -335,6 +339,7 @@ export const createRoomMesh = ({
     timers.clearTimeout(link.expiry);
     link.retired.abort();
     link.introductions?.close();
+    link.controlPacer.close();
     link.contentHandlers.clear();
     cancelVerification(link);
     link.offClose?.();
@@ -547,6 +552,59 @@ export const createRoomMesh = ({
     link.retired.signal.addEventListener('abort', release, { once: true });
     return Object.freeze({ release });
   };
+  /** @param {'routing'|'content'|'lookup'|'directory'} purpose @param {boolean} locallySelected */
+  const admissionDecision=(purpose,locallySelected)=>{
+    const time = now();
+    const planned=[...reservedAdmissions.values()];
+    const victims=new Set(planned.map(p=>p.evict).filter(Boolean));
+    const values=routingLinks().filter(link=>!victims.has(link.did));
+    const projected=values.length+planned.length;
+    let decision = { allowed: projected + links.size-routingLinks().length < budget && (purpose !== 'routing'
+          ? links.size - routingLinks().length < transferSlots : projected < routingBudget), evict: /** @type {string | undefined} */ (undefined) };
+        if (sparse && purpose === 'routing') {
+          const pressure = projected >= routingBudget || (!locallySelected
+            && values.filter((link) => !link.locallySelected).length >= routingBudget - Math.min(2, Math.max(0, routingBudget - 1)));
+          const peers = values.map((link) => {
+            const busy = link.serving > 0 || link.contentHandlers.size > 0;
+            // One bounded protection window per link begins on first pressure,
+            // not each remote request. Continuous work cannot pin a slot forever.
+            if (pressure && busy && time - link.admittedAt >= NEIGHBOR_GRACE_MS && link.protectedUntil === 0) link.protectedUntil = time + TRANSFER_PROTECTION_MS;
+            return { did: link.did, locallySelected: link.locallySelected, admittedAt: link.admittedAt,
+              protectedUntil: link.protectedUntil, busy };
+          });
+          peers.push(...planned.map(p=>({did:p.did,locallySelected:p.locallySelected,admittedAt:time,protectedUntil:time+10_000,busy:true})));
+          decision = { evict: undefined, ...establishedAdmission({ peers, budget: routingBudget, locallySelected, now: time, lastRotation:planned.some(p=>p.evict)?time:lastRotation }) };
+          // why: a rendezvous outage freezes replacement, not local ownership.
+          // Unsolicited links must leave exploration slots available for repair.
+          if (!sparseRotation && decision.evict) decision = { allowed: false, evict: undefined };
+        }
+    return decision;
+  };
+  /** @type {Map<{release:()=>void},{did:string,locallySelected:boolean,evict?:string,victim?:Link}>} */
+  const reservedAdmissions=new Map();
+  /** @param {string} did @param {{locallySelected?:boolean,signal?:AbortSignal}} [options] */
+  const reserveAdmission=(did,{locallySelected=false,signal}={})=>{
+    pruneCooldowns();
+    const decision=admissionDecision('routing',locallySelected);
+    const unavailable=closed||signal?.aborted||isBlocked(did)||cooldowns.has(did)||did===identity.did;
+    const duplicate=links.has(did)||[...reservedAdmissions.values()].some(p=>p.did===did);
+    if(unavailable||duplicate||!decision.allowed){
+      const values=routingLinks();
+      try{audit?.('admission_reservation_refused',{reason:unavailable?'unavailable':duplicate?'duplicate':'policy',
+        routingDegree:values.length,reservations:reservedAdmissions.size,locallySelected,
+        oldestAgeMs:values.length?Math.max(...values.map(link=>Math.max(0,now()-link.admittedAt))):0,
+        rotationAgeMs:Number.isFinite(lastRotation)?Math.max(0,now()-lastRotation):null});}catch{/* Diagnostic sinks cannot affect admission. */}
+      throw new Error('room admission reservation refused');
+    }
+    let live=true;
+    const release=()=>{if(!live)return;live=false;timers.clearTimeout(timer);signal?.removeEventListener('abort',release);
+      reservedAdmissions.delete(ticket);};
+    const ticket=Object.freeze({release});
+    const timer=timers.setTimeout(release,10_000);
+    reservedAdmissions.set(ticket,{did,locallySelected,evict:decision.evict,victim:decision.evict?links.get(decision.evict):undefined});
+    signal?.addEventListener('abort',release,{once:true});
+    return ticket;
+  };
   return Object.freeze({
     roomId,
     selfDid: identity.did,
@@ -559,12 +617,16 @@ export const createRoomMesh = ({
     // link for a replacement that may partition the remaining overlay.
     /** @param {boolean} enabled */
     setSparseRotation: (enabled) => { sparseRotation = sparse && !!enabled; },
+    reserveAdmission,
     locallySelectedCount: () => routingLinks().filter((link) => link.locallySelected).length,
 
     // Admit an AUTHENTICATED link (HELLO already done — did is proven).
     /** @param {Channel} channel @param {string} did @param {any} [info]
-     * @param {{ locallySelected?: boolean, purpose?: 'routing' | 'content' | 'lookup' | 'directory' }} [ownership] */
-    addLink(channel, did, info = {}, { locallySelected = false, purpose = 'routing' } = {}) {
+     * @param {{ locallySelected?: boolean, purpose?: 'routing' | 'content' | 'lookup' | 'directory', reservation?:{release:()=>void}, allowRotation?:boolean }} [ownership] */
+    addLink(channel, did, info = {}, { locallySelected = false, purpose = 'routing', reservation, allowRotation = true } = {}) {
+      const reserved=reservation?reservedAdmissions.get(reservation):undefined;
+      if(!reservation&&[...reservedAdmissions.values()].some(plan=>plan.did===did||plan.evict===did)){channel.close();return false;}
+      if(reservation&&(!reserved||reserved.did!==did||reserved.locallySelected!==locallySelected||purpose!=='routing')){channel.close();return false;}
       if (!['routing', 'content', 'lookup', 'directory'].includes(purpose) || (purpose !== 'routing' && (!transferSlots || !info?.caps?.includes(purpose === 'content' ? CONTENT_ONLY : purpose === 'directory' ? DIRECTORY_INTRODUCTIONS : LOOKUP_ONLY)))) { channel.close(); return false; }
       if (closed || channel.isClosed?.() || isBlocked(did)) { channel.close(); return false; }
       pruneCooldowns();
@@ -580,39 +642,25 @@ export const createRoomMesh = ({
       const timing = previous ?? (sparse ? recentNeighbors.get(did) : undefined);
       if (!previous) {
         const time = now();
-        let decision = { allowed: links.size < budget && (purpose !== 'routing'
-          ? links.size - routingLinks().length < transferSlots : routingLinks().length < routingBudget), evict: /** @type {string | undefined} */ (undefined) };
-        if (sparse && purpose === 'routing') {
-          const values = routingLinks();
-          const pressure = values.length >= routingBudget || (!locallySelected
-            && values.filter((link) => !link.locallySelected).length >= routingBudget - Math.min(2, Math.max(0, routingBudget - 1)));
-          const peers = values.map((link) => {
-            const busy = link.serving > 0 || link.contentHandlers.size > 0;
-            // One bounded protection window per link begins on first pressure,
-            // not each remote request. Continuous work cannot pin a slot forever.
-            if (pressure && busy && time - link.admittedAt >= NEIGHBOR_GRACE_MS && link.protectedUntil === 0) link.protectedUntil = time + TRANSFER_PROTECTION_MS;
-            return { did: link.did, locallySelected: link.locallySelected, admittedAt: link.admittedAt,
-              protectedUntil: link.protectedUntil, busy };
-          });
-          decision = { evict: undefined, ...establishedAdmission({ peers, budget: routingBudget, locallySelected, now: time, lastRotation }) };
-          // why: a rendezvous outage freezes replacement, not local ownership.
-          // Unsolicited links must leave exploration slots available for repair.
-          if (!sparseRotation && decision.evict) decision = { allowed: false, evict: undefined };
-        }
-        if (!decision.allowed) {
+        const victim=reserved?.evict?links.get(reserved.evict):undefined;
+        const decision = reserved ? {allowed:(!reserved.evict||sparseRotation)
+          &&(!victim||victim===reserved.victim)
+          &&(!!victim||(links.size<budget&&routingLinks().length<routingBudget)),evict:victim?reserved.evict:undefined} : admissionDecision(purpose,locallySelected);
+        if (!decision.allowed || (decision.evict && !allowRotation)) {
           audit?.('peer_budget_refused', { did });
           channel.close();
           return false;
         }
         if (decision.evict) { lastRotation = time; removeLink(decision.evict, 'neighbor-rotation'); }
       }
+      reservation?.release();
       // The room resolves crossing offers before this point. Replacement of
       // the same authenticated neighbor preserves its age and local ownership;
       // a short complete disconnect also retains only timing custody. Local
       // exploration ownership is never inherited from a retired connection.
       if (links.has(did)) removeLink(did, 'replaced');
       /** @type {Link} */
-      const link = { did, channel, purpose, leases: 0, introductions: purpose === 'directory' ? createDirectoryIntroductions({now}) : undefined, locallySelected: locallySelected || previous?.locallySelected || false,
+      const link = { did, channel, purpose, leases: 0, controlPacer:createControlPacer({now,timers}), introductions: purpose === 'directory' ? createDirectoryIntroductions({now}) : undefined, locallySelected: locallySelected || previous?.locallySelected || false,
         admittedAt: timing?.admittedAt ?? now(), protectedUntil: timing?.protectedUntil ?? 0, serving: 0, retired: new AbortController(), contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
       // Own this exact generation before an already-closed channel can invoke
       // its immediate observer. A close during handoff must not become connected.
@@ -626,6 +674,7 @@ export const createRoomMesh = ({
           timers.clearTimeout(link.expiry);
           link.retired.abort();
     link.introductions?.close();
+    link.controlPacer.close();
           link.contentHandlers.clear();
           cancelVerification(link);
           try { audit?.('peer_link_closed', { did, why: 'channel-closed' }); }
@@ -779,6 +828,7 @@ export const createRoomMesh = ({
     close: () => {
       if (closed) return;
       closed = true;
+      for(const ticket of [...reservedAdmissions.keys()])ticket.release();
       stopTimers();
       for (const did of [...links.keys()]) removeLink(did, 'mesh-closed');
       cooldowns.clear();
