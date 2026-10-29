@@ -11,6 +11,7 @@ let room, base, dispatch, originalChunk;
 let messages = [];
 const received = new Map();
 const audit = [];
+const contentDials = {started:0,succeeded:0,failed:0};
 const connections = [];
 // why: keep candidate evidence for ICE attempts that do not enter the mesh.
 class ObservedConnection extends RTCPeerConnection {
@@ -32,15 +33,56 @@ const stop = () => {
 };
 
 window.cluster = {
-  async start({ roomId, signaling, name, budget, profile }) {
+  async start({ roomId, signaling, name, budget, profile, transferSlots = 0 }) {
     stop();
     messages = [];
     // why: only rendezvous crosses SSH. ICE has no STUN/TURN server or tunnel;
     // the selected pair below proves the actual cross-host data path.
     room = await joinRoom({ roomId, identity, url: signaling, iceServers: [], audit: recordAudit,
-      RTCPeerConnection: ObservedConnection, budget, profile });
+      RTCPeerConnection: ObservedConnection, budget, profile, transferSlots });
+    const routing = makeDhtDialer(room);
+    const dial = Object.assign(async (contact, options) => {
+      const routes = [...new Set([contact.hints?.broker, ...(contact.brokers ?? [])])].filter(Boolean);
+      const linkedBefore = room.mesh.hasLink(contact.did);
+      const linkedRoutes = routes.filter(did => room.mesh.hasLink(did)).length;
+      const result = await routing(contact, options);
+      recordAudit('routing-dial-end', {ok:result, linkedBefore, routes:routes.length, linkedRoutes});
+      return result;
+    }, {acquireContent:routing.acquireContent,acquireLookup:routing.acquireLookup,createTraversal:routing.createTraversal});
+    const observeContent = acquire => async (contact, options) => {
+      const started = performance.now();
+      const routes = [...new Set([contact.hints?.broker, ...(contact.brokers ?? [])])].filter(Boolean);
+      contentDials.started++;
+      recordAudit('content-dial-start', { routes: routes.length, linkedRoutes: routes.filter(did => room.mesh.hasLink(did)).length });
+      try {
+        const lease = await acquire(contact, options);
+        contentDials.succeeded++;
+        recordAudit('content-dial-end', { ok: true, ms: Math.round(performance.now() - started) });
+        return lease;
+      } catch (error) {
+        contentDials.failed++;
+        const reason = ['content broker unavailable', 'content capacity', 'content dial cancelled', 'room peer admission refused'].includes(error.message) ? error.message : 'other';
+        recordAudit('content-dial-end', { ok: false, reason, ms: Math.round(performance.now() - started) });
+        throw error;
+      }
+    };
+    if (dial.acquireContent) dial.acquireContent = observeContent(dial.acquireContent);
+    if (routing.createTraversal) dial.createTraversal = options => {
+      const traversal = routing.createTraversal({...options,onAttempt:event=>recordAudit('directory-attempt',event)});
+      return {...traversal, acquireContent: observeContent(traversal.acquireContent)};
+    };
     base = await createBaseNetwork({ identity, mesh: room.mesh, meta: () => ({ name }),
-      dial: makeDhtDialer(room), audit: recordAudit });
+      dial, audit: recordAudit });
+    const findContacts = base.node.dht.findProviderContacts;
+    base.node.dht.findProviderContacts = async (key, options = {}) => {
+      let failures = 0;
+      const started = performance.now();
+      const table = base.node.dht.routingTable.all();
+      recordAudit('provider-lookup-start', {contacts:table.length, linkedContacts:table.filter(c => room.mesh.hasLink(c.did)).length, liveNeighbors:room.mesh.peers().length});
+      const contacts = await findContacts(key, {...options, onQueryFailure: () => { failures++; options.onQueryFailure?.(); }});
+      recordAudit('provider-lookup-end', { contacts:contacts.length, withRoutes:contacts.filter(c => c.hints?.broker || c.brokers?.length).length, failures, aborted:!!options.signal?.aborted, ms:Math.round(performance.now()-started) });
+      return contacts;
+    };
     originalChunk = base.node.content.getChunk;
     base.node.gossip.subscribe(topic, ({ from, data }) => {
       messages.push({ from, data });
@@ -75,7 +117,7 @@ window.cluster = {
   }))),
   report() {
     return { did: identity.did, online: !!base, rendezvous: room?.rendezvous(),
-      peers: base?.snapshot().peers ?? [], messages, cards: base?.heardDwapps() ?? [], audit,
+      contentDials: {...contentDials}, peers: base?.snapshot().peers ?? [], messages, cards: base?.heardDwapps() ?? [], audit,
       // Local protocol work, not wire bandwidth or remote delivery receipts.
       dissemination: base ? { mesh: base.mesh.stats(), gossip: base.node.gossip.stats(),
         discovery: base.discovery.stats() } : null };
@@ -128,7 +170,7 @@ window.cluster = {
     // why: this lane qualifies production behavior across real links; a tighter
     // harness-only deadline misclassifies healthy WAN transfer as product loss.
     const result = provider ? await base.mesh.fetchFrom(provider, uri)
-      : await base.fetchApp(uri);
+      : await base.fetchApp(uri, { onProgress: progress => recordAudit('fetch-progress', { phase: progress.phase, providers: progress.providers, done: progress.done }) });
     const decoded = await unpackTransportBundle(result);
     received.set(uri, result);
     return { digest: await sha256hex(decoded.files['payload.bin']), size: decoded.files['payload.bin'].length,

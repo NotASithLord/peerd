@@ -4,6 +4,8 @@
 
 import { buildEnvelope, signEnvelope, verifyEnvelope } from './envelope.js';
 
+export const ADMISSION_READY = 'admission-ready-v3';
+
 const newId = () => crypto.randomUUID();
 const NONCE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -29,14 +31,23 @@ const validEnvelope = (env, typ) => exactKeys(env, ['v', 'ch', 'typ', 'from', 'b
  *   channel: { send:(msg:any, options?: import('./outgoing.js').SendOptions)=>void | Promise<void>, setHandler:(h:any)=>void, deliver:(msg:any)=>void,
  *     onClose?:(cb:()=>void)=>(()=>void), close?:()=>void, isClosed?:()=>boolean, getSessionBinding?:()=>(SessionBinding|null) },
  *   identity: {did:string,sign:(bytes:Uint8Array)=>Promise<Uint8Array>},
+ *   prepareAdmission?:(did:string,caps:readonly string[])=>void|{victim:string|null,signal?:AbortSignal,release?:()=>void}|Promise<void|{victim:string|null,signal?:AbortSignal,release?:()=>void}>,
+ *   commitAdmission?:(plan:{remoteDid:string,localVictim:string|null,remoteVictim:string|null,signal:AbortSignal})=>Promise<{digest:string,signal:AbortSignal,release?:()=>void}|null>,
  *   caps?:string[], now?:()=>number, timeoutMs?:number, signal?:AbortSignal, timers?:any,
  * }} opts
  * @returns {Promise<{remoteDid:string,remoteCaps:readonly string[]}>}
  */
 export const createSession = ({ channel, identity, caps = ['content'], now = Date.now,
-  timeoutMs = 10_000, signal, timers = globalThis,
+  timeoutMs = 10_000, signal, timers = globalThis, prepareAdmission, commitAdmission,
 }) => new Promise((resolve, reject) => {
   let settled = false;
+  let preparing=false, readySent=false, readyReceived=false, verifyingReady=false;
+  let localVictim=/** @type {string|null} */(null);
+  let committing=false,commitSent=false,commitReceived=false,verifyingCommit=false;
+  /** @type {any} */let localReady=null;
+  /** @type {any} */let remoteCommit=null;
+  const work=new AbortController();
+  /** @type {any} */let remoteReady=null;
   let helloStarted = false;
   let helloSent = false;
   let proofStarted = false;
@@ -48,6 +59,8 @@ export const createSession = ({ channel, identity, caps = ['content'], now = Dat
   /** @type {SessionBinding} */ let binding;
   const helloId = newId();
   let offClose = () => {};
+  let releaseAdmissionObserver = () => {};
+  let releaseWitnessObserver = () => {};
   /** @type {any[]} */ const stashed = [];
   let stashedBytes = 0;
   /** @param {Error|null} error */
@@ -57,8 +70,11 @@ export const createSession = ({ channel, identity, caps = ['content'], now = Dat
     timers.clearTimeout(timer);
     signal?.removeEventListener('abort', abort);
     offClose();
+    releaseAdmissionObserver();
+    releaseWitnessObserver();
     channel.setHandler(null);
     if (error) {
+      work.abort();
       // Fixed flags retain no frames/keys; sent means JS completion, never native delivery.
       try { Object.assign(error, { helloProgress: Object.freeze({
         helloSent, helloReceived: !!remoteHello, proofSent, proofReceived,
@@ -74,7 +90,83 @@ export const createSession = ({ channel, identity, caps = ['content'], now = Dat
       resolve({ remoteDid: remoteHello.from, remoteCaps: Object.freeze([...remoteHello.body.caps]) });
     }
   };
-  const complete = () => { if (helloSent && proofSent && proofReceived) finish(null); };
+  const complete = () => {
+    if(settled||!helloSent||!proofSent||!proofReceived)return;
+    const negotiated=caps.includes(ADMISSION_READY)&&remoteHello.body.caps.includes(ADMISSION_READY);
+    if(!negotiated){if(remoteReady||remoteCommit)finish(new Error('unnegotiated admission readiness'));else finish(null);return;}
+    if(readySent&&readyReceived){
+      if(commitSent&&commitReceived){finish(null);return;}
+      if(!committing){
+        committing=true;
+        Promise.resolve().then(()=>{
+          if(settled)return null;
+          return commitAdmission?.({remoteDid:remoteHello.from,localVictim,remoteVictim:remoteReady.body.victim,signal:work.signal})??null;
+        }).then(async(witness)=>{
+          if(settled){witness?.release?.();return;}
+          if(localVictim && (!witness || !HASH.test(witness.digest))){finish(new Error('rotation requires a live path witness'));return;}
+          if(witness){
+            const retired=()=>finish(new Error('peer admission witness retired'));
+            releaseWitnessObserver=()=>witness.signal.removeEventListener('abort',retired);
+            witness.signal.addEventListener('abort',retired,{once:true});
+            if(witness.signal.aborted){retired();return;}
+          }
+          const env=await signEnvelope(buildEnvelope({ch:0,typ:3,from:identity.did,
+            body:{ready:localReady.id,peerReady:remoteReady.id,digest:localVictim?witness?.digest:null},id:newId(),ts:now()}),identity);
+          if(settled)return;
+          await channel.send({__t:'ADMISSION_COMMIT',env},{signal:work.signal,priority:'control'});
+          if(settled)return;commitSent=true;complete();
+        }).catch(error=>finish(error instanceof Error?error:new Error(String(error))));
+      }
+      if(remoteCommit&&!verifyingCommit){
+        verifyingCommit=true;
+        const env=remoteCommit,b=env.body;
+        if(env.from!==remoteHello.from || b.ready!==remoteReady.id || b.peerReady!==localReady.id
+          || (remoteReady.body.victim===null ? b.digest!==null : typeof b.digest!=='string'||!HASH.test(b.digest))){
+          finish(new Error('admission commit does not match this plan'));return;
+        }
+        verifyEnvelope(env).then(valid=>{
+          if(settled)return;
+          if(!valid){finish(new Error('invalid admission commit signature'));return;}
+          commitReceived=true;complete();
+        }).catch(error=>finish(error instanceof Error?error:new Error(String(error))));
+      }
+      return;
+    }
+    if(!preparing){
+      preparing=true;
+      Promise.resolve().then(()=>{if(!settled)return prepareAdmission?.(remoteHello.from,Object.freeze([...remoteHello.body.caps]));}).then(async(plan)=>{
+        if(settled){plan?.release?.();return;}
+        // Signing/sending readiness is asynchronous. A local reservation may
+        // expire or be cancelled during either await; its old authorization
+        // must never finish a new carrier after that ownership has ended.
+        if(plan?.signal){
+          const admissionSignal=plan.signal;
+          const retired=()=>finish(new Error('peer admission reservation retired'));
+          releaseAdmissionObserver=()=>admissionSignal.removeEventListener('abort',retired);
+          admissionSignal.addEventListener('abort',retired,{once:true});
+          if(admissionSignal.aborted){retired();return;}
+        }
+        localVictim=plan?.victim??null;
+        if(localVictim!==null && (typeof localVictim!=='string'||!localVictim.length||localVictim.length>128
+          ||localVictim===identity.did||localVictim===remoteHello.from)){finish(new Error('invalid local admission victim'));return;}
+        const env=await signEnvelope(buildEnvelope({ch:0,typ:2,from:identity.did,
+          body:{proto:2,to:remoteHello.from,hello:helloId,challenge:remoteHello.id,binding:{...binding},victim:localVictim},id:newId(),ts:now()}),identity);
+        if(settled)return;
+        localReady=env;
+        await channel.send({__t:'ADMISSION_READY',env},{signal,priority:'control'});
+        if(settled)return;readySent=true;complete();
+      }).catch(error=>finish(error instanceof Error?error:new Error(String(error))));
+    }
+    if(remoteReady&&!verifyingReady){
+      verifyingReady=true;
+      const env=remoteReady,b=env.body;
+      if(env.from!==remoteHello.from||b.to!==identity.did||b.hello!==remoteHello.id||b.challenge!==helloId
+        ||b.binding.kind!==binding.kind||b.binding.streamId!==binding.streamId
+        ||b.binding.localFingerprint!==binding.remoteFingerprint||b.binding.remoteFingerprint!==binding.localFingerprint){finish(new Error('admission readiness does not match this channel'));return;}
+      verifyEnvelope(env).then(valid=>{if(settled)return;if(!valid){finish(new Error('invalid admission readiness signature'));return;}readyReceived=true;complete();})
+        .catch(error=>finish(error instanceof Error?error:new Error(String(error))));
+    }
+  };
   const abort = () => finish(new Error('peer HELLO cancelled'));
   const timer = timers.setTimeout(() => finish(new Error('peer HELLO timed out')), timeoutMs);
   signal?.addEventListener('abort', abort, { once: true });
@@ -142,6 +234,28 @@ export const createSession = ({ channel, identity, caps = ['content'], now = Dat
       remoteHello = owned;
       await Promise.all([sendProof(), verifyProof()]);
       return;
+    }
+    if(msg?.__t==='ADMISSION_COMMIT'){
+      if(remoteCommit)return;
+      const env=msg.env;
+      if(!caps.includes(ADMISSION_READY)||!validEnvelope(env,3)||!exactKeys(env.body,['ready','peerReady','digest'])
+        ||typeof env.body.ready!=='string'||!NONCE.test(env.body.ready)
+        ||typeof env.body.peerReady!=='string'||!NONCE.test(env.body.peerReady)
+        ||!(env.body.digest===null||(typeof env.body.digest==='string'&&HASH.test(env.body.digest)))){
+        finish(new Error('invalid admission commit'));return;
+      }
+      remoteCommit={...env,body:{...env.body}};complete();return;
+    }
+    if(msg?.__t==='ADMISSION_READY'){
+      if(remoteReady)return;
+      const env=msg.env;
+      if(!validEnvelope(env,2)||!exactKeys(env.body,['proto','to','hello','challenge','binding','victim'])
+        ||env.body.proto!==2||!(env.body.victim===null||(typeof env.body.victim==='string'&&env.body.victim.length>0&&env.body.victim.length<=128&&env.body.victim!==identity.did&&env.body.victim!==env.from))||typeof env.body.to!=='string'||env.body.to.length>128
+        ||typeof env.body.hello!=='string'||!NONCE.test(env.body.hello)
+        ||typeof env.body.challenge!=='string'||!NONCE.test(env.body.challenge)||!validBinding(env.body.binding)){
+        finish(new Error('invalid admission readiness'));return;
+      }
+      remoteReady={...env,body:{...env.body,binding:{...env.body.binding}}};complete();return;
     }
     if (msg?.__t === 'HELLO_PROOF') {
       if (remoteProof) return;

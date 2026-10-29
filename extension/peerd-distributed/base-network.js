@@ -360,107 +360,121 @@ export const createBaseNetwork = async ({
   // linked seeders concurrently; unrelated neighbors never delay useful chunks.
   /** @param {string} uri @param {{ timeoutMs?: number, onProgress?: (p: any) => void, signal?: AbortSignal, expectedRuntime?: {value:unknown} }} [opts] */
   const fetchAllowedApp = async (uri, { timeoutMs = 15_000, onProgress, signal: callerSignal, expectedRuntime } = {}) => {
-    callerSignal?.throwIfAborted();
-    /** @param {string} did */
-    const channelFor = (did) => isBlocked(did) ? null : node.mesh.contentChannel(did);
-    const acceptManifest = (/** @type {any} */ manifest) => {
-      if (expectedRuntime) assertAppRuntimeAgreement(expectedRuntime.value, manifest.meta?.runtime);
-      assertAppRuntime(manifest.meta?.runtime);
-    };
-    /** @type {string | null | undefined} */
-    let publisher = null;
-    let localHash = null;
-    try { ({ did: publisher, hash: localHash } = parsePeerdUri(uri)); } catch { /* malformed uri → skip the fast path */ }
-    if (publisher && isBlocked(publisher)) throw new Error('publisher-user-blocked');
-    // why: a seeder can be the only remaining provider of another author's
-    // App. Read its explicitly announced bytes without a mesh channel to self,
-    // preserving the original signer and verifying the same addressed content.
-    if (publisher && localHash && node.content.isAnnounced(localHash)) {
-      const manifest = structuredClone(node.content.getManifest(localHash));
-      if (!manifest || await manifestHash(manifest) !== localHash) {
-        throw new Error('local manifest hash mismatch');
-      }
-      if (manifest.publisher !== publisher) throw new Error('local manifest publisher mismatch');
-      assertBundleWithinLimits(manifest);
-      if (!(await verifyManifest(manifest)).ok) throw new Error('local manifest signature invalid');
-      acceptManifest(manifest);
-      const chunks = manifest.chunks.map((/** @type {{hash:string}} */ chunk) => {
-        const bytes = node.content.getChunk(chunk.hash);
-        return bytes instanceof Uint8Array ? new Uint8Array(bytes) : null;
-      });
-      for (const [index, chunk] of chunks.entries()) {
-        if (!(chunk instanceof Uint8Array)) throw new Error('local bundle chunk unavailable');
-        // assertBundleWithinLimits checked sizes; the generic content store
-        // intentionally models only the hash used by its serving firewall.
-        const committed = /** @type {{hash:string,size:number}} */ (manifest.chunks[index]);
-        if (chunk.byteLength !== committed.size || await sha256ChunkHex(chunk) !== committed.hash) {
-          throw new Error('local bundle chunk verification failed');
+    /** @type {Array<{release:()=>void}>} */
+    const leases = [];
+    const traversal = dial?.createTraversal?.({signal:callerSignal});
+    try {
+      callerSignal?.throwIfAborted();
+      /** @param {string} did */
+      const channelFor = (did) => isBlocked(did) ? null : node.mesh.contentChannel(did);
+      const acceptManifest = (/** @type {any} */ manifest) => {
+        if (expectedRuntime) assertAppRuntimeAgreement(expectedRuntime.value, manifest.meta?.runtime);
+        assertAppRuntime(manifest.meta?.runtime);
+      };
+      /** @type {string | null | undefined} */
+      let publisher = null;
+      let localHash = null;
+      try { ({ did: publisher, hash: localHash } = parsePeerdUri(uri)); } catch { /* malformed uri → skip the fast path */ }
+      if (publisher && isBlocked(publisher)) throw new Error('publisher-user-blocked');
+      // why: a seeder can be the only remaining provider of another author's
+      // App. Read its explicitly announced bytes without a mesh channel to self,
+      // preserving the original signer and verifying the same addressed content.
+      if (publisher && localHash && node.content.isAnnounced(localHash)) {
+        const manifest = structuredClone(node.content.getManifest(localHash));
+        if (!manifest || await manifestHash(manifest) !== localHash) {
+          throw new Error('local manifest hash mismatch');
         }
+        if (manifest.publisher !== publisher) throw new Error('local manifest publisher mismatch');
+        assertBundleWithinLimits(manifest);
+        if (!(await verifyManifest(manifest)).ok) throw new Error('local manifest signature invalid');
+        acceptManifest(manifest);
+        const chunks = manifest.chunks.map((/** @type {{hash:string}} */ chunk) => {
+          const bytes = node.content.getChunk(chunk.hash);
+          return bytes instanceof Uint8Array ? new Uint8Array(bytes) : null;
+        });
+        for (const [index, chunk] of chunks.entries()) {
+          if (!(chunk instanceof Uint8Array)) throw new Error('local bundle chunk unavailable');
+          // assertBundleWithinLimits checked sizes; the generic content store
+          // intentionally models only the hash used by its serving firewall.
+          const committed = /** @type {{hash:string,size:number}} */ (manifest.chunks[index]);
+          if (chunk.byteLength !== committed.size || await sha256ChunkHex(chunk) !== committed.hash) {
+            throw new Error('local bundle chunk verification failed');
+          }
+        }
+        const payload = concat(.../** @type {Uint8Array[]} */ (chunks));
+        assertBundlePayloadWithinLimits(payload, maxBundleBytes);
+        if (payload.byteLength !== manifest.size) throw new Error('local bundle size mismatch');
+        if (manifest.v === 2 && await sha256ChunkHex(payload) !== manifest.bundle.compressedHash) {
+          throw new Error('local compressed bundle hash mismatch');
+        }
+        return { manifest, payload, providers: [identity.did], verifiedContributors: [] };
       }
-      const payload = concat(.../** @type {Uint8Array[]} */ (chunks));
-      assertBundlePayloadWithinLimits(payload, maxBundleBytes);
-      if (payload.byteLength !== manifest.size) throw new Error('local bundle size mismatch');
-      if (manifest.v === 2 && await sha256ChunkHex(payload) !== manifest.bundle.compressedHash) {
-        throw new Error('local compressed bundle hash mismatch');
+      if (publisher === identity.did && (localRecoveryPending() || node.mesh.peers().length === 0)) {
+        // why: an install holds the publication lane needed by local reseeding.
+        // Yield before network IO while recovery is pending, even if neighbors
+        // have already supplied a discovery card. After recovery, another seeder
+        // may still serve an older local version that is no longer announced.
+        throw Object.assign(new Error('local shared App bytes are not available yet'), {
+          code: 'dweb-local-content-unavailable',
+          performed: false,
+          outcomeKnown: true,
+          outcomeKind: 'pre-effect-failure',
+          retryable: true,
+        });
       }
-      return { manifest, payload, providers: [identity.did], verifiedContributors: [] };
-    }
-    if (publisher === identity.did && (localRecoveryPending() || node.mesh.peers().length === 0)) {
-      // why: an install holds the publication lane needed by local reseeding.
-      // Yield before network IO while recovery is pending, even if neighbors
-      // have already supplied a discovery card. After recovery, another seeder
-      // may still serve an older local version that is no longer announced.
-      throw Object.assign(new Error('local shared App bytes are not available yet'), {
-        code: 'dweb-local-content-unavailable',
-        performed: false,
-        outcomeKnown: true,
-        outcomeKind: 'pre-effect-failure',
-        retryable: true,
-      });
-    }
-    const linked = node.mesh.peers().map((/** @type {{ did: string }} */ p) => p.did);
+      const linked = node.mesh.peers().map((/** @type {{ did: string }} */ p) => p.did);
 
-    const isAllowed = (/** @type {string} */ did) => !closed && !isBlocked(did);
-    const preferred = [...new Set([...(publisher ? [publisher] : []), ...linked])];
-    if (linked.length) {
-      try { return await swarmFetch({ uri, providers: preferred, channelFor, timeoutMs, onProgress, signal: callerSignal, isAllowed, acceptManifest }); }
-      catch (e) { callerSignal?.throwIfAborted(); if (e instanceof AppRuntimeError) throw e; dlog('base', `linked seeder fetch failed (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}); trying DHT providers (bounded)`); }
-    }
-    // Retain the DHT responder as the signaling broker for each provider.
-    // Bound both lookup and dialing; unavailable referrals must not hang an install.
-    onProgress?.({ phase: 'locating' });
-    callerSignal?.throwIfAborted();
-    let lookupCompleted = false;
-    const contacts = await withNetworkBudget(async (signal) => {
-      const key = await contentKey(uri);
-      signal.throwIfAborted();
-      let queryFailed = false;
-      const found = await node.dht.findProviderContacts(key, { signal, onQueryFailure: () => { queryFailed = true; } });
-      signal.throwIfAborted();
-      lookupCompleted = !queryFailed;
-      return found;
-    }, undefined, callerSignal).catch(() => []);
-    callerSignal?.throwIfAborted();
-    const candidates = contacts.filter((/** @type {any} */ contact) => contact.did !== identity.did && !isBlocked(contact.did)).slice(0, 8);
-    let next = 0;
-    const connectProvider = async () => {
-      while (next < candidates.length && !closed && !callerSignal?.aborted) {
-        const contact = candidates[next++];
-        if (node.mesh.hasLink(contact.did) || !dial) continue;
-        onProgress?.({ phase: 'connecting' });
-        callerSignal?.throwIfAborted();
-        try { await withNetworkBudget((signal) => dial(contact, { signal }), undefined, callerSignal); }
-        catch { /* another provider may be reachable */ }
+      const isAllowed = (/** @type {string} */ did) => !closed && !isBlocked(did);
+      const preferred = [...new Set([...(publisher ? [publisher] : []), ...linked])];
+      if (linked.length) {
+        try { return await swarmFetch({ uri, providers: preferred, channelFor, timeoutMs, onProgress, signal: callerSignal, isAllowed, acceptManifest }); }
+        catch (e) { callerSignal?.throwIfAborted(); if (e instanceof AppRuntimeError) throw e; dlog('base', `linked seeder fetch failed (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}); trying DHT providers (bounded)`); }
       }
-    };
-    await Promise.all(Array.from({ length: Math.min(3, candidates.length) }, connectProvider));
-    callerSignal?.throwIfAborted();
-    if (closed) throw new Error('base network closed');
-    const provided = candidates.map((/** @type {any} */ contact) => contact.did);
-    const providers = [...new Set([...provided, ...linked])];
-    if (!providers.length && lookupCompleted && !contacts.length) throw new NoAppProviderError(uri);
-    if (!providers.length) throw new Error(`no peer is serving ${uri} right now — the peer may have dropped; try again`);
-    return swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress, signal: callerSignal, isAllowed, acceptManifest });
+      // Retain the DHT responder as the signaling broker for each provider.
+      // Bound both lookup and dialing; unavailable referrals must not hang an install.
+      onProgress?.({ phase: 'locating' });
+      callerSignal?.throwIfAborted();
+      let lookupCompleted = false;
+      const contacts = await withNetworkBudget(async (signal) => {
+        const key = await contentKey(uri);
+        signal.throwIfAborted();
+        let queryFailed = false;
+        const found = await node.dht.findProviderContacts(key, { signal, traversal, onQueryFailure: () => { queryFailed = true; } });
+        // A deadline ends exploration, not referrals already received. The
+        // caller's cancellation is checked below before any provider is dialed.
+        lookupCompleted = !queryFailed && !signal.aborted;
+        return found;
+      }, undefined, callerSignal).catch(() => []);
+      callerSignal?.throwIfAborted();
+      const candidates = contacts.filter((/** @type {any} */ contact) => contact.did !== identity.did && !isBlocked(contact.did)).slice(0, 8);
+      let next = 0;
+      const connectProvider = async () => {
+        while (next < candidates.length && !closed && !callerSignal?.aborted) {
+          const contact = candidates[next++];
+          if (node.mesh.hasLink(contact.did) || !dial) continue;
+          onProgress?.({ phase: 'connecting' });
+          callerSignal?.throwIfAborted();
+          try { await withNetworkBudget(async (signal) => {
+            const acquireContent = traversal?.acquireContent ?? dial.acquireContent;
+            if (acquireContent) {
+              // Dial deadline cleanup must not cancel an admitted transfer. The
+              // caller owns its lease until fetch completion/cancellation.
+              const lease = await acquireContent(contact, { signal, leaseSignal: callerSignal ?? null });
+              leases.push(lease);
+            } else await dial(contact, { signal });
+          }, undefined, callerSignal); }
+          catch { /* another provider may be reachable */ }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, candidates.length) }, connectProvider));
+      callerSignal?.throwIfAborted();
+      if (closed) throw new Error('base network closed');
+      const provided = candidates.map((/** @type {any} */ contact) => contact.did);
+      const providers = [...new Set([...provided, ...linked])];
+      if (!providers.length && lookupCompleted && !contacts.length) throw new NoAppProviderError(uri);
+      if (!providers.length) throw new Error(`no peer is serving ${uri} right now. The peer may have dropped; try again`);
+      return await swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress, signal: callerSignal, isAllowed, acceptManifest });
+    } finally { for (const lease of leases) lease.release(); traversal?.close(); }
   };
 
   /** @param {string} uri @param {{timeoutMs?:number,onProgress?:(p:any)=>void,signal?:AbortSignal,expectedRuntime?:{value:unknown}}} [options] */

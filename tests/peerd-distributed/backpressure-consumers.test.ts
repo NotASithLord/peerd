@@ -175,3 +175,33 @@ test('a blocked ping cannot delay healthy peers or accumulate duplicate liveness
     expect(fastSends).toBe(3);
   } finally { mesh.close(); slowRemote.close(); fastRemote.close(); }
 });
+
+test('cancelling a roster request withdraws its queued frame and preserves the peer link', async () => {
+  const identity = await generateIdentity(); const broker = await generateIdentity();
+  const governor = createOutgoingGovernor();
+  class StalledRosterChannel extends EventTarget {
+    readyState = 'open'; bufferedAmount = 1_000_000; bufferedAmountLowThreshold = 0;
+    sent: string[] = [];
+    send(encoded: string) { this.sent.push(encoded); }
+  }
+  const dc = new StalledRosterChannel();
+  const writer = createOutgoingWriter({ dc: dc as any, governor });
+  let queued!: () => void;
+  const started = new Promise<void>(resolve => { queued = resolve; });
+  const channel = createBufferedChannel({ close: writer.close, send: (message, options) => {
+    const sent = writer.send(message, options); queued(); return sent;
+  } });
+  const mesh = createRoomMesh({ roomId: 'roster-cancel', identity });
+  mesh.addLink(channel, broker.did);
+  const controller = new AbortController();
+  const request = mesh.requestRoster(broker.did, { signal: controller.signal }).catch(error => error);
+  try {
+    await started;
+    expect(governor.stats().frames).toBe(1);
+    controller.abort(); await request; await flush();
+    expect(governor.stats().frames).toBe(0);
+    dc.bufferedAmount = 0; dc.dispatchEvent(new Event('bufferedamountlow'));
+    expect(dc.sent).toHaveLength(0);
+    expect(mesh.hasLink(broker.did)).toBe(true);
+  } finally { mesh.close(); writer.close(); }
+});

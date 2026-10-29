@@ -23,11 +23,17 @@
 import { openRendezvous, DEFAULT_SIGNALING } from './signaling-client.js';
 import { createWebrtcTransport } from './transports/webrtc.js';
 import { createRoomMesh } from './mesh.js';
-import { createSession } from './session.js';
-import { TOPIC_SYNC_WINDOW } from './capabilities.js';
+import { createSession, ADMISSION_READY } from './session.js';
+import { createRoutingPathHolds } from './routing-path-holds.js';
+import { createRoutingRpc } from './routing-rpc.js';
+import { createRoutingPathSearch } from './routing-path-search.js';
+import { createRoutingWitnesses } from './routing-witness.js';
+import { TOPIC_SYNC_WINDOW, CONTENT_ONLY, LOOKUP_ONLY, ROUTING_WITNESS } from './capabilities.js';
 import { connectionPath } from './ice.js';
 import { AdmissionError, roomAdmission, MAX_ADMISSION_CANDIDATES } from './admission.js';
 import { createSignalingBuffer } from './signaling-buffer.js';
+import { createContentDials } from './content-dials.js';
+import { DIRECTORY_INTRODUCTIONS } from './directory-introductions.js';
 import { dlog, dwarn } from '../log.js';
 import { SPARSE_PUBLIC_PROFILE, sparsePublicProfile } from './rendezvous-profile.js';
 import { createNeighborMaintenance, NEIGHBOR_CANDIDATES } from './neighbors.js';
@@ -57,6 +63,7 @@ const newId = () =>
  *   now?: () => number,
  *   audit?: import('./mesh.js').AuditFn,
  *   budget?: number,
+ *   transferSlots?: number,
  *   caps?: string[],
  *   kind?: string,
  *   profile?: string,
@@ -87,13 +94,17 @@ export const joinRoom = async ({
   kind: peerKind,             // 'website' = observe-only visitor (own rendezvous cap pool); omitted/default = extension
   awaitInitialRendezvous = true,
   admission = roomAdmission,
-  isBlocked = () => false, admitPeer = null, onMesh = null,
+  isBlocked = () => false, admitPeer = null, onMesh = null, transferSlots = 0,
 } = /** @type {{ roomId: string, identity: import('./mesh.js').Identity }} */ ({})) => {
   // why: protocol support is mutual and fixed for this room lifetime; a
   // caller-owned capabilities array must not change negotiation after joining.
-  const sessionCaps = [...caps];
+  const sessionCaps = [...new Set([...caps,ADMISSION_READY,ROUTING_WITNESS])];
   const t = transport ?? createWebrtcTransport({ iceServers, RTCPeerConnection });
-  const mesh = createRoomMesh({ roomId, identity, now, budget, audit, isBlocked });
+  const mesh = createRoomMesh({ roomId, identity, now, budget, audit, isBlocked, transferSlots, timers });
+  const routingHolds=createRoutingPathHolds({identity,roomId,holdRoutingLink:mesh.holdRoutingLink,now});
+  const routingRpc=createRoutingRpc({identity,roomId,mesh,holds:routingHolds,now,timers});
+  const routingSearch=createRoutingPathSearch({selfDid:identity.did,readNeighbors:routingRpc.readNeighbors,now,timers});
+  const routingWitnesses=createRoutingWitnesses({identity,roomId,acquireHop:routingRpc.acquireHop,now,timers});
   const releaseMesh = onMesh?.(mesh);
   /** @type {Set<(arg: { rendezvous: string }) => void>} */
   const statusCbs = new Set();
@@ -104,6 +115,7 @@ export const joinRoom = async ({
   const lifetime = new AbortController();
   const sparseRequested = peerKind !== 'website' && !!sparsePublicProfile(roomId, profile);
   const attempts = admission.createScope();
+  let temporaryAttempts = 0;
   /** @type {Set<string>} */
   const repairTargets = new Set();
 
@@ -124,17 +136,45 @@ export const joinRoom = async ({
    * @param {string | null} [via]
    * @param {AbortSignal} [signal]
    * @param {boolean} [locallySelected]
+   * @param {'routing' | 'content' | 'lookup' | 'directory'} [purpose]
    */
-  const admit = async (channel, expectedDid = null, via = null, signal, locallySelected = false) => {
+  const admit = async (channel, expectedDid = null, via = null, signal, locallySelected = false, purpose = 'routing') => {
     if (left || signal?.aborted || channel.isClosed?.()) { channel.close(); throw new Error('room dial cancelled or channel closed'); }
-    const { remoteDid, remoteCaps } = await createSession({ channel, identity, caps: sessionCaps, now, signal, timers });
+    const selectedCaps = purpose === 'content' ? ['content', CONTENT_ONLY] : purpose === 'lookup' ? [LOOKUP_ONLY] : purpose === 'directory' ? [DIRECTORY_INTRODUCTIONS] : sessionCaps;
+    /** @type {ReturnType<typeof mesh.reserveAdmission>|undefined} */let reservation;
+    /** @type {Awaited<ReturnType<typeof routingWitnesses.acquire>>|undefined} */let witness;
+    let admissionChecked=false;
+    try {
+    const { remoteDid, remoteCaps } = await createSession({ channel, identity, caps: selectedCaps, now, signal, timers,
+      prepareAdmission:async did=>{
+        if(purpose!=='routing')return;
+        if(expectedDid&&did!==expectedDid)throw new Error('peer authenticated as a different did than expected');
+        if((admitPeer&&!await admitPeer(did))||isBlocked(did))throw new Error('peer-user-blocked');
+        if(left||signal?.aborted||channel.isClosed?.())throw new Error('room admission retired');
+        const ticket=mesh.reserveAdmission(did,{locallySelected,signal,requireWitness:true});
+        reservation=ticket;admissionChecked=true;return ticket;
+      },
+      commitAdmission:async({remoteDid:peerDid,localVictim,remoteVictim,signal:handshakeSignal})=>{
+        if(!localVictim)return null;
+        if(!reservation || reservation.victim!==localVictim)throw new Error('room rotation plan retired');
+        const owner=AbortSignal.any([reservation.signal,handshakeSignal,lifetime.signal]);
+        const cuts=[[identity.did,localVictim],...(remoteVictim?[[peerDid,remoteVictim]]:[])];
+        const path=await routingSearch.find({target:localVictim,cuts,signal:owner});
+        if(!path)throw new Error('room rotation lacks an alternate path');
+        witness=await routingWitnesses.acquire({candidate:[identity.did,peerDid],cuts,path:[...path],signal:owner});
+        if(!reservation.bindWitness(witness)){witness.release();throw new Error('room rotation witness retired');}
+        return witness;
+      }});
+    // why: the relay hint chooses resource admission, but only signed HELLO
+    // binds both endpoints to content-only authority. Legacy peers fail closed.
+    if (remoteCaps.includes(CONTENT_ONLY) !== (purpose === 'content') || remoteCaps.includes(LOOKUP_ONLY) !== (purpose === 'lookup') || remoteCaps.includes(DIRECTORY_INTRODUCTIONS) !== (purpose === 'directory')) { channel.close(); throw new Error('peer connection purpose mismatch'); }
     if (left || signal?.aborted || channel.isClosed?.()) { channel.close(); throw new Error('room dial cancelled or channel closed'); }
     if (expectedDid && remoteDid !== expectedDid) {
       channel.close();
       audit?.('peer_did_mismatch', { expected: expectedDid, got: remoteDid });
       throw new Error('peer authenticated as a different did than expected');
     }
-    if ((admitPeer && !await admitPeer(remoteDid)) || isBlocked(remoteDid)) {
+    if ((!admissionChecked && admitPeer && !await admitPeer(remoteDid)) || isBlocked(remoteDid)) {
       channel.close(); throw new Error('peer-user-blocked');
     }
     if (left || signal?.aborted || channel.isClosed?.() || isBlocked(remoteDid)) {
@@ -145,7 +185,7 @@ export const joinRoom = async ({
       channel.close();
       return remoteDid;
     }
-    if (!mesh.addLink(channel, remoteDid, { caps: remoteCaps.filter((cap) => sessionCaps.includes(cap)) }, { locallySelected })) throw new Error('room peer admission refused');
+    if (!mesh.addLink(channel, remoteDid, { caps: remoteCaps.filter((cap) => selectedCaps.includes(cap)) }, { locallySelected, purpose, reservation, allowRotation:!!reservation })) throw new Error('room peer admission refused');
     repairTargets.delete(remoteDid);
     if (via) mesh.tagLink(remoteDid, { via });
     dlog('room', `✅ CONNECTED to peer ${short(remoteDid)} — data channel open, in the mesh`);
@@ -158,6 +198,7 @@ export const joinRoom = async ({
       });
     }
     return remoteDid;
+    } finally {reservation?.release();witness?.release();}
   };
 
   // ---- shared trickle signaling ------------------------------------------
@@ -169,10 +210,16 @@ export const joinRoom = async ({
    * routers: Map<string, (payload: any) => void>, routeKey: string,
    * send: (payload: any, signal: AbortSignal) => void | Promise<void>,
    * connect: (signaling: any, signal: AbortSignal) => Promise<any>,
-   * expectedDid?: string | null, via: string, signal?: AbortSignal }} opts */
-  const attempt = ({ key, direction, routers, routeKey, send, connect, expectedDid = null, via, signal }) =>
+   * expectedDid?: string | null, via: string, signal?: AbortSignal, purpose?: 'routing' | 'content' | 'lookup' | 'directory' }} opts */
+  const attempt = ({ key, direction, routers, routeKey, send, connect, expectedDid = null, via, signal, purpose = 'routing' }) =>
     attempts.run(key, direction, async (reservationSignal) => {
       if (expectedDid && isBlocked(expectedDid)) throw new Error('peer-user-blocked');
+      // why: reserve before constructing ICE, including pending authentication.
+      // The existing global admission governor still bounds all handshakes.
+      if (purpose !== 'routing') {
+        if (temporaryAttempts + mesh.stats().transferDegree >= transferSlots) throw new AdmissionError('content capacity');
+        temporaryAttempts++;
+      }
       const ac = new AbortController();
       const cancel = () => {
         pipe.close();
@@ -195,7 +242,7 @@ export const joinRoom = async ({
         const channel = await connect(pipe.signaling, ac.signal);
         opened = channel;
         if (ac.signal.aborted) { channel.close(); throw new AdmissionError('cancelled'); }
-        const did = await admit(channel, expectedDid, via, ac.signal, direction === 'outbound');
+        const did = await admit(channel, expectedDid, via, ac.signal, direction === 'outbound', purpose);
         admitted = true;
         return did;
       };
@@ -205,6 +252,7 @@ export const joinRoom = async ({
         if (routers.get(routeKey) === pipe.route) routers.delete(routeKey);
         reservationSignal.removeEventListener('abort', cancel);
         ac.abort();
+        if (purpose !== 'routing') temporaryAttempts--;
       }
     }, signal);
 
@@ -359,41 +407,44 @@ export const joinRoom = async ({
     const route = relayRouters.get(routeKey);
     if (route) { if (kind !== 'offer') route(payload); return; }
     if (kind !== 'offer' || payload?.type !== 'offer' || typeof payload.sdp !== 'string' || payload.sdp.length > 128 * 1024 || new TextEncoder().encode(payload.sdp).byteLength > 128 * 1024) return;
+    const purpose = payload.purpose ?? 'routing';
+    if (!['routing', 'content', 'lookup', 'directory'].includes(purpose) || (purpose !== 'routing' && !transferSlots)) return;
     // why: if both ends dial, retaining whichever channel authenticates first
     // can make each close the other's survivor. The lower DID owns the dial;
     // the higher DID cancels its outgoing attempt before accepting that offer.
     /** @type {'inbound'|'outbound'} */
     let direction = 'inbound';
-    if (attempts.pending(`did/${env.from}`)) {
+    if (attempts.pending(`${purpose}/did/${env.from}`)) {
       if (identity.did < env.from) return;
-      attempts.supersede(`did/${env.from}`);
+      attempts.supersede(`${purpose}/did/${env.from}`);
       // This is still locally requested exploration: swapping wire roles must
       // not lose its reserved outbound capacity to an inbound flood.
       direction = 'outbound';
     }
     try {
-      await attempt({ key: `incoming-did/${env.from}`, direction, routers: relayRouters, routeKey,
-        expectedDid: env.from, via,
+      await attempt({ key: `${purpose}/incoming-did/${env.from}`, direction, routers: relayRouters, routeKey,
+        expectedDid: env.from, via, purpose,
         send: (p, signal) => mesh.relay(via, env.from, p.type === 'answer' ? 'answer' : 'ice', sid, p, { signal }),
         connect: async (signaling, signal) => (await t.accept({ offer: { type: 'offer', sdp: payload.sdp }, iceServers, signaling, signal })).channel });
     } catch (e) { logConnectFail('relay accept', env.from, e); }
   });
 
-  /** @param {string} via @param {string} targetDid @param {{signal?: AbortSignal}} [opts] */
-  const dialViaRelay = async (via, targetDid, { signal } = {}) => {
+  /** @param {string} via @param {string} targetDid @param {{signal?: AbortSignal, purpose?: 'routing' | 'content' | 'lookup' | 'directory'}} [opts] */
+  const dialViaRelay = async (via, targetDid, { signal, purpose = 'routing' } = {}) => {
+    if (purpose !== 'routing' && !transferSlots) throw new AdmissionError('content links disabled');
     if (left || signal?.aborted) throw new AdmissionError('cancelled');
     if (isBlocked(targetDid)) throw new Error('peer-user-blocked');
-    if (mesh.hasLink(targetDid)) return;
+    if (purpose === 'content' ? mesh.hasContentLink(targetDid) : purpose === 'lookup' ? mesh.hasLookupLink(targetDid) : purpose === 'directory' ? mesh.hasDirectoryLink(targetDid) : mesh.hasLink(targetDid)) return;
     if (typeof targetDid !== 'string' || targetDid.length > 512) throw new AdmissionError('invalid candidate');
-    const incoming = attempts.pending(`incoming-did/${targetDid}`);
+    const incoming = attempts.pending(`${purpose}/incoming-did/${targetDid}`);
     if (incoming) throw new AdmissionError('duplicate');
     const sid = newId();
-    try { await attempt({ key: `did/${targetDid}`, direction: 'outbound', routers: relayRouters,
-      routeKey: `${targetDid}/${sid}`, expectedDid: targetDid, via, signal,
-      send: (p, attemptSignal) => mesh.relay(via, targetDid, p.type === 'offer' ? 'offer' : 'ice', sid, p, { signal: attemptSignal }),
+    try { await attempt({ key: `${purpose}/did/${targetDid}`, direction: 'outbound', routers: relayRouters,
+      routeKey: `${targetDid}/${sid}`, expectedDid: targetDid, via, signal, purpose,
+      send: (p, attemptSignal) => mesh.relay(via, targetDid, p.type === 'offer' ? 'offer' : 'ice', sid, p.type === 'offer' && purpose !== 'routing' ? { ...p, purpose } : p, { signal: attemptSignal }),
       connect: (signaling, attemptSignal) => t.connect({ did: targetDid }, { iceServers, signaling, signal: attemptSignal }) }); }
     catch (error) {
-      const replacement = attempts.pending(`incoming-did/${targetDid}`);
+      const replacement = attempts.pending(`${purpose}/incoming-did/${targetDid}`);
       if (error instanceof AdmissionError && error.reason === 'superseded' && replacement && !left && !signal?.aborted) {
         await waitForAdmission(replacement, signal);
         return;
@@ -401,6 +452,31 @@ export const joinRoom = async ({
       throw error;
     }
   };
+
+  const contentDials = createContentDials({ limit: transferSlots,
+    has: mesh.hasContentLink, acquire: mesh.acquireContentLink,
+    connect: async (via, did, signal) => {
+      await dialViaRelay(via, did, { signal, purpose: 'content' });
+      // Own even a late success so abandoned attempts cannot leak a carrier.
+      return mesh.acquireContentLink(did);
+    },
+  });
+
+  const lookupDials = createContentDials({ limit: transferSlots,
+    has: mesh.hasLookupLink, acquire: mesh.acquireLookupLink,
+    connect: async (via, did, signal) => {
+      await dialViaRelay(via, did, { signal, purpose: 'lookup' });
+      return mesh.acquireLookupLink(did);
+    },
+  });
+
+  const directoryDials = createContentDials({limit:transferSlots,
+    has:mesh.hasDirectoryLink,acquire:mesh.acquireDirectoryLink,
+    connect:async(via,did,signal)=>{
+      await dialViaRelay(via,did,{signal,purpose:'directory'});
+      return mesh.acquireDirectoryLink(did);
+    },
+  });
 
   // Crawl the room through one connected member: their roster, then a
   // relayed dial to everyone we don't hold yet.
@@ -577,8 +653,13 @@ export const joinRoom = async ({
     // (`brokerDid` forwards the signaling). The DHT dialer uses this to connect
     // to a lookup contact it doesn't link yet. Resolves once linked, throws on
     // timeout. One hop only — `brokerDid` must be directly linked.
-    /** @param {string} brokerDid @param {string} targetDid @param {{signal?: AbortSignal}} [opts] */
+    /** @param {string} brokerDid @param {string} targetDid @param {{signal?: AbortSignal, purpose?: 'routing' | 'content' | 'lookup' | 'directory'}} [opts] */
     dialVia: (brokerDid, targetDid, opts) => dialViaRelay(brokerDid, targetDid, opts),
+    contentTransfersEnabled: transferSlots > 0,
+    temporaryCapacity: transferSlots,
+    acquireContentVia: contentDials.open,
+    acquireLookupVia: lookupDials.open,
+    acquireDirectoryVia: directoryDials.open,
     leave() {
       if (left) return;
       left = true;
@@ -586,9 +667,16 @@ export const joinRoom = async ({
       stopRepairObserver();
       stopOfflineRepair();
       lifetime.abort();
+      contentDials.stop();
+      lookupDials.stop();
+      directoryDials.stop();
       attempts.close();
       timers.clearTimeout(reconnectTimer ?? undefined);
       try { session?.close(); } catch { /* already closed */ }
+      routingSearch.close();
+      routingWitnesses.close();
+      routingRpc.close();
+      routingHolds.close();
       mesh.close();
     },
   });

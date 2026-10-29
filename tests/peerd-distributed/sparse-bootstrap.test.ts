@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, test, spyOn } from 'bun:test';
 import { signalingStep, initialSignalingState } from '../../extension/peerd-distributed/transport/signaling.js';
 import { SPARSE_PUBLIC_PROFILE, PUBLIC_ROOM } from '../../extension/peerd-distributed/transport/rendezvous-profile.js';
 import { joinRoom } from '../../extension/peerd-distributed/transport/rooms.js';
@@ -99,6 +99,17 @@ const fixture = () => {
     admissionChanged = Promise.withResolvers<void>();
     previous.resolve();
   };
+  // Native crypto is the only external asynchronous work in this memory-wire
+  // fixture. Observe completion, without replacing results, before advancing
+  // protocol timers: an admission may itself be awaiting a paced control frame.
+  let pendingCrypto=0;
+  const cryptoSpies=(['sign','verify','digest','importKey','exportKey','generateKey'] as const).map(name=>{
+    const original=(crypto.subtle[name] as (...args:any[])=>Promise<any>).bind(crypto.subtle);
+    return spyOn(crypto.subtle,name).mockImplementation((...args:any[])=>{
+      pendingCrypto++;
+      return original(...args).finally(()=>{pendingCrypto--;notifyAdmissionChange();});
+    });
+  });
   const trackAdmissions = (governor: ReturnType<typeof createAdmissionGovernor>) => {
     const createScope = governor.createScope.bind(governor);
     governor.createScope = () => {
@@ -166,6 +177,15 @@ const fixture = () => {
         if (actual.length !== stats.length) throw new Error('fixture admission tracking drift');
         break;
       }
+      // A quiescent admission can now wait on protocol timers (paced path
+      // RPC or its deadline). Leave those owners live; advance() alone moves
+      // time to its requested boundary. Draining all future admissions here
+      // would recursively run maintenance forever and jump past that boundary.
+      if(!pendingCrypto && tasks.size){
+        const actual=governors.map(g=>g.stats()).filter(s=>s.active||s.queued);
+        if(actual.length!==stats.length)throw new Error('fixture admission tracking drift');
+        break;
+      }
       const remaining = deadlineAt - Date.now();
       if (remaining <= 0) throw new Error('fixture admission did not settle');
       await deadline(changed, `admission did not settle ${JSON.stringify(stats)} pending:${JSON.stringify([...pending.keys()].map(key => ({ key, ...offerTrace.get(key) })))}`, remaining);
@@ -201,6 +221,7 @@ const fixture = () => {
         teardown = { carriers: liveCarriers, pending: pending.size, timers: tasks.size, sockets: sockets.size,
           admission: governors.map(governor => governor.stats()) };
         for (const channel of carriers) channel.close();
+        for(const spy of cryptoSpies)spy.mockRestore();
       }
     } };
 };

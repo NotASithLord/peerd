@@ -232,3 +232,25 @@ test('retirement timing never crosses a mesh lifetime', async () => {
     expect(fresh.add('newcomer')).toBe(false);
   } finally { fresh.close(); }
 });
+
+test('fresh inbound neighbors do not veto rotation of an eligible old local exploration edge',async()=>{
+ const f=await fixture(true,2);
+ try{
+  expect(f.add('old-outbound',true)).toBe(true);f.advance(NEIGHBOR_GRACE_MS);
+  expect(f.add('fresh-inbound')).toBe(true);
+  expect(f.add('repair-outbound',true)).toBe(true);
+  expect(f.mesh.hasLink('old-outbound')).toBe(false);
+  expect(f.mesh.hasLink('fresh-inbound')).toBe(true);
+  expect(f.mesh.peers()).toHaveLength(2);
+  expect(f.add('rate-limited-next',true)).toBe(false);
+ }finally{f.close();}
+});
+test('local exploration still prefers an eligible inbound edge over an older outbound edge',async()=>{
+ const f=await fixture(true,2);
+ try{
+  expect(f.add('old-outbound',true)).toBe(true);f.advance(100);
+  expect(f.add('inbound')).toBe(true);f.advance(NEIGHBOR_GRACE_MS);
+  expect(f.add('repair-outbound',true)).toBe(true);
+  expect(f.mesh.hasLink('old-outbound')).toBe(true);expect(f.mesh.hasLink('inbound')).toBe(false);
+ }finally{f.close();}
+});
