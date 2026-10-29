@@ -11,6 +11,7 @@ import { createSignalingServer } from '../../signaling-node/bun-server.mjs';
 import { validateHosts, validateMesh, pathsReady, repairableEdge } from './dweb-cluster-checks.mjs';
 import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
 import { sshArguments } from './dweb-cluster-ssh.mjs';
+import {validateCapacityHosts, capacityTopology, capacityPathsReady} from './dweb-capacity-evidence.mjs';
 import { soakOptions, runSoak } from './dweb-cluster-soak.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -18,6 +19,8 @@ const configPath = process.argv[2];
 if (!configPath || configPath.startsWith('--')) throw new Error('Pass a private cluster JSON config; see scripts/cdp/CLUSTER.md');
 const config = JSON.parse(readFileSync(configPath, 'utf8'));
 const local = process.argv.includes('--local');
+const capacity = process.argv.includes('--capacity');
+assert(!(local && capacity), 'Capacity placement cannot be a local rehearsal');
 const transferSlots = config.transferSlots ?? 0;
 assert(Number.isSafeInteger(transferSlots) && transferSlots >= 0 && transferSlots < (config.budget ?? 16), 'invalid transfer reserve');
 const soak = soakOptions(config.soak);
@@ -25,7 +28,7 @@ const output = resolve(config.output ?? join(root, 'scripts/cdp/artifacts/cluste
 // why: remote agreement alone could certify identical but stale staged trees.
 const expectedSource = sourceFingerprint(root);
 const coordinator = { ...gitMetadata(root), source: expectedSource, runtime: Bun.version };
-const report = { ok: false, lane: local ? 'local-rehearsal' : 'physical-macs',
+const report = { ok: false, lane: capacity ? 'shared-host-capacity-preflight' : local ? 'local-rehearsal' : 'physical-macs',
   startedAt: new Date().toISOString(), coordinator,
   hosts: [], checks: [], skipped: [], capacity: {total: config.budget ?? 16, transferSlots, routing: (config.budget ?? 16) - transferSlots} };
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
@@ -113,13 +116,24 @@ try {
   assert(Array.isArray(config.hosts) && config.hosts.length >= 2, 'Configure at least two hosts');
   assert.equal(new Set(config.hosts.map(host => host.name)).size, config.hosts.length, 'Host names must be unique');
   const topology = config.topology ?? 'all-pairs';
+  if (capacity) {
+    assert.equal(topology, 'connected', 'Capacity preflight requires sparse connected topology');
+    assert.equal(transferSlots, 0, 'Capacity baseline keeps temporary reserve zero');
+    assert(config.hosts.length > (config.budget ?? 16), 'Capacity membership must exceed degree budget');
+    report.capacityQualification = {complete:false, missing:['paired degree comparisons', 'whole-browser resource metrics', 'adversarial workloads', 'sustained finalist and overnight runs']};
+  }
   assert(['all-pairs', 'connected'].includes(topology), 'topology must be all-pairs or connected');
   signaling = createSignalingServer({ hostname: '127.0.0.1', port: 0, log: () => {} });
   for (const target of config.hosts) startWorker(target, signaling.server.port);
   report.hosts = await Promise.all(workers.map(async worker => ({ name: worker.target.name,
     ...await worker.call('launch', { chrome: worker.target.chrome, mdns: config.mdns !== false,
       allInterfaces: config.allInterfaces === true }) })));
-  await check(local ? 'matching source and browser (rehearsal)' : 'identical source on distinct Macs', async () => { validateHosts(report.hosts, { local, expectedSource, expectedRuntime: coordinator.runtime }); return report.hosts; });
+  await check(capacity ? 'shared-host browser placement and identical source' : local ? 'matching source and browser (rehearsal)' : 'identical source on distinct Macs', async () => {
+    const options = {local, expectedSource, expectedRuntime:coordinator.runtime};
+    if (capacity) report.placement = validateCapacityHosts(report.hosts, options);
+    else validateHosts(report.hosts, options);
+    return report.hosts;
+  });
   const roomId = config.roomId ?? `cluster-${crypto.randomUUID()}`;
   assert(typeof roomId === 'string' && roomId.length > 0, 'roomId must be a non-empty string');
   const start = (worker, id = roomId) => worker.call('start', { roomId: id, signaling: worker.signaling,
@@ -130,7 +144,11 @@ try {
   const reports = () => Promise.all(workers.map(worker => worker.call('report')));
   let adjacency;
   const meshReady = () => waitUntil(reports, states => {
-    try { adjacency = validateMesh(states, dids, { topology }); return true; }
+    try {
+      adjacency = validateMesh(states, dids, { topology });
+      if (capacity) report.placement = capacityTopology(report.hosts, states, dids, config.budget ?? 16);
+      return true;
+    }
     catch { return false; }
   }, 'authenticated mesh').then(states => ({ states, adjacency }));
   await check(`authenticated ${topology} mesh`, meshReady);
@@ -142,7 +160,7 @@ try {
       let expected;
       try { expected = validateMesh(states, dids, { topology }); } catch { return null; }
       return { values: await Promise.all(workers.map(worker => worker.call('paths'))), expected };
-    }, value => value && pathsReady(value.values, value.expected, { local }), 'selected direct UDP paths');
+    }, value => value && (capacity ? capacityPathsReady(value.values, value.expected, report.hosts, dids) : pathsReady(value.values, value.expected, { local })), 'selected direct UDP paths');
     adjacency = evidence.expected;
     return evidence.values;
   };

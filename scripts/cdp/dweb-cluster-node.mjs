@@ -132,7 +132,8 @@ const launch = async ({ chrome, mdns = true, allInterfaces = false }) => {
     if (Date.now() >= deadline) throw new Error(`Fixture readiness deadline: ${errors.join('')}`);
     await sleep(100);
   }
-  return { ...host, browser: version.Browser, mdns, allInterfaces };
+  return { ...host, browser: version.Browser, mdns, allInterfaces, browserPid: browser.pid,
+    profileFingerprint: createHash('sha256').update(profile).digest('hex') };
 };
 
 const lines = createInterface({ input: process.stdin });
