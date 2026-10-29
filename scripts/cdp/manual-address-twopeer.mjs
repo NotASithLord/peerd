@@ -195,7 +195,28 @@ try {
   evidence.receiverDid = receiver.did;
 
   const created = await bounded('publisher tab', async () => (await fetch(`http://127.0.0.1:${ctx.port}/json/new?about:blank`, { method: 'PUT' })).json());
-  publisher = await bounded('attach publisher', () => attach(created.webSocketDebuggerUrl));
+  // why: room admission logs timeout progress at debug level, which the
+  // general page-error collector omits. Preserve only fixed handshake flags;
+  // never retain the log text, peer label, SDP, or remote-authored fields.
+  const helloFailures = evidence.publisherHelloFailures = [];
+  publisher = await bounded('attach publisher', () => attach(created.webSocketDebuggerUrl, event => {
+    if (event.method !== 'Runtime.consoleAPICalled') return;
+    for (const argument of event.params?.args ?? []) {
+      const value = argument.value;
+      if (typeof value !== 'string' || value.length > 4096 || !value.includes('failed: peer HELLO')) continue;
+      const start = value.indexOf('{');
+      if (start < 0) continue;
+      try {
+        const raw = JSON.parse(value.slice(start));
+        const flags = {};
+        for (const key of ['helloSent', 'helloReceived', 'proofSent', 'proofReceived', 'verifyingHello', 'verifyingProof']) {
+          if (typeof raw[key] === 'boolean') flags[key] = raw[key];
+        }
+        helloFailures.push(flags);
+        if (helloFailures.length > 16) helloFailures.shift();
+      } catch { /* non-structured logs are not retained */ }
+    }
+  }));
   await bounded('publisher domains', async () => { await publisher.send('Runtime.enable'); await publisher.send('Page.enable'); await publisher.send('Page.navigate', { url: `http://127.0.0.1:${httpPort}/` }); });
   await until('publisher document', () => evalIn(publisher, `location.origin === 'http://127.0.0.1:${httpPort}' && document.readyState === 'complete'`));
   const published = await bounded('publish real signed bundle', () => evalIn(publisher, `(async () => {

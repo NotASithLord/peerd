@@ -320,7 +320,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: dweb two-peer (headless WebRTC)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Harden runner (audit egress and source writes)
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
@@ -433,7 +433,7 @@ jobs:
         run: |
           failed=0
           mkdir -p artifacts/random-js-trials
-          for trial in $(seq 1 10); do
+          for trial in $(seq 1 50); do
             destination="artifacts/random-js-trials/trial-$trial"
             mkdir -p "$destination"
             if bun scripts/cdp/manual-address-twopeer.mjs > "$destination/run.log" 2>&1; then
