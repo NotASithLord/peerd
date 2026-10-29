@@ -57,3 +57,29 @@ describe('explicit shared-host capacity evidence', () => {
     expect(capacityPathsReady(paths.slice(1),adjacency,hosts,dids)).toBe(false);
   });
 });
+
+test('local peer-reflexive paths require fresh OS ownership and reciprocal selected-pair evidence', async () => {
+  const {interfaceProof} = await import('../../scripts/cdp/dweb-address-proof.mjs');
+  const {validateOwnedPeerReflexivePath} = await import('../../scripts/cdp/dweb-capacity-evidence.mjs');
+  const interfaces = {en0:[{address:'192.0.2.1',internal:false}]};
+  const proof=interfaceProof('192.0.2.1',interfaces,hosts[0]!.machine,1000);
+  const a:any={...path('c','192.0.2.1','192.0.2.2'),pair:{timestamp:1000},interfaceProof:proof};
+  a.local.type='prflx';a.local.port=12000;a.remote.port=13000;
+  const b:any=path('a','192.0.2.2','');b.local.port=13000;b.remote.port=12000;b.remote.type='prflx';
+  expect(()=>validateOwnedPeerReflexivePath(a,b,hosts[0],hosts[2])).not.toThrow();
+  const {validatePaths}=await import('../../scripts/cdp/dweb-cluster-checks.mjs');
+  expect(()=>validatePaths([a],['c'])).toThrow('local host');
+  for(const mutate of [
+    (x:any)=>{x.interfaceProof=null;},
+    (x:any)=>{x.interfaceProof.machine=hosts[2]!.machine;},
+    (x:any)=>{x.interfaceProof.addressHash='0'.repeat(64);},
+    (x:any)=>{x.interfaceProof.collectedAt=10000;},
+    (x:any)=>{x.remote.port++;},
+    (x:any)=>{x.remote.type='relay';},
+    (x:any)=>{x.local.address='127.0.0.1';},
+    (x:any)=>{x.bytesReceived=0;},
+  ]){const invalid=structuredClone(a);mutate(invalid);expect(()=>validateOwnedPeerReflexivePath(invalid,b,hosts[0],hosts[2])).toThrow();}
+  expect(()=>validateOwnedPeerReflexivePath(a,null,hosts[0],hosts[2])).toThrow();
+  expect(interfaceProof('192.0.2.9',interfaces,hosts[0]!.machine,1000)).toBeNull();
+  expect(interfaceProof('127.0.0.1',{lo0:[{address:'127.0.0.1',internal:true}]},hosts[0]!.machine,1000)).toBeNull();
+});

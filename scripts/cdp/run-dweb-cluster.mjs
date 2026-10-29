@@ -35,6 +35,22 @@ const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const workers = [];
 let signaling;
+// why: distinguish bootstrap refusals from overlay failures without retaining
+// signaling payloads or changing the production server's admission budgets.
+report.signalingClosures = {};
+report.signalingSnapshots = [];
+const openSignaling = port => createSignalingServer({ hostname: '127.0.0.1', port, log: () => {},
+  serve: options => Bun.serve({ ...options, websocket: { ...options.websocket,
+    close(ws, code, reason) {
+      const category = [1000, 1001, 1006, 1008, 1009, 1013].includes(code) ? String(code) : 'other';
+      report.signalingClosures[category] = (report.signalingClosures[category] ?? 0) + 1;
+      options.websocket.close(ws, code, reason);
+    },
+  } }),
+});
+const recordSignaling = phase => {
+  if (signaling) report.signalingSnapshots.push({phase, at:Date.now(), ...signaling.stats()});
+};
 const waitUntil = async (read, accept, label, budget = 30_000) => {
   const deadline = Date.now() + budget;
   let value;
@@ -98,6 +114,7 @@ const startWorker = (target, port) => {
 };
 
 const cleanup = async () => {
+  recordSignaling('cleanup');
   signaling?.stop();
   signaling = null;
   await Promise.allSettled(workers.map(async worker => {
@@ -121,7 +138,7 @@ try {
     report.capacityQualification = {complete:false, missing:['paired degree comparisons', 'whole-browser resource metrics', 'adversarial workloads', 'sustained finalist and overnight runs']};
   }
   assert(['all-pairs', 'connected'].includes(topology), 'topology must be all-pairs or connected');
-  signaling = createSignalingServer({ hostname: '127.0.0.1', port: 0, log: () => {} });
+  signaling = openSignaling(0);
   for (const target of config.hosts) startWorker(target, signaling.server.port);
   report.hosts = await Promise.all(workers.map(async worker => ({ name: worker.target.name,
     ...await worker.call('launch', { chrome: worker.target.chrome, mdns: config.mdns !== false,
@@ -173,14 +190,15 @@ try {
   await check('selected direct UDP paths', paths);
   await check('two-turn A2A conversations in both directions', async () => {
     const results = [];
+    report.conversations = results;
     for (const [index, worker] of workers.entries()) for (const did of adjacency[index]) {
       const nonce = crypto.randomUUID();
       const result = await worker.call('conversation', { did, nonce });
+      results.push({ from: dids[index], to: did, ...result });
       assert.equal(result.first.ok, true);
       assert.equal(result.first.reply, `PONG:${nonce}`);
       assert.equal(result.second?.reply, `PONG:${nonce}/followup`);
       assert.equal(result.second.convId, result.first.convId);
-      results.push({ from: dids[index], to: did, ...result });
     }
     return results;
   });
@@ -257,6 +275,7 @@ try {
     verify(await workers[0].call('fetch', { uri: published.uri })));
   await check('mesh survives signaling outage and recovery', async () => {
     const port = signaling.server.port;
+    recordSignaling('intentional-outage');
     signaling.stop();
     signaling = null;
     await waitUntil(reports, states => states.every(state => state.rendezvous !== 'up'), 'signaling disconnect');
@@ -279,7 +298,7 @@ try {
     }
     verify(await workers[0].call('fetch', { uri: published.uri }));
     const outagePaths = await paths();
-    signaling = createSignalingServer({ hostname: '127.0.0.1', port, log: () => {} });
+    signaling = openSignaling(port);
     await waitUntil(reports, states => states.every(state => state.rendezvous === 'up'), 'signaling recovery');
     return { outagePaths, recovered: await gossip() };
   });

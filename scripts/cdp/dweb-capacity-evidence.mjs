@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {candidateAddressHash} from './dweb-address-proof.mjs';
 import {validateHosts, validateMesh, validatePaths} from './dweb-cluster-checks.mjs';
 import {sparsePublicProfile} from '../../extension/peerd-distributed/transport/rendezvous-profile.js';
 
@@ -60,15 +61,49 @@ export const capacityPathsReady = (pathSets, adjacency, hosts, dids) => {
   try {
     assert.equal(pathSets.length, hosts.length, 'Each browser needs path evidence');
     pathSets.forEach((paths,index) => {
-      validatePaths(paths, adjacency[index], {local:true});
+      assert.deepEqual(paths.map(path=>path.did).sort(),[...adjacency[index]].sort(),'Every expected peer needs ICE evidence');
+      const hostPaths=paths.filter(path=>path.local?.type!=='prflx');
+      validatePaths(hostPaths,hostPaths.map(path=>path.did),{local:true});
       for (const path of paths) {
         const other = dids.indexOf(path.did);
         assert(other >= 0, 'Unknown peer path');
         // Retain the physical lane's stronger address test on every cross-host
         // edge. Same-host UDP is classified separately, not counted as remote.
-        if (hosts[index].machine !== hosts[other].machine) validatePaths([path], [path.did]);
+        if(path.local?.type==='prflx'){
+          const reverse=pathSets[other].find(candidate=>candidate.did===dids[index]);
+          validateOwnedPeerReflexivePath(path,reverse,hosts[index],hosts[other]);
+        }else if (hosts[index].machine !== hosts[other].machine) validatePaths([path], [path.did]);
       }
     });
     return true;
   } catch { return false; }
+};
+
+
+// Preserve the physical lane's host-only rule. This explicit shared-host lane
+// additionally admits a peer-reflexive local candidate only with OS ownership
+// and reciprocal selected-pair evidence; never relabel candidate types.
+export const validateOwnedPeerReflexivePath = (path, reverse, host, otherHost) => {
+  assert(reverse, 'Missing reciprocal selected pair');
+  validatePaths([reverse],[reverse.did],{local:host.machine===otherHost.machine});
+  assert.equal(path.local?.type,'prflx');
+  assert.equal(path.state,'succeeded');
+  assert(path.bytesSent>0&&path.bytesReceived>0);
+  assert.equal(path.local.protocol,'udp');
+  assert.equal(path.remote?.protocol,'udp');
+  assert(['host','prflx'].includes(path.remote.type));
+  assert(path.local.address&&path.remote.address,'Owned peer-reflexive proof needs both local-view addresses');
+  assert(!/^(127\.|::1$|0\.0\.0\.0$|localhost$)/i.test(path.local.address));
+  const proof=path.interfaceProof;
+  assert(proof&&proof.machine===host.machine,'Wrong interface proof owner');
+  assert(candidateAddressHash(path.local.address)&&proof.addressHash===candidateAddressHash(path.local.address),'Interface address not owned');
+  assert(Number.isFinite(proof.collectedAt)&&Number.isFinite(path.pair?.timestamp)
+    &&Math.abs(proof.collectedAt-path.pair.timestamp)<=5000,'Stale interface observation');
+  assert.equal(candidateAddressHash(path.remote.address),candidateAddressHash(reverse.local.address),'Reciprocal address mismatch');
+  assert(candidateAddressHash(path.remote.address),'Invalid peer address');
+  if(reverse.remote.address)assert.equal(candidateAddressHash(path.local.address),candidateAddressHash(reverse.remote.address));
+  for(const [a,b] of [[path.local.port,reverse.remote.port],[path.remote.port,reverse.local.port]]){
+    assert(Number.isInteger(a)&&a>0&&a<=65535,'Missing selected port');assert.equal(a,b,'Reciprocal port mismatch');
+  }
+  if(host.machine!==otherHost.machine)assert.notEqual(candidateAddressHash(path.local.address),candidateAddressHash(path.remote.address),'Cross-host addresses must differ');
 };

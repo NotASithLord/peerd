@@ -3,17 +3,18 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { hostname, tmpdir } from 'node:os';
+import { hostname, tmpdir, networkInterfaces } from 'node:os';
 import { dirname, join, resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
+import { interfaceProof } from './dweb-address-proof.mjs';
 import { settleResponse } from './dweb-cluster-rpc.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const extension = join(root, 'extension');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-let browser, profile, server, socket;
+let browser, profile, server, socket, hostMachine;
 const errors = [];
 const pending = new Map();
 let sequence = 0;
@@ -132,6 +133,7 @@ const launch = async ({ chrome, mdns = true, allInterfaces = false }) => {
     if (Date.now() >= deadline) throw new Error(`Fixture readiness deadline: ${errors.join('')}`);
     await sleep(100);
   }
+  hostMachine = host.machine;
   return { ...host, browser: version.Browser, mdns, allInterfaces, browserPid: browser.pid,
     profileFingerprint: createHash('sha256').update(profile).digest('hex') };
 };
@@ -146,6 +148,11 @@ for await (const line of lines) {
     const result = method === 'launch' ? await launch(args)
       : method === 'diagnostics' ? { logs: errors, transports: await evaluate('window.cluster?.diagnostics()') }
       : await evaluate(`window.cluster[${JSON.stringify(method)}](${JSON.stringify(args ?? {})})`);
+    if(method==='paths'&&Array.isArray(result)){
+      // The OS observation belongs to this SSH worker, not browser-supplied JS.
+      const interfaces=networkInterfaces(),collectedAt=Date.now();
+      for(const path of result) path.interfaceProof=interfaceProof(path.local?.address,interfaces,hostMachine,collectedAt);
+    }
     // why: successful coordinator work renews the idle lease for a soak;
     // hung requests and abandoned SSH sessions still expire and clean up.
     watchdog.refresh();
