@@ -40,7 +40,15 @@ window.cluster = {
     // the selected pair below proves the actual cross-host data path.
     room = await joinRoom({ roomId, identity, url: signaling, iceServers: [], audit: recordAudit,
       RTCPeerConnection: ObservedConnection, budget, profile, transferSlots });
-    const dial = makeDhtDialer(room);
+    const routing = makeDhtDialer(room);
+    const dial = Object.assign(async (contact, options) => {
+      const routes = [...new Set([contact.hints?.broker, ...(contact.brokers ?? [])])].filter(Boolean);
+      const linkedBefore = room.mesh.hasLink(contact.did);
+      const linkedRoutes = routes.filter(did => room.mesh.hasLink(did)).length;
+      const result = await routing(contact, options);
+      recordAudit('routing-dial-end', {ok:result, linkedBefore, routes:routes.length, linkedRoutes});
+      return result;
+    }, {acquireContent:routing.acquireContent});
     const acquire = dial.acquireContent;
     if (acquire) dial.acquireContent = async (contact, options) => {
       const started = performance.now();
@@ -65,6 +73,8 @@ window.cluster = {
     base.node.dht.findProviderContacts = async (key, options = {}) => {
       let failures = 0;
       const started = performance.now();
+      const table = base.node.dht.routingTable.all();
+      recordAudit('provider-lookup-start', {contacts:table.length, linkedContacts:table.filter(c => room.mesh.hasLink(c.did)).length, liveNeighbors:room.mesh.peers().length});
       const contacts = await findContacts(key, {...options, onQueryFailure: () => { failures++; options.onQueryFailure?.(); }});
       recordAudit('provider-lookup-end', { contacts:contacts.length, withRoutes:contacts.filter(c => c.hints?.broker || c.brokers?.length).length, failures, aborted:!!options.signal?.aborted, ms:Math.round(performance.now()-started) });
       return contacts;
