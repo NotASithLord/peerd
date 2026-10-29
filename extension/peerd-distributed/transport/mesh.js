@@ -36,6 +36,7 @@ import { createContentResponder, fetchBundle } from '../content/transfer.js';
 import { dlog } from '../log.js';
 import { createLocalCounters } from '../local-counters.js';
 import { CONTENT_ONLY, LOOKUP_ONLY } from './capabilities.js';
+import { DIRECTORY_INTRODUCTIONS, createDirectoryIntroductions } from './directory-introductions.js';
 
 // ch=0 control message types (PROTOCOL §3.4; 5–7 are the Phase 1 rows).
 export const CTRL = Object.freeze({
@@ -82,8 +83,9 @@ const QUEUED_PER_MESH = 128;
 /**
  * @typedef {{
  *   did: string,
- *   purpose: 'routing' | 'content' | 'lookup',
+ *   purpose: 'routing' | 'content' | 'lookup' | 'directory',
  *   leases: number,
+ *   introductions?: ReturnType<typeof createDirectoryIntroductions>,
  *   expiry?: ReturnType<typeof setTimeout>,
  *   channel: Channel,
  *   retired: AbortController,
@@ -276,12 +278,27 @@ export const createRoomMesh = ({
     }
   };
 
+  /** @param {any} env */
+  const directoryFrame = (env) => !env?.t && ((env?.ch === 1 && [0,1].includes(env.typ))
+    || (env?.ch === 0 && [CTRL.ROSTER_REQ,CTRL.ROSTER,CTRL.RELAY].includes(env.typ)));
+  /** @param {Link} link @param {any} env */
+  const introductionAllowed = (link, env) => !!link.introductions?.allow({
+    from:env.from,to:env.body?.to,via:link.did,kind:env.body?.kind,sid:env.body?.sid,payload:env.body?.payload,
+  });
+  /** @param {string} did @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
+  const sendIntroduction = async (did, env, options) => {
+    const link=links.get(did);
+    if (link?.purpose !== 'directory') return sendTo(did, env, options);
+    if (env.ch !== 0 || env.typ !== CTRL.RELAY || !introductionAllowed(link, env)) return false;
+    try {await sendOnLink(link, env, options);return true;} catch {return false;}
+  };
+
   // A virtual content channel to one linked peer: sends ride the real link,
   // CONTENT_RESP frames route to this peer's handler. null if not linked.
   /** @param {string} did */
   const contentChannelFor = (did) => {
     const link = links.get(did);
-    if (!link || link.purpose === 'lookup') return null;
+    if (!link || !['routing','content'].includes(link.purpose)) return null;
     // why: concurrent downloads own separate handlers, scoped to this link
     // generation; finishing an old transfer must not detach a new one.
     /** @type {((msg: any) => boolean | void) | null} */
@@ -317,6 +334,7 @@ export const createRoomMesh = ({
     links.delete(did);
     timers.clearTimeout(link.expiry);
     link.retired.abort();
+    link.introductions?.close();
     link.contentHandlers.clear();
     cancelVerification(link);
     link.offClose?.();
@@ -382,6 +400,7 @@ export const createRoomMesh = ({
       case CTRL.RELAY: {
         const b = env.body;
         if (!b || b.room !== roomId || typeof b.to !== 'string') return;
+        if (link.purpose === 'directory' && !introductionAllowed(link, env)) return;
         if (b.to === identity.did) {
           // For us: surface to the pairing layer (rooms.js). env.from is
           // the verified ORIGIN — the forwarder couldn't have altered it.
@@ -391,7 +410,10 @@ export const createRoomMesh = ({
         // Forward exactly one hop, and only frames received directly from
         // their signer — a relay never launders someone else's envelope.
         if (env.from !== link.did) return;
-        if (!await sendTo(b.to, env)) audit?.('relay_target_unreachable', { to: b.to, via: link.did });
+        // Directory introductions terminate at an existing routing neighbor;
+        // they do not form chains of relay-forwarded envelopes.
+        if (link.purpose === 'directory' && links.get(b.to)?.purpose !== 'routing') return;
+        if (!await sendIntroduction(b.to, env)) audit?.('relay_target_unreachable', { to: b.to, via: link.did });
         return;
       }
       default:
@@ -402,6 +424,7 @@ export const createRoomMesh = ({
   /** @param {Link} link @param {any} msg */
   const handle = async (link, msg) => {
     if (closed || links.get(link.did) !== link) return;
+    if (link.purpose === 'directory' && !directoryFrame(msg)) { penalize(link, 'directory-link-scope', true); return; }
     if (link.purpose === 'lookup' && !(msg?.ch === 1 && !msg.t && (msg.typ === 0 || msg.typ === 1))) { penalize(link, 'lookup-link-scope', true); return; }
     if (!msg) { penalize(link, 'malformed-frame'); return; }
     // Phase 0 content-transfer frames multiplex on mesh links.
@@ -506,10 +529,10 @@ export const createRoomMesh = ({
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
   };
 
-  /** @param {string} did @param {'content'|'lookup'} purpose @param {AbortSignal|undefined} signal */
+  /** @param {string} did @param {'content'|'lookup'|'directory'} purpose @param {AbortSignal|undefined} signal */
   const acquireScopedLink = (did, purpose, signal) => {
     const link = links.get(did);
-    if (!link || (link.purpose !== 'routing' && link.purpose !== purpose) || closed || signal?.aborted) throw new Error('content lease unavailable');
+    if (!link || (link.purpose !== 'routing' && link.purpose !== purpose && !(purpose === 'lookup' && link.purpose === 'directory')) || closed || signal?.aborted) throw new Error('content lease unavailable');
     link.leases++;
     let released = false;
     const release = () => {
@@ -540,9 +563,9 @@ export const createRoomMesh = ({
 
     // Admit an AUTHENTICATED link (HELLO already done — did is proven).
     /** @param {Channel} channel @param {string} did @param {any} [info]
-     * @param {{ locallySelected?: boolean, purpose?: 'routing' | 'content' | 'lookup' }} [ownership] */
+     * @param {{ locallySelected?: boolean, purpose?: 'routing' | 'content' | 'lookup' | 'directory' }} [ownership] */
     addLink(channel, did, info = {}, { locallySelected = false, purpose = 'routing' } = {}) {
-      if (!['routing', 'content', 'lookup'].includes(purpose) || (purpose !== 'routing' && (!transferSlots || !info?.caps?.includes(purpose === 'content' ? CONTENT_ONLY : LOOKUP_ONLY)))) { channel.close(); return false; }
+      if (!['routing', 'content', 'lookup', 'directory'].includes(purpose) || (purpose !== 'routing' && (!transferSlots || !info?.caps?.includes(purpose === 'content' ? CONTENT_ONLY : purpose === 'directory' ? DIRECTORY_INTRODUCTIONS : LOOKUP_ONLY)))) { channel.close(); return false; }
       if (closed || channel.isClosed?.() || isBlocked(did)) { channel.close(); return false; }
       pruneCooldowns();
       if (cooldowns.has(did)) {
@@ -589,7 +612,7 @@ export const createRoomMesh = ({
       // exploration ownership is never inherited from a retired connection.
       if (links.has(did)) removeLink(did, 'replaced');
       /** @type {Link} */
-      const link = { did, channel, purpose, leases: 0, locallySelected: locallySelected || previous?.locallySelected || false,
+      const link = { did, channel, purpose, leases: 0, introductions: purpose === 'directory' ? createDirectoryIntroductions({now}) : undefined, locallySelected: locallySelected || previous?.locallySelected || false,
         admittedAt: timing?.admittedAt ?? now(), protectedUntil: timing?.protectedUntil ?? 0, serving: 0, retired: new AbortController(), contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
       // Own this exact generation before an already-closed channel can invoke
       // its immediate observer. A close during handoff must not become connected.
@@ -602,6 +625,7 @@ export const createRoomMesh = ({
           links.delete(did);
           timers.clearTimeout(link.expiry);
           link.retired.abort();
+    link.introductions?.close();
           link.contentHandlers.clear();
           cancelVerification(link);
           try { audit?.('peer_link_closed', { did, why: 'channel-closed' }); }
@@ -627,7 +651,7 @@ export const createRoomMesh = ({
     /** @param {string} did */
     hasLink: (did) => links.get(did)?.purpose === 'routing',
     /** @param {string} did */
-    hasContentLink: (did) => links.has(did) && links.get(did)?.purpose !== 'lookup',
+    hasContentLink: (did) => links.has(did) && ['routing','content'].includes(links.get(did)?.purpose ?? ''),
     /** @param {string} did */
     hasLookupLink: (did) => links.has(did) && links.get(did)?.purpose !== 'content',
     /** @param {string} did @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
@@ -642,6 +666,10 @@ export const createRoomMesh = ({
     acquireContentLink: (did, {signal} = {}) => acquireScopedLink(did, 'content', signal),
     /** @param {string} did @param {{signal?:AbortSignal}} [options] */
     acquireLookupLink: (did, {signal} = {}) => acquireScopedLink(did, 'lookup', signal),
+    /** @param {string} did @param {{signal?:AbortSignal}} [options] */
+    acquireDirectoryLink: (did, {signal} = {}) => acquireScopedLink(did, 'directory', signal),
+    /** @param {string} did */
+    hasDirectoryLink: (did) => ['routing','directory'].includes(links.get(did)?.purpose ?? ''),
 
     // Merge telemetry onto a link (e.g. the ICE path once stats settle).
     /** @param {string} did @param {any} patch */
@@ -680,7 +708,7 @@ export const createRoomMesh = ({
       return new Promise((resolve, reject) => {
         if (signal?.aborted) return reject(signal.reason ?? new Error('roster cancelled'));
         const link = links.get(did);
-        if (!link || link.purpose !== 'routing') return reject(new Error(`requestRoster: no link to ${did}`));
+        if (!link || !['routing','directory'].includes(link.purpose)) return reject(new Error(`requestRoster: no link to ${did}`));
         const ac = new AbortController();
         let settled = false;
         let offClose = () => {};
@@ -724,7 +752,7 @@ export const createRoomMesh = ({
       if (signal?.aborted) throw new Error('relay cancelled');
       const env = await sign(0, CTRL.RELAY, { room: roomId, to, kind, sid, payload });
       if (signal?.aborted) throw new Error('relay cancelled');
-      if (!await sendTo(via, env, { signal })) throw new Error(`relay: no link to via-peer ${via}`);
+      if (!await sendIntroduction(via, env, { signal })) throw new Error(`relay: no link to via-peer ${via}`);
     },
 
     // Content multiplexing on mesh links (announce-set rules unchanged —

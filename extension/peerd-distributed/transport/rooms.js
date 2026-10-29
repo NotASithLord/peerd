@@ -29,6 +29,7 @@ import { connectionPath } from './ice.js';
 import { AdmissionError, roomAdmission, MAX_ADMISSION_CANDIDATES } from './admission.js';
 import { createSignalingBuffer } from './signaling-buffer.js';
 import { createContentDials } from './content-dials.js';
+import { DIRECTORY_INTRODUCTIONS } from './directory-introductions.js';
 import { dlog, dwarn } from '../log.js';
 import { SPARSE_PUBLIC_PROFILE, sparsePublicProfile } from './rendezvous-profile.js';
 import { createNeighborMaintenance, NEIGHBOR_CANDIDATES } from './neighbors.js';
@@ -127,15 +128,15 @@ export const joinRoom = async ({
    * @param {string | null} [via]
    * @param {AbortSignal} [signal]
    * @param {boolean} [locallySelected]
-   * @param {'routing' | 'content' | 'lookup'} [purpose]
+   * @param {'routing' | 'content' | 'lookup' | 'directory'} [purpose]
    */
   const admit = async (channel, expectedDid = null, via = null, signal, locallySelected = false, purpose = 'routing') => {
     if (left || signal?.aborted || channel.isClosed?.()) { channel.close(); throw new Error('room dial cancelled or channel closed'); }
-    const selectedCaps = purpose === 'content' ? ['content', CONTENT_ONLY] : purpose === 'lookup' ? [LOOKUP_ONLY] : sessionCaps;
+    const selectedCaps = purpose === 'content' ? ['content', CONTENT_ONLY] : purpose === 'lookup' ? [LOOKUP_ONLY] : purpose === 'directory' ? [DIRECTORY_INTRODUCTIONS] : sessionCaps;
     const { remoteDid, remoteCaps } = await createSession({ channel, identity, caps: selectedCaps, now, signal, timers });
     // why: the relay hint chooses resource admission, but only signed HELLO
     // binds both endpoints to content-only authority. Legacy peers fail closed.
-    if (remoteCaps.includes(CONTENT_ONLY) !== (purpose === 'content') || remoteCaps.includes(LOOKUP_ONLY) !== (purpose === 'lookup')) { channel.close(); throw new Error('peer connection purpose mismatch'); }
+    if (remoteCaps.includes(CONTENT_ONLY) !== (purpose === 'content') || remoteCaps.includes(LOOKUP_ONLY) !== (purpose === 'lookup') || remoteCaps.includes(DIRECTORY_INTRODUCTIONS) !== (purpose === 'directory')) { channel.close(); throw new Error('peer connection purpose mismatch'); }
     if (left || signal?.aborted || channel.isClosed?.()) { channel.close(); throw new Error('room dial cancelled or channel closed'); }
     if (expectedDid && remoteDid !== expectedDid) {
       channel.close();
@@ -177,7 +178,7 @@ export const joinRoom = async ({
    * routers: Map<string, (payload: any) => void>, routeKey: string,
    * send: (payload: any, signal: AbortSignal) => void | Promise<void>,
    * connect: (signaling: any, signal: AbortSignal) => Promise<any>,
-   * expectedDid?: string | null, via: string, signal?: AbortSignal, purpose?: 'routing' | 'content' | 'lookup' }} opts */
+   * expectedDid?: string | null, via: string, signal?: AbortSignal, purpose?: 'routing' | 'content' | 'lookup' | 'directory' }} opts */
   const attempt = ({ key, direction, routers, routeKey, send, connect, expectedDid = null, via, signal, purpose = 'routing' }) =>
     attempts.run(key, direction, async (reservationSignal) => {
       if (expectedDid && isBlocked(expectedDid)) throw new Error('peer-user-blocked');
@@ -375,7 +376,7 @@ export const joinRoom = async ({
     if (route) { if (kind !== 'offer') route(payload); return; }
     if (kind !== 'offer' || payload?.type !== 'offer' || typeof payload.sdp !== 'string' || payload.sdp.length > 128 * 1024 || new TextEncoder().encode(payload.sdp).byteLength > 128 * 1024) return;
     const purpose = payload.purpose ?? 'routing';
-    if (!['routing', 'content', 'lookup'].includes(purpose) || (purpose !== 'routing' && !transferSlots)) return;
+    if (!['routing', 'content', 'lookup', 'directory'].includes(purpose) || (purpose !== 'routing' && !transferSlots)) return;
     // why: if both ends dial, retaining whichever channel authenticates first
     // can make each close the other's survivor. The lower DID owns the dial;
     // the higher DID cancels its outgoing attempt before accepting that offer.
@@ -396,12 +397,12 @@ export const joinRoom = async ({
     } catch (e) { logConnectFail('relay accept', env.from, e); }
   });
 
-  /** @param {string} via @param {string} targetDid @param {{signal?: AbortSignal, purpose?: 'routing' | 'content' | 'lookup'}} [opts] */
+  /** @param {string} via @param {string} targetDid @param {{signal?: AbortSignal, purpose?: 'routing' | 'content' | 'lookup' | 'directory'}} [opts] */
   const dialViaRelay = async (via, targetDid, { signal, purpose = 'routing' } = {}) => {
     if (purpose !== 'routing' && !transferSlots) throw new AdmissionError('content links disabled');
     if (left || signal?.aborted) throw new AdmissionError('cancelled');
     if (isBlocked(targetDid)) throw new Error('peer-user-blocked');
-    if (purpose === 'content' ? mesh.hasContentLink(targetDid) : purpose === 'lookup' ? mesh.hasLookupLink(targetDid) : mesh.hasLink(targetDid)) return;
+    if (purpose === 'content' ? mesh.hasContentLink(targetDid) : purpose === 'lookup' ? mesh.hasLookupLink(targetDid) : purpose === 'directory' ? mesh.hasDirectoryLink(targetDid) : mesh.hasLink(targetDid)) return;
     if (typeof targetDid !== 'string' || targetDid.length > 512) throw new AdmissionError('invalid candidate');
     const incoming = attempts.pending(`${purpose}/incoming-did/${targetDid}`);
     if (incoming) throw new AdmissionError('duplicate');
@@ -434,6 +435,14 @@ export const joinRoom = async ({
     connect: async (via, did, signal) => {
       await dialViaRelay(via, did, { signal, purpose: 'lookup' });
       return mesh.acquireLookupLink(did);
+    },
+  });
+
+  const directoryDials = createContentDials({limit:transferSlots,
+    has:mesh.hasDirectoryLink,acquire:mesh.acquireDirectoryLink,
+    connect:async(via,did,signal)=>{
+      await dialViaRelay(via,did,{signal,purpose:'directory'});
+      return mesh.acquireDirectoryLink(did);
     },
   });
 
@@ -612,11 +621,12 @@ export const joinRoom = async ({
     // (`brokerDid` forwards the signaling). The DHT dialer uses this to connect
     // to a lookup contact it doesn't link yet. Resolves once linked, throws on
     // timeout. One hop only — `brokerDid` must be directly linked.
-    /** @param {string} brokerDid @param {string} targetDid @param {{signal?: AbortSignal, purpose?: 'routing' | 'content' | 'lookup'}} [opts] */
+    /** @param {string} brokerDid @param {string} targetDid @param {{signal?: AbortSignal, purpose?: 'routing' | 'content' | 'lookup' | 'directory'}} [opts] */
     dialVia: (brokerDid, targetDid, opts) => dialViaRelay(brokerDid, targetDid, opts),
     contentTransfersEnabled: transferSlots > 0,
     acquireContentVia: contentDials.open,
     acquireLookupVia: lookupDials.open,
+    acquireDirectoryVia: directoryDials.open,
     leave() {
       if (left) return;
       left = true;
@@ -626,6 +636,7 @@ export const joinRoom = async ({
       lifetime.abort();
       contentDials.stop();
       lookupDials.stop();
+      directoryDials.stop();
       attempts.close();
       timers.clearTimeout(reconnectTimer ?? undefined);
       try { session?.close(); } catch { /* already closed */ }

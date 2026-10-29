@@ -80,7 +80,7 @@ for (const cancel of [false, true]) test(`actual provider fetch releases its tem
 import {createSession} from '../../extension/peerd-distributed/transport/session.js';
 import {CONTENT_ONLY} from '../../extension/peerd-distributed/transport/capabilities.js';
 
-for (const purpose of ['routing','content','lookup'] as const) test(`signed HELLO cannot substitute the opposite role for ${purpose} admission`,async()=>{
+for (const purpose of ['routing','content','lookup','directory'] as const) test(`signed HELLO cannot substitute the opposite role for ${purpose} admission`,async()=>{
  const [local,remote,broker]=await Promise.all([generateIdentity(),generateIdentity(),generateIdentity()]);
  const channels:ReturnType<typeof memoryPair>[number][]=[];
  const sessions:Promise<unknown>[]=[];
@@ -107,7 +107,7 @@ for (const purpose of ['routing','content','lookup'] as const) test(`signed HELL
 });
 
 
-test('signed lookup negotiation exchanges directory RPC without claiming routing or content capacity twice',async()=>{
+for(const role of ['lookup','directory'] as const) test(`signed ${role} negotiation exchanges directory RPC without claiming capacity twice`,async()=>{
  const identities=await Promise.all([generateIdentity(),generateIdentity(),generateIdentity()]);
  const pending=new Map<string,ReturnType<typeof memoryPair>[number]>();let next=0;
  const transport={
@@ -117,7 +117,7 @@ test('signed lookup negotiation exchanges directory RPC without claiming routing
  const rooms=await Promise.all(identities.map(identity=>joinRoom({identity,roomId:'lookup',url:null,transport,budget:3,transferSlots:1})));
  try{
   for(const i of [0,1]){const pair=memoryPair();rooms[i].mesh.addLink(pair[0],identities[2].did);rooms[2].mesh.addLink(pair[1],identities[i].did);rooms[i].mesh.addLink(createBufferedChannel({send(){}}),'filler');}
-  const lease=await rooms[0].acquireLookupVia(identities[2].did,identities[1].did);
+  const lease=await (role==='lookup'?rooms[0].acquireLookupVia:rooms[0].acquireDirectoryVia)(identities[2].did,identities[1].did);
   for(let i=0;i<100&&!rooms[1].mesh.hasLookupLink(identities[0].did);i++)await new Promise(r=>setTimeout(r,1));
   let reply:any;
   rooms[0].mesh.onEnvelope(({env})=>{reply=env.body;});
