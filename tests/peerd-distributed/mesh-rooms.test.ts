@@ -21,29 +21,32 @@ test('offline repair retirement aborts pending dials and closes late channels', 
   for (const retirement of ['restart-with-no-survivors', 'leave']) {
     const started = Promise.withResolvers<AbortSignal>();
     const opened = Promise.withResolvers<ReturnType<typeof memoryPair>[number]>();
-    const room = await joinRoom({ roomId: `repair-${retirement}`, identity: await generateIdentity(), url: null,
+    const identity=await generateIdentity(),brokerIdentity=await generateIdentity();
+    const room = await joinRoom({ roomId: `repair-${retirement}`, identity, url: null,
       transport: {
         name: 'delayed-repair', canReach: () => 1,
         connect: async (_peer: any, { signal }: any) => { started.resolve(signal); return opened.promise; },
         accept: async () => { throw new Error('unexpected inbound dial'); },
       } });
-    const target = memoryPair(), broker = memoryPair(), late = memoryPair();
+    const target = memoryPair(), broker = memoryPair(), late = memoryPair(), remoteTarget=memoryPair();
+    const brokerMesh=createRoomMesh({roomId:`repair-${retirement}`,identity:brokerIdentity});
     try {
+      brokerMesh.addLink(broker[1],identity.did);brokerMesh.addLink(remoteTarget[0],'lost-target');
       room.mesh.addLink(target[0], 'lost-target');
-      room.mesh.addLink(broker[0], 'surviving-broker');
+      room.mesh.addLink(broker[0], brokerIdentity.did);
       room.mesh.removeLink('lost-target');
       const signal = await started.promise;
       expect(signal.aborted).toBe(false);
       if (retirement === 'leave') room.leave();
-      else room.mesh.removeLink('surviving-broker');
+      else room.mesh.removeLink(brokerIdentity.did);
       expect(signal.aborted).toBe(true);
       opened.resolve(late[0]);
       await waitFor(() => late[0].isClosed());
       expect(late[0].isClosed()).toBe(true);
       expect(room.mesh.hasLink('lost-target')).toBe(false);
     } finally {
-      opened.resolve(late[0]); room.leave();
-      for (const pair of [target, broker, late]) for (const channel of pair) channel.close();
+      opened.resolve(late[0]); room.leave();brokerMesh.close();
+      for (const pair of [target, broker, late, remoteTarget]) for (const channel of pair) channel.close();
     }
   }
 });

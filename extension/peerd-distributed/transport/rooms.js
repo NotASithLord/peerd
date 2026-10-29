@@ -20,6 +20,7 @@
 // did:keys only ever come from the signed HELLO on the direct channel —
 // the rendezvous never learns who anyone is.
 
+import { findOfflineRepairRoute } from './offline-repair-route.js';
 import { openRendezvous, DEFAULT_SIGNALING } from './signaling-client.js';
 import { createWebrtcTransport } from './transports/webrtc.js';
 import { createRoomMesh } from './mesh.js';
@@ -524,10 +525,12 @@ export const joinRoom = async ({
       if (left || rendezvousState === 'up' || epoch !== repairEpoch) return;
       const peers = mesh.peers().map(({ did }) => did);
       for (const did of repairTargets) if (mesh.hasLink(did)) repairTargets.delete(did);
-      const targets = [...repairTargets];
-      const target = targets[repairRound % targets.length];
-      const broker = peers[repairRound % peers.length];
+      const targets = [...repairTargets].reverse();
       audit?.('offline_mesh_repair', { round: repairRound + 1, peers: peers.length, targets: targets.length });
+      const route=await findOfflineRepairRoute({peers,targets,round:repairRound,signal,timers,
+        readRoster:(peer,owner)=>mesh.requestRoster(peer,{signal:owner})}).catch(()=>null);
+      if(left || signal.aborted || epoch!==repairEpoch || rendezvousState==='up')return;
+      const target=route?.target,broker=route?.via;
       if (broker && target) await dialViaRelay(broker, target, { signal }).catch(error => {
         audit?.('offline_mesh_repair_failed', { error: error?.message });
       });
@@ -542,6 +545,7 @@ export const joinRoom = async ({
     const oldest = repairTargets.size >= MAX_ADMISSION_CANDIDATES
       ? repairTargets.values().next().value : undefined;
     if (oldest) repairTargets.delete(oldest);
+    repairTargets.delete(did);
     repairTargets.add(did);
     if (rendezvousState !== 'up') scheduleOfflineRepair(true);
   });
