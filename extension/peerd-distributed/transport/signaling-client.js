@@ -17,6 +17,7 @@
 // member already present. The node only ever relays opaque SDP between
 // members and forgets them.
 
+import { createSignalingWriter } from './signaling-writer.js';
 import { createWebrtcTransport } from './transports/webrtc.js';
 import { SPARSE_PUBLIC_PROFILE, INTRODUCTION_LIMIT, SAMPLE_INTERVAL_MS, sparsePublicProfile } from './rendezvous-profile.js';
 
@@ -65,7 +66,7 @@ export const DEFAULT_SIGNALING = ['wss://bootstrap.peerd.ai/rendezvous'];
  *   sample: (opts?: {signal?: AbortSignal}) => Promise<string[]>,
  *   self: string | null,
  *   members: string[],
- *   sendSignal: (to: string, payload: any) => void,
+ *   sendSignal: (to: string, payload: any, options?: {signal?:AbortSignal}) => void | Promise<void>,
  *   on: (ev: RendezvousEvent, cb: (arg: any) => void) => (() => void),
  *   close: () => void,
  * }} RendezvousSession
@@ -88,7 +89,7 @@ export const openRendezvous = ({
     let sequence = 0, nextSampleAt = Infinity;
     /** @type {any} */
     let keepalive;
-    /** @type {{ id: string, resolve: (members: string[]) => void, reject: (error: Error) => void, timer: any, detach: () => void } | null} */
+    /** @type {{ id: string, resolve: (members: string[]) => void, reject: (error: Error) => void, timer: any, detach: () => void, cancelSend:()=>void } | null} */
     let pending = null;
     /** @param {Error | null} error @param {string[]} [members] */
     const finishSample = (error, members = []) => {
@@ -97,12 +98,14 @@ export const openRendezvous = ({
       pending = null;
       timers.clearTimeout(request.timer);
       request.detach();
+      request.cancelSend();
       if (error) request.reject(error); else request.resolve(members);
     };
     /** @param {Error} error @param {boolean} [notify] */
     const end = (error, notify = true) => {
       if (ended) return;
       ended = true;
+      writer.close();
       timers.clearTimeout(joinTimer);
       timers.clearInterval(keepalive);
       signal?.removeEventListener('abort', cancel);
@@ -114,11 +117,11 @@ export const openRendezvous = ({
       } finally { for (const callbacks of Object.values(listeners)) callbacks.clear(); }
     };
     const cancel = () => end(new SignalingError('cancelled'));
-    /** @param {any} message */
-    const send = (message) => {
-      if (ended || ws.readyState !== 1) throw new SignalingError('connection closed');
-      ws.send(JSON.stringify(message));
-    };
+    const writer = createSignalingWriter({now,timers,buffered:()=>ws.bufferedAmount??0,write:text=>{
+      if(ended||ws.readyState!==1)throw new SignalingError('connection closed');
+      ws.send(text);
+    }});
+    const send = writer.send;
     /** @param {unknown} id */
     const validId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 512;
     /** @param {any} value @param {number} limit @param {string | null} self */
@@ -127,7 +130,7 @@ export const openRendezvous = ({
     /** @type {RendezvousSession} */
     const session = {
       profile: null, self: null, members: [],
-      sendSignal: (to, payload) => send({ t: 'signal', to, payload }),
+      sendSignal: (to, payload, options) => send({ t: 'signal', to, payload }, options),
       on: (event, callback) => { if (!ended) listeners[event].add(callback); return () => listeners[event].delete(callback); },
       close: () => end(new SignalingError('connection closed'), false),
       sample: ({ signal: requestSignal } = {}) => {
@@ -137,15 +140,18 @@ export const openRendezvous = ({
         if (now() < nextSampleAt) return Promise.reject(new SignalingError('sample cooldown'));
         return new Promise((sampleResolve, sampleReject) => {
           const id = `sample-${++sequence}`;
+          const sendLife = new AbortController();
           const abort = () => finishSample(new SignalingError('sample cancelled'));
-          pending = { id, resolve: sampleResolve, reject: sampleReject,
+          pending = { id, resolve: sampleResolve, reject: sampleReject, cancelSend:()=>sendLife.abort(),
             timer: timers.setTimeout(() => finishSample(new SignalingError('sample timed out')), timeoutMs),
             detach: () => requestSignal?.removeEventListener('abort', abort) };
           requestSignal?.addEventListener('abort', abort, { once: true });
           // Charge attempts, including failures: remote silence never accelerates
           // retries. One request/timer is retained, regardless of caller pressure.
           nextSampleAt = now() + SAMPLE_INTERVAL_MS;
-          try { send({ t: 'sample', requestId: id }); } catch (error) { finishSample(/** @type {Error} */ (error)); }
+          void send({ t: 'sample', requestId: id }, {signal:sendLife.signal}).catch(error => {
+            if(pending?.id===id)finishSample(error);
+          });
         });
       },
     };
@@ -181,7 +187,7 @@ export const openRendezvous = ({
         session.members = message.members;
         session.profile = acknowledged ? SPARSE_PUBLIC_PROFILE : null;
         nextSampleAt = now() + SAMPLE_INTERVAL_MS;
-        keepalive = timers.setInterval(() => { try { send({ t: 'ping' }); } catch { end(new SignalingError('keepalive failed')); } }, 25_000);
+        keepalive = timers.setInterval(() => { void send({ t: 'ping' }).catch(() => end(new SignalingError('keepalive failed'))); }, 25_000);
         resolve(session);
       } else if (message.t === 'full' && !opened) end(new SignalingError(`room "${room}" is at capacity`));
       else if (message.t === 'sample' && pending && message.requestId === pending.id) {
@@ -246,7 +252,7 @@ export const connectViaSignaling = async ({
       dispose: off,
       signaling: {
         /** @param {any} payload */
-        send: (payload) => { if (member) session.sendSignal(member, payload); },
+        send: (payload) => { if (member) return session.sendSignal(member, payload, {signal:ac.signal}); },
         /** @param {(payload: any) => void} h */
         onRemote: (h) => { handler = h; while (buffer.length) h(buffer.shift()); return () => { handler = null; }; },
       },

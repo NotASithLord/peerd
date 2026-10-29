@@ -326,7 +326,7 @@ export const joinRoom = async ({
       if (payload?.type !== 'offer' || typeof payload.sdp !== 'string' || payload.sdp.length > 128 * 1024 || new TextEncoder().encode(payload.sdp).byteLength > 128 * 1024) return;
       try {
         const did = await attempt({ key, direction, routers, routeKey: from,
-          send: (p) => s.sendSignal(from, p), via: 'rendezvous', signal: generationLife.signal,
+          send: (p, sendSignal) => s.sendSignal(from, p, {signal:sendSignal}), via: 'rendezvous', signal: generationLife.signal,
           connect: async (signaling, signal) => (await t.accept({ offer: { type: 'offer', sdp: payload.sdp }, iceServers, signaling, signal })).channel });
         bind(from, did);
       } catch (e) { logConnectFail('accept from', from, e); }
@@ -363,7 +363,7 @@ export const joinRoom = async ({
       try {
         if (known(member)) return;
         const did = await attempt({ key: `${generation}/${member}`, direction: 'outbound', routers, routeKey: member,
-          send: (p) => s.sendSignal(member, p), via: 'rendezvous', signal,
+          send: (p, sendSignal) => s.sendSignal(member, p, {signal:sendSignal}), via: 'rendezvous', signal,
           connect: (signaling, attemptSignal) => t.connect({ did: `${roomId}/${member}` }, { iceServers, signaling, signal: attemptSignal }) });
         bind(member, did);
       } catch (e) { logConnectFail('dial to', member, e); throw e; }
