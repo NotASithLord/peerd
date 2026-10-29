@@ -439,8 +439,9 @@ export const createBaseNetwork = async ({
         signal.throwIfAborted();
         let queryFailed = false;
         const found = await node.dht.findProviderContacts(key, { signal, onQueryFailure: () => { queryFailed = true; } });
-        signal.throwIfAborted();
-        lookupCompleted = !queryFailed;
+        // A deadline ends exploration, not referrals already received. The
+        // caller's cancellation is checked below before any provider is dialed.
+        lookupCompleted = !queryFailed && !signal.aborted;
         return found;
       }, undefined, callerSignal).catch(() => []);
       callerSignal?.throwIfAborted();
