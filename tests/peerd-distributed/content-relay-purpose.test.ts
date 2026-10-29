@@ -32,3 +32,47 @@ test('signed relay purpose and HELLO admit a content carrier while routing slots
   leases[1].release();expect(rooms[0].mesh.hasContentLink(identities[1].did)).toBe(false);
  } finally {rooms.forEach(r=>r.leave());channels.forEach(c=>c.close());}
 });
+
+import {createBaseNetwork} from '../../extension/peerd-distributed/base-network.js';
+import {makeDhtDialer} from '../../extension/peerd-distributed/transport/dht-dialer.js';
+
+for (const cancel of [false, true]) test(`actual provider fetch releases its temporary carrier after ${cancel ? 'caller cancellation' : 'verified transfer'}`,async()=>{
+ const identities=await Promise.all([generateIdentity(),generateIdentity(),generateIdentity()]);
+ const pending=new Map<string,ReturnType<typeof memoryPair>[number]>();let next=0;
+ const transport={
+  async connect(_peer:any,{signaling}:any){const pair=memoryPair();const id=String(++next);pending.set(id,pair[1]);await signaling.send({type:'offer',sdp:id});return pair[0];},
+  async accept({offer}:any){const channel=pending.get(offer.sdp);pending.delete(offer.sdp);return {channel};}
+ };
+ const rooms=await Promise.all(identities.map((identity,i)=>joinRoom({identity,roomId:'provider',url:null,transport,budget:i===2?3:2,transferSlots:i===2?0:1})));
+ const bases=await Promise.all(rooms.map((room,i)=>createBaseNetwork({identity:identities[i],mesh:room.mesh,dial:makeDhtDialer(room)})));
+ try {
+  for(const i of [0,1]) {const pair=memoryPair();rooms[i].mesh.addLink(pair[0],identities[2].did);rooms[2].mesh.addLink(pair[1],identities[i].did);await bases[i].node.dht.learn(identities[2].did);await bases[2].node.dht.learn(identities[i].did);}
+  const app=await bases[1].publishApp({name:'bounded transfer',entry:'index.html',files:{'index.html':'verified'.repeat(20000)}});
+  await bases[1].announceProvider(app.uri);
+  bases[2].node.dht.routingTable.remove(identities[1].did);
+  const controller=new AbortController();
+  let cancelledDuringTransfer=false;
+  const result=await bases[0].fetchApp(app.uri,{
+   timeoutMs:1000, signal:controller.signal,
+   onProgress(progress){
+    if(cancel && progress.phase==='manifest' && progress.publisher){
+     expect(rooms[0].mesh.stats().transferDegree).toBe(1);
+     cancelledDuringTransfer=true;
+     controller.abort(new Error('caller stopped transfer'));
+    }
+   }
+  }).then(value=>({value,error:null}),error=>({value:null,error}));
+  if(cancel){
+   expect(cancelledDuringTransfer).toBe(true);
+   expect(result.error).toBeTruthy();
+   expect(result.value).toBeNull();
+  }else{
+   expect(result.error).toBeNull();
+   expect(result.value!.manifest.publisher).toBe(identities[1].did);
+  }
+  expect(next).toBeGreaterThanOrEqual(1);
+  expect(rooms[0].mesh.stats().transferDegree).toBe(0);
+  expect(rooms[0].mesh.stats().peerDegree).toBe(1);
+  expect(rooms[0].mesh.hasLink(identities[2].did)).toBe(true);
+ }finally{bases.forEach(b=>b.close());rooms.forEach(r=>r.leave());}
+});

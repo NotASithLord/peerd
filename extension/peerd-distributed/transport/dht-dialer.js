@@ -6,14 +6,28 @@ import { dlog } from '../log.js';
 
 /** @typedef {Awaited<ReturnType<typeof import('./rooms.js').joinRoom>>} Room */
 /** @param {Room} room */
-export const makeDhtDialer = (room) => /** @param {{ did: string, hints?: { broker?: string } }} contact */ async (contact, { signal } = /** @type {{signal?: AbortSignal}} */ ({})) => {
-  if (room.mesh.hasLink(contact.did)) return true;
-  const broker = contact?.hints?.broker;
-  if (!broker || !room.mesh.hasLink(broker)) return false;
-  try { await room.dialVia(broker, contact.did, { signal }); }
-  catch (error) {
-    dlog('dht', `relay-dial of ${contact.did.slice(-8)} via ${broker.slice(-8)} failed: ${/** @type {{ message?: string }} */ (error)?.message ?? String(error)}`);
-    return false;
-  }
-  return room.mesh.hasLink(contact.did);
+export const makeDhtDialer = (room) => {
+  const dial = /** @param {{ did: string, hints?: { broker?: string } }} contact */ async (contact, { signal } = /** @type {{signal?: AbortSignal}} */ ({})) => {
+    if (room.mesh.hasLink(contact.did)) return true;
+    const broker = contact?.hints?.broker;
+    if (!broker || !room.mesh.hasLink(broker)) return false;
+    try { await room.dialVia(broker, contact.did, { signal }); }
+    catch (error) {
+      dlog('dht', `relay-dial of ${contact.did.slice(-8)} via ${broker.slice(-8)} failed: ${/** @type {{ message?: string }} */ (error)?.message ?? String(error)}`);
+      return false;
+    }
+    return room.mesh.hasLink(contact.did);
+  };
+
+  // Routing lookups retain the original adapter. Only content retrieval asks
+  // for a temporary carrier and receives cleanup ownership.
+  return Object.assign(dial, { acquireContent: room.contentTransfersEnabled ?
+    /** @param {{did:string,hints?:{broker?:string}}} contact
+     * @param {{signal?:AbortSignal,leaseSignal?:AbortSignal|null}} options */
+    async (contact, options) => {
+      if (room.mesh.hasContentLink(contact.did)) return room.mesh.acquireContentLink(contact.did, {signal:options.leaseSignal ?? undefined});
+      const broker = contact.hints?.broker;
+      if (!broker || !room.mesh.hasLink(broker)) throw new Error('content broker unavailable');
+      return room.acquireContentVia(broker, contact.did, options);
+    } : undefined });
 };

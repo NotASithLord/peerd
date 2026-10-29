@@ -8,7 +8,7 @@ export const CONTENT_DIAL_WAITERS = 32;
  * connect:(via:string,did:string,signal:AbortSignal)=>Promise<Lease>}} options */
 export const createContentDials = ({limit, has, acquire, connect}) => {
   if (!Number.isSafeInteger(limit) || limit < 0) throw new Error('invalid content dial limit');
-  /** @typedef {{resolve:(lease:Lease)=>void, reject:(error:Error)=>void, signal?:AbortSignal,
+  /** @typedef {{resolve:(lease:Lease)=>void, reject:(error:Error)=>void, signal?:AbortSignal, leaseSignal?:AbortSignal|null,
    * cancel:()=>void}} Waiter */
   /** @typedef {{controller:AbortController, waiters:Set<Waiter>}} Entry */
   /** @type {Map<string,Entry>} */ const pending = new Map();
@@ -23,11 +23,11 @@ export const createContentDials = ({limit, has, acquire, connect}) => {
     waiter.signal?.removeEventListener('abort', waiter.cancel);
   };
   return {
-    /** @param {string} via @param {string} did @param {{signal?:AbortSignal}} [options] */
-    open(via, did, {signal} = {}) {
+    /** @param {string} via @param {string} did @param {{signal?:AbortSignal, leaseSignal?:AbortSignal|null}} [options] */
+    open(via, did, {signal, leaseSignal = signal} = {}) {
       if (stopped || signal?.aborted) return Promise.reject(cancelled());
       if (has(did)) {
-        try { return Promise.resolve(acquire(did, {signal})); }
+        try { return Promise.resolve(acquire(did, {signal:leaseSignal ?? undefined})); }
         catch (error) { return Promise.reject(error); }
       }
       if (waiterCount >= CONTENT_DIAL_WAITERS) return Promise.reject(new Error('content waiter capacity'));
@@ -41,7 +41,7 @@ export const createContentDials = ({limit, has, acquire, connect}) => {
       /** @type {Promise<Lease>} */
       const result = new Promise((resolve, reject) => {
         /** @type {Waiter} */
-        const waiter = {resolve,reject,signal,cancel:() => {
+        const waiter = {resolve,reject,signal,leaseSignal,cancel:() => {
           if (!owned.waiters.has(waiter)) return;
           detach(owned, waiter); reject(cancelled());
           if (!owned.waiters.size) { forget(did,owned); owned.controller.abort(); }
@@ -60,7 +60,7 @@ export const createContentDials = ({limit, has, acquire, connect}) => {
             for (const waiter of [...owned.waiters]) {
               detach(owned,waiter);
               if (stopped || waiter.signal?.aborted) { waiter.reject(cancelled()); continue; }
-              try { waiter.resolve(acquire(did,{signal:waiter.signal})); }
+              try { waiter.resolve(acquire(did,{signal:waiter.leaseSignal ?? undefined})); }
               catch (error) { waiter.reject(error instanceof Error ? error : new Error(String(error))); }
             }
           } finally { hold.release(); }

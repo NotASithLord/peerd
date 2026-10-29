@@ -380,15 +380,15 @@ export const joinRoom = async ({
     // the higher DID cancels its outgoing attempt before accepting that offer.
     /** @type {'inbound'|'outbound'} */
     let direction = 'inbound';
-    if (attempts.pending(`did/${env.from}`)) {
+    if (attempts.pending(`${purpose}/did/${env.from}`)) {
       if (identity.did < env.from) return;
-      attempts.supersede(`did/${env.from}`);
+      attempts.supersede(`${purpose}/did/${env.from}`);
       // This is still locally requested exploration: swapping wire roles must
       // not lose its reserved outbound capacity to an inbound flood.
       direction = 'outbound';
     }
     try {
-      await attempt({ key: `incoming-did/${env.from}`, direction, routers: relayRouters, routeKey,
+      await attempt({ key: `${purpose}/incoming-did/${env.from}`, direction, routers: relayRouters, routeKey,
         expectedDid: env.from, via, purpose,
         send: (p, signal) => mesh.relay(via, env.from, p.type === 'answer' ? 'answer' : 'ice', sid, p, { signal }),
         connect: async (signaling, signal) => (await t.accept({ offer: { type: 'offer', sdp: payload.sdp }, iceServers, signaling, signal })).channel });
@@ -402,15 +402,15 @@ export const joinRoom = async ({
     if (isBlocked(targetDid)) throw new Error('peer-user-blocked');
     if (purpose === 'content' ? mesh.hasContentLink(targetDid) : mesh.hasLink(targetDid)) return;
     if (typeof targetDid !== 'string' || targetDid.length > 512) throw new AdmissionError('invalid candidate');
-    const incoming = attempts.pending(`incoming-did/${targetDid}`);
+    const incoming = attempts.pending(`${purpose}/incoming-did/${targetDid}`);
     if (incoming) throw new AdmissionError('duplicate');
     const sid = newId();
-    try { await attempt({ key: `did/${targetDid}`, direction: 'outbound', routers: relayRouters,
+    try { await attempt({ key: `${purpose}/did/${targetDid}`, direction: 'outbound', routers: relayRouters,
       routeKey: `${targetDid}/${sid}`, expectedDid: targetDid, via, signal, purpose,
       send: (p, attemptSignal) => mesh.relay(via, targetDid, p.type === 'offer' ? 'offer' : 'ice', sid, p.type === 'offer' && purpose === 'content' ? { ...p, purpose } : p, { signal: attemptSignal }),
       connect: (signaling, attemptSignal) => t.connect({ did: targetDid }, { iceServers, signaling, signal: attemptSignal }) }); }
     catch (error) {
-      const replacement = attempts.pending(`incoming-did/${targetDid}`);
+      const replacement = attempts.pending(`${purpose}/incoming-did/${targetDid}`);
       if (error instanceof AdmissionError && error.reason === 'superseded' && replacement && !left && !signal?.aborted) {
         await waitForAdmission(replacement, signal);
         return;
@@ -605,6 +605,7 @@ export const joinRoom = async ({
     // timeout. One hop only — `brokerDid` must be directly linked.
     /** @param {string} brokerDid @param {string} targetDid @param {{signal?: AbortSignal, purpose?: 'routing' | 'content'}} [opts] */
     dialVia: (brokerDid, targetDid, opts) => dialViaRelay(brokerDid, targetDid, opts),
+    contentTransfersEnabled: transferSlots > 0,
     acquireContentVia: contentDials.open,
     leave() {
       if (left) return;
