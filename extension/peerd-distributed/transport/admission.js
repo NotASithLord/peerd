@@ -26,7 +26,12 @@ export const createAdmissionGovernor = ({ active = 8, perScope = 4, reservedOutb
   let inbound = 0;
   /** @param {Entry} e */
   const canStart = (e) => !e.scope.closed && running < active && e.scope.running < perScope
-    && (e.direction === 'outbound' || (inbound < active - reservedOutbound && e.scope.inbound < perScope - 1));
+    // why: unanswered outbound ICE cannot occupy every slot while another
+    // honest peer tries to connect. Preserve inbound as well as outbound
+    // progress without increasing global or per-room construction ceilings.
+    && (e.direction === 'outbound'
+      ? running - inbound < active - 1 && e.scope.running - e.scope.inbound < perScope - 1
+      : inbound < active - reservedOutbound && e.scope.inbound < perScope - 1);
   /** @param {Entry} e @param {any} [error] @param {any} [value] */
   const finish = (e, error, value) => {
     if (e.settled) return;
