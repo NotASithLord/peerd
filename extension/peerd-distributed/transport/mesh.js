@@ -35,7 +35,7 @@ import { establishedAdmission, TRANSFER_PROTECTION_MS, NEIGHBOR_GRACE_MS } from 
 import { createContentResponder, fetchBundle } from '../content/transfer.js';
 import { dlog } from '../log.js';
 import { createLocalCounters } from '../local-counters.js';
-import { createControlPacer } from './control-pacer.js';
+import { createControlPacer, ControlPacingCapacityError } from './control-pacer.js';
 import { CONTENT_ONLY, LOOKUP_ONLY, ROUTING_WITNESS, ROUTING_CONTROL } from './capabilities.js';
 import { DIRECTORY_INTRODUCTIONS, createDirectoryIntroductions } from './directory-introductions.js';
 
@@ -322,9 +322,10 @@ export const createRoomMesh = ({
     const link = links.get(did);
     if (!link || link.purpose !== 'routing') { const counts = trafficFor(env); counts.add('attempted'); counts.add('failed'); return false; }
     try { await sendOnLink(link, env, options); return true; }
-    catch {
-      // Backpressure failure is a failed connection, never identity misconduct.
-      if (!options?.signal?.aborted && links.get(did) === link) removeLink(did, 'send-failed');
+    catch (error) {
+      // why: local pacing admission refused this operation before transport IO.
+      // Keep the bounded queue and healthy carrier; actual transport failures still retire it.
+      if (!(error instanceof ControlPacingCapacityError) && !options?.signal?.aborted && links.get(did) === link) removeLink(did, 'send-failed');
       return false;
     }
   };
@@ -805,7 +806,7 @@ export const createRoomMesh = ({
       });
       if (links.get(did) !== link) { link.offClose(); return false; }
       channel.setHandler((/** @type {any} */ msg) => {
-        handle(link, msg).catch(() => { if (links.get(did) === link) removeLink(did, 'service-or-send-failed'); });
+        handle(link, msg).catch(error => { if (!(error instanceof ControlPacingCapacityError) && links.get(did) === link) removeLink(did, 'service-or-send-failed'); });
       });
       if (links.get(did) !== link) return false;
       // why: continuous traffic cannot pin scarce temporary capacity forever.

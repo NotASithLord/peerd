@@ -64,12 +64,12 @@ test('maximum legacy bootstrap roster and relay dials share bounded queued owner
     WebSocket: f.WebSocket, transport: f.transport, awaitInitialRendezvous: false });
   await flush();
   try {
-    expect(admission.stats()).toEqual({ active: 2, inbound: 0, queued: 2 });
-    expect(f.calls).toHaveLength(2);
+    expect(admission.stats()).toEqual({ active: 1, inbound: 0, queued: 2 });
+    expect(f.calls).toHaveLength(1);
     room.leave(); await flush();
     expect(admission.stats()).toEqual({ active: 0, inbound: 0, queued: 0 });
-    expect(f.peak()).toBe(2);
-    // A fresh scope can use every released slot; the closed scope retains none.
+    expect(f.peak()).toBe(1);
+    // A fresh scope can use the released outbound slot; the closed scope retains none.
     const next = await joinRoom({ roomId: 'next', identity: await generateIdentity(), admission, url: null, transport: f.transport });
     try {
       const first = next.dialVia('broker', 'same').catch((e) => e);
@@ -77,7 +77,7 @@ test('maximum legacy bootstrap roster and relay dials share bounded queued owner
       expect(duplicate.reason).toBe('duplicate');
       const ac = new AbortController(); ac.abort();
       expect((await next.dialVia('broker', 'aborted', { signal: ac.signal }).catch((e) => e)).reason).toBe('cancelled');
-      expect(f.calls).toHaveLength(3);
+      expect(f.calls).toHaveLength(2);
       next.leave(); await first;
     } finally { next.leave(); }
   } finally { room.leave(); }
@@ -90,10 +90,10 @@ test('another room progresses while one room has a full queue; cancellation does
   const b = await joinRoom({ roomId: 'b', identity, admission, url: null, transport: f.transport });
   const pending = Array.from({ length: 10 }, (_, n) => a.dialVia('broker', `a-${n}`).catch((e) => e));
   const other = b.dialVia('broker', 'b').catch((e) => e);
-  expect(admission.stats()).toEqual({ active: 3, inbound: 0, queued: 2 });
-  expect(f.calls).toHaveLength(3);
+  expect(admission.stats()).toEqual({ active: 2, inbound: 0, queued: 2 });
+  expect(f.calls).toHaveLength(2);
   a.leave();
-  expect(f.calls).toHaveLength(3);
+  expect(f.calls).toHaveLength(2);
   expect(admission.stats()).toEqual({ active: 1, inbound: 0, queued: 0 });
   b.leave(); await Promise.all([...pending, other]);
 });
@@ -172,9 +172,9 @@ test('attempt deadline cancels transport and lets a queued candidate construct i
     const first = room.dialVia('broker', 'first').catch((e) => e);
     const second = room.dialVia('broker', 'second').catch((e) => e);
     const third = room.dialVia('broker', 'third').catch((e) => e);
-    expect(f.calls).toHaveLength(2);
+    expect(f.calls).toHaveLength(1);
     expect((await first).reason).toBe('timed out');
-    expect(f.calls).toHaveLength(3);
+    expect(f.calls).toHaveLength(2);
     expect(f.calls[0]!.signal.aborted).toBe(true);
     room.leave(); await Promise.all([second, third]);
     expect(admission.stats()).toEqual({ active: 0, inbound: 0, queued: 0 });
@@ -230,4 +230,30 @@ test('an authenticated inbound HELLO can revalidate repaired policy before the s
     await Promise.all([handshake, accepted]);
     expect(checks).toBe(1); expect(room.mesh.hasLink(other.did)).toBe(true);
   } finally { room.leave(); remote.close(); }
+});
+
+test('stalled outbound dials leave admission capacity for an independent inbound peer', async () => {
+  const governor=createAdmissionGovernor();const scope=governor.createScope();
+  const started:string[]=[];
+  const stall=(name:string)=>(signal:AbortSignal)=>new Promise<void>((_resolve,reject)=>{
+    started.push(name);signal.addEventListener('abort',()=>reject(new Error('cancelled')),{once:true});
+  });
+  const requests=Array.from({length:4},(_,i)=>scope.run(`out-${i}`,'outbound',stall(`out-${i}`)).catch(e=>e));
+  const inbound=scope.run('independent-inbound','inbound',stall('inbound')).catch(e=>e);
+  try {
+    expect(started).toContain('inbound');
+    expect(governor.stats()).toEqual({active:4,inbound:1,queued:1});
+  } finally {scope.close();await Promise.all([...requests,inbound]);}
+  expect(governor.stats()).toEqual({active:0,inbound:0,queued:0});
+});
+
+test('multiple rooms cannot spend the heap-wide inbound reservation on outbound work', async () => {
+  const governor=createAdmissionGovernor();const scopes=Array.from({length:8},()=>governor.createScope());
+  let accepted=false;
+  const stall=(signal:AbortSignal)=>new Promise<void>((_resolve,reject)=>signal.addEventListener('abort',()=>reject(new Error('cancelled')),{once:true}));
+  const requests=scopes.map((scope,i)=>scope.run(`out-${i}`,'outbound',stall).catch(e=>e));
+  const inbound=scopes[0]!.run('incoming','inbound',signal=>{accepted=true;return stall(signal);}).catch(e=>e);
+  try {expect(accepted).toBe(true);expect(governor.stats()).toEqual({active:8,inbound:1,queued:1});}
+  finally {for(const scope of scopes)scope.close();await Promise.all([...requests,inbound]);}
+  expect(governor.stats()).toEqual({active:0,inbound:0,queued:0});
 });

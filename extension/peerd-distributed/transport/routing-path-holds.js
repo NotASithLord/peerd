@@ -70,6 +70,14 @@ export const createRoutingPathHolds = ({identity,roomId,holdRoutingLink,now=Date
   let closed=false,verifying=false,windowStart=now(),requests=0;
   const unavailable=()=>new RoutingPathHoldError();
   return Object.freeze({
+    // why: topology alone repeatedly selects cooling edges that cannot supply
+    // a witness. This is a local search hint, never permission to acquire one.
+    /** @param {string} peer */
+    canSuggestEdge(peer){
+      if(closed)return false;
+      const cohort=cohorts.get(peer);
+      return !cohort || (cohort.owners>0 ? now()<cohort.expiresAt : now()>=cohort.retryAfter);
+    },
     // The caller supplies the authenticated incoming carrier's retirement
     // signal, never a DID from the wire. Replacing that carrier while crypto is
     // pending must not transfer its authority to a new link with the same DID.

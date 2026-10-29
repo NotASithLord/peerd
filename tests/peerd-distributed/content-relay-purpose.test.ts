@@ -173,3 +173,25 @@ test('real DHT RPC borrows a lookup carrier and never retains it as a routing ne
   expect(rooms[0].mesh.stats().transferDegree).toBe(0);
  }finally{bases.forEach(base=>base.close());rooms.forEach(room=>room.leave());}
 });
+
+for (const purpose of ['content','lookup'] as const) test(`signal-free ${purpose} referral lease survives roster cleanup until release`,async()=>{
+ const identities=await Promise.all([generateIdentity(),generateIdentity(),generateIdentity()]);
+ const pending=new Map<string,ReturnType<typeof memoryPair>[number]>();let next=0;
+ const transport={
+  async connect(_peer:any,{signaling}:any){const pair=memoryPair();const id=String(++next);pending.set(id,pair[1]);await signaling.send({type:'offer',sdp:id});return pair[0];},
+  async accept({offer}:any){const channel=pending.get(offer.sdp);pending.delete(offer.sdp);return {channel};}
+ };
+ const rooms=await Promise.all(identities.map(identity=>joinRoom({identity,roomId:'signal-free',url:null,transport,budget:3,transferSlots:1})));
+ try{
+  for(const i of [0,1]){const pair=memoryPair();rooms[i].mesh.addLink(pair[0],identities[2].did);rooms[2].mesh.addLink(pair[1],identities[i].did);}
+  const dial=makeDhtDialer(rooms[0]);
+  const acquire=purpose==='content'?dial.acquireContent!:dial.acquireLookup!;
+  const lease=await acquire({did:identities[1].did,brokers:[identities[2].did]},{});
+  try{
+   expect(rooms[0].mesh.stats().transferDegree).toBe(1);
+   expect(purpose==='content'?rooms[0].mesh.hasContentLink(identities[1].did):rooms[0].mesh.hasLookupLink(identities[1].did)).toBe(true);
+  }finally{lease.release();}
+  expect(rooms[0].mesh.stats().transferDegree).toBe(0);
+  expect(rooms[0].mesh.hasLink(identities[2].did)).toBe(true);
+ }finally{rooms.forEach(room=>room.leave());}
+});

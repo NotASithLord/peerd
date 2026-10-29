@@ -38,6 +38,10 @@ and storage formats may move until the surface stabilizes.
   path that survives both peers' proposed replacements. Expired or cancelled
   reservations preserve the existing connection, and active transfers retain
   their fixed protection window even on newly established links.
+- Busy rendezvous queues preserve healthy links, handshake admission leaves
+  room for inbound progress, and neighbor selection gives untried peers a turn.
+- Offline repair uses authenticated common brokers; routing suggestions omit
+  cooling edges, and returned content leases survive referral-search cleanup.
 - Network disable waits for vault recovery already in flight, and revoked
   feature starts cannot recreate a host after the disable acknowledgement.
 - Concurrent controller startup work uses the bounded admission queue while

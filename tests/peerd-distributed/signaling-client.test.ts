@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { SIGNALING_BURST } from '../../extension/peerd-distributed/transport/signaling-writer.js';
 import { openRendezvous } from '../../extension/peerd-distributed/transport/signaling-client.js';
 import { PUBLIC_ROOM, SPARSE_PUBLIC_PROFILE, INTRODUCTION_LIMIT, SAMPLE_INTERVAL_MS } from '../../extension/peerd-distributed/transport/rendezvous-profile.js';
 
@@ -109,4 +110,21 @@ test('binary bounds precede decoding and subscriber exceptions cannot retain shu
   expect(() => ws.close()).toThrow('subscriber');
   expect(calls).toBe(1); expect(f.tasks.size).toBe(0);
   ws.onclose(); ws.receive(f.ack); expect(calls).toBe(1); expect(f.tasks.size).toBe(0);
+});
+
+
+test('rendezvous owns paced ICE sends and cancels timed-out queued samples', async () => {
+  const f = fixture(); const joining = f.open({timeoutMs:100}); const ws = f.sockets[0]!;
+  ws.receive(f.ack); const session = await joining;
+  f.advance(SAMPLE_INTERVAL_MS);
+  await Promise.all(Array.from({length:SIGNALING_BURST},(_,n)=>session.sendSignal('peer',{n})));
+  const ac = new AbortController();
+  const cancelled = Promise.resolve(session.sendSignal('peer',{stale:true},{signal:ac.signal})).catch(e=>e.message);
+  const sample = session.sample().catch(e=>e.message);
+  ac.abort(); expect(await cancelled).toContain('cancelled');
+  f.advance(100); expect(await sample).toContain('timed out');
+  f.advance(1000); expect(ws.sent).toHaveLength(SIGNALING_BURST);
+  const pending = Array.from({length:12},()=>Promise.resolve(session.sendSignal('peer',{later:true})).catch(e=>e.message));
+  session.close(); await Promise.all(pending); const sent=ws.sent.length;
+  f.advance(30_000); expect(ws.sent).toHaveLength(sent); expect(f.tasks.size).toBe(0);
 });

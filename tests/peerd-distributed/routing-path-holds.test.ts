@@ -146,3 +146,18 @@ test('an incoming carrier retired during signature verification cannot transfer 
   const leases=Array.from({length:16},()=>f.mesh.holdRoutingLink(f.ids[0].did));leases.forEach(h=>h.release());
  }finally{f.close();}
 });
+
+test('path hints omit cooling edges without renewing or bypassing hold authorization',async()=>{
+ const f=await fixture();try{
+  const peer=f.ids[0].did;
+  expect(f.gate.canSuggestEdge(peer)).toBe(true);
+  const first=await f.gate.acquire(await f.request(),carrier(peer));
+  expect(f.gate.canSuggestEdge(peer)).toBe(true);
+  first.release();expect(f.gate.canSuggestEdge(peer)).toBe(false);
+  await expect(f.gate.acquire(await f.request(),carrier(peer))).rejects.toThrow();
+  f.advance(ROUTING_PATH_COOLDOWN_MS-1);expect(f.gate.canSuggestEdge(peer)).toBe(false);
+  f.advance(1);expect(f.gate.canSuggestEdge(peer)).toBe(true);
+  (await f.gate.acquire(await f.request(),carrier(peer))).release();
+  f.gate.close();expect(f.gate.canSuggestEdge(peer)).toBe(false);
+ }finally{f.close();}
+});

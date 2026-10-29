@@ -32,3 +32,25 @@ test('late sample completion after retirement cannot dial, retain candidates or 
   expect(sampleSignal!.aborted).toBe(true); expect(dialed).toBe(0);
   expect(owner.stats()).toEqual({ candidates: 0, running: false, stopped: true }); expect(f.tasks.size).toBe(0);
 });
+
+test('failed early contacts do not crowd out untried sampled peers', async () => {
+  const f = fixture(); const ac = new AbortController(); let clock = 0;
+  const members = Array.from({ length: 12 }, (_, i) => `peer-${i}`);
+  const contacted: string[] = []; const linked = new Set<string>();
+  const owner = createNeighborMaintenance({ initial: members, sample: async () => members,
+    known: member => linked.has(member), localCount: () => linked.size,
+    connect: async member => {
+      contacted.push(member);
+      if (members.slice(0, 4).includes(member)) throw new Error('remote full');
+      linked.add(member);
+    }, signal: ac.signal, now: () => clock, timers: f.timers, random: () => 0 });
+  try {
+    await owner.start();
+    expect(contacted).toEqual(members.slice(0, 4));
+    clock = 20_000; // Early failures are eligible again; sample repeats their order.
+    await owner.start();
+    expect(contacted.slice(4)).toEqual(members.slice(4, 8));
+    expect(linked.size).toBe(4);
+  } finally { owner.stop(); }
+  expect(f.tasks.size).toBe(0);
+});

@@ -173,11 +173,22 @@ test('cancellation racing request hashing is retained only for the matching sign
   const spy=spyOn(crypto.subtle,'digest').mockImplementation(async(...args)=>{entered();await gate;return original(...args);});
   const rpc=createRoutingRpc({identity:ids[1],roomId:'hash-race',now:()=>time,
    mesh:{routingCarrier:did=>did===ids[2].did?next:null,peers:()=>[],onRoutingControl:handler=>{receive=handler;return ()=>{};}},
-   holds:{acquire:async()=>{throw new Error('unused');}}});
+   holds:{canSuggestEdge:()=>true,acquire:async()=>{throw new Error('unused');}}});
   try{
    receive({env:request,carrier:previous});await started;receive({env:cancel,carrier:previous});resume();
    await until(()=>sent.length>0);
    expect(sent.some(env=>env.typ===ROUTING_CONTROL.ROUTE_CALL)).toBe(!matches);
   }finally{resume();rpc.close();spy.mockRestore();}
  }
+});
+
+test('routing neighbor hints exclude a released path edge during its cooldown',async()=>{
+ const f=await fixture([[0,1],[1,2],[2,0]]);try{
+  const witness=await f.witnesses[0].acquire({candidate:[f.ids[0].did,f.ids[3].did],cuts:[[f.ids[0].did,f.ids[1].did]],path:[0,2,1].map(i=>f.ids[i].did)});
+  witness.release();
+  const neighbors=await f.rpcs[0].readNeighbors([f.ids[0].did],new AbortController().signal);
+  expect(neighbors).toContain(f.ids[1].did);
+  expect(neighbors).not.toContain(f.ids[2].did);
+  expect(f.meshes[0].hasLink(f.ids[2].did)).toBe(true);
+ }finally{f.close();}
 });
