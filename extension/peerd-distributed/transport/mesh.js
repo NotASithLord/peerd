@@ -30,13 +30,13 @@ import { isRawProtocolClose } from './channel.js';
 // the same links: requests hit the served store, responses route to the
 // per-peer fetch in flight.
 
-import { buildEnvelope, signEnvelope, verifyEnvelope } from './envelope.js';
+import { buildEnvelope, envelopeBytes, signEnvelope, verifyEnvelope } from './envelope.js';
 import { establishedAdmission, TRANSFER_PROTECTION_MS, NEIGHBOR_GRACE_MS } from './neighbor-policy.js';
 import { createContentResponder, fetchBundle } from '../content/transfer.js';
 import { dlog } from '../log.js';
 import { createLocalCounters } from '../local-counters.js';
 import { createControlPacer } from './control-pacer.js';
-import { CONTENT_ONLY, LOOKUP_ONLY } from './capabilities.js';
+import { CONTENT_ONLY, LOOKUP_ONLY, ROUTING_WITNESS, ROUTING_CONTROL } from './capabilities.js';
 import { DIRECTORY_INTRODUCTIONS, createDirectoryIntroductions } from './directory-introductions.js';
 
 // ch=0 control message types (PROTOCOL §3.4; 5–7 are the Phase 1 rows).
@@ -46,7 +46,14 @@ export const CTRL = Object.freeze({
   ROSTER_REQ: 5,
   ROSTER: 6,
   RELAY: 7,
+  ...ROUTING_CONTROL,
 });
+
+const routingControlTypes=new Set(Object.values(ROUTING_CONTROL));
+const isRoutingControl=(/** @type {any} */ env)=>env?.ch===0&&routingControlTypes.has(env.typ);
+export class RoutingControlError extends Error {
+  constructor(){super('routing control carrier unavailable');this.name='RoutingControlError';}
+}
 
 const CONTENT_REQ = new Set(['MANIFEST_REQ', 'CHUNK_REQ']);
 const CONTENT_RESP = new Set(['MANIFEST', 'NOMANIFEST', 'CHUNK', 'NOCHUNK']);
@@ -58,6 +65,8 @@ const newId = () =>
 // more links than members (NORTH-STAR D-9).
 const DEFAULT_BUDGET = 16;
 export const CONTENT_LINK_LIFETIME_MS = 60_000;
+export const ROTATION_HOLD_MS = 10_000;
+export const MAX_ROTATION_HOLDS = 16;
 // One retired cohort plus its replacements fits without an unbounded identity
 // history. This is timing custody, not reputation: cache eviction/new DIDs can
 // still bypass it, so it is not a Sybil defense.
@@ -80,11 +89,12 @@ const QUEUED_PER_MESH = 128;
 
 /** @typedef {{ did: string, sign: (bytes: Uint8Array) => Promise<Uint8Array> }} Identity */
 /** @typedef {((type: string, detail?: any) => void) | null} AuditFn */
-/** @typedef {{ send: (msg: any, options?: import('./outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: any) => void, close: () => void, isClosed?: () => boolean, onClose: (cb: (reason?: string) => void) => (() => void) }} Channel */
+/** @typedef {{ send: (msg: any, options?: import('./outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: any) => void, close: () => void, isClosed?: () => boolean, maxFrameBytes?:()=>number, onClose: (cb: (reason?: string) => void) => (() => void) }} Channel */
 /**
  * @typedef {{
  *   did: string,
  *   purpose: 'routing' | 'content' | 'lookup' | 'directory',
+ *   routingWitness: boolean,
  *   leases: number,
  *   controlPacer: ReturnType<typeof createControlPacer>,
  *   introductions?: ReturnType<typeof createDirectoryIntroductions>,
@@ -166,6 +176,9 @@ export const createRoomMesh = ({
   /** @type {Map<string, Link>} */
   const links = new Map(); // did -> { channel, lastSeen, ctrl: {windowStart, count}, offClose }
   const routingLinks = () => [...links.values()].filter(link => link.purpose === 'routing');
+  /** @type {Map<Link, {expiresAt:number, releases:Set<()=>void>}>} */
+  const rotationHolds = new Map();
+  let rotationHoldCount = 0;
   let lastRotation = -Infinity;
   let sparseRotation = sparse;
   /** @type {Set<(arg: any) => void>} */
@@ -176,6 +189,9 @@ export const createRoomMesh = ({
   const envelopeCbs = new Set();
   /** @type {Set<(arg: any) => void>} */
   const relayCbs = new Set();
+  /** @type {((event:{env:any,carrier:{did:string,signal:AbortSignal,maxFrameBytes:()=>number,send:(env:any,options?:import('./outgoing.js').SendOptions)=>Promise<void>}})=>void)|null} */
+  let routingControlHandler=null;
+  /** @type {AbortController|null} */let routingControlOwner=null;
   /** @type {Map<string, Set<(members: any) => void>>} */
   const rosterWaiters = new Map(); // did -> Set<resolve>
   /** @type {((msg: any, send: (m: any) => Promise<void>, owner?: object) => Promise<void>) | null} */
@@ -243,8 +259,8 @@ export const createRoomMesh = ({
   const sign = (ch, typ, body) =>
     signEnvelope(buildEnvelope({ ch, typ, from: identity.did, body, id: newId(), ts: now() }), identity);
 
-  /** @param {Link} link @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
-  const sendOnLink = async (link, env, options = {}) => {
+  /** @param {Link} link @param {any} env @param {import('./outgoing.js').SendOptions} [options] @param {()=>void} [validate] */
+  const sendOnLink = async (link, env, options = {}, validate) => {
     const counts = trafficFor(env);
     counts.add('attempted');
     if (closed || links.get(link.did) !== link || options.signal?.aborted) {
@@ -258,6 +274,7 @@ export const createRoomMesh = ({
     try {
       if(env?.ch===0)await link.controlPacer.take({signal:ac.signal});
       if(ac.signal.aborted||links.get(link.did)!==link)throw new Error('mesh link retired during pacing');
+      validate?.();
       await link.channel.send(env, { ...options, signal: ac.signal });
       if (closed || links.get(link.did) !== link || ac.signal.aborted) throw new Error('mesh link retired during send');
       counts.add('completed');
@@ -268,6 +285,36 @@ export const createRoomMesh = ({
       link.retired.signal.removeEventListener('abort', abort);
       options.signal?.removeEventListener('abort', abort);
     }
+  };
+
+  /** @type {WeakMap<Link,{owner:AbortController,carrier:{did:string,signal:AbortSignal,maxFrameBytes:()=>number,send:(env:any,options?:import('./outgoing.js').SendOptions)=>Promise<void>}}>} */
+  const routingCarrierCache=new WeakMap();
+  /** @param {Link} link */
+  const routingFrameLimit=(link)=>{
+    const limit=link.channel.maxFrameBytes?.()??4_096;
+    return limit===Infinity?16_384:Number.isFinite(limit)?Math.max(0,Math.min(16_384,limit)):0;
+  };
+  /** @param {Link} link */
+  const routingCarrierFor=(link)=>{
+    const owner=routingControlOwner;
+    if(!owner||closed||links.get(link.did)!==link||link.retired.signal.aborted||link.channel.isClosed?.()||!link.routingWitness||link.purpose!=='routing'||!routingControlHandler)return null;
+    const cached=routingCarrierCache.get(link);if(cached?.owner===owner)return cached.carrier;
+    const signal=AbortSignal.any([link.retired.signal,owner.signal]);
+    const current=()=>routingControlOwner===owner&&!signal.aborted&&!closed&&links.get(link.did)===link&&!link.retired.signal.aborted
+      &&!link.channel.isClosed?.()&&link.purpose==='routing'&&link.routingWitness&&!!routingControlHandler;
+    if(!current())return null;
+    const carrier=Object.freeze({did:link.did,signal,maxFrameBytes:()=>current()?routingFrameLimit(link):0,
+      /** @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
+      async send(env,options){
+        if(!current()||!isRoutingControl(env)||envelopeBytes(env)>routingFrameLimit(link))throw new RoutingControlError();
+        const owned=structuredClone(env);
+        await sendOnLink(link,owned,{...options,signal:options?.signal?AbortSignal.any([signal,options.signal]):signal,priority:'control'},()=>{
+          if(!current()||envelopeBytes(owned)>routingFrameLimit(link))throw new RoutingControlError();
+        });
+        if(!current())throw new RoutingControlError();
+      },
+    });
+    routingCarrierCache.set(link,{owner,carrier});return carrier;
   };
 
   /** @param {string} did @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
@@ -382,6 +429,15 @@ export const createRoomMesh = ({
   const handleControl = async (link, env) => {
     const linkLocal = env.from === link.did; // signer IS the neighbor
     switch (env.typ) {
+      case CTRL.ROUTE_CALL:
+      case CTRL.ROUTE_REPLY:
+      case CTRL.ROUTE_CANCEL: {
+        const carrier=routingCarrierFor(link);
+        // Signature verification authenticates the origin, not the route.
+        // The single protocol owner must also match path and request custody.
+        if(carrier)routingControlHandler?.({env,carrier});
+        return;
+      }
       case CTRL.PING:
         if (linkLocal) await sendOnLink(link, await sign(0, CTRL.PONG, { nonce: env.body?.nonce }), { priority: 'control' });
         return;
@@ -460,6 +516,14 @@ export const createRoomMesh = ({
     if (link.purpose === 'content') { penalize(link, 'content-link-scope', true); return; }
     if (msg.__t === 'HELLO') return; // stale handshake frame
     if (msg.v !== 1 || !msg.sig) { penalize(link, 'malformed-frame'); return; }
+    const incomingRoutingOwner=isRoutingControl(msg)?routingControlOwner:null;
+    if(isRoutingControl(msg)){
+      if(link.purpose!=='routing'||!link.routingWitness||!routingControlHandler)return;
+      if(envelopeBytes(msg)>routingFrameLimit(link))return;
+      // In-memory channels may share object references. Own the exact frame
+      // before awaiting crypto so a caller cannot mutate an authenticated plan.
+      try{msg=structuredClone(msg);}catch{return;}
+    }
     // Charge before crypto: an invalid signature must not bypass this budget.
     // Only charge the authenticated immediate neighbor, never the claimed signer.
     if (msg.ch === 0 && !ctrlAllowed(link)) {
@@ -500,6 +564,7 @@ export const createRoomMesh = ({
       return;
     }
     if (closed || links.get(link.did) !== link) return;
+    if(isRoutingControl(msg)&&(!incomingRoutingOwner||routingControlOwner!==incomingRoutingOwner))return;
     link.lastSeen = now();
     if (msg.ch === 0) return handleControl(link, msg);
     // Link-authenticity rule for non-control: flooded frames (ch=4) carry
@@ -552,8 +617,9 @@ export const createRoomMesh = ({
     link.retired.signal.addEventListener('abort', release, { once: true });
     return Object.freeze({ release });
   };
-  /** @param {'routing'|'content'|'lookup'|'directory'} purpose @param {boolean} locallySelected */
-  const admissionDecision=(purpose,locallySelected)=>{
+  /** @param {'routing'|'content'|'lookup'|'directory'} purpose @param {boolean} locallySelected @param {boolean} [requireWitness] */
+  const admissionDecision=(purpose,locallySelected,requireWitness=false)=>{
+    pruneAdmissions();
     const time = now();
     const planned=[...reservedAdmissions.values()];
     const victims=new Set(planned.map(p=>p.evict).filter(Boolean));
@@ -570,22 +636,25 @@ export const createRoomMesh = ({
             // not each remote request. Continuous work cannot pin a slot forever.
             if (pressure && busy && time - link.admittedAt >= NEIGHBOR_GRACE_MS && link.protectedUntil === 0) link.protectedUntil = time + TRANSFER_PROTECTION_MS;
             return { did: link.did, locallySelected: link.locallySelected, admittedAt: link.admittedAt,
-              protectedUntil: link.protectedUntil, busy };
+              protectedUntil: link.protectedUntil, busy, rotationHeld: (rotationHolds.get(link)?.expiresAt ?? 0) > time };
           });
-          peers.push(...planned.map(p=>({did:p.did,locallySelected:p.locallySelected,admittedAt:time,protectedUntil:time+10_000,busy:true})));
-          decision = { evict: undefined, ...establishedAdmission({ peers, budget: routingBudget, locallySelected, now: time, lastRotation:planned.some(p=>p.evict)?time:lastRotation }) };
+          peers.push(...planned.map(p=>({did:p.did,locallySelected:p.locallySelected,admittedAt:time,protectedUntil:time+10_000,busy:true,rotationHeld:false})));
+          decision = { evict: undefined, ...establishedAdmission({ peers, budget: routingBudget, locallySelected, now: time, requireWitness, lastRotation:planned.some(p=>p.evict)?time:lastRotation }) };
           // why: a rendezvous outage freezes replacement, not local ownership.
           // Unsolicited links must leave exploration slots available for repair.
           if (!sparseRotation && decision.evict) decision = { allowed: false, evict: undefined };
         }
     return decision;
   };
-  /** @type {Map<{release:()=>void},{did:string,locallySelected:boolean,evict?:string,victim?:Link}>} */
+  /** @type {Map<{release:()=>void},{did:string,locallySelected:boolean,evict?:string,victim?:Link,expiresAt:number,requireWitness:boolean,witness?:{signal:AbortSignal,validUntil:number}}>} */
   const reservedAdmissions=new Map();
-  /** @param {string} did @param {{locallySelected?:boolean,signal?:AbortSignal}} [options] */
-  const reserveAdmission=(did,{locallySelected=false,signal}={})=>{
+  const pruneAdmissions=()=>{
+    for(const [ticket,plan] of reservedAdmissions)if(now()>=plan.expiresAt || (plan.witness && (plan.witness.signal.aborted || now()>=plan.witness.validUntil)))ticket.release();
+  };
+  /** @param {string} did @param {{locallySelected?:boolean,signal?:AbortSignal,requireWitness?:boolean}} [options] */
+  const reserveAdmission=(did,{locallySelected=false,signal,requireWitness=false}={})=>{
     pruneCooldowns();
-    const decision=admissionDecision('routing',locallySelected);
+    const decision=admissionDecision('routing',locallySelected,requireWitness);
     const unavailable=closed||signal?.aborted||isBlocked(did)||cooldowns.has(did)||did===identity.did;
     const duplicate=links.has(did)||[...reservedAdmissions.values()].some(p=>p.did===did);
     if(unavailable||duplicate||!decision.allowed){
@@ -596,14 +665,62 @@ export const createRoomMesh = ({
         rotationAgeMs:Number.isFinite(lastRotation)?Math.max(0,now()-lastRotation):null});}catch{/* Diagnostic sinks cannot affect admission. */}
       throw new Error('room admission reservation refused');
     }
+    const lifetime=new AbortController();
     let live=true;
+    let detachWitness=()=>{};
     const release=()=>{if(!live)return;live=false;timers.clearTimeout(timer);signal?.removeEventListener('abort',release);
-      reservedAdmissions.delete(ticket);};
-    const ticket=Object.freeze({release});
-    const timer=timers.setTimeout(release,10_000);
-    reservedAdmissions.set(ticket,{did,locallySelected,evict:decision.evict,victim:decision.evict?links.get(decision.evict):undefined});
+      detachWitness();reservedAdmissions.delete(ticket);lifetime.abort();};
+    const expiresAt=now()+10_000;
+    // The room owns signature/path validation. Once attached, this exact
+    // witness can only shorten authorization; it cannot be replaced or renewed.
+    /** @param {{signal:AbortSignal,validUntil:number}} witness */
+    const bindWitness=(witness)=>{
+      pruneAdmissions();
+      const plan=reservedAdmissions.get(ticket);
+      if(!live || !plan || plan.witness || !decision.evict || witness.signal.aborted
+        || !Number.isFinite(witness.validUntil) || now()>=witness.validUntil)return false;
+      plan.witness={signal:witness.signal,validUntil:Math.min(expiresAt,witness.validUntil)};
+      witness.signal.addEventListener('abort',release,{once:true});
+      detachWitness=()=>witness.signal.removeEventListener('abort',release);
+      timers.clearTimeout(timer);timer=timers.setTimeout(release,plan.witness.validUntil-now());
+      return true;
+    };
+    const ticket=Object.freeze({release,bindWitness,rotates:!!decision.evict,signal:lifetime.signal,expiresAt,victim:decision.evict??null});
+    let timer=timers.setTimeout(release,10_000);
+    reservedAdmissions.set(ticket,{did,locallySelected,requireWitness,evict:decision.evict,victim:decision.evict?links.get(decision.evict):undefined,expiresAt});
     signal?.addEventListener('abort',release,{once:true});
     return ticket;
+  };
+  // Local ownership for authenticated path witnesses. The room protocol owns
+  // wire validation; sharing an edge never extends its original deadline.
+  /** @param {string} did @param {{signal?:AbortSignal}} [options] */
+  const holdRoutingLink = (did, {signal} = {}) => {
+    pruneAdmissions();
+    const time = now();
+    for (const state of rotationHolds.values()) if (state.expiresAt <= time) {
+      for (const release of [...state.releases]) release();
+    }
+    const link = links.get(did);
+    if (closed || signal?.aborted || !link || link.purpose !== 'routing' || link.retired.signal.aborted || link.channel.isClosed?.()
+      || rotationHoldCount >= MAX_ROTATION_HOLDS
+      || [...reservedAdmissions.values()].some(plan => plan.victim === link)) throw new Error('routing hold unavailable');
+    const state = rotationHolds.get(link) ?? {expiresAt:time + ROTATION_HOLD_MS, releases:new Set()};
+    const lifetime = new AbortController();
+    let live = true;
+    const release = () => {
+      if (!live) return;
+      live = false; timers.clearTimeout(timer);
+      signal?.removeEventListener('abort', release);
+      link.retired.signal.removeEventListener('abort', release);
+      state.releases.delete(release); rotationHoldCount--;
+      if (!state.releases.size && rotationHolds.get(link) === state) rotationHolds.delete(link);
+      lifetime.abort();
+    };
+    const timer = timers.setTimeout(release, state.expiresAt - time);
+    state.releases.add(release); rotationHoldCount++; rotationHolds.set(link, state);
+    signal?.addEventListener('abort', release, {once:true});
+    link.retired.signal.addEventListener('abort', release, {once:true});
+    return Object.freeze({release, signal:lifetime.signal, expiresAt:state.expiresAt});
   };
   return Object.freeze({
     roomId,
@@ -618,12 +735,14 @@ export const createRoomMesh = ({
     /** @param {boolean} enabled */
     setSparseRotation: (enabled) => { sparseRotation = sparse && !!enabled; },
     reserveAdmission,
+    holdRoutingLink,
     locallySelectedCount: () => routingLinks().filter((link) => link.locallySelected).length,
 
     // Admit an AUTHENTICATED link (HELLO already done — did is proven).
     /** @param {Channel} channel @param {string} did @param {any} [info]
      * @param {{ locallySelected?: boolean, purpose?: 'routing' | 'content' | 'lookup' | 'directory', reservation?:{release:()=>void}, allowRotation?:boolean }} [ownership] */
     addLink(channel, did, info = {}, { locallySelected = false, purpose = 'routing', reservation, allowRotation = true } = {}) {
+      pruneAdmissions();
       const reserved=reservation?reservedAdmissions.get(reservation):undefined;
       if(!reservation&&[...reservedAdmissions.values()].some(plan=>plan.did===did||plan.evict===did)){channel.close();return false;}
       if(reservation&&(!reserved||reserved.did!==did||reserved.locallySelected!==locallySelected||purpose!=='routing')){channel.close();return false;}
@@ -644,6 +763,7 @@ export const createRoomMesh = ({
         const time = now();
         const victim=reserved?.evict?links.get(reserved.evict):undefined;
         const decision = reserved ? {allowed:(!reserved.evict||sparseRotation)
+          &&(!reserved.evict||!reserved.requireWitness||!!reserved.witness)
           &&(!victim||victim===reserved.victim)
           &&(!!victim||(links.size<budget&&routingLinks().length<routingBudget)),evict:victim?reserved.evict:undefined} : admissionDecision(purpose,locallySelected);
         if (!decision.allowed || (decision.evict && !allowRotation)) {
@@ -660,7 +780,7 @@ export const createRoomMesh = ({
       // exploration ownership is never inherited from a retired connection.
       if (links.has(did)) removeLink(did, 'replaced');
       /** @type {Link} */
-      const link = { did, channel, purpose, leases: 0, controlPacer:createControlPacer({now,timers}), introductions: purpose === 'directory' ? createDirectoryIntroductions({now}) : undefined, locallySelected: locallySelected || previous?.locallySelected || false,
+      const link = { did, channel, purpose, routingWitness:purpose==='routing'&&info?.caps?.includes(ROUTING_WITNESS)===true, leases: 0, controlPacer:createControlPacer({now,timers}), introductions: purpose === 'directory' ? createDirectoryIntroductions({now}) : undefined, locallySelected: locallySelected || previous?.locallySelected || false,
         admittedAt: timing?.admittedAt ?? now(), protectedUntil: timing?.protectedUntil ?? 0, serving: 0, retired: new AbortController(), contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
       // Own this exact generation before an already-closed channel can invoke
       // its immediate observer. A close during handoff must not become connected.
@@ -736,6 +856,15 @@ export const createRoomMesh = ({
     onEnvelope: (cb) => { envelopeCbs.add(cb); return () => envelopeCbs.delete(cb); },
     /** @param {(arg: any) => void} cb */
     onRelay: (cb) => { relayCbs.add(cb); return () => relayCbs.delete(cb); },
+
+    /** @param {(event:{env:any,carrier:{did:string,signal:AbortSignal,maxFrameBytes:()=>number,send:(env:any,options?:import('./outgoing.js').SendOptions)=>Promise<void>}})=>void} handler */
+    onRoutingControl(handler){
+      if(closed||routingControlHandler)throw new RoutingControlError();
+      const owner=new AbortController();routingControlOwner=owner;routingControlHandler=handler;
+      return ()=>{if(routingControlOwner===owner){routingControlHandler=null;routingControlOwner=null;owner.abort();}};
+    },
+    /** @param {string} did */
+    routingCarrier(did){const link=links.get(did);return link?routingCarrierFor(link):null;},
 
     // Build-and-sign for upper layers (gossip), so the envelope shape and
     // signing stay in one place.
@@ -831,6 +960,7 @@ export const createRoomMesh = ({
       for(const ticket of [...reservedAdmissions.keys()])ticket.release();
       stopTimers();
       for (const did of [...links.keys()]) removeLink(did, 'mesh-closed');
+      routingControlHandler=null;routingControlOwner?.abort();routingControlOwner=null;
       cooldowns.clear();
       recentNeighbors.clear();
     },

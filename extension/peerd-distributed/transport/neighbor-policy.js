@@ -5,10 +5,10 @@ export const NEIGHBOR_GRACE_MS = 60_000;
 export const NEIGHBOR_ROTATION_MS = 30_000;
 export const TRANSFER_PROTECTION_MS = 30_000;
 /** @typedef {{ did: string, locallySelected: boolean, admittedAt: number,
- * protectedUntil: number, busy: boolean }} Neighbor */
-/** @param {{ peers: Neighbor[], budget: number, locallySelected: boolean, now: number, lastRotation: number }} input
+ * protectedUntil: number, busy: boolean, rotationHeld?: boolean }} Neighbor */
+/** @param {{ peers: Neighbor[], budget: number, locallySelected: boolean, now: number, lastRotation: number, requireWitness?:boolean }} input
  * @returns {{ allowed: boolean, evict?: string }} */
-export const establishedAdmission = ({ peers, budget, locallySelected, now, lastRotation }) => {
+export const establishedAdmission = ({ peers, budget, locallySelected, now, lastRotation, requireWitness=false }) => {
   const inbound = peers.filter((peer) => !peer.locallySelected);
   const reserved = Math.min(2, Math.max(0, budget - 1));
   const inboundFull = !locallySelected && inbound.length >= budget - reserved;
@@ -17,8 +17,10 @@ export const establishedAdmission = ({ peers, budget, locallySelected, now, last
   // Keep locally selected diversity when admitting unsolicited neighbors.
   // Local exploration may eventually rotate a local edge, but prefers inbound
   // slots; every replacement is authenticated and rate limited, never a ban.
+  // A provisional witnessed reservation may inspect a young cycle edge. The
+  // mesh must require its live proof at commit; ordinary admission keeps grace.
   const candidates = (inboundFull ? inbound : locallySelected ? peers : inbound.length ? inbound : peers)
-    .filter((peer) => now - peer.admittedAt >= NEIGHBOR_GRACE_MS
+    .filter((peer) => !peer.rotationHeld && (requireWitness || now - peer.admittedAt >= NEIGHBOR_GRACE_MS)
       && (!peer.busy || now >= peer.protectedUntil))
     .sort((a, b) => (locallySelected ? Number(a.locallySelected) - Number(b.locallySelected) : 0)
       || a.admittedAt - b.admittedAt || a.did.localeCompare(b.did));

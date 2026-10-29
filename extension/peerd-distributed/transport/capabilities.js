@@ -8,3 +8,9 @@ export const CONTENT_ONLY = 'content-only-v1';
 
 // Temporary directory RPC carrier, independent from content and routing roles.
 export const LOOKUP_ONLY = 'lookup-only-v1';
+
+// Routing-path queries and holds use existing carriers only. Advertising this
+// capability requires a live per-room protocol owner; it is not enabled merely
+// by importing these constants.
+export const ROUTING_WITNESS = 'routing-witness-v1';
+export const ROUTING_CONTROL = Object.freeze({ROUTE_CALL:10,ROUTE_REPLY:11,ROUTE_CANCEL:12});

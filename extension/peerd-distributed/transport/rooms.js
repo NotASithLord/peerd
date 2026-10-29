@@ -24,7 +24,11 @@ import { openRendezvous, DEFAULT_SIGNALING } from './signaling-client.js';
 import { createWebrtcTransport } from './transports/webrtc.js';
 import { createRoomMesh } from './mesh.js';
 import { createSession, ADMISSION_READY } from './session.js';
-import { TOPIC_SYNC_WINDOW, CONTENT_ONLY, LOOKUP_ONLY } from './capabilities.js';
+import { createRoutingPathHolds } from './routing-path-holds.js';
+import { createRoutingRpc } from './routing-rpc.js';
+import { createRoutingPathSearch } from './routing-path-search.js';
+import { createRoutingWitnesses } from './routing-witness.js';
+import { TOPIC_SYNC_WINDOW, CONTENT_ONLY, LOOKUP_ONLY, ROUTING_WITNESS } from './capabilities.js';
 import { connectionPath } from './ice.js';
 import { AdmissionError, roomAdmission, MAX_ADMISSION_CANDIDATES } from './admission.js';
 import { createSignalingBuffer } from './signaling-buffer.js';
@@ -94,9 +98,13 @@ export const joinRoom = async ({
 } = /** @type {{ roomId: string, identity: import('./mesh.js').Identity }} */ ({})) => {
   // why: protocol support is mutual and fixed for this room lifetime; a
   // caller-owned capabilities array must not change negotiation after joining.
-  const sessionCaps = [...new Set([...caps,ADMISSION_READY])];
+  const sessionCaps = [...new Set([...caps,ADMISSION_READY,ROUTING_WITNESS])];
   const t = transport ?? createWebrtcTransport({ iceServers, RTCPeerConnection });
   const mesh = createRoomMesh({ roomId, identity, now, budget, audit, isBlocked, transferSlots, timers });
+  const routingHolds=createRoutingPathHolds({identity,roomId,holdRoutingLink:mesh.holdRoutingLink,now});
+  const routingRpc=createRoutingRpc({identity,roomId,mesh,holds:routingHolds,now,timers});
+  const routingSearch=createRoutingPathSearch({selfDid:identity.did,readNeighbors:routingRpc.readNeighbors,now,timers});
+  const routingWitnesses=createRoutingWitnesses({identity,roomId,acquireHop:routingRpc.acquireHop,now,timers});
   const releaseMesh = onMesh?.(mesh);
   /** @type {Set<(arg: { rendezvous: string }) => void>} */
   const statusCbs = new Set();
@@ -133,7 +141,8 @@ export const joinRoom = async ({
   const admit = async (channel, expectedDid = null, via = null, signal, locallySelected = false, purpose = 'routing') => {
     if (left || signal?.aborted || channel.isClosed?.()) { channel.close(); throw new Error('room dial cancelled or channel closed'); }
     const selectedCaps = purpose === 'content' ? ['content', CONTENT_ONLY] : purpose === 'lookup' ? [LOOKUP_ONLY] : purpose === 'directory' ? [DIRECTORY_INTRODUCTIONS] : sessionCaps;
-    /** @type {{release:()=>void}|undefined} */let reservation;
+    /** @type {ReturnType<typeof mesh.reserveAdmission>|undefined} */let reservation;
+    /** @type {Awaited<ReturnType<typeof routingWitnesses.acquire>>|undefined} */let witness;
     let admissionChecked=false;
     try {
     const { remoteDid, remoteCaps } = await createSession({ channel, identity, caps: selectedCaps, now, signal, timers,
@@ -142,7 +151,19 @@ export const joinRoom = async ({
         if(expectedDid&&did!==expectedDid)throw new Error('peer authenticated as a different did than expected');
         if((admitPeer&&!await admitPeer(did))||isBlocked(did))throw new Error('peer-user-blocked');
         if(left||signal?.aborted||channel.isClosed?.())throw new Error('room admission retired');
-        reservation=mesh.reserveAdmission(did,{locallySelected,signal});admissionChecked=true;
+        const ticket=mesh.reserveAdmission(did,{locallySelected,signal,requireWitness:true});
+        reservation=ticket;admissionChecked=true;return ticket;
+      },
+      commitAdmission:async({remoteDid:peerDid,localVictim,remoteVictim,signal:handshakeSignal})=>{
+        if(!localVictim)return null;
+        if(!reservation || reservation.victim!==localVictim)throw new Error('room rotation plan retired');
+        const owner=AbortSignal.any([reservation.signal,handshakeSignal,lifetime.signal]);
+        const cuts=[[identity.did,localVictim],...(remoteVictim?[[peerDid,remoteVictim]]:[])];
+        const path=await routingSearch.find({target:localVictim,cuts,signal:owner});
+        if(!path)throw new Error('room rotation lacks an alternate path');
+        witness=await routingWitnesses.acquire({candidate:[identity.did,peerDid],cuts,path:[...path],signal:owner});
+        if(!reservation.bindWitness(witness)){witness.release();throw new Error('room rotation witness retired');}
+        return witness;
       }});
     // why: the relay hint chooses resource admission, but only signed HELLO
     // binds both endpoints to content-only authority. Legacy peers fail closed.
@@ -177,7 +198,7 @@ export const joinRoom = async ({
       });
     }
     return remoteDid;
-    } finally {reservation?.release();}
+    } finally {reservation?.release();witness?.release();}
   };
 
   // ---- shared trickle signaling ------------------------------------------
@@ -652,6 +673,10 @@ export const joinRoom = async ({
       attempts.close();
       timers.clearTimeout(reconnectTimer ?? undefined);
       try { session?.close(); } catch { /* already closed */ }
+      routingSearch.close();
+      routingWitnesses.close();
+      routingRpc.close();
+      routingHolds.close();
       mesh.close();
     },
   });
