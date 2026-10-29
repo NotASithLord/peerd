@@ -35,7 +35,7 @@ import { establishedAdmission, TRANSFER_PROTECTION_MS, NEIGHBOR_GRACE_MS } from 
 import { createContentResponder, fetchBundle } from '../content/transfer.js';
 import { dlog } from '../log.js';
 import { createLocalCounters } from '../local-counters.js';
-import { CONTENT_ONLY } from './capabilities.js';
+import { CONTENT_ONLY, LOOKUP_ONLY } from './capabilities.js';
 
 // ch=0 control message types (PROTOCOL §3.4; 5–7 are the Phase 1 rows).
 export const CTRL = Object.freeze({
@@ -82,7 +82,7 @@ const QUEUED_PER_MESH = 128;
 /**
  * @typedef {{
  *   did: string,
- *   purpose: 'routing' | 'content',
+ *   purpose: 'routing' | 'content' | 'lookup',
  *   leases: number,
  *   expiry?: ReturnType<typeof setTimeout>,
  *   channel: Channel,
@@ -281,7 +281,7 @@ export const createRoomMesh = ({
   /** @param {string} did */
   const contentChannelFor = (did) => {
     const link = links.get(did);
-    if (!link) return null;
+    if (!link || link.purpose === 'lookup') return null;
     // why: concurrent downloads own separate handlers, scoped to this link
     // generation; finishing an old transfer must not detach a new one.
     /** @type {((msg: any) => boolean | void) | null} */
@@ -402,6 +402,7 @@ export const createRoomMesh = ({
   /** @param {Link} link @param {any} msg */
   const handle = async (link, msg) => {
     if (closed || links.get(link.did) !== link) return;
+    if (link.purpose === 'lookup' && !(msg?.ch === 1 && !msg.t && (msg.typ === 0 || msg.typ === 1))) { penalize(link, 'lookup-link-scope', true); return; }
     if (!msg) { penalize(link, 'malformed-frame'); return; }
     // Phase 0 content-transfer frames multiplex on mesh links.
     if (typeof msg.t === 'string' && CONTENT_REQ.has(msg.t)) {
@@ -481,7 +482,7 @@ export const createRoomMesh = ({
       penalize(link, 'misattributed-envelope');
       return;
     }
-    emit(envelopeCbs, { env: msg, via: link.did });
+    emit(envelopeCbs, { env: msg, via: link.did, purpose: link.purpose });
   };
 
   const sweep = () => {
@@ -505,6 +506,24 @@ export const createRoomMesh = ({
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
   };
 
+  /** @param {string} did @param {'content'|'lookup'} purpose @param {AbortSignal|undefined} signal */
+  const acquireScopedLink = (did, purpose, signal) => {
+    const link = links.get(did);
+    if (!link || (link.purpose !== 'routing' && link.purpose !== purpose) || closed || signal?.aborted) throw new Error('content lease unavailable');
+    link.leases++;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      signal?.removeEventListener('abort', release);
+      link.retired.signal.removeEventListener('abort', release);
+      link.leases--;
+      if (link.purpose !== 'routing' && link.leases === 0 && links.get(did) === link) removeLink(did, 'content-released');
+    };
+    signal?.addEventListener('abort', release, { once: true });
+    link.retired.signal.addEventListener('abort', release, { once: true });
+    return Object.freeze({ release });
+  };
   return Object.freeze({
     roomId,
     selfDid: identity.did,
@@ -521,9 +540,9 @@ export const createRoomMesh = ({
 
     // Admit an AUTHENTICATED link (HELLO already done — did is proven).
     /** @param {Channel} channel @param {string} did @param {any} [info]
-     * @param {{ locallySelected?: boolean, purpose?: 'routing' | 'content' }} [ownership] */
+     * @param {{ locallySelected?: boolean, purpose?: 'routing' | 'content' | 'lookup' }} [ownership] */
     addLink(channel, did, info = {}, { locallySelected = false, purpose = 'routing' } = {}) {
-      if (!['routing', 'content'].includes(purpose) || (purpose === 'content' && (!transferSlots || !info?.caps?.includes(CONTENT_ONLY)))) { channel.close(); return false; }
+      if (!['routing', 'content', 'lookup'].includes(purpose) || (purpose !== 'routing' && (!transferSlots || !info?.caps?.includes(purpose === 'content' ? CONTENT_ONLY : LOOKUP_ONLY)))) { channel.close(); return false; }
       if (closed || channel.isClosed?.() || isBlocked(did)) { channel.close(); return false; }
       pruneCooldowns();
       if (cooldowns.has(did)) {
@@ -538,7 +557,7 @@ export const createRoomMesh = ({
       const timing = previous ?? (sparse ? recentNeighbors.get(did) : undefined);
       if (!previous) {
         const time = now();
-        let decision = { allowed: links.size < budget && (purpose === 'content'
+        let decision = { allowed: links.size < budget && (purpose !== 'routing'
           ? links.size - routingLinks().length < transferSlots : routingLinks().length < routingBudget), evict: /** @type {string | undefined} */ (undefined) };
         if (sparse && purpose === 'routing') {
           const values = routingLinks();
@@ -596,7 +615,7 @@ export const createRoomMesh = ({
       if (links.get(did) !== link) return false;
       // why: continuous traffic cannot pin scarce temporary capacity forever.
       // The expiry belongs to this carrier generation, never to a DID alone.
-      if (purpose === 'content') link.expiry = timers.setTimeout(() => {
+      if (purpose !== 'routing') link.expiry = timers.setTimeout(() => {
         if (links.get(did) === link) removeLink(did, 'content-lifetime');
       }, CONTENT_LINK_LIFETIME_MS);
       audit?.('peer_connected', { did, room: roomId });
@@ -608,27 +627,22 @@ export const createRoomMesh = ({
     /** @param {string} did */
     hasLink: (did) => links.get(did)?.purpose === 'routing',
     /** @param {string} did */
-    hasContentLink: (did) => links.has(did),
+    hasContentLink: (did) => links.has(did) && links.get(did)?.purpose !== 'lookup',
+    /** @param {string} did */
+    hasLookupLink: (did) => links.has(did) && links.get(did)?.purpose !== 'content',
+    /** @param {string} did @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
+    async sendLookup(did, env, options) {
+      const link = links.get(did);
+      if (!link || link.purpose === 'content' || env?.ch !== 1 || env.t || ![0, 1].includes(env.typ)) return false;
+      try { await sendOnLink(link, env, options); return true; } catch { return false; }
+    },
     // Local consumers share one carrier but own separate cancellation. A
     // routing neighbor is borrowed without acquiring teardown authority.
     /** @param {string} did @param {{signal?: AbortSignal}} [options] */
-    acquireContentLink(did, { signal } = {}) {
-      const link = links.get(did);
-      if (!link || closed || signal?.aborted) throw new Error('content lease unavailable');
-      link.leases++;
-      let released = false;
-      const release = () => {
-        if (released) return;
-        released = true;
-        signal?.removeEventListener('abort', release);
-        link.retired.signal.removeEventListener('abort', release);
-        link.leases--;
-        if (link.purpose === 'content' && link.leases === 0 && links.get(did) === link) removeLink(did, 'content-released');
-      };
-      signal?.addEventListener('abort', release, { once: true });
-      link.retired.signal.addEventListener('abort', release, { once: true });
-      return Object.freeze({ release });
-    },
+    acquireContentLink: (did, {signal} = {}) => acquireScopedLink(did, 'content', signal),
+    /** @param {string} did @param {{signal?:AbortSignal}} [options] */
+    acquireLookupLink: (did, {signal} = {}) => acquireScopedLink(did, 'lookup', signal),
+
     // Merge telemetry onto a link (e.g. the ICE path once stats settle).
     /** @param {string} did @param {any} patch */
     tagLink(did, patch) {
