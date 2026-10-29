@@ -204,7 +204,29 @@ try {
     const { createChannelClient } = await import('/peerd-distributed/content/transfer.js');
     const { formatDwappUri } = await import('/shared/address/dwapp-uri.js');
     const identity = await generateIdentity();
-    const room = await joinRoom({ identity, roomId: 'peerd/base/1', url: 'ws://127.0.0.1:${signalPort}/rendezvous', iceServers: [] });
+    // why: distinguish ICE from HELLO failures without collecting addresses,
+    // SDP or unbounded logs. Passive listeners preserve the native transport.
+    const nativePeers = [];
+    const NativePeer = globalThis.RTCPeerConnection;
+    class ObservedPeer extends NativePeer {
+      constructor(...args) {
+        super(...args);
+        const record = { events: [], candidates: 0, candidateErrors: 0 };
+        nativePeers.push(record);
+        if (nativePeers.length > 8) nativePeers.shift();
+        const observe = () => {
+          record.events.push({ connection: this.connectionState, ice: this.iceConnectionState,
+            gathering: this.iceGatheringState, signaling: this.signalingState });
+          if (record.events.length > 32) record.events.shift();
+        };
+        for (const event of ['connectionstatechange', 'iceconnectionstatechange',
+          'icegatheringstatechange', 'signalingstatechange']) this.addEventListener(event, observe);
+        this.addEventListener('icecandidate', event => { if (event.candidate) record.candidates++; });
+        this.addEventListener('icecandidateerror', () => { record.candidateErrors++; });
+        observe();
+      }
+    }
+    const room = await joinRoom({ identity, roomId: 'peerd/base/1', url: 'ws://127.0.0.1:${signalPort}/rendezvous', iceServers: [], RTCPeerConnection: ObservedPeer });
     const base = await createBaseNetwork({ identity, mesh: room.mesh, meta: () => ({ name: 'manual-address-publisher' }) });
     // (module (func (export "answer") (result i32) i32.const 42))
     const wasm = Uint8Array.from([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,10,1,6,97,110,115,119,101,114,0,0,10,6,1,4,0,65,42,11]);
@@ -214,7 +236,7 @@ try {
     const app = await base.publishApp({ name: 'Manual address acceptance', entry: 'index.html', files });
     const catalog = ${randomDiscovery} ? await base.publishMeta({ slug: 'native-wasm', name: 'Manual address acceptance',
       description: ${wasmExecution} ? 'A peer-shared WebAssembly answer.' : 'A peer-shared JavaScript answer.', head: { version_id: app.hash, content_addr: app.uri, size: app.packedBytes, includes_wasm: ${wasmExecution} } }) : null;
-    window.manualPublisher = { base, room, app, query: async did => {
+    window.manualPublisher = { base, room, app, nativePeers, query: async did => {
       const client = createChannelClient(room.mesh.contentChannel(did), 5000);
       try { return await client.manifest(app.hash); } finally { client.close(); }
     } };
@@ -241,7 +263,8 @@ try {
       const room = window.manualPublisher.room;
       const state = room.rendezvous();
       return { linkedToReceiver: room.mesh.hasLink(did), peerCount: room.mesh.peers().length,
-        rendezvous: ['up', 'connecting', 'none'].includes(state) ? state : 'unknown' };
+        rendezvous: ['up', 'connecting', 'none'].includes(state) ? state : 'unknown',
+        nativePeers: window.manualPublisher.nativePeers };
     }`, [receiver.did]);
     probe.publisher = other;
     return other.linkedToReceiver && receiverLinked;
