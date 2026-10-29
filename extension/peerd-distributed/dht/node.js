@@ -18,6 +18,7 @@
 // disjoint-path lookups (the Sybil hardening) are a documented v1.1 follow-up
 // layered on this same shortlist machinery.
 
+import { MAX_PROVIDER_BROKERS } from './provider-routes.js';
 import { createRoutingTable } from './routing-table.js';
 import { nodeIdOf, byDistanceTo } from './distance.js';
 import { itemKey } from './records.js';
@@ -42,7 +43,7 @@ const isDhtKeyHex = (h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h);
  * }} opts
  */
 export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, k = 8, alpha = 3, now = Date.now }) => {
-  /** @typedef {{ did: string, id: Uint8Array, hints?: any }} Contact */
+  /** @typedef {{ did: string, id: Uint8Array, hints?: any, brokers?: string[] }} Contact */
   const rt = createRoutingTable({ selfId, k, now });
 
   // Add a peer that just ANSWERED us. id is recomputed from the did (never
@@ -179,9 +180,14 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
           for (const did of (Array.isArray(resp?.providers) ? resp.providers.slice(0, 64) : [])) {
             if (signal?.aborted || typeof did !== 'string' || did.length > 128 || did === identity.did) continue;
             try {
-              if (!found.get(did)?.hints && (found.has(did) || found.size < 64)) {
+              if (found.has(did) || found.size < 64) {
                 const id = await nodeIdOf(did);
-                if (!signal?.aborted && (found.has(did) || found.size < 64)) found.set(did, { did, id, hints: { broker: c.did } });
+                if (!signal?.aborted && (found.has(did) || found.size < 64)) {
+                  const previous = found.get(did);
+                  // Local responders only: wire() never emits these routes.
+                  const brokers = [...new Set([...(previous?.brokers ?? []), c.did])].slice(0, MAX_PROVIDER_BROKERS);
+                  found.set(did, { did, id, hints: { broker: brokers[0] }, brokers });
+                }
               }
             } catch { /* malformed identity is not a referral */ }
           }

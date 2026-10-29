@@ -366,7 +366,7 @@ export const createRoomMesh = ({
         return; // lastSeen already updated on receipt
       case CTRL.ROSTER_REQ: {
         if (!linkLocal || env.body?.room !== roomId) return;
-        const members = [identity.did, ...routingLinks().map(link => link.did)].filter((d) => d !== link.did);
+        const members = [identity.did, ...routingLinks().map(peer => peer.did)].filter((d) => d !== link.did);
         await sendOnLink(link, await sign(0, CTRL.ROSTER, { room: roomId, members }));
         return;
       }
@@ -661,9 +661,10 @@ export const createRoomMesh = ({
     },
 
     // "Who do you see in this room?" — the server-optional roster.
-    /** @param {string} did @param {{ timeoutMs?: number }} [opts] */
-    requestRoster(did, { timeoutMs = 10_000 } = {}) {
+    /** @param {string} did @param {{ timeoutMs?: number, signal?: AbortSignal }} [opts] */
+    requestRoster(did, { timeoutMs = 10_000, signal } = {}) {
       return new Promise((resolve, reject) => {
+        if (signal?.aborted) return reject(signal.reason ?? new Error('roster cancelled'));
         const link = links.get(did);
         if (!link || link.purpose !== 'routing') return reject(new Error(`requestRoster: no link to ${did}`));
         const ac = new AbortController();
@@ -673,6 +674,7 @@ export const createRoomMesh = ({
         let timer;
         const cleanup = () => {
           clearTimeout(timer); ac.abort(); offClose();
+          signal?.removeEventListener('abort', cancel);
           rosterWaiters.get(did)?.delete(settle);
           if (!rosterWaiters.get(did)?.size) rosterWaiters.delete(did);
         };
@@ -680,6 +682,8 @@ export const createRoomMesh = ({
         const fail = (error) => { if (!settled) { settled = true; cleanup(); reject(error); } };
         /** @param {any} members */
         const settle = (members) => { if (!settled) { settled = true; cleanup(); resolve(members); } };
+        const cancel = () => fail(signal?.reason ?? new Error('roster cancelled'));
+        signal?.addEventListener('abort', cancel, { once: true });
         let waiters = rosterWaiters.get(did);
         if (!waiters) { waiters = new Set(); rosterWaiters.set(did, waiters); }
         waiters.add(settle);
