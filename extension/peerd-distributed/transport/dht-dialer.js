@@ -52,7 +52,16 @@ export const makeDhtDialer = (room) => {
       return !active.aborted && room.mesh.hasLink(contact.did) ? true : null;
     }) ?? false;
   };
-  return Object.assign(dial, {acquireContent: room.contentTransfersEnabled ?
+  return Object.assign(dial, {acquireLookup: room.contentTransfersEnabled ?
+    /** @param {Contact} contact @param {{signal?:AbortSignal}} options */
+    async (contact, options) => {
+      options.signal?.throwIfAborted();
+      if (room.mesh.hasLookupLink(contact.did)) return room.mesh.acquireLookupLink(contact.did, options);
+      const lease = await throughReferral(room, contact, options.signal, (broker, active) =>
+        room.acquireLookupVia(broker, contact.did, {signal:active, leaseSignal:options.signal}));
+      if (!lease) throw new Error('lookup broker unavailable');
+      return lease;
+    } : undefined, acquireContent: room.contentTransfersEnabled ?
     /** @param {Contact} contact
      * @param {{signal?:AbortSignal,leaseSignal?:AbortSignal|null}} options */
     async (contact, options) => {

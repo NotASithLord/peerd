@@ -48,7 +48,7 @@ window.cluster = {
       const result = await routing(contact, options);
       recordAudit('routing-dial-end', {ok:result, linkedBefore, routes:routes.length, linkedRoutes});
       return result;
-    }, {acquireContent:routing.acquireContent});
+    }, {acquireContent:routing.acquireContent,acquireLookup:routing.acquireLookup});
     const acquire = dial.acquireContent;
     if (acquire) dial.acquireContent = async (contact, options) => {
       const started = performance.now();

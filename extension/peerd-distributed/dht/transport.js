@@ -26,7 +26,7 @@ const RESP = 1;
 /**
  * @param {{
  *   mesh: any, identity: { did: string }, selfId: Uint8Array,
- *   store: any, providers?: any, dial?: ((contact: any, opts?: {signal?: AbortSignal}) => Promise<boolean>) | null,
+ *   store: any, providers?: any, dial?: (((contact: any, opts?: {signal?: AbortSignal}) => Promise<boolean>) & {acquireLookup?:(contact:any,opts:{signal?:AbortSignal})=>Promise<{release:()=>void}>}) | null,
  *   timeoutMs?: number, now?: () => number, k?: number, alpha?: number,
  * }} opts
  * @returns {{ node: any, detach: () => void }}
@@ -57,16 +57,22 @@ export const attachDht = ({ mesh, identity, selfId, store, providers = null, dia
     const aborted = new Promise((_, reject) => {
       ac.signal.addEventListener('abort', () => reject(new Error('dht: rpc cancelled or timed out')), { once: true });
     });
+    /** @type {{lease:{release:()=>void}|null}} */
+    const owned = {lease:null};
     const run = async () => {
       if (!mesh.hasLink(did)) {
-        if (!dial || !(await dial(contact, { signal: ac.signal }))) throw new Error(`dht: no path to ${did.slice(-8)}`);
+        if (dial?.acquireLookup) {
+          owned.lease = await dial.acquireLookup(contact, {signal:ac.signal});
+          if (ac.signal.aborted) { owned.lease.release(); ac.signal.throwIfAborted(); }
+        }
+        else if (!dial || !(await dial(contact, { signal: ac.signal }))) throw new Error(`dht: no path to ${did.slice(-8)}`);
       }
       ac.signal.throwIfAborted();
       const env = await mesh.sign(CH_DHT, REQ, { reqId, msg });
       ac.signal.throwIfAborted();
       return new Promise((resolve, reject) => {
         pending.set(reqId, { did, resolve, timer });
-        Promise.resolve(mesh.send(did, env, { signal: ac.signal })).then((sent) => {
+        Promise.resolve(owned.lease ? mesh.sendLookup(did, env, {signal:ac.signal}) : mesh.send(did, env, { signal: ac.signal })).then((sent) => {
           if (!sent) reject(new Error('dht: link lost mid-send'));
         }, reject);
       });
@@ -78,12 +84,13 @@ export const attachDht = ({ mesh, identity, selfId, store, providers = null, dia
       signal?.removeEventListener('abort', cancel);
       active.delete(ac);
       ac.abort();
+      owned.lease?.release();
     }
   };
 
-  const node = createDhtNode({ identity, selfId, store, providers, rpc, now, k, alpha });
+  const node = createDhtNode({ identity, selfId, store, providers, rpc, now, k, alpha, retainContact: (did) => mesh.hasLink(did) });
 
-  const off = mesh.onEnvelope(async (/** @type {{ env: any }} */ { env }) => {
+  const off = mesh.onEnvelope(async (/** @type {{ env: any, purpose?:string }} */ { env, purpose }) => {
     if (closed || env.ch !== CH_DHT || !env.body) return;
     if (env.typ === REQ) {
       // Serve it. env.from is the authenticated neighbour (mesh guaranteed it).
@@ -92,7 +99,9 @@ export const attachDht = ({ mesh, identity, selfId, store, providers = null, dia
       let resp;
       try { resp = await node.handle(env.from, env.body.msg); }
       catch { resp = { t: 'ERR', reason: 'handler-error' }; }
-      await mesh.send(env.from, await mesh.sign(CH_DHT, RESP, { reqId: env.body.reqId, resp }));
+      const response = await mesh.sign(CH_DHT, RESP, { reqId: env.body.reqId, resp });
+      if (purpose === 'lookup') await mesh.sendLookup(env.from, response);
+      else await mesh.send(env.from, response);
     } else if (env.typ === RESP) {
       const p = pending.get(env.body.reqId);
       if (p && p.did === env.from) { clearTimeout(p.timer); pending.delete(env.body.reqId); p.resolve(env.body.resp); }

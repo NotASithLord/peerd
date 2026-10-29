@@ -75,7 +75,7 @@ describe('transport REQ backstop wiring (D1)', () => {
     const src = await Bun.file('extension/peerd-distributed/dht/transport.js').text();
     expect(src).toContain("catch { resp = { t: 'ERR', reason: 'handler-error' }; }");
     const tryAt = src.indexOf('try { resp = await node.handle');
-    const sendAt = src.indexOf('mesh.send(env.from, await mesh.sign(CH_DHT, RESP');
+    const sendAt = src.indexOf('const response = await mesh.sign(CH_DHT, RESP');
     expect(tryAt).toBeGreaterThan(-1);
     expect(sendAt).toBeGreaterThan(tryAt); // the RESP is sent after the guarded handle
   });

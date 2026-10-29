@@ -39,10 +39,10 @@ const isDhtKeyHex = (h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h);
  *   store: ReturnType<typeof import('./store.js').createDhtStore>,
  *   providers?: ReturnType<typeof import('./provider-store.js').createProviderStore> | null,
  *   rpc: (contact: any, msg: any, opts?: {signal?: AbortSignal}) => Promise<any>,
- *   k?: number, alpha?: number, now?: () => number,
+ *   k?: number, alpha?: number, now?: () => number, retainContact?: (did:string)=>boolean,
  * }} opts
  */
-export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, k = 8, alpha = 3, now = Date.now }) => {
+export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, k = 8, alpha = 3, now = Date.now, retainContact = () => true }) => {
   /** @typedef {{ did: string, id: Uint8Array, hints?: any, brokers?: string[] }} Contact */
   const rt = createRoutingTable({ selfId, k, now });
 
@@ -132,7 +132,7 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
         try { resp = await rpc(c, wantValue ? { t: 'FIND_VALUE', key: targetHex } : { t: 'FIND_NODE', target: targetHex }, { signal }); }
         catch { if (!signal?.aborted) rt.remove(c.did); return; } // unreachable → drop (reachable-only)
         if (signal?.aborted) return;
-        await learn(c.did, c.hints); // it answered → reachable
+        if (retainContact(c.did)) await learn(c.did, c.hints); // it answered → reachable
         if (wantValue && resp?.t === 'VALUE') { value = resp.item; return; }
         for (const n of (resp?.nodes ?? [])) {
           if (n?.did && n.did !== identity.did && !known.has(n.did)) {
@@ -173,7 +173,7 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
           // why: an error or malformed reply is not a successful empty lookup.
           // Keep partial usable referrals, but don't label absence as evidence.
           if (resp?.t !== 'PROVIDERS' || !Array.isArray(resp.providers) || !Array.isArray(resp.nodes)) onQueryFailure?.();
-          await learn(c.did, c.hints);
+          if (retainContact(c.did)) await learn(c.did, c.hints);
           // why: a provider identity alone is not a route. Retain the peer
           // that supplied it as a local signaling broker, without trusting it
           // enough to insert the provider into the reachable routing table.

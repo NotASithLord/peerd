@@ -80,7 +80,7 @@ for (const cancel of [false, true]) test(`actual provider fetch releases its tem
 import {createSession} from '../../extension/peerd-distributed/transport/session.js';
 import {CONTENT_ONLY} from '../../extension/peerd-distributed/transport/capabilities.js';
 
-for (const purpose of ['routing','content'] as const) test(`signed HELLO cannot substitute the opposite role for ${purpose} admission`,async()=>{
+for (const purpose of ['routing','content','lookup'] as const) test(`signed HELLO cannot substitute the opposite role for ${purpose} admission`,async()=>{
  const [local,remote,broker]=await Promise.all([generateIdentity(),generateIdentity(),generateIdentity()]);
  const channels:ReturnType<typeof memoryPair>[number][]=[];
  const sessions:Promise<unknown>[]=[];
@@ -104,4 +104,61 @@ for (const purpose of ['routing','content'] as const) test(`signed HELLO cannot 
   expect(admission.stats().active).toBe(0);
   expect(channels.every(channel=>channel.isClosed?.())).toBe(true);
  }finally{room.leave();channels.forEach(channel=>channel.close());await Promise.all(sessions);}
+});
+
+
+test('signed lookup negotiation exchanges directory RPC without claiming routing or content capacity twice',async()=>{
+ const identities=await Promise.all([generateIdentity(),generateIdentity(),generateIdentity()]);
+ const pending=new Map<string,ReturnType<typeof memoryPair>[number]>();let next=0;
+ const transport={
+  async connect(_peer:any,{signaling}:any){const pair=memoryPair();const id=String(++next);pending.set(id,pair[1]);await signaling.send({type:'offer',sdp:id});return pair[0];},
+  async accept({offer}:any){const channel=pending.get(offer.sdp);pending.delete(offer.sdp);return {channel};}
+ };
+ const rooms=await Promise.all(identities.map(identity=>joinRoom({identity,roomId:'lookup',url:null,transport,budget:3,transferSlots:1})));
+ try{
+  for(const i of [0,1]){const pair=memoryPair();rooms[i].mesh.addLink(pair[0],identities[2].did);rooms[2].mesh.addLink(pair[1],identities[i].did);rooms[i].mesh.addLink(createBufferedChannel({send(){}}),'filler');}
+  const lease=await rooms[0].acquireLookupVia(identities[2].did,identities[1].did);
+  for(let i=0;i<100&&!rooms[1].mesh.hasLookupLink(identities[0].did);i++)await new Promise(r=>setTimeout(r,1));
+  let reply:any;
+  rooms[0].mesh.onEnvelope(({env})=>{reply=env.body;});
+  rooms[1].mesh.onEnvelope(async ({env})=>{await rooms[1].mesh.sendLookup(env.from,await rooms[1].mesh.sign(1,1,{reqId:env.body.reqId,resp:{t:'PROVIDERS',providers:[],nodes:[]}}));});
+  expect(await rooms[0].mesh.sendLookup(identities[1].did,await rooms[0].mesh.sign(1,0,{reqId:'lookup',msg:{t:'GET_PROVIDERS',key:'a'.repeat(64)}}))).toBe(true);
+  for(let i=0;i<100&&!reply;i++)await new Promise(r=>setTimeout(r,1));
+  expect(reply).toEqual({reqId:'lookup',resp:{t:'PROVIDERS',providers:[],nodes:[]}});
+  expect(rooms[0].mesh.stats().totalDegree).toBe(3);
+  expect(rooms[0].mesh.peers()).toHaveLength(2);
+  expect(rooms[0].mesh.contentChannel(identities[1].did)).toBeNull();
+  await expect(rooms[0].acquireContentVia(identities[2].did,identities[1].did)).rejects.toThrow();
+  lease.release();
+  expect(rooms[0].mesh.stats().totalDegree).toBe(2);
+ }finally{rooms.forEach(room=>room.leave());}
+});
+
+const contentKey = async (uri:string) => Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(uri))).toString('hex');
+
+test('real DHT RPC borrows a lookup carrier and never retains it as a routing neighbor',async()=>{
+ const identities=await Promise.all([generateIdentity(),generateIdentity(),generateIdentity()]);
+ const pending=new Map<string,ReturnType<typeof memoryPair>[number]>();let next=0;
+ const transport={
+  async connect(_peer:any,{signaling}:any){const pair=memoryPair();const id=String(++next);pending.set(id,pair[1]);await signaling.send({type:'offer',sdp:id});return pair[0];},
+  async accept({offer}:any){const channel=pending.get(offer.sdp);pending.delete(offer.sdp);return {channel};}
+ };
+ const rooms=await Promise.all(identities.map((identity,i)=>joinRoom({identity,roomId:'rpc',url:null,transport,budget:i===2?3:2,transferSlots:i===2?0:1})));
+ let acquired=0;
+ const bases=await Promise.all(rooms.map((room,i)=>{
+  const dial=makeDhtDialer(room);const acquire=dial.acquireLookup;
+  if(i===0&&acquire)dial.acquireLookup=async(...args)=>{const lease=await acquire(...args);acquired++;return lease;};
+  return createBaseNetwork({identity:identities[i],mesh:room.mesh,dial});
+ }));
+ try{
+  for(const i of [0,1]){const pair=memoryPair();rooms[i].mesh.addLink(pair[0],identities[2].did);rooms[2].mesh.addLink(pair[1],identities[i].did);await bases[i].node.dht.learn(identities[2].did);await bases[2].node.dht.learn(identities[i].did);}
+  const app=await bases[1].publishApp({name:'lookup',entry:'index.html',files:{'index.html':'directory'}});
+  await bases[1].announceProvider(app.uri);
+  const contacts=await bases[0].node.dht.findProviderContacts(await contentKey(app.uri));
+  expect(contacts.some((c:any)=>c.did===identities[1].did)).toBe(true);
+  expect(acquired).toBeGreaterThan(0);
+  expect(rooms[0].mesh.hasLink(identities[1].did)).toBe(false);
+  expect(bases[0].node.dht.routingTable.has(identities[1].did)).toBe(false);
+  expect(rooms[0].mesh.stats().transferDegree).toBe(0);
+ }finally{bases.forEach(base=>base.close());rooms.forEach(room=>room.leave());}
 });
