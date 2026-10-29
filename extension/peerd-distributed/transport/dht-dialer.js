@@ -58,8 +58,10 @@ export const makeDhtDialer = (room) => {
     async (contact, options) => {
       options.signal?.throwIfAborted();
       if (room.mesh.hasLookupLink(contact.did)) return room.mesh.acquireLookupLink(contact.did, options);
+      // No caller signal means explicit release owns the lease, not the
+      // short-lived referral search signal that retires when this returns.
       const lease = await throughReferral(room, contact, options.signal, (broker, active) =>
-        room.acquireLookupVia(broker, contact.did, {signal:active, leaseSignal:options.signal}));
+        room.acquireLookupVia(broker, contact.did, {signal:active, leaseSignal:options.signal ?? null}));
       if (!lease) throw new Error('lookup broker unavailable');
       return lease;
     } : undefined, acquireContent: room.contentTransfersEnabled ?
@@ -69,7 +71,7 @@ export const makeDhtDialer = (room) => {
       options.signal?.throwIfAborted();
       if (room.mesh.hasContentLink(contact.did)) return room.mesh.acquireContentLink(contact.did, {signal:(options.leaseSignal === undefined ? options.signal : options.leaseSignal) ?? undefined});
       const lease = await throughReferral(room, contact, options.signal, (broker, active) =>
-        room.acquireContentVia(broker, contact.did, {signal:active, leaseSignal:options.leaseSignal === undefined ? options.signal : options.leaseSignal}));
+        room.acquireContentVia(broker, contact.did, {signal:active, leaseSignal:options.leaseSignal === undefined ? (options.signal ?? null) : options.leaseSignal}));
       if (!lease) throw new Error('content broker unavailable');
       return lease;
     } : undefined});
