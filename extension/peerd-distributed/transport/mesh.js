@@ -35,6 +35,7 @@ import { establishedAdmission, TRANSFER_PROTECTION_MS, NEIGHBOR_GRACE_MS } from 
 import { createContentResponder, fetchBundle } from '../content/transfer.js';
 import { dlog } from '../log.js';
 import { createLocalCounters } from '../local-counters.js';
+import { CONTENT_ONLY } from './capabilities.js';
 
 // ch=0 control message types (PROTOCOL §3.4; 5–7 are the Phase 1 rows).
 export const CTRL = Object.freeze({
@@ -80,6 +81,7 @@ const QUEUED_PER_MESH = 128;
 /**
  * @typedef {{
  *   did: string,
+ *   purpose: 'routing' | 'content',
  *   channel: Channel,
  *   retired: AbortController,
  *   pinging?: boolean,
@@ -105,6 +107,7 @@ const QUEUED_PER_MESH = 128;
  *   now?: () => number,
  *   budget?: number,
  *   sparse?: boolean,
+ *   transferSlots?: number,
  *   isBlocked?: (did:string)=>boolean,
  *   pingIntervalMs?: number,
  *   idleTimeoutMs?: number,
@@ -118,6 +121,7 @@ export const createRoomMesh = ({
   now = Date.now,
   budget = DEFAULT_BUDGET,
   sparse = false,
+  transferSlots = 0,
   isBlocked = () => false,
   // "Are you still there?" cadence — the BACKSTOP for total silence (when neither
   // a clean data-channel close nor ICE 'disconnected' fired, which is rare). PING
@@ -132,6 +136,10 @@ export const createRoomMesh = ({
   ctrlRateLimit = 60,
   audit = null, // optional (type, detail) => void
 } = /** @type {{ roomId: string, identity: Identity }} */ ({})) => {
+  // why: temporary transfers reserve capacity inside the existing total, not
+  // above it. This opt-in boundary is inactive until the room negotiates it.
+  if (!Number.isSafeInteger(transferSlots) || transferSlots < 0 || transferSlots >= budget) throw new Error('invalid transfer slots');
+  const routingBudget = budget - transferSlots;
   // Local send completion is not a remote delivery acknowledgment.
   const traffic = Object.fromEntries(['gossip', 'discoveryItem', 'discoverySnapshot', 'discoveryControl',
     'topicControl', 'contentRequest', 'contentResponse', 'other'].map(name =>
@@ -148,6 +156,7 @@ export const createRoomMesh = ({
   };
   /** @type {Map<string, Link>} */
   const links = new Map(); // did -> { channel, lastSeen, ctrl: {windowStart, count}, offClose }
+  const routingLinks = () => [...links.values()].filter(link => link.purpose === 'routing');
   let lastRotation = -Infinity;
   let sparseRotation = sparse;
   /** @type {Set<(arg: any) => void>} */
@@ -198,7 +207,7 @@ export const createRoomMesh = ({
   };
   /** @param {Link} link */
   const rememberNeighbor = (link) => {
-    if (!sparse || closed) return;
+    if (!sparse || closed || link.purpose !== 'routing') return;
     pruneRecentNeighbors();
     recentNeighbors.delete(link.did);
     if (recentNeighbors.size >= RECENT_NEIGHBOR_CAP) {
@@ -253,7 +262,7 @@ export const createRoomMesh = ({
   /** @param {string} did @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
   const sendTo = async (did, env, options) => {
     const link = links.get(did);
-    if (!link) { const counts = trafficFor(env); counts.add('attempted'); counts.add('failed'); return false; }
+    if (!link || link.purpose !== 'routing') { const counts = trafficFor(env); counts.add('attempted'); counts.add('failed'); return false; }
     try { await sendOnLink(link, env, options); return true; }
     catch {
       // Backpressure failure is a failed connection, never identity misconduct.
@@ -276,6 +285,7 @@ export const createRoomMesh = ({
       /** @param {any} m @param {import('./outgoing.js').SendOptions} [options] */
       send: async (m, options) => {
         if (closed || links.get(did) !== link) throw new Error('content link closed');
+        if (link.purpose === 'content' && !CONTENT_REQ.has(m?.t) && !CONTENT_RESP.has(m?.t)) throw new Error('content link scope');
         await sendOnLink(link, m, options);
       },
       // why: retain the captured generation so replacement cancels only old
@@ -307,7 +317,7 @@ export const createRoomMesh = ({
     try { link.channel.close(); } catch { /* already down */ }
     dlog('mesh', `🔌 peer ${(did || '').slice(-8)} link dropped (${why}) — ${links.size} link(s) left`);
     try { audit?.('peer_link_closed', { did, why }); }
-    finally { emit(goneCbs, { did, why }); }
+    finally { if (link.purpose === 'routing') emit(goneCbs, { did, why }); }
   };
 
   /** @param {Link} link @param {string} reason @param {boolean} [immediate] */
@@ -350,7 +360,7 @@ export const createRoomMesh = ({
         return; // lastSeen already updated on receipt
       case CTRL.ROSTER_REQ: {
         if (!linkLocal || env.body?.room !== roomId) return;
-        const members = [identity.did, ...links.keys()].filter((d) => d !== link.did);
+        const members = [identity.did, ...routingLinks().map(link => link.did)].filter((d) => d !== link.did);
         await sendOnLink(link, await sign(0, CTRL.ROSTER, { room: roomId, members }));
         return;
       }
@@ -412,6 +422,7 @@ export const createRoomMesh = ({
       if (progress && !closed && links.get(link.did) === link) link.lastSeen = now();
       return;
     }
+    if (link.purpose === 'content') { penalize(link, 'content-link-scope', true); return; }
     if (msg.__t === 'HELLO') return; // stale handshake frame
     if (msg.v !== 1 || !msg.sig) { penalize(link, 'malformed-frame'); return; }
     // Charge before crypto: an invalid signature must not bypass this budget.
@@ -472,7 +483,7 @@ export const createRoomMesh = ({
     for (const [did, link] of [...links]) {
       if (t - link.lastSeen > idleTimeoutMs) {
         removeLink(did, 'idle-timeout');
-      } else if (t - link.lastSeen > pingIntervalMs && !link.pinging) {
+      } else if (link.purpose === 'routing' && t - link.lastSeen > pingIntervalMs && !link.pinging) {
         // One pending ping per link; a slow neighbor must not delay another
         // neighbor's sweep or accumulate more sends on every timer tick.
         link.pinging = true;
@@ -500,12 +511,13 @@ export const createRoomMesh = ({
     // link for a replacement that may partition the remaining overlay.
     /** @param {boolean} enabled */
     setSparseRotation: (enabled) => { sparseRotation = sparse && !!enabled; },
-    locallySelectedCount: () => [...links.values()].filter((link) => link.locallySelected).length,
+    locallySelectedCount: () => routingLinks().filter((link) => link.locallySelected).length,
 
     // Admit an AUTHENTICATED link (HELLO already done — did is proven).
     /** @param {Channel} channel @param {string} did @param {any} [info]
-     * @param {{ locallySelected?: boolean }} [ownership] */
-    addLink(channel, did, info = {}, { locallySelected = false } = {}) {
+     * @param {{ locallySelected?: boolean, purpose?: 'routing' | 'content' }} [ownership] */
+    addLink(channel, did, info = {}, { locallySelected = false, purpose = 'routing' } = {}) {
+      if (!['routing', 'content'].includes(purpose) || (purpose === 'content' && (!transferSlots || !info?.caps?.includes(CONTENT_ONLY)))) { channel.close(); return false; }
       if (closed || channel.isClosed?.() || isBlocked(did)) { channel.close(); return false; }
       pruneCooldowns();
       if (cooldowns.has(did)) {
@@ -515,15 +527,17 @@ export const createRoomMesh = ({
       }
       if (did === identity.did) { channel.close(); return false; }
       const previous = links.get(did);
+      if (previous && previous.purpose !== purpose) { channel.close(); return false; }
       pruneRecentNeighbors();
       const timing = previous ?? (sparse ? recentNeighbors.get(did) : undefined);
       if (!previous) {
         const time = now();
-        let decision = { allowed: links.size < budget, evict: /** @type {string | undefined} */ (undefined) };
-        if (sparse) {
-          const values = [...links.values()];
-          const pressure = links.size >= budget || (!locallySelected
-            && values.filter((link) => !link.locallySelected).length >= budget - Math.min(2, Math.max(0, budget - 1)));
+        let decision = { allowed: links.size < budget && (purpose === 'content'
+          ? links.size - routingLinks().length < transferSlots : routingLinks().length < routingBudget), evict: /** @type {string | undefined} */ (undefined) };
+        if (sparse && purpose === 'routing') {
+          const values = routingLinks();
+          const pressure = values.length >= routingBudget || (!locallySelected
+            && values.filter((link) => !link.locallySelected).length >= routingBudget - Math.min(2, Math.max(0, routingBudget - 1)));
           const peers = values.map((link) => {
             const busy = link.serving > 0 || link.contentHandlers.size > 0;
             // One bounded protection window per link begins on first pressure,
@@ -532,7 +546,7 @@ export const createRoomMesh = ({
             return { did: link.did, locallySelected: link.locallySelected, admittedAt: link.admittedAt,
               protectedUntil: link.protectedUntil, busy };
           });
-          decision = { evict: undefined, ...establishedAdmission({ peers, budget, locallySelected, now: time, lastRotation }) };
+          decision = { evict: undefined, ...establishedAdmission({ peers, budget: routingBudget, locallySelected, now: time, lastRotation }) };
           // why: a rendezvous outage freezes replacement, not local ownership.
           // Unsolicited links must leave exploration slots available for repair.
           if (!sparseRotation && decision.evict) decision = { allowed: false, evict: undefined };
@@ -550,7 +564,7 @@ export const createRoomMesh = ({
       // exploration ownership is never inherited from a retired connection.
       if (links.has(did)) removeLink(did, 'replaced');
       /** @type {Link} */
-      const link = { did, channel, locallySelected: locallySelected || previous?.locallySelected || false,
+      const link = { did, channel, purpose, locallySelected: locallySelected || previous?.locallySelected || false,
         admittedAt: timing?.admittedAt ?? now(), protectedUntil: timing?.protectedUntil ?? 0, serving: 0, retired: new AbortController(), contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
       // Own this exact generation before an already-closed channel can invoke
       // its immediate observer. A close during handoff must not become connected.
@@ -565,7 +579,7 @@ export const createRoomMesh = ({
           link.contentHandlers.clear();
           cancelVerification(link);
           try { audit?.('peer_link_closed', { did, why: 'channel-closed' }); }
-          finally { emit(goneCbs, { did, why: 'channel-closed' }); }
+          finally { if (link.purpose === 'routing') emit(goneCbs, { did, why: 'channel-closed' }); }
         }
       });
       if (links.get(did) !== link) { link.offClose(); return false; }
@@ -574,20 +588,22 @@ export const createRoomMesh = ({
       });
       if (links.get(did) !== link) return false;
       audit?.('peer_connected', { did, room: roomId });
-      emit(peerCbs, { did, info });
+      if (purpose === 'routing') emit(peerCbs, { did, info });
       return true;
     },
     /** @param {string} did */
     removeLink: (did) => removeLink(did, 'removed'),
     /** @param {string} did */
-    hasLink: (did) => links.has(did),
+    hasLink: (did) => links.get(did)?.purpose === 'routing',
+    /** @param {string} did */
+    hasContentLink: (did) => links.has(did),
     // Merge telemetry onto a link (e.g. the ICE path once stats settle).
     /** @param {string} did @param {any} patch */
     tagLink(did, patch) {
       const link = links.get(did);
       if (link) link.info = { ...link.info, ...patch };
     },
-    peers: () => [...links.values()].map((l) => ({ did: l.did, lastSeen: l.lastSeen, info: l.info, channel: l.channel })),
+    peers: () => routingLinks().map((l) => ({ did: l.did, lastSeen: l.lastSeen, info: l.info, channel: l.channel })),
 
     /** @param {(arg: any) => void} cb */
     onPeer: (cb) => { peerCbs.add(cb); return () => peerCbs.delete(cb); },
@@ -601,12 +617,12 @@ export const createRoomMesh = ({
     // Build-and-sign for upper layers (gossip), so the envelope shape and
     // signing stay in one place.
     sign,
-    stats: () => ({ peerDegree: links.size, broadcasts: broadcasts.snapshot(),
+    stats: () => ({ peerDegree: routingLinks().length, transferDegree: links.size - routingLinks().length, totalDegree: links.size, broadcasts: broadcasts.snapshot(),
       sends: Object.fromEntries(Object.entries(traffic).map(([name, counts]) => [name, counts.snapshot()])) }),
     send: sendTo,
     /** @param {any} env @param {string | null} [exceptDid] */
     async broadcast(env, exceptDid = null) {
-      const destinations = [...links.keys()].filter((did) => did !== exceptDid);
+      const destinations = routingLinks().map(link => link.did).filter((did) => did !== exceptDid);
       broadcasts.add('calls'); broadcasts.add('destinations', destinations.length);
       broadcasts.max('maxDestinations', destinations.length);
       await Promise.all(destinations.map((did) => sendTo(did, env)));
@@ -617,7 +633,7 @@ export const createRoomMesh = ({
     requestRoster(did, { timeoutMs = 10_000 } = {}) {
       return new Promise((resolve, reject) => {
         const link = links.get(did);
-        if (!link) return reject(new Error(`requestRoster: no link to ${did}`));
+        if (!link || link.purpose !== 'routing') return reject(new Error(`requestRoster: no link to ${did}`));
         const ac = new AbortController();
         let settled = false;
         let offClose = () => {};
