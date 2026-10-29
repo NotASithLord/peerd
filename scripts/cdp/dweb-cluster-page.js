@@ -7,7 +7,7 @@ import { createConversationRegistry } from '/peerd-runtime/actor/conversation-re
 
 const identity = await generateIdentity();
 const topic = 'cluster/validation';
-let room, base, dispatch, originalChunk;
+let room, base, dispatch, originalChunk, contentDial;
 let messages = [];
 const received = new Map();
 const audit = [];
@@ -29,7 +29,7 @@ const recordAudit = (event, data) => {
 const stop = () => {
   base?.close();
   room?.leave();
-  base = room = dispatch = null;
+  base = room = dispatch = contentDial = null;
 };
 
 window.cluster = {
@@ -71,6 +71,7 @@ window.cluster = {
       const traversal = routing.createTraversal({...options,onAttempt:event=>recordAudit('directory-attempt',event)});
       return {...traversal, acquireContent: observeContent(traversal.acquireContent)};
     };
+    contentDial = dial.acquireContent;
     base = await createBaseNetwork({ identity, mesh: room.mesh, meta: () => ({ name }),
       dial, audit: recordAudit });
     const findContacts = base.node.dht.findProviderContacts;
@@ -168,11 +169,17 @@ window.cluster = {
     room.mesh.removeLink(did);
     return { existed, linked: room.mesh.hasLink(did) };
   },
-  async fetch({ uri, provider }) {
+  async fetch({ uri, provider, brokers = [] }) {
     // why: this lane qualifies production behavior across real links; a tighter
     // harness-only deadline misclassifies healthy WAN transfer as product loss.
-    const result = provider ? await base.mesh.fetchFrom(provider, uri)
-      : await base.fetchApp(uri, { onProgress: progress => recordAudit('fetch-progress', { phase: progress.phase, providers: progress.providers, done: progress.done }) });
+    // An earlier fetch may release its temporary carrier. Explicit negative
+    // probes must own a live production lease before checking the response.
+    const lease = provider && contentDial ? await contentDial({did:provider,brokers}, {}) : null;
+    let result;
+    try {
+      result = provider ? await base.mesh.fetchFrom(provider, uri)
+        : await base.fetchApp(uri, { onProgress: progress => recordAudit('fetch-progress', { phase: progress.phase, providers: progress.providers, done: progress.done }) });
+    } finally { lease?.release(); }
     const decoded = await unpackTransportBundle(result);
     received.set(uri, result);
     return { digest: await sha256hex(decoded.files['payload.bin']), size: decoded.files['payload.bin'].length,

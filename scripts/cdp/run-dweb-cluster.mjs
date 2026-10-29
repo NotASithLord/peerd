@@ -239,10 +239,16 @@ try {
   await check('signed multi-chunk download verifies every byte', async () => verify(await workers[seederIndex].call('fetch', { uri: published.uri })));
   await check('parallel downloads verify every byte', async () =>
     (await workers[seederIndex].call('fetchMany', { uri: published.uri, count: 3 })).map(verify));
+  const explicitProviderProbe = async () => {
+    const states = await reports();
+    const providerNeighbors = new Set(states[0].peers.filter(peer => peer.linked).map(peer => peer.did));
+    const brokers = states[seederIndex].peers.filter(peer => peer.linked && providerNeighbors.has(peer.did)).map(peer => peer.did);
+    return workers[seederIndex].call('fetch', { uri: published.uri, provider: dids[0], brokers });
+  };
   await check('corrupt serving peer is rejected', async () => {
     await workers[0].call('corrupt', { enabled: true });
     try {
-      await assert.rejects(workers[seederIndex].call('fetch', { uri: published.uri, provider: dids[0] }), /chunk hash mismatch/);
+      await assert.rejects(explicitProviderProbe(), /chunk hash mismatch/);
       return { rejected: true };
     } finally { await workers[0].call('corrupt', { enabled: false }); }
   });
@@ -250,7 +256,7 @@ try {
   await check('unsharing stops remote content serving', async () => {
     await workers[seederIndex].call('seed', { uri: published.uri });
     await workers[0].call('unshare', { hash: published.hash });
-    await assert.rejects(workers[seederIndex].call('fetch', { uri: published.uri, provider: dids[0] }), /peer does not hold/);
+    await assert.rejects(explicitProviderProbe(), /peer does not hold/);
     return { rejected: true };
   });
   await check('peer leave removes authenticated links', async () => {

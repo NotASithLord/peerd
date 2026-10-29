@@ -51,6 +51,13 @@ export const createNeighborMaintenance = ({ initial, sample, connect, known, loc
       // an arrival-order monopoly. Established admission owns rotation limits.
       const available = Math.max(1, LOCAL_TARGET - localCount());
       const batch = [...candidates].filter(([member, candidate]) => !known(member) && candidate.retryAt <= now()).slice(0, Math.min(LOCAL_TARGET, available));
+      // Rotate attempted contacts behind untried candidates before awaiting IO.
+      // Repeated samples preserve this order and each candidate's backoff, so
+      // a full early contact cannot monopolize every maintenance cycle.
+      for (const [member, candidate] of batch) {
+        candidates.delete(member);
+        candidates.set(member, candidate);
+      }
       await Promise.allSettled(batch.map(async ([member, candidate]) => {
         candidate.retryAt = now() + SAMPLE_INTERVAL_MS;
         try { await connect(member, lifetime.signal); }
