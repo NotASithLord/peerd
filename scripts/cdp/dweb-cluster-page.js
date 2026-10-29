@@ -32,13 +32,13 @@ const stop = () => {
 };
 
 window.cluster = {
-  async start({ roomId, signaling, name, budget, profile }) {
+  async start({ roomId, signaling, name, budget, profile, transferSlots = 0 }) {
     stop();
     messages = [];
     // why: only rendezvous crosses SSH. ICE has no STUN/TURN server or tunnel;
     // the selected pair below proves the actual cross-host data path.
     room = await joinRoom({ roomId, identity, url: signaling, iceServers: [], audit: recordAudit,
-      RTCPeerConnection: ObservedConnection, budget, profile });
+      RTCPeerConnection: ObservedConnection, budget, profile, transferSlots });
     base = await createBaseNetwork({ identity, mesh: room.mesh, meta: () => ({ name }),
       dial: makeDhtDialer(room), audit: recordAudit });
     originalChunk = base.node.content.getChunk;

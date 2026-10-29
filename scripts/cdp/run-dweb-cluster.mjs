@@ -18,6 +18,8 @@ const configPath = process.argv[2];
 if (!configPath || configPath.startsWith('--')) throw new Error('Pass a private cluster JSON config; see scripts/cdp/CLUSTER.md');
 const config = JSON.parse(readFileSync(configPath, 'utf8'));
 const local = process.argv.includes('--local');
+const transferSlots = config.transferSlots ?? 0;
+assert(Number.isSafeInteger(transferSlots) && transferSlots >= 0 && transferSlots < (config.budget ?? 16), 'invalid transfer reserve');
 const soak = soakOptions(config.soak);
 const output = resolve(config.output ?? join(root, 'scripts/cdp/artifacts/cluster-result.json'));
 // why: remote agreement alone could certify identical but stale staged trees.
@@ -25,7 +27,7 @@ const expectedSource = sourceFingerprint(root);
 const coordinator = { ...gitMetadata(root), source: expectedSource, runtime: Bun.version };
 const report = { ok: false, lane: local ? 'local-rehearsal' : 'physical-macs',
   startedAt: new Date().toISOString(), coordinator,
-  hosts: [], checks: [], skipped: [] };
+  hosts: [], checks: [], skipped: [], capacity: {total: config.budget ?? 16, transferSlots, routing: (config.budget ?? 16) - transferSlots} };
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const workers = [];
@@ -121,7 +123,7 @@ try {
   const roomId = config.roomId ?? `cluster-${crypto.randomUUID()}`;
   assert(typeof roomId === 'string' && roomId.length > 0, 'roomId must be a non-empty string');
   const start = (worker, id = roomId) => worker.call('start', { roomId: id, signaling: worker.signaling,
-    name: worker.target.name, budget: config.budget, profile: config.profile });
+    name: worker.target.name, budget: config.budget, profile: config.profile, transferSlots });
   const identities = await Promise.all(workers.map(worker => start(worker)));
   const dids = identities.map(identity => identity.did);
   assert.equal(new Set(dids).size, workers.length, 'Each browser must own a distinct identity');
