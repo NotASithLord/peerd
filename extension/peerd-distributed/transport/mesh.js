@@ -31,7 +31,7 @@ import { isRawProtocolClose } from './channel.js';
 // per-peer fetch in flight.
 
 import { buildEnvelope, envelopeBytes, signEnvelope, verifyEnvelope } from './envelope.js';
-import { establishedAdmission, TRANSFER_PROTECTION_MS, NEIGHBOR_GRACE_MS } from './neighbor-policy.js';
+import { establishedAdmission, TRANSFER_PROTECTION_MS, NEIGHBOR_GRACE_MS, RoutingAdmissionBusyError } from './neighbor-policy.js';
 import { createContentResponder, fetchBundle } from '../content/transfer.js';
 import { dlog } from '../log.js';
 import { createLocalCounters } from '../local-counters.js';
@@ -660,12 +660,22 @@ export const createRoomMesh = ({
     const decision=admissionDecision('routing',locallySelected,requireWitness);
     const unavailable=closed||signal?.aborted||isBlocked(did)||cooldowns.has(did)||did===identity.did;
     const duplicate=links.has(did)||[...reservedAdmissions.values()].some(p=>p.did===did);
-    if(unavailable||duplicate||!decision.allowed){
+    // why: two simultaneous first-link proposals can reserve opposing cuts in
+    // the same saturated component, then poison both paths with failed holds.
+    // The isolated endpoint serializes provisional ownership until one routing
+    // link commits; connected peers retain ordinary bounded concurrency.
+    const isolatedPending=sparse && routingLinks().length===0 && reservedAdmissions.size>0;
+    // why: a provisional free-slot admission can fail. Do not let its projected
+    // occupancy trigger a competing cut of an existing edge before it commits.
+    // Full committed tables still use the normal witnessed rotation policy.
+    const pendingCapacity=sparse && decision.evict && routingLinks().length<routingBudget && reservedAdmissions.size>0;
+    if(unavailable||duplicate||isolatedPending||pendingCapacity||!decision.allowed){
       const values=routingLinks();
       try{audit?.('admission_reservation_refused',{reason:unavailable?'unavailable':duplicate?'duplicate':'policy',
         routingDegree:values.length,reservations:reservedAdmissions.size,locallySelected,
         oldestAgeMs:values.length?Math.max(...values.map(link=>Math.max(0,now()-link.admittedAt))):0,
         rotationAgeMs:Number.isFinite(lastRotation)?Math.max(0,now()-lastRotation):null});}catch{/* Diagnostic sinks cannot affect admission. */}
+      if (!unavailable && !duplicate && (isolatedPending || pendingCapacity)) throw new RoutingAdmissionBusyError();
       throw new Error('room admission reservation refused');
     }
     const lifetime=new AbortController();
@@ -848,6 +858,12 @@ export const createRoomMesh = ({
     tagLink(did, patch) {
       const link = links.get(did);
       if (link) link.info = { ...link.info, ...patch };
+    },
+    // One provisional first link; afterwards admit into free slots, or one
+    // witnessed rotation when full. The ICE governor remains the hard ceiling.
+    routingAdmissionParallelism: () => {
+      const degree = routingLinks().length;
+      return degree === 0 ? 1 : Math.max(1, routingBudget - degree - reservedAdmissions.size);
     },
     peers: () => routingLinks().map((l) => ({ did: l.did, lastSeen: l.lastSeen, info: l.info, channel: l.channel })),
 

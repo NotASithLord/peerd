@@ -1,5 +1,6 @@
 // @ts-check
 import { SAMPLE_INTERVAL_MS } from './rendezvous-profile.js';
+import { RoutingAdmissionBusyError } from './neighbor-policy.js';
 
 export const NEIGHBOR_CANDIDATES = 32;
 const CANDIDATE_TTL_MS = 120_000;
@@ -9,10 +10,10 @@ const LOCAL_TARGET = 4;
  * state, active dials, sampling and timers are independently bounded.
  * @param {{ initial: string[], sample: (opts: {signal: AbortSignal}) => Promise<string[]>,
  * connect: (member: string, signal: AbortSignal) => Promise<void>,
- * known: (member: string) => boolean, localCount: () => number,
+ * known: (member: string) => boolean, localCount: () => number, parallelism?: () => number,
  * now?: () => number, random?: () => number, timers?: any, signal: AbortSignal }} opts
  */
-export const createNeighborMaintenance = ({ initial, sample, connect, known, localCount,
+export const createNeighborMaintenance = ({ initial, sample, connect, known, localCount, parallelism = () => LOCAL_TARGET,
   now = Date.now, random = Math.random, timers = globalThis, signal }) => {
   /** @type {Map<string, {expires: number, retryAt: number, failures: number}>} */
   const candidates = new Map();
@@ -35,6 +36,7 @@ export const createNeighborMaintenance = ({ initial, sample, connect, known, loc
     if (stopped || signal.aborted) return;
     if (running) { again = true; return; }
     running = true;
+    const startedAt = now();
     timers.clearTimeout(timer);
     try {
       for (const [member, candidate] of candidates) if (candidate.expires <= now() || known(member)) candidates.delete(member);
@@ -51,23 +53,53 @@ export const createNeighborMaintenance = ({ initial, sample, connect, known, loc
       // an arrival-order monopoly. Established admission owns rotation limits.
       const available = Math.max(1, LOCAL_TARGET - localCount());
       const batch = [...candidates].filter(([member, candidate]) => !known(member) && candidate.retryAt <= now()).slice(0, Math.min(LOCAL_TARGET, available));
-      // Rotate attempted contacts behind untried candidates before awaiting IO.
-      // Repeated samples preserve this order and each candidate's backoff, so
-      // a full early contact cannot monopolize every maintenance cycle.
-      for (const [member, candidate] of batch) {
+      // why: parallel dials must fit provisional routing ownership, not merely
+      // the native ICE ceiling. Recompute after each settlement so a first
+      // committed link can unlock parallel exploration on a larger table.
+      /** @type {Set<Promise<void>>} */
+      const active = new Set();
+      let cursor = 0;
+      /** @param {string} member @param {{expires:number,retryAt:number,failures:number}} candidate */
+      const launch = (member, candidate) => {
         candidates.delete(member);
         candidates.set(member, candidate);
+        const work = (async () => {
+          candidate.retryAt = now() + SAMPLE_INTERVAL_MS;
+          try { await connect(member, lifetime.signal); }
+          catch (error) {
+            // why: our own provisional reservation can refuse this attempt even
+            // when the remote is healthy. Retain existing failure debt without
+            // charging another remote failure; retry only at ordinary cadence.
+            if (error instanceof RoutingAdmissionBusyError) candidate.retryAt = now() + SAMPLE_INTERVAL_MS;
+            else { candidate.failures = Math.min(5, candidate.failures + 1); candidate.retryAt = now() + Math.min(60_000, 2_000 * 2 ** candidate.failures); }
+          }
+          if (!stopped && known(member)) candidates.delete(member);
+        })();
+        active.add(work);
+        void work.then(() => active.delete(work), () => active.delete(work));
+      };
+      while (cursor < batch.length || active.size) {
+        if (stopped || signal.aborted) break;
+        // why: a stale contact can consume an entire sample interval. Finish
+        // already-owned dials, then resample instead of serially spending a
+        // full transport deadline on every remaining stale batch member.
+        if (cursor > 0 && now() - startedAt >= SAMPLE_INTERVAL_MS) break;
+        const limit = Math.max(1, Math.min(LOCAL_TARGET, parallelism()));
+        while (cursor < batch.length && active.size < limit && !stopped && !signal.aborted) {
+          const [member, candidate] = batch[cursor++];
+          launch(member, candidate);
+        }
+        if (active.size) await Promise.race(active);
       }
-      await Promise.allSettled(batch.map(async ([member, candidate]) => {
-        candidate.retryAt = now() + SAMPLE_INTERVAL_MS;
-        try { await connect(member, lifetime.signal); }
-        catch { candidate.failures = Math.min(5, candidate.failures + 1); candidate.retryAt = now() + Math.min(60_000, 2_000 * 2 ** candidate.failures); }
-        if (!stopped && known(member)) candidates.delete(member);
-      }));
+      await Promise.allSettled(active);
+
     } finally {
       running = false;
       if (!stopped && !signal.aborted) {
-        const delay = again ? 0 : SAMPLE_INTERVAL_MS + Math.floor(random() * 2_000);
+        // why: a departed contact can consume the whole dial deadline. Adding
+        // another full interval afterward stalls discovery of returning peers.
+        // Keep cycles non-overlapping and retain each candidate's retry debt.
+        const delay = again ? 0 : Math.max(0, startedAt + SAMPLE_INTERVAL_MS + Math.floor(random() * 2_000) - now());
         again = false;
         timer = timers.setTimeout(() => { void cycle(); }, delay);
       }

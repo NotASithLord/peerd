@@ -373,7 +373,7 @@ export const joinRoom = async ({
     if (s.profile === SPARSE_PUBLIC_PROFILE) {
       mesh.enableSparseAdmission();
       maintenance = createNeighborMaintenance({ initial: s.members, sample: s.sample,
-        connect: dial, known, localCount: mesh.locallySelectedCount, now, random, timers, signal: generationLife.signal });
+        connect: dial, known, localCount: mesh.locallySelectedCount, parallelism: mesh.routingAdmissionParallelism, now, random, timers, signal: generationLife.signal });
       const offGone = mesh.onPeerGone(() => maintenance?.wake());
       generationLife.signal.addEventListener('abort', () => { offGone(); bindings.clear(); maintenance?.stop(); }, { once: true });
     }
