@@ -119,3 +119,17 @@ this placement and workload: the report explicitly leaves full capacity
 qualification incomplete until paired degree comparisons, whole-browser
 resource metrics, adverse workloads, and sustained/overnight runs are collected.
 It does not change production degree or establish a supported network size.
+
+Set `resourceMetrics: true` to collect owned browser-process observations. The
+coordinator writes an exclusive companion JSONL file beside the result; use a
+fresh output path for each run. It samples the browser process tree and the
+controlled renderer heap at fixture readiness, periodically during the workload,
+and before cleanup. Missing observations fail the run. The result identifies
+the companion file and sample count; retain both with the source fingerprint.
+
+The collector in `dweb-process-evidence.mjs` records numeric process identities,
+RSS and cumulative CPU time, without command lines. Summed RSS can double-count
+shared pages; CPU observations omit processes that exited between samples; the
+renderer heap is not the whole browser heap. These observations do not establish
+an idle baseline or qualify file-descriptor use, event-loop latency, queue or
+bandwidth budgets. The report keeps those missing measurements explicit.
