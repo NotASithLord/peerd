@@ -1,5 +1,6 @@
 import {test,expect} from 'bun:test';
 import {generateIdentity} from '../../extension/peerd-distributed/identity/keypair.js';
+import {RETRIEVAL_CHANNEL,RETRIEVAL_TYPES} from '../../extension/peerd-distributed/transport/capabilities.js';
 import {MAX_ROUTING_PATH_NODES} from '../../extension/peerd-distributed/transport/routing-path-holds.js';
 import {buildEnvelope,envelopeBytes,signEnvelope} from '../../extension/peerd-distributed/transport/envelope.js';
 import {toBase64} from '../../extension/shared/bundle/bytes.js';
@@ -27,7 +28,7 @@ test('maximum fixed path request and one response part fit the small frame budge
  const body={room:'peerd/base/1',path:ids.slice(0,-1).map(id=>id.did),request:{kind:'chunk',hash}};
  expect(validRetrievalCall(body,body.room,ids[0].did)).toBe(true);
  expect(validRetrievalCall({...body,path:ids.map(id=>id.did)},body.room,ids[0].did)).toBe(false);
- const frame=await signEnvelope(buildEnvelope({ch:0,typ:13,from:ids[0].did,id:crypto.randomUUID(),ts:Date.now(),body}),ids[0]);
+ const frame=await signEnvelope(buildEnvelope({ch:RETRIEVAL_CHANNEL,typ:RETRIEVAL_TYPES.CALL,from:ids[0].did,id:crypto.randomUUID(),ts:Date.now(),body}),ids[0]);
  expect(envelopeBytes(frame)).toBeLessThanOrEqual(RETRIEVAL_FRAME_BYTES);
  const part={offset:0,total:retrievalReplyLimit('chunk'),data:toBase64(new Uint8Array(RETRIEVAL_PART_BYTES))};
  const reply={...frame,body:{room:body.room,origin:ids[0].did,requestId:frame.id,requestHash:hash,part}};

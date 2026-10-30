@@ -36,7 +36,8 @@ import { createContentResponder, fetchBundle } from '../content/transfer.js';
 import { dlog } from '../log.js';
 import { createLocalCounters } from '../local-counters.js';
 import { createControlPacer, ControlPacingCapacityError } from './control-pacer.js';
-import { CONTENT_ONLY, LOOKUP_ONLY, ROUTING_WITNESS, ROUTING_CONTROL } from './capabilities.js';
+import { CONTENT_ONLY, LOOKUP_ONLY, ROUTING_WITNESS, ROUTING_CONTROL, ROUTED_RETRIEVAL, RETRIEVAL_CHANNEL, RETRIEVAL_TYPES } from './capabilities.js';
+import { RETRIEVAL_FRAME_BYTES } from './retrieval-protocol.js';
 import { DIRECTORY_INTRODUCTIONS, createDirectoryIntroductions } from './directory-introductions.js';
 
 // ch=0 control message types (PROTOCOL §3.4; 5–7 are the Phase 1 rows).
@@ -53,6 +54,12 @@ const routingControlTypes=new Set(Object.values(ROUTING_CONTROL));
 const isRoutingControl=(/** @type {any} */ env)=>env?.ch===0&&routingControlTypes.has(env.typ);
 export class RoutingControlError extends Error {
   constructor(){super('routing control carrier unavailable');this.name='RoutingControlError';}
+}
+
+const retrievalTypes=new Set(Object.values(RETRIEVAL_TYPES));
+const isRetrieval=(/** @type {any} */ env)=>env?.ch===RETRIEVAL_CHANNEL&&retrievalTypes.has(env.typ);
+export class RetrievalCarrierError extends Error {
+  constructor(){super('retrieval carrier unavailable');this.name='RetrievalCarrierError';}
 }
 
 const CONTENT_REQ = new Set(['MANIFEST_REQ', 'CHUNK_REQ']);
@@ -95,6 +102,7 @@ const QUEUED_PER_MESH = 128;
  *   did: string,
  *   purpose: 'routing' | 'content' | 'lookup' | 'directory',
  *   routingWitness: boolean,
+ *   routedRetrieval: boolean,
  *   leases: number,
  *   controlPacer: ReturnType<typeof createControlPacer>,
  *   introductions?: ReturnType<typeof createDirectoryIntroductions>,
@@ -191,6 +199,8 @@ export const createRoomMesh = ({
   const relayCbs = new Set();
   /** @type {((event:{env:any,carrier:{did:string,signal:AbortSignal,maxFrameBytes:()=>number,send:(env:any,options?:import('./outgoing.js').SendOptions)=>Promise<void>}})=>void)|null} */
   let routingControlHandler=null;
+  /** @type {((event:{env:any,carrier:{did:string,signal:AbortSignal,maxFrameBytes:()=>number,send:(env:any,options?:import('./outgoing.js').SendOptions)=>Promise<void>}})=>void)|null} */let retrievalHandler=null;
+  /** @type {AbortController|null} */let retrievalOwner=null;
   /** @type {AbortController|null} */let routingControlOwner=null;
   /** @type {Map<string, Set<(members: any) => void>>} */
   const rosterWaiters = new Map(); // did -> Set<resolve>
@@ -289,6 +299,32 @@ export const createRoomMesh = ({
 
   /** @type {WeakMap<Link,{owner:AbortController,carrier:{did:string,signal:AbortSignal,maxFrameBytes:()=>number,send:(env:any,options?:import('./outgoing.js').SendOptions)=>Promise<void>}}>} */
   const routingCarrierCache=new WeakMap();
+  /** @type {typeof routingCarrierCache} */
+  const retrievalCarrierCache=new WeakMap();
+  /** @param {Link} link */
+  const retrievalFrameLimit=(link)=>Math.min(RETRIEVAL_FRAME_BYTES,routingFrameLimit(link));
+  /** @param {Link} link */
+  const retrievalCarrierFor=(link)=>{
+    const owner=retrievalOwner;
+    if(!owner||!retrievalHandler||closed||links.get(link.did)!==link||link.retired.signal.aborted
+      ||link.channel.isClosed?.()||!link.routedRetrieval||link.purpose!=='routing')return null;
+    const cached=retrievalCarrierCache.get(link);if(cached?.owner===owner)return cached.carrier;
+    const signal=AbortSignal.any([link.retired.signal,owner.signal]);
+    const current=()=>retrievalOwner===owner&&!signal.aborted&&!closed&&links.get(link.did)===link
+      &&!link.channel.isClosed?.()&&!!retrievalHandler;
+    const carrier=Object.freeze({did:link.did,signal,maxFrameBytes:()=>current()?retrievalFrameLimit(link):0,
+      /** @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
+      async send(env,options){
+        if(!current()||!isRetrieval(env)||envelopeBytes(env)>retrievalFrameLimit(link))throw new RetrievalCarrierError();
+        const owned=structuredClone(env);
+        // why: retrieval can fill a chunk; even its ACKs must not borrow the
+        // witness/liveness reserve or allow callers to promote bulk traffic.
+        await sendOnLink(link,owned,{...options,signal:options?.signal?AbortSignal.any([signal,options.signal]):signal,priority:'bulk'},()=>{
+          if(!current()||envelopeBytes(owned)>retrievalFrameLimit(link))throw new RetrievalCarrierError();
+        });
+      }});
+    retrievalCarrierCache.set(link,{owner,carrier});return carrier;
+  };
   /** @param {Link} link */
   const routingFrameLimit=(link)=>{
     const limit=link.channel.maxFrameBytes?.()??4_096;
@@ -517,6 +553,11 @@ export const createRoomMesh = ({
     if (link.purpose === 'content') { penalize(link, 'content-link-scope', true); return; }
     if (msg.__t === 'HELLO') return; // stale handshake frame
     if (msg.v !== 1 || !msg.sig) { penalize(link, 'malformed-frame'); return; }
+    const incomingRetrievalOwner=msg.ch===RETRIEVAL_CHANNEL?retrievalOwner:null;
+    if(msg.ch===RETRIEVAL_CHANNEL){
+      if(!isRetrieval(msg)||!retrievalCarrierFor(link)||envelopeBytes(msg)>retrievalFrameLimit(link))return;
+      try{msg=structuredClone(msg);}catch{return;}
+    }
     const incomingRoutingOwner=isRoutingControl(msg)?routingControlOwner:null;
     if(isRoutingControl(msg)){
       if(link.purpose!=='routing'||!link.routingWitness||!routingControlHandler)return;
@@ -538,7 +579,7 @@ export const createRoomMesh = ({
         // and channel classification distinguish local pressure from peer floods.
         audit?.('peer_verification_overflow', {
           did: link.did,
-          channel: Number.isInteger(msg.ch) && msg.ch >= 0 && msg.ch <= 5 ? msg.ch : -1,
+          channel: Number.isInteger(msg.ch) && msg.ch >= 0 && msg.ch <= RETRIEVAL_CHANNEL ? msg.ch : -1,
           claimedForwarded: msg.ch === 4 && msg.from !== link.did,
           activePeer: link.verifying, activeMesh: verifying,
           queuedPeer: link.queued, queuedMesh: verificationQueue.length,
@@ -566,9 +607,18 @@ export const createRoomMesh = ({
     }
     if (closed || links.get(link.did) !== link) return;
     if(isRoutingControl(msg)&&(!incomingRoutingOwner||routingControlOwner!==incomingRoutingOwner))return;
+    if(msg.ch===RETRIEVAL_CHANNEL){
+      if(!incomingRetrievalOwner||retrievalOwner!==incomingRetrievalOwner)return;
+      const carrier=retrievalCarrierFor(link);
+      // why: only the dedicated owner may interpret origin-signed routed
+      // traffic. It must validate path custody, freshness and correlation.
+      if(carrier)retrievalHandler?.({env:msg,carrier});
+      return;
+    }
     link.lastSeen = now();
     if (msg.ch === 0) return handleControl(link, msg);
-    // Link-authenticity rule for non-control: flooded frames (ch=4) carry
+    // Retrieval was exclusively dispatched above. For remaining non-control,
+    // flooded frames (ch=4) carry
     // their ORIGIN in `from` (≠ link did, by design); everything else is
     // link-local and must be signed by the neighbor itself.
     if (msg.ch !== 4 && msg.from !== link.did) {
@@ -793,7 +843,7 @@ export const createRoomMesh = ({
       // exploration ownership is never inherited from a retired connection.
       if (links.has(did)) removeLink(did, 'replaced');
       /** @type {Link} */
-      const link = { did, channel, purpose, routingWitness:purpose==='routing'&&info?.caps?.includes(ROUTING_WITNESS)===true, leases: 0, controlPacer:createControlPacer({now,timers}), introductions: purpose === 'directory' ? createDirectoryIntroductions({now}) : undefined, locallySelected: locallySelected || previous?.locallySelected || false,
+      const link = { did, channel, purpose, routedRetrieval:purpose==='routing'&&info?.caps?.includes(ROUTED_RETRIEVAL)===true, routingWitness:purpose==='routing'&&info?.caps?.includes(ROUTING_WITNESS)===true, leases: 0, controlPacer:createControlPacer({now,timers}), introductions: purpose === 'directory' ? createDirectoryIntroductions({now}) : undefined, locallySelected: locallySelected || previous?.locallySelected || false,
         admittedAt: timing?.admittedAt ?? now(), protectedUntil: timing?.protectedUntil ?? 0, serving: 0, retired: new AbortController(), contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
       // Own this exact generation before an already-closed channel can invoke
       // its immediate observer. A close during handoff must not become connected.
@@ -884,6 +934,15 @@ export const createRoomMesh = ({
     },
     /** @param {string} did */
     routingCarrier(did){const link=links.get(did);return link?routingCarrierFor(link):null;},
+
+    /** @param {NonNullable<typeof retrievalHandler>} handler */
+    onRetrieval(handler){
+      if(closed||retrievalHandler)throw new RetrievalCarrierError();
+      const owner=new AbortController();retrievalOwner=owner;retrievalHandler=handler;
+      return ()=>{if(retrievalOwner===owner){retrievalHandler=null;retrievalOwner=null;owner.abort();}};
+    },
+    /** @param {string} did */
+    retrievalCarrier(did){const link=links.get(did);return link?retrievalCarrierFor(link):null;},
 
     // Build-and-sign for upper layers (gossip), so the envelope shape and
     // signing stay in one place.
@@ -979,6 +1038,7 @@ export const createRoomMesh = ({
       for(const ticket of [...reservedAdmissions.keys()])ticket.release();
       stopTimers();
       for (const did of [...links.keys()]) removeLink(did, 'mesh-closed');
+      retrievalHandler=null;retrievalOwner?.abort();retrievalOwner=null;
       routingControlHandler=null;routingControlOwner?.abort();routingControlOwner=null;
       cooldowns.clear();
       recentNeighbors.clear();
