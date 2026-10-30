@@ -3894,19 +3894,28 @@ return { sourceUrl, tlaValue };`);
           content: 'export const values = [' + values + '];',
         });
         const runId = 'firefox-linker-stop-probe';
+        // why: resolving the fixture can exceed a short polling window on a
+        // busy runner. Observe the actual phase before starting the run, bounded
+        // by its existing deadline; cancellation still has its own strict gate.
+        const status = document.getElementById('run-status');
+        if (!status) throw new Error('Notebook run status is missing');
+        let finishPhase;
+        let phaseTimer;
+        const phase = new Promise((resolvePhase) => { finishPhase = resolvePhase; });
+        const observer = new MutationObserver(() => {
+          if (status.textContent === 'Linking notebook imports.') finishPhase(true);
+        });
+        observer.observe(status, { childList: true, characterData: true, subtree: true });
+        phaseTimer = setTimeout(() => finishPhase(false), 20_000);
         const evaluation = send({
           type: 'js/eval', notebookId: id, runId,
           code: "import { values } from './lib/linker-load.js'; return values.length;",
           timeoutMs: 20_000,
         });
-        let sawLinking = false;
-        for (let attempt = 0; attempt < 400; attempt += 1) {
-          if (document.getElementById('run-status')?.textContent === 'Linking notebook imports.') {
-            sawLinking = true;
-            break;
-          }
-          await new Promise((resolveWait) => setTimeout(resolveWait, 5));
-        }
+        evaluation.then(() => finishPhase(false), () => finishPhase(false));
+        const sawLinking = await phase;
+        clearTimeout(phaseTimer);
+        observer.disconnect();
         const abortSentAt = Date.now();
         const abort = await send({
           type: 'js/abort', notebookId: id, runId,
