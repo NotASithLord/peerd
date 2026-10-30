@@ -139,25 +139,25 @@ try {
     report.capacityQualification = {complete:false, missing:['paired degree comparisons', 'whole-browser resource metrics', 'adversarial workloads', 'sustained finalist and overnight runs']};
   }
   assert(['all-pairs', 'connected'].includes(topology), 'topology must be all-pairs or connected');
+  assert(config.resourceMetrics === undefined || typeof config.resourceMetrics === 'boolean', 'resourceMetrics must be boolean');
   signaling = openSignaling(0);
   for (const target of config.hosts) startWorker(target, signaling.server.port);
   report.hosts = await Promise.all(workers.map(async worker => ({ name: worker.target.name,
     ...await worker.call('launch', { chrome: worker.target.chrome, mdns: config.mdns !== false,
-      allInterfaces: config.allInterfaces === true }) })));
+      allInterfaces: config.allInterfaces === true, resourceMetrics: config.resourceMetrics === true }) })));
   await check(capacity ? 'shared-host browser placement and identical source' : local ? 'matching source and browser (rehearsal)' : 'identical source on distinct Macs', async () => {
     const options = {local, expectedSource, expectedRuntime:coordinator.runtime};
     if (capacity) report.placement = validateCapacityHosts(report.hosts, options);
     else validateHosts(report.hosts, options);
     return report.hosts;
   });
-  assert(config.resourceMetrics === undefined || typeof config.resourceMetrics === 'boolean', 'resourceMetrics must be boolean');
   let resourceAt = -Infinity;
   const resourceOutput = `${output}.resources.jsonl`;
   if (config.resourceMetrics) {
     mkdirSync(dirname(output), {recursive:true});
     writeFileSync(resourceOutput, '', {flag:'wx'});
     report.resourceEvidence = {file:resourceOutput, samples:0, minimumIntervalMs:30000,
-      complete:false, missing:['event-loop latency','idle-only baseline','queue and bandwidth budgets']};
+      complete:false, missing:['whole-browser event-loop coverage','idle-only baseline','queue and bandwidth budgets']};
   }
   const sampleResources = async (phase, force = false) => {
     if (!config.resourceMetrics || (!force && Date.now() - resourceAt < 30000)) return;

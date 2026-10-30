@@ -5,6 +5,10 @@ import { makeDhtDialer } from '/peerd-distributed/transport/dht-dialer.js';
 import { makeMeshDispatch } from '/peerd-runtime/actor/a2a-dispatch.js';
 import { createConversationRegistry } from '/peerd-runtime/actor/conversation-registry.js';
 
+import { createEventLoopObservation } from '/__event-loop.js';
+
+let eventLoopObservation;
+window.addEventListener('pagehide', () => eventLoopObservation?.stop(), { once: true });
 const identity = await generateIdentity();
 const topic = 'cluster/validation';
 let room, base, dispatch, originalChunk, contentDial;
@@ -33,6 +37,14 @@ const stop = () => {
 };
 
 window.cluster = {
+  startResourceObservation() {
+    eventLoopObservation ??= createEventLoopObservation();
+    return eventLoopObservation.snapshot();
+  },
+  resourceObservation() {
+    if (!eventLoopObservation) throw new Error('Renderer resource observation was not enabled');
+    return eventLoopObservation.snapshot();
+  },
   async start({ roomId, signaling, name, budget, profile, transferSlots = 0 }) {
     stop();
     messages = [];

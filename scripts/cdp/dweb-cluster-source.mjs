@@ -24,7 +24,7 @@ export const sourceFingerprint = root => {
     }
   };
   visit('extension');
-  for (const name of ['dweb-cluster-node.mjs', 'dweb-cluster-page.js', 'dweb-cluster-rpc.mjs', 'dweb-cluster-source.mjs', 'dweb-address-proof.mjs', 'dweb-process-evidence.mjs']) add(`scripts/cdp/${name}`);
+  for (const name of ['dweb-cluster-node.mjs', 'dweb-cluster-page.js', 'dweb-cluster-rpc.mjs', 'dweb-cluster-source.mjs', 'dweb-address-proof.mjs', 'dweb-process-evidence.mjs', 'dweb-event-loop-evidence.mjs']) add(`scripts/cdp/${name}`);
   return hash.digest('hex');
 };
 
