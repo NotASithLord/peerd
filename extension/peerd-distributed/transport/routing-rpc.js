@@ -8,7 +8,12 @@ import { decodeDidKey } from '../identity/did.js';
 import { MAX_ROUTING_PATH_NODES } from './routing-path-holds.js';
 import { MAX_ROUTING_PATH_NEIGHBORS } from './routing-path-search.js';
 
-const LIVE_LIMIT=16,REPLAY_LIMIT=128,REPLAY_MS=70_000,LIFETIME_MS=10_000;
+const LIVE_LIMIT=16,REPLAY_MS=70_000,LIFETIME_MS=10_000;
+const REQUEST_WINDOW_MS=10_000,REQUEST_BURST=32;
+// why: retain every admitted request ID for the full replay horizon, including
+// a burst on either side of a window boundary. Smaller bookkeeping capacity
+// silently rejects healthy sustained route discovery below its allowed rate.
+const REPLAY_LIMIT=REQUEST_BURST*(Math.ceil(REPLAY_MS/REQUEST_WINDOW_MS)+1);
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const exact=(/** @type {any} */ value,/** @type {string[]} */ keys)=>value&&typeof value==='object'&&!Array.isArray(value)
   &&Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));
@@ -78,8 +83,8 @@ export const createRoutingRpc=({identity,roomId,mesh,holds,now=Date.now,timers=g
   const reserve=(env,index,previous,next)=>{
     sweep();const key=keyFor(env.from,env.id);
     if(closed||states.size>=LIVE_LIMIT||seen.size>=REPLAY_LIMIT||seen.has(key))throw fail();
-    if(now()-windowStart>=10_000){windowStart=now();requests=0;}
-    if(requests>=32)throw fail();requests++;seen.set(key,now()+REPLAY_MS);
+    if(now()-windowStart>=REQUEST_WINDOW_MS){windowStart=now();requests=0;}
+    if(requests>=REQUEST_BURST)throw fail();requests++;seen.set(key,now()+REPLAY_MS);
     /** @type {State} */const state={env,hash:'',index,previous,next,life:new AbortController(),expires:now()+LIFETIME_MS,
       timer:undefined,live:true,replied:false,detach:[]};
     states.set(key,state);state.timer=timers.setTimeout(()=>dispose(state),LIFETIME_MS);
