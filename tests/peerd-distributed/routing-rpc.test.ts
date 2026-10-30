@@ -43,6 +43,25 @@ test('signed multi-hop RPC returns only the requested endpoint roster',async()=>
   expect(new Set(result)).toEqual(new Set([f.ids[1].did,f.ids[3].did]));
  }finally{f.close();}
 });
+test('routing reads retain replay protection without exhausting admitted request windows',async()=>{
+ const f=await fixture([[0,1],[1,2]],3);
+ try{
+  const path=f.ids.map(id=>id.did),signal=new AbortController().signal;
+  for(let index=0;index<180;index++){
+   expect(await f.rpcs[0].readNeighbors(path,signal)).toEqual([f.ids[1].did]);
+   f.advance(500);
+   if(index===129){
+    const first=f.frames.find(frame=>frame.from===0&&frame.env.typ===ROUTING_CONTROL.ROUTE_CALL)!.env;
+    const {sig:_sig,...unsigned}=first;
+    const replay=await signEnvelope({...unsigned,ts:f.now()},f.ids[0]);
+    const before=f.frames.filter(frame=>frame.from===1&&frame.to===2&&frame.env.typ===ROUTING_CONTROL.ROUTE_CALL).length;
+    await f.meshes[0].routingCarrier(f.ids[1].did)!.send(replay);
+    await new Promise(r=>setTimeout(r,15));
+    expect(f.frames.filter(frame=>frame.from===1&&frame.to===2&&frame.env.typ===ROUTING_CONTROL.ROUTE_CALL)).toHaveLength(before);
+   }
+  }
+ }finally{f.close();}
+},15000);
 test('existing route discovery traverses saturated signed carriers without changing the mesh',async()=>{
  for(const edges of [[[0,2],[2,3],[3,1],[1,4]],[[0,2],[2,3],[3,1],[1,4],[4,0]]]){
   const f=await fixture(edges,5);
