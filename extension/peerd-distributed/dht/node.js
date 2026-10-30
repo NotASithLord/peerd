@@ -161,11 +161,9 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
       /** @type {Set<string>} */
       const queried = new Set();
       const shortlist = () => byDistanceTo(keyBytes, [...known.values()]).slice(0, k);
-      while (!signal?.aborted) {
-        const batch = shortlist().filter((c) => !queried.has(c.did)).slice(0, alpha);
-        if (!batch.length || queried.size >= 64) break;
-        await Promise.all(batch.map(async (c) => {
-          queried.add(c.did);
+      /** @type {Set<Promise<void>>} */const pending = new Set();
+      /** @param {Contact} c */
+      const query = async (c) => {
           let resp;
           try { resp = await rpc(c, { t: 'GET_PROVIDERS', key }, { signal, traversal }); }
           catch { onQueryFailure?.(); if (!signal?.aborted) rt.remove(c.did); return; }
@@ -206,8 +204,24 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
               catch { /* malformed contact */ }
             }
           }
-        }));
-      }
+      };
+      try {
+        while (!signal?.aborted) {
+          // why: one silent peer must not idle the other lookup slots while
+          // healthy replies supply useful referrals. Keep the same parallelism,
+          // shortlist and total query bounds; refill only a completed slot.
+          const available = Math.min(Math.max(0, alpha - pending.size), 64 - queried.size);
+          const next = shortlist().filter(c => !queried.has(c.did)).slice(0, available);
+          for (const contact of next) {
+            if (signal?.aborted) break;
+            queried.add(contact.did);
+            const task = query(contact).finally(() => pending.delete(task));
+            pending.add(task);
+          }
+          if (!pending.size) break;
+          await Promise.race(pending);
+        }
+      } finally { await Promise.allSettled(pending); }
       return [...found.values()];
   };
 
