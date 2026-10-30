@@ -299,7 +299,7 @@ export const createRoomMesh = ({
 
   /** @type {WeakMap<Link,{owner:AbortController,carrier:{did:string,signal:AbortSignal,maxFrameBytes:()=>number,send:(env:any,options?:import('./outgoing.js').SendOptions)=>Promise<void>}}>} */
   const routingCarrierCache=new WeakMap();
-  /** @type {typeof routingCarrierCache} */
+  /** @type {WeakMap<Link,{owner:AbortController,carrier:import('./retrieval-rpc.js').Carrier}>} */
   const retrievalCarrierCache=new WeakMap();
   /** @param {Link} link */
   const retrievalFrameLimit=(link)=>Math.min(RETRIEVAL_FRAME_BYTES,routingFrameLimit(link));
@@ -313,6 +313,7 @@ export const createRoomMesh = ({
     const current=()=>retrievalOwner===owner&&!signal.aborted&&!closed&&links.get(link.did)===link
       &&!link.channel.isClosed?.()&&!!retrievalHandler;
     const carrier=Object.freeze({did:link.did,signal,maxFrameBytes:()=>current()?retrievalFrameLimit(link):0,
+      noteProgress:()=>{if(current())link.lastSeen=now();},
       /** @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
       async send(env,options){
         if(!current()||!isRetrieval(env)||envelopeBytes(env)>retrievalFrameLimit(link))throw new RetrievalCarrierError();

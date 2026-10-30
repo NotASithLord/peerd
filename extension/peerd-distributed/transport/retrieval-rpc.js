@@ -15,7 +15,7 @@ const exact=(/** @type {any} */ x,/** @type {string[]} */ keys)=>x&&typeof x==='
 export class RetrievalRpcError extends Error {
   constructor(){super('bounded retrieval unavailable');this.name='RetrievalRpcError';}
 }
-/** @typedef {import('./routing-rpc.js').Carrier} Carrier */
+/** @typedef {import('./routing-rpc.js').Carrier & {noteProgress?:()=>void}} Carrier */
 /** @typedef {import('./retrieval-protocol.js').RetrievalKind} Kind */
 /** @typedef {{env:any,hash:string,previous:Carrier|null,next:Carrier|null,life:AbortController,
  * expires:number,timer:any,live:boolean,phase:'part'|'ack',offset:number,total:number,sending:boolean,pendingAck?:any,ackSending:boolean,pendingPart?:any,
@@ -28,11 +28,12 @@ export class RetrievalRpcError extends Error {
  * of hop count or chunk size; ACKs preserve ordinary transport backpressure.
  * @param {{identity:{did:string,sign:(bytes:Uint8Array)=>Promise<Uint8Array>},roomId:string,
  * mesh:{retrievalCarrier:(did:string)=>Carrier|null,onRetrieval:(cb:(event:{env:any,carrier:Carrier})=>void)=>()=>void},
- * read:(request:{kind:Kind,hash:string},signal:AbortSignal)=>Promise<Uint8Array|null>,now?:()=>number,timers?:any}} opts
+ * read:(request:{kind:Kind,hash:string},signal:AbortSignal)=>Promise<Uint8Array|null>,now?:()=>number,timers?:any,isAllowed?:(did:string)=>boolean}} opts
  */
-export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=globalThis})=>{
+export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=globalThis,isAllowed=()=>true})=>{
   /** @type {Map<string,State>} */const states=new Map();
   /** @type {Map<string,number>} */const seen=new Map();
+  /** @type {Set<Promise<void>>} */const cleanup=new Set();
   let closed=false,originating=0,serving=0,windowStart=now(),requests=0;
   const fail=()=>new RetrievalRpcError();
   const key=(/** @type {string} */ origin,/** @type {string} */ id)=>JSON.stringify([origin,id]);
@@ -57,16 +58,17 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
     state.reject?.(fail());state.reject=undefined;state.resolve=undefined;
     if(notify&&state.hash){
       const frame=forwarded?Promise.resolve(forwarded):sign(TYPE.CANCEL,reference(state));
-      void frame.then(env=>Promise.all([state.previous,state.next].filter(c=>c&&c.signal!==except?.signal)
-        .map(c=>send(c,env).catch(()=>{})))).catch(()=>{});
+      const task=frame.then(env=>Promise.all([state.previous,state.next].filter(c=>c&&c.signal!==except?.signal)
+        .map(c=>send(c,env).catch(()=>{})))).then(()=>{},()=>{});
+      cleanup.add(task);void task.finally(()=>cleanup.delete(task));
     }
   };
-  const check=(/** @type {State} */ state)=>{if(!state.live||closed||now()>=state.expires){dispose(state);throw fail();}};
+  const check=(/** @type {State} */ state)=>{if(!state.live||closed||now()>=state.expires||!state.env.body.path.every(isAllowed)){dispose(state);throw fail();}};
   /** @param {any} env @param {Carrier|null} previous @param {Carrier|null} next */
   const reserve=(env,previous,next)=>{
     for(const [k,expiry] of seen)if(now()>=expiry)seen.delete(k);
     const k=key(env.from,env.id);
-    if(closed||states.size>=LIVE_LIMIT||seen.size>=REPLAY_LIMIT||seen.has(k))throw fail();
+    if(closed||states.size>=LIVE_LIMIT||cleanup.size>=LIVE_LIMIT||seen.size>=REPLAY_LIMIT||seen.has(k))throw fail();
     if(now()-windowStart>=10_000){windowStart=now();requests=0;}
     if(requests>=32)throw fail();requests++;seen.set(k,now()+REPLAY_MS);
     /** @type {State} */const state={env,hash:'',previous,next,life:new AbortController(),expires:now()+LIFETIME_MS,
@@ -122,6 +124,7 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
       const payload=env.body.part;
       if(state.phase!=='part'||!validRetrievalPart(payload,state.env.body.request.kind)||payload.offset!==state.offset
         ||(state.total>=0&&payload.total!==state.total))throw fail();
+      state.next?.noteProgress?.();
       state.total=payload.total;state.offset=Math.min(state.total,state.offset+RETRIEVAL_PART_BYTES);state.phase='ack';
       if(state.previous){state.sending=true;await send(state.previous,env,state.life.signal);drained(state);return;}
       const result=state.assembly?.accept(payload);
@@ -139,6 +142,7 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
   const ack=async(state,env)=>{
     try{
       if(state.phase!=='ack'||env.body.offset!==state.offset)throw fail();
+      state.previous?.noteProgress?.();
       const complete=state.offset===state.total;state.phase='part';
       if(state.next){state.ackSending=true;await send(state.next,env,state.life.signal);drainedAck(state);}
       if(complete){dispose(state,false);return;}
@@ -149,11 +153,12 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
   const receive=({env,carrier})=>{
     if(closed||carrier.signal.aborted||!fresh(env))return;
     if(env.typ===TYPE.CALL){
-      if(!validRetrievalCall(env.body,roomId,env.from))return;
+      if(!validRetrievalCall(env.body,roomId,env.from)||!env.body.path.every(isAllowed))return;
       const owned=structuredClone(env),index=owned.body.path.indexOf(identity.did);
       if(index<=0||owned.body.path[index-1]!==carrier.did)return;
       const next=index+1<owned.body.path.length?mesh.retrievalCarrier(owned.body.path[index+1]):null;
       let state;try{state=reserve(owned,carrier,next);}catch{return;}
+      carrier.noteProgress?.();
       void start(state);return;
     }
     if(![TYPE.PART,TYPE.ACK,TYPE.CANCEL].includes(env.typ))return;
@@ -162,7 +167,7 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
     if(!exact(body,keys)||body.room!==roomId||typeof body.origin!=='string'||body.origin.length>128
       ||typeof body.requestId!=='string'||!UUID.test(body.requestId)||typeof body.requestHash!=='string'||!HASH.test(body.requestHash))return;
     const state=states.get(key(body.origin,body.requestId));if(!state||!state.live)return;
-    if(now()>=state.expires){dispose(state);return;}
+    if(now()>=state.expires||!state.env.body.path.every(isAllowed)){dispose(state);return;}
     if(env.typ===TYPE.CANCEL){
       if((carrier.signal===state.previous?.signal||carrier.signal===state.next?.signal)&&state.env.body.path.includes(env.from)){
         if(!state.hash)state.pendingCancel={env:structuredClone(env),carrier};
@@ -187,7 +192,7 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
     /** @param {readonly string[]} path @param {{kind:Kind,hash:string}} request @param {AbortSignal} signal */
     async retrieve(path,request,signal){
       const body={room:roomId,path:[...path],request:structuredClone(request)};
-      if(closed||signal.aborted||originating>=2||!validRetrievalCall(body,roomId,identity.did))throw fail();
+      if(closed||signal.aborted||originating>=2||!validRetrievalCall(body,roomId,identity.did)||!body.path.every(isAllowed))throw fail();
       originating++;/** @type {State|undefined} */let state;
       try{
         const env=await sign(TYPE.CALL,body);if(closed||signal.aborted||!fresh(env))throw fail();
@@ -200,6 +205,15 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
       }catch(error){if(state)dispose(state);throw error;}finally{originating--;}
     },
     stats:()=>({active:states.size,replay:seen.size,originating,serving}),
-    close(){if(closed)return;closed=true;for(const state of [...states.values()])dispose(state);detach();},
+    close(){
+      if(closed)return;closed=true;for(const state of [...states.values()])dispose(state);
+      // Detaching immediately revokes carriers before asynchronous cancellation
+      // signing can finish. Allow bounded cleanup; never wait for a slow peer.
+      if(!cleanup.size){detach();return;}
+      let detached=false;
+      const finish=()=>{if(detached)return;detached=true;detach();};
+      const timer=timers.setTimeout(finish,1000);
+      void Promise.allSettled([...cleanup]).then(()=>{timers.clearTimeout(timer);finish();});
+    },
   });
 };

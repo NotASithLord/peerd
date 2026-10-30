@@ -101,3 +101,11 @@ test('queued sends retain an owned frame and abort when the owner detaches',asyn
   off();expect(await rejected).toBeInstanceOf(Error);expect(signal!.aborted).toBe(true);
  }finally{f.close();}
 });
+test('only a live protocol carrier can record validated retrieval progress',async()=>{
+ const f=await fixture();try{
+  const off=f.meshes[0].onRetrieval(()=>{}),carrier=f.meshes[0].retrievalCarrier(f.ids[1].did)!;
+  const initial=f.meshes[0].peers()[0].lastSeen;await tick();carrier.noteProgress?.();
+  const updated=f.meshes[0].peers()[0].lastSeen;expect(updated).toBeGreaterThan(initial);
+  off();await tick();carrier.noteProgress?.();expect(f.meshes[0].peers()[0].lastSeen).toBe(updated);
+ }finally{f.close();}
+});

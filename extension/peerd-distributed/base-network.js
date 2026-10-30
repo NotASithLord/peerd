@@ -28,6 +28,7 @@ import {
 } from './content/manifest.js';
 import { packTransportBundle } from './content/bundle.js';
 import { chunkBytes, sha256hex as sha256ChunkHex } from './content/chunk.js';
+import { createRoutedContentChannel } from './content/routed.js';
 import { swarmFetch } from './content/swarm.js';
 import { formatPeerdUri, parsePeerdUri } from './content/uri.js';
 import { concat, utf8, toHex } from '/shared/bundle/bytes.js';
@@ -366,7 +367,12 @@ export const createBaseNetwork = async ({
     try {
       callerSignal?.throwIfAborted();
       /** @param {string} did */
-      const channelFor = (did) => isBlocked(did) ? null : node.mesh.contentChannel(did);
+      const channelFor = (did) => {
+        if(isBlocked(did))return null;
+        const direct=node.mesh.contentChannel(did);if(direct)return direct;
+        return dial?.retrieval?createRoutedContentChannel({isAllowed:()=>!closed&&!isBlocked(did),
+          read:(kind,hash,signal)=>dial.retrieval.read(did,{kind,hash},signal)}):null;
+      };
       const acceptManifest = (/** @type {any} */ manifest) => {
         if (expectedRuntime) assertAppRuntimeAgreement(expectedRuntime.value, manifest.meta?.runtime);
         assertAppRuntime(manifest.meta?.runtime);
@@ -447,6 +453,11 @@ export const createBaseNetwork = async ({
       }, undefined, callerSignal).catch(() => []);
       callerSignal?.throwIfAborted();
       const candidates = contacts.filter((/** @type {any} */ contact) => contact.did !== identity.did && !isBlocked(contact.did)).slice(0, 8);
+      if(dial?.retrieval&&candidates.length){
+        try{return await swarmFetch({uri,providers:[...new Set([...candidates.map((/** @type {any} */ c)=>c.did),...linked])],
+          channelFor,timeoutMs,onProgress,signal:callerSignal,isAllowed,acceptManifest});}
+        catch(error){callerSignal?.throwIfAborted();if(error instanceof AppRuntimeError)throw error;}
+      }
       let next = 0;
       const connectProvider = async () => {
         while (next < candidates.length && !closed && !callerSignal?.aborted) {

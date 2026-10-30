@@ -28,8 +28,9 @@ import { createSession, ADMISSION_READY } from './session.js';
 import { createRoutingPathHolds } from './routing-path-holds.js';
 import { createRoutingRpc } from './routing-rpc.js';
 import { createRoutingPathSearch } from './routing-path-search.js';
+import { createRoomRetrieval } from './room-retrieval.js';
 import { createRoutingWitnesses } from './routing-witness.js';
-import { TOPIC_SYNC_WINDOW, CONTENT_ONLY, LOOKUP_ONLY, ROUTING_WITNESS } from './capabilities.js';
+import { TOPIC_SYNC_WINDOW, CONTENT_ONLY, LOOKUP_ONLY, ROUTING_WITNESS, ROUTED_RETRIEVAL } from './capabilities.js';
 import { connectionPath } from './ice.js';
 import { AdmissionError, roomAdmission, MAX_ADMISSION_CANDIDATES } from './admission.js';
 import { createSignalingBuffer } from './signaling-buffer.js';
@@ -99,13 +100,14 @@ export const joinRoom = async ({
 } = /** @type {{ roomId: string, identity: import('./mesh.js').Identity }} */ ({})) => {
   // why: protocol support is mutual and fixed for this room lifetime; a
   // caller-owned capabilities array must not change negotiation after joining.
-  const sessionCaps = [...new Set([...caps,ADMISSION_READY,ROUTING_WITNESS])];
+  const sessionCaps = [...new Set([...caps,ADMISSION_READY,ROUTING_WITNESS,ROUTED_RETRIEVAL])];
   const t = transport ?? createWebrtcTransport({ iceServers, RTCPeerConnection });
   const mesh = createRoomMesh({ roomId, identity, now, budget, audit, isBlocked, transferSlots, timers });
   const routingHolds=createRoutingPathHolds({identity,roomId,holdRoutingLink:mesh.holdRoutingLink,now});
   const routingRpc=createRoutingRpc({identity,roomId,mesh,holds:routingHolds,now,timers});
   const routingSearch=createRoutingPathSearch({selfDid:identity.did,readNeighbors:routingRpc.readNeighbors,now,timers});
   const routingWitnesses=createRoutingWitnesses({identity,roomId,acquireHop:routingRpc.acquireHop,now,timers});
+  const retrieval=createRoomRetrieval({identity,roomId,mesh,routeTo:routingSearch.routeTo,now,timers,isBlocked});
   const releaseMesh = onMesh?.(mesh);
   /** @type {Set<(arg: { rendezvous: string }) => void>} */
   const statusCbs = new Set();
@@ -645,6 +647,7 @@ export const joinRoom = async ({
     roomId,
     did: identity.did,
     mesh,
+    retrieval,
     peers: mesh.peers,
     onPeer: mesh.onPeer,
     onPeerGone: mesh.onPeerGone,
@@ -677,6 +680,7 @@ export const joinRoom = async ({
       attempts.close();
       timers.clearTimeout(reconnectTimer ?? undefined);
       try { session?.close(); } catch { /* already closed */ }
+      retrieval.close();
       routingSearch.close();
       routingWitnesses.close();
       routingRpc.close();

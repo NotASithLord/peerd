@@ -26,7 +26,7 @@ const RESP = 1;
 /**
  * @param {{
  *   mesh: any, identity: { did: string }, selfId: Uint8Array,
- *   store: any, providers?: any, dial?: (((contact: any, opts?: {signal?: AbortSignal}) => Promise<boolean>) & {acquireLookup?:(contact:any,opts:{signal?:AbortSignal})=>Promise<{release:()=>void}>}) | null,
+ *   store: any, providers?: any, dial?: (((contact: any, opts?: {signal?: AbortSignal}) => Promise<boolean>) & {retrieval?:ReturnType<typeof import('../transport/room-retrieval.js').createRoomRetrieval>,acquireLookup?:(contact:any,opts:{signal?:AbortSignal})=>Promise<{release:()=>void}>}) | null,
  *   timeoutMs?: number, now?: () => number, k?: number, alpha?: number,
  * }} opts
  * @returns {{ node: any, detach: () => void }}
@@ -60,6 +60,13 @@ export const attachDht = ({ mesh, identity, selfId, store, providers = null, dia
     /** @type {{lease:{release:()=>void}|null}} */
     const owned = {lease:null};
     const run = async () => {
+      if (!mesh.hasLink(did)&&msg?.t==='GET_PROVIDERS'&&dial?.retrieval) {
+        try {
+          const bytes=await dial.retrieval.read(did,{kind:'providers',hash:msg.key},ac.signal);
+          ac.signal.throwIfAborted();
+          return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
+        } catch { ac.signal.throwIfAborted(); /* A legacy route may still permit a direct lookup. */ }
+      }
       if (!mesh.hasLink(did)) {
         const acquireLookup = traversal?.acquireLookup ?? dial?.acquireLookup;
         if (acquireLookup) {
