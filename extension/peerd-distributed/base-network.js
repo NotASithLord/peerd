@@ -75,6 +75,9 @@ export const createBaseNetwork = async ({
   let maintenanceTimer = null;
   /** @type {Map<string, number>} */
   const providerRenewals = new Map();
+  /** @type {Map<string, string>} */
+  const providerTopologies = new Map();
+  const providerTopology = () => mesh.peers().map((/** @type {{did:string}} */ peer) => peer.did).sort().join(',');
   let renewingProviders = false;
   /** @type {Set<AbortController>} */
   const operations = new Set();
@@ -112,6 +115,7 @@ export const createBaseNetwork = async ({
   const revokeProvider = (hash) => {
     for (const ac of providerAttempts.get(hash) ?? []) ac.abort();
     providerRenewals.delete(hash);
+    providerTopologies.delete(hash);
     return node.content.unannounce(hash);
   };
 
@@ -206,6 +210,7 @@ export const createBaseNetwork = async ({
     const { hash } = parsePeerdUri(contentAddr);
     const key = await contentKey(contentAddr);
     if (closed || !node.content.isAnnounced(hash)) return { key, stored: 0 };
+    const topology = providerTopology();
     try {
       const result = await withNetworkBudget(async (signal) => {
         const entry = await signProvider({ key, ts: now() }, identity);
@@ -213,9 +218,13 @@ export const createBaseNetwork = async ({
         return node.dht.announceProvider(key, entry, { signal });
       }, hash);
       if (!closed && node.content.isAnnounced(hash)) providerRenewals.set(hash, now() + (result.stored ? PROVIDER_TTL_MS / 2 : 30_000));
+      if (!closed && node.content.isAnnounced(hash)) providerTopologies.set(hash, topology);
       return result;
     } catch (e) {
-      if (!closed && node.content.isAnnounced(hash)) providerRenewals.set(hash, now() + 30_000);
+      if (!closed && node.content.isAnnounced(hash)) {
+        providerRenewals.set(hash, now() + 30_000);
+        providerTopologies.set(hash, topology);
+      }
       dlog('base', `announceProvider ${key.slice(0, 8)} failed: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`);
       return { key, stored: 0 };
     }
@@ -226,7 +235,20 @@ export const createBaseNetwork = async ({
     try {
       const hashes = node.content.announcedHashes();
       const live = new Set(hashes);
-      for (const hash of providerRenewals.keys()) if (!live.has(hash)) providerRenewals.delete(hash);
+      for (const hash of providerRenewals.keys()) if (!live.has(hash)) {
+        providerRenewals.delete(hash);
+        providerTopologies.delete(hash);
+      }
+      // why: successful placement in a small or earlier topology is not durable
+      // discovery after churn changes the nearest indexes. Coalesce changes into
+      // the existing retry interval; never postpone due work or exceed the batch.
+      const topology = providerTopology();
+      for (const hash of hashes) {
+        if (providerTopologies.has(hash) && providerTopologies.get(hash) !== topology) {
+          providerRenewals.set(hash, Math.min(providerRenewals.get(hash) ?? 0, now() + 30_000));
+          providerTopologies.set(hash, topology);
+        }
+      }
       // Bounded maintenance traffic; later ticks pick up the remaining due apps.
       const due = hashes.filter((hash) => (providerRenewals.get(hash) ?? 0) <= now())
         .sort((a, b) => (providerRenewals.get(a) ?? 0) - (providerRenewals.get(b) ?? 0)).slice(0, 8);
@@ -736,6 +758,6 @@ export const createBaseNetwork = async ({
       // subscribe to current peers too, or a late starter's Library stays empty.
       discovery.subscribeAll();
     },
-    close: () => { closed = true; retrievalHistory.clear(); library.clearContributors(); for (const ac of operations) ac.abort(); if (maintenanceTimer) clearInterval(maintenanceTimer); providerRenewals.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
+    close: () => { closed = true; retrievalHistory.clear(); library.clearContributors(); for (const ac of operations) ac.abort(); if (maintenanceTimer) clearInterval(maintenanceTimer); providerRenewals.clear(); providerTopologies.clear(); dlog('base', 'base network closing'); discovery.close(); node.close(); },
   });
 };

@@ -694,3 +694,37 @@ test('provider deadline retains completed referrals while caller cancellation st
     } finally {globalThis.setTimeout=original;reader.base.close();publisher.base.close();}
   }
 });
+
+test('provider renewal follows topology changes without flooding a stable mesh', async () => {
+  let clock = 1000;
+  const publisher = await spawn('publisher', { now: () => clock });
+  const early = await spawn('early', { now: () => clock });
+  const newcomer = await spawn('newcomer', { now: () => clock });
+  try {
+    await link(publisher, early);
+    const shared = await publisher.base.publishApp({ name: 'growing index', entry: 'index.html', files: { 'index.html': 'hello' } });
+    const receipt = await publisher.base.announceProvider(shared.uri);
+    const records = async () => (await newcomer.base.node.dht.handle(publisher.identity.did, { t: 'GET_PROVIDERS', key: receipt.key })).providers;
+    await link(publisher, newcomer);
+    expect(await records()).toEqual([]);
+    await publisher.base.refreshProviders();
+    clock += 29_999;
+    publisher.mesh.removeLink(early.identity.did);
+    await publisher.base.refreshProviders();
+    expect(await records()).toEqual([]);
+    clock += 1;
+    await publisher.base.refreshProviders();
+    expect(await records()).toContain(publisher.identity.did);
+    const original = publisher.base.node.dht.announceProvider;
+    let calls = 0;
+    publisher.base.node.dht.announceProvider = async (...args: any[]) => { calls++; return original(...args); };
+    clock += 60_000;
+    await publisher.base.refreshProviders();
+    expect(calls).toBe(0);
+    publisher.base.unserveContent(shared.hash);
+    publisher.mesh.removeLink(newcomer.identity.did);
+    clock += 60_000;
+    await publisher.base.refreshProviders();
+    expect(calls).toBe(0);
+  } finally { publisher.base.close(); early.base.close(); newcomer.base.close(); }
+});

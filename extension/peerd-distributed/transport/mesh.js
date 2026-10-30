@@ -36,7 +36,7 @@ import { createContentResponder, fetchBundle } from '../content/transfer.js';
 import { dlog } from '../log.js';
 import { createLocalCounters } from '../local-counters.js';
 import { createControlPacer, ControlPacingCapacityError } from './control-pacer.js';
-import { CONTENT_ONLY, LOOKUP_ONLY, ROUTING_WITNESS, ROUTING_CONTROL, ROUTED_RETRIEVAL, RETRIEVAL_CHANNEL, RETRIEVAL_TYPES } from './capabilities.js';
+import { CONTENT_ONLY, LOOKUP_ONLY, ROUTING_WITNESS, ROUTE_HINTS, ROUTING_CONTROL, ROUTED_RETRIEVAL, RETRIEVAL_CHANNEL, RETRIEVAL_TYPES } from './capabilities.js';
 import { RETRIEVAL_FRAME_BYTES } from './retrieval-protocol.js';
 import { DIRECTORY_INTRODUCTIONS, createDirectoryIntroductions } from './directory-introductions.js';
 
@@ -102,6 +102,7 @@ const QUEUED_PER_MESH = 128;
  *   did: string,
  *   purpose: 'routing' | 'content' | 'lookup' | 'directory',
  *   routingWitness: boolean,
+ *   routeHints: boolean,
  *   routedRetrieval: boolean,
  *   leases: number,
  *   controlPacer: ReturnType<typeof createControlPacer>,
@@ -340,7 +341,7 @@ export const createRoomMesh = ({
     const current=()=>routingControlOwner===owner&&!signal.aborted&&!closed&&links.get(link.did)===link&&!link.retired.signal.aborted
       &&!link.channel.isClosed?.()&&link.purpose==='routing'&&link.routingWitness&&!!routingControlHandler;
     if(!current())return null;
-    const carrier=Object.freeze({did:link.did,signal,maxFrameBytes:()=>current()?routingFrameLimit(link):0,
+    const carrier=Object.freeze({did:link.did,signal,routeHints:link.routeHints,maxFrameBytes:()=>current()?routingFrameLimit(link):0,
       /** @param {any} env @param {import('./outgoing.js').SendOptions} [options] */
       async send(env,options){
         if(!current()||!isRoutingControl(env)||envelopeBytes(env)>routingFrameLimit(link))throw new RoutingControlError();
@@ -844,7 +845,7 @@ export const createRoomMesh = ({
       // exploration ownership is never inherited from a retired connection.
       if (links.has(did)) removeLink(did, 'replaced');
       /** @type {Link} */
-      const link = { did, channel, purpose, routedRetrieval:purpose==='routing'&&info?.caps?.includes(ROUTED_RETRIEVAL)===true, routingWitness:purpose==='routing'&&info?.caps?.includes(ROUTING_WITNESS)===true, leases: 0, controlPacer:createControlPacer({now,timers}), introductions: purpose === 'directory' ? createDirectoryIntroductions({now}) : undefined, locallySelected: locallySelected || previous?.locallySelected || false,
+      const link = { did, channel, purpose, routeHints:purpose==='routing'&&info?.caps?.includes(ROUTE_HINTS)===true, routedRetrieval:purpose==='routing'&&info?.caps?.includes(ROUTED_RETRIEVAL)===true, routingWitness:purpose==='routing'&&info?.caps?.includes(ROUTING_WITNESS)===true, leases: 0, controlPacer:createControlPacer({now,timers}), introductions: purpose === 'directory' ? createDirectoryIntroductions({now}) : undefined, locallySelected: locallySelected || previous?.locallySelected || false,
         admittedAt: timing?.admittedAt ?? now(), protectedUntil: timing?.protectedUntil ?? 0, serving: 0, retired: new AbortController(), contentHandlers: new Set(), verifying: 0, queued: 0, lastSeen: now(), ctrl: { windowStart: now(), count: 0 }, abuse: { windowStart: now(), count: 0 }, info };
       // Own this exact generation before an already-closed channel can invoke
       // its immediate observer. A close during handoff must not become connected.
