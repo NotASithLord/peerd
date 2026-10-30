@@ -127,6 +127,15 @@ controlled renderer heap at fixture readiness, periodically during the workload,
 and before cleanup. Missing observations fail the run. The result identifies
 the companion file and sample count; retain both with the source fingerprint.
 
+With resource collection enabled, an optional `idleBaseline` object uses the
+same duration/interval shape as `soak` to observe the loaded fixtures before
+any peer starts. Its tighter bounds are enforced by `idleBaselineOptions` in
+`dweb-cluster-soak.mjs`. Samples carry an `idle-before-peer-start` phase, and
+the result retains an incomplete checkpoint until a final observation succeeds
+after the requested interval. A missing observation fails the run. Compare
+these samples with the active workload on the same hosts; they include the
+collector's overhead and are not a blank-browser or connected-but-idle baseline.
+
 The collector in `dweb-process-evidence.mjs` records numeric process identities,
 RSS, cumulative CPU time and numeric open-file-descriptor counts, without command
 lines, file paths or socket endpoints. Descriptor counts exclude mapped-file
@@ -134,7 +143,7 @@ pseudo-descriptors. Process and descriptor snapshots are not atomic; an exited
 or inaccessible process fails the observation instead of contributing zero. Summed RSS can double-count
 shared pages; CPU observations omit processes that exited between samples; the
 renderer heap is not the whole browser heap. These observations do not establish
-an idle baseline or qualify queue or bandwidth budgets. The report keeps those
+an idle baseline unless requested, or qualify queue or bandwidth budgets. The report keeps those
 missing measurements explicit.
 
 Resource observation also enables a 100ms timer in the controlled renderer.

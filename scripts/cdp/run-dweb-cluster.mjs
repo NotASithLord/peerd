@@ -13,7 +13,7 @@ import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
 import { sshArguments } from './dweb-cluster-ssh.mjs';
 import {validateCapacityConfig, validateCapacityHosts, capacityTopology, capacityPathsReady} from './dweb-capacity-evidence.mjs';
 import {validateConversations} from './dweb-conversation-evidence.mjs';
-import { soakOptions, runSoak } from './dweb-cluster-soak.mjs';
+import { soakOptions, idleBaselineOptions, runSoak } from './dweb-cluster-soak.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const configPath = process.argv[2];
@@ -25,6 +25,7 @@ assert(!(local && capacity), 'Capacity placement cannot be a local rehearsal');
 const transferSlots = config.transferSlots ?? 0;
 assert(Number.isSafeInteger(transferSlots) && transferSlots >= 0 && transferSlots < (config.budget ?? 16), 'invalid transfer reserve');
 const soak = soakOptions(config.soak);
+const idleBaseline = idleBaselineOptions(config.idleBaseline, config.resourceMetrics);
 const output = resolve(config.output ?? join(root, 'scripts/cdp/artifacts/cluster-result.json'));
 // why: remote agreement alone could certify identical but stale staged trees.
 const expectedSource = sourceFingerprint(root);
@@ -167,6 +168,19 @@ try {
     report.resourceEvidence.samples++;
   };
   await sampleResources('fixture-ready', true);
+  if (idleBaseline) {
+    await check('idle browser resource baseline before peer startup', async () =>
+      runSoak({ options: idleBaseline, now: () => performance.now(), sleep,
+        probe: () => sampleResources('idle-before-peer-start', true),
+        save: async evidence => {
+          report.idleBaseline = { ...evidence, scope: 'fixture loaded; mesh not started; collector active' };
+          mkdirSync(dirname(output), { recursive: true });
+          writeFileSync(`${output}.pending`, `${JSON.stringify(report, null, 2)}\n`);
+          renameSync(`${output}.pending`, output);
+        },
+      }));
+    report.resourceEvidence.missing = report.resourceEvidence.missing.filter(value => value !== 'idle-only baseline');
+  }
   const roomId = config.roomId ?? `cluster-${crypto.randomUUID()}`;
   assert(typeof roomId === 'string' && roomId.length > 0, 'roomId must be a non-empty string');
   const start = (worker, id = roomId) => worker.call('start', { roomId: id, signaling: worker.signaling,
