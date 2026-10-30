@@ -465,8 +465,8 @@ test('room capabilities require both signed advertisements and preserve the loca
     rooms.push(await join('capabilities', ids[1], node, ether));
     rooms.push(await join('capabilities', ids[2], node, ether));
     await waitFor(() => rooms.every(room => room.peers().length === 2));
-    for (const peer of rooms[0].peers()) expect(peer.info.caps).toEqual(['content', 'admission-ready-v3', 'routing-witness-v1', 'routed-retrieval-v1']);
-    expect(rooms[1].peers().find((peer: any) => peer.did === ids[0].did).info.caps).toEqual(['content', 'admission-ready-v3', 'routing-witness-v1', 'routed-retrieval-v1']);
+    for (const peer of rooms[0].peers()) expect(peer.info.caps).toEqual(['content', 'admission-ready-v3', 'routing-witness-v1', 'route-hints-v1', 'routed-retrieval-v1']);
+    expect(rooms[1].peers().find((peer: any) => peer.did === ids[0].did).info.caps).toEqual(['content', 'admission-ready-v3', 'routing-witness-v1', 'route-hints-v1', 'routed-retrieval-v1']);
     expect(rooms[1].peers().find((peer: any) => peer.did === ids[2].did).info.caps).toContain(TOPIC_SYNC_WINDOW);
   } finally { rooms.forEach(room => room.leave()); }
 });

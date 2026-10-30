@@ -13,6 +13,8 @@ export const LOOKUP_ONLY = 'lookup-only-v1';
 // capability requires a live per-room protocol owner; it is not enabled merely
 // by importing these constants.
 export const ROUTING_WITNESS = 'routing-witness-v1';
+// Read-only carrier rosters are independent of witness eligibility.
+export const ROUTE_HINTS = 'route-hints-v1';
 export const ROUTING_CONTROL = Object.freeze({ROUTE_CALL:10,ROUTE_REPLY:11,ROUTE_CANCEL:12});
 
 // Immutable retrieval over existing routing links has no witness/rotation authority.
