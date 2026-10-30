@@ -30,15 +30,36 @@ export const idleBaselineOptions = (value, resourceMetrics) => {
 export const runSoak = async ({ options, probe, save, now, sleep }) => {
   const start = now();
   const evidence = { ...options, completed: false, cycles: 0, elapsedMs: 0, samples: [] };
+  let pendingSample;
+  let probeStarted;
   await save(evidence);
   try {
     for (;;) {
       const before = now();
-      await probe();
+      probeStarted = before;
+      pendingSample = { cycle: evidence.cycles + 1, elapsedMs: before - start, probeMs: 0, stages: [] };
+      // Fixed names and one observation per stage bound both successful and
+      // failed receipts. Keep timing separate from operation return values.
+      const timed = async (name, operation) => {
+        if (!['mesh', 'gossip', 'fetch', 'paths', 'resources'].includes(name)
+          || pendingSample.stages.some(stage => stage.name === name)) throw new Error('Invalid soak timing stage');
+        const stage = { name, ms: 0, ok: false };
+        pendingSample.stages.push(stage);
+        const began = now();
+        try {
+          const value = await operation();
+          stage.ok = true;
+          return value;
+        } finally { stage.ms = now() - began; }
+      };
+      await probe(timed);
       const after = now();
       evidence.cycles += 1;
       evidence.elapsedMs = after - start;
-      evidence.samples.push({ cycle: evidence.cycles, elapsedMs: evidence.elapsedMs, probeMs: after - before });
+      pendingSample.elapsedMs = evidence.elapsedMs;
+      pendingSample.probeMs = after - before;
+      evidence.samples.push(pendingSample);
+      pendingSample = null;
       if (evidence.samples.length > 32) evidence.samples.shift();
       // A final successful probe must begin after the requested duration. A
       // slow first probe or an elapsed timer alone cannot certify a soak.
@@ -50,6 +71,11 @@ export const runSoak = async ({ options, probe, save, now, sleep }) => {
   } catch (error) {
     evidence.completed = false;
     evidence.elapsedMs = now() - start;
+    if (pendingSample) {
+      pendingSample.elapsedMs = evidence.elapsedMs;
+      pendingSample.probeMs = now() - probeStarted;
+      evidence.failedSample = pendingSample;
+    }
     evidence.error = error.message;
     await save(evidence);
     throw error;

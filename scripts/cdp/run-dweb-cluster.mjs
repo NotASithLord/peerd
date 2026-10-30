@@ -351,12 +351,12 @@ try {
   });
   if (soak) await check('sustained authenticated traffic and verified content', async () =>
     runSoak({ options: soak, now: () => performance.now(), sleep,
-      probe: async () => {
-        await meshReady();
-        await gossip();
-        verify(await workers[0].call('fetch', { uri: published.uri }));
-        await paths();
-        await sampleResources('sustained-workload');
+      probe: async timed => {
+        await timed('mesh', meshReady);
+        await timed('gossip', gossip);
+        await timed('fetch', async () => verify(await workers[0].call('fetch', { uri: published.uri })));
+        await timed('paths', paths);
+        await timed('resources', () => sampleResources('sustained-workload'));
       },
       save: async evidence => {
         report.soak = evidence;
