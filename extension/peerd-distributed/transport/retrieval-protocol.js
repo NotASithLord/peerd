@@ -7,6 +7,7 @@ import { CHUNK_SIZE } from '../content/chunk.js';
 import { MAX_MANIFEST_BYTES } from '../content/manifest.js';
 import { base64ByteLength, fromBase64 } from '/shared/bundle/bytes.js';
 
+export const RETRIEVAL_CONCURRENCY = 2;
 export const RETRIEVAL_PART_BYTES = 1024;
 export const RETRIEVAL_FRAME_BYTES = 4096;
 const HASH = /^[0-9a-f]{64}$/;

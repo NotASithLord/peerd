@@ -17,10 +17,12 @@ export const createRoomRetrieval=({identity,roomId,mesh,routeTo,now,timers,isBlo
   return Object.freeze({
     /** @param {Parameters<typeof createRetrievalRpc>[0]['read']} read */
     serve(read){if(closed||service)throw new RetrievalRpcError();service=read;return close;},
-    /** @param {string} target @param {Parameters<typeof client.read>[1]} request @param {AbortSignal} signal */
-    async read(target,request,signal){
+    /** @param {string} target @param {Parameters<typeof client.read>[1]} request @param {AbortSignal} signal @param {import('./retrieval-rpc.js').PartObserver} [onPart] */
+    async read(target,request,signal,onPart){
       if(closed||isBlocked(target))throw new RetrievalRpcError();
-      const bytes=await client.read(target,request,signal);
+      const bytes=await client.read(target,request,signal,onPart?part=>{
+        if(closed||isBlocked(target))throw new RetrievalRpcError();onPart(part);
+      }:undefined);
       if(closed||isBlocked(target))throw new RetrievalRpcError();return bytes;
     },
     close,

@@ -2,11 +2,12 @@
 import { buildEnvelope, envelopeBytes, signEnvelope } from './envelope.js';
 import { RETRIEVAL_CHANNEL, RETRIEVAL_TYPES as TYPE } from './capabilities.js';
 import { validRetrievalCall, validRetrievalPart, createRetrievalReply, retrievalReplyLimit,
-  RETRIEVAL_FRAME_BYTES, RETRIEVAL_PART_BYTES } from './retrieval-protocol.js';
+  RETRIEVAL_FRAME_BYTES, RETRIEVAL_PART_BYTES, RETRIEVAL_CONCURRENCY } from './retrieval-protocol.js';
 import { canonicalize } from '/shared/bundle/canonical.js';
-import { utf8, toBase64 } from '/shared/bundle/bytes.js';
+import { utf8, toBase64, fromBase64 } from '/shared/bundle/bytes.js';
 import { sha256hex } from '/shared/bundle/chunk.js';
 
+const WINDOW_PARTS=16;
 const LIVE_LIMIT=16, REPLAY_LIMIT=128, LIFETIME_MS=60_000, REPLAY_MS=130_000;
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HASH=/^[0-9a-f]{64}$/;
@@ -17,15 +18,18 @@ export class RetrievalRpcError extends Error {
 }
 /** @typedef {import('./routing-rpc.js').Carrier & {noteProgress?:()=>void}} Carrier */
 /** @typedef {import('./retrieval-protocol.js').RetrievalKind} Kind */
+/** @typedef {(part:{offset:number,total:number,bytes:Uint8Array})=>void} PartObserver */
 /** @typedef {{env:any,hash:string,previous:Carrier|null,next:Carrier|null,life:AbortController,
- * expires:number,timer:any,live:boolean,phase:'part'|'ack',offset:number,total:number,sending:boolean,pendingAck?:any,ackSending:boolean,pendingPart?:any,
- * bytes?:Uint8Array,assembly?:ReturnType<typeof createRetrievalReply>,detach:Array<()=>void>,
+ * expires:number,timer:any,live:boolean,phase:'part'|'ack',offset:number,total:number,sending:boolean,pendingAck?:any,ackSending:boolean,partQueue:any[],processingParts:boolean,
+ * onPart?:PartObserver,bytes?:Uint8Array,assembly?:ReturnType<typeof createRetrievalReply>,detach:Array<()=>void>,
  * resolve?:(bytes:Uint8Array)=>void,reject?:(error:Error)=>void,pendingCancel?:{env:any,carrier:Carrier}}} State */
 /**
  * Mesh verifies signatures; this owner enforces fixed-route custody and endpoint
  * identity. Only immutable bounded reads are exposed. No links are created.
- * why stop-and-wait: each path retains at most one part in flight, independent
- * of hop count or chunk size; ACKs preserve ordinary transport backpressure.
+ * why bounded batches: each kilobyte must not pay the entire path latency.
+ * One fixed batch is outstanding; every hop drains sends in order before
+ * accepting its ACK. Queue bounds do not depend on chunk size; forwarders
+ * never assemble content.
  * @param {{identity:{did:string,sign:(bytes:Uint8Array)=>Promise<Uint8Array>},roomId:string,
  * mesh:{retrievalCarrier:(did:string)=>Carrier|null,onRetrieval:(cb:(event:{env:any,carrier:Carrier})=>void)=>()=>void},
  * read:(request:{kind:Kind,hash:string},signal:AbortSignal)=>Promise<Uint8Array|null>,now?:()=>number,timers?:any,isAllowed?:(did:string)=>boolean}} opts
@@ -53,8 +57,8 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
   const dispose=(state,notify=true,except=null,forwarded=null)=>{
     if(!state.live)return;state.live=false;states.delete(key(state.env.from,state.env.id));
     timers.clearTimeout(state.timer);for(const detach of state.detach)detach();
-    state.life.abort();state.assembly?.close();state.bytes=undefined;
-    state.pendingAck=undefined;state.pendingPart=undefined;state.pendingCancel=undefined;state.detach=[];
+    state.life.abort();state.assembly?.close();state.bytes=undefined;state.onPart=undefined;
+    state.pendingAck=undefined;state.partQueue.length=0;state.pendingCancel=undefined;state.detach=[];
     state.reject?.(fail());state.reject=undefined;state.resolve=undefined;
     if(notify&&state.hash){
       const frame=forwarded?Promise.resolve(forwarded):sign(TYPE.CANCEL,reference(state));
@@ -72,7 +76,7 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
     if(now()-windowStart>=10_000){windowStart=now();requests=0;}
     if(requests>=32)throw fail();requests++;seen.set(k,now()+REPLAY_MS);
     /** @type {State} */const state={env,hash:'',previous,next,life:new AbortController(),expires:now()+LIFETIME_MS,
-      timer:undefined,live:true,phase:'part',offset:0,total:-1,sending:false,ackSending:false,detach:[]};
+      timer:undefined,live:true,phase:'part',offset:0,total:-1,sending:false,ackSending:false,partQueue:[],processingParts:false,detach:[]};
     states.set(k,state);state.timer=timers.setTimeout(()=>dispose(state),LIFETIME_MS);
     for(const carrier of [previous,next])if(carrier){
       const abort=()=>dispose(state);carrier.signal.addEventListener('abort',abort,{once:true});
@@ -91,11 +95,17 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
   const emitPart=async(state)=>{
     try{
       check(state);const bytes=state.bytes;if(!bytes)throw fail();
-      const offset=state.offset,total=bytes.length;
-      const part={offset,total,data:toBase64(bytes.subarray(offset,offset+RETRIEVAL_PART_BYTES))};
-      state.offset=Math.min(total,offset+RETRIEVAL_PART_BYTES);state.phase='ack';state.sending=true;
-      const frame=await sign(TYPE.PART,{...reference(state),part});check(state);
-      await send(state.previous,frame,state.life.signal);drained(state);
+      const total=bytes.length;
+      for(let count=0;count<WINDOW_PARTS;count++){
+        check(state);const offset=state.offset;
+        const part={offset,total,data:toBase64(bytes.subarray(offset,offset+RETRIEVAL_PART_BYTES))};
+        state.offset=Math.min(total,offset+RETRIEVAL_PART_BYTES);
+        const boundary=state.offset===total||count===WINDOW_PARTS-1;
+        state.phase=boundary?'ack':'part';state.sending=true;
+        const frame=await sign(TYPE.PART,{...reference(state),part});check(state);
+        await send(state.previous,frame,state.life.signal);drained(state);
+        if(boundary)return;
+      }
     }catch{dispose(state);}
   };
   /** @param {State} state */
@@ -121,22 +131,51 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
   /** @param {State} state @param {any} env */
   const part=async(state,env)=>{
     try{
-      const payload=env.body.part;
+      check(state);const payload=env.body.part;
       if(state.phase!=='part'||!validRetrievalPart(payload,state.env.body.request.kind)||payload.offset!==state.offset
         ||(state.total>=0&&payload.total!==state.total))throw fail();
       state.next?.noteProgress?.();
-      state.total=payload.total;state.offset=Math.min(state.total,state.offset+RETRIEVAL_PART_BYTES);state.phase='ack';
+      state.total=payload.total;state.offset=Math.min(state.total,state.offset+RETRIEVAL_PART_BYTES);
+      const boundary=state.offset===state.total||state.offset%(WINDOW_PARTS*RETRIEVAL_PART_BYTES)===0;
+      state.phase=boundary?'ack':'part';
       if(state.previous){state.sending=true;await send(state.previous,env,state.life.signal);drained(state);return;}
       const result=state.assembly?.accept(payload);
+      state.onPart?.({offset:payload.offset,total:payload.total,bytes:fromBase64(payload.data)});check(state);
+      if(!boundary)return;
       const ack=await sign(TYPE.ACK,{...reference(state),offset:state.offset});check(state);
       // Allow the next part once the ACK is sent, including synchronous test carriers.
-      state.phase='part';state.ackSending=true;await send(state.next,ack,state.life.signal);drainedAck(state);
+      state.phase='part';await send(state.next,ack,state.life.signal);
       if(result){const resolve=state.resolve;state.reject=undefined;dispose(state,false);resolve?.(result);}
     }catch{dispose(state);}
   };
-  const drainedAck=(/** @type {State} */ state)=>{
-    state.ackSending=false;const pending=state.pendingPart;state.pendingPart=undefined;
-    if(state.live&&pending)void part(state,pending);
+  // why: receive callbacks can overlap a draining send. One ordered consumer
+  // and one batch bound retained frames instead of growing a promise chain.
+  const pumpParts=(/** @type {State} */ state)=>{
+    if(state.processingParts||state.ackSending||!state.live)return;
+    state.processingParts=true;
+    void (async()=>{
+      try{
+        while(state.live&&!state.ackSending&&state.phase==='part'){
+          const index=state.partQueue.findIndex(env=>env.body.part.offset===state.offset);
+          if(index<0)break;
+          await part(state,state.partQueue.splice(index,1)[0]);
+        }
+      }
+      finally{state.processingParts=false;}
+    })();
+  };
+  const enqueuePart=(/** @type {State} */ state,/** @type {any} */ env)=>{
+    const payload=env.body.part;
+    // Signature verification runs concurrently in the mesh, so authenticated
+    // delivery may reorder even on an ordered transport. Reorder only within
+    // one bounded batch; duplicates, stale offsets and distant gaps retire it.
+    if(!validRetrievalPart(payload,state.env.body.request.kind)||payload.offset<state.offset
+      ||payload.offset>=state.offset+WINDOW_PARTS*RETRIEVAL_PART_BYTES
+      ||(state.total>=0&&payload.total!==state.total)
+      ||state.partQueue.some(frame=>frame.body.part.offset===payload.offset)
+      ||state.partQueue.length>=WINDOW_PARTS){dispose(state);return;}
+    state.total=payload.total;
+    state.partQueue.push(structuredClone(env));pumpParts(state);
   };
   /** @param {State} state @param {any} env */
   const ack=async(state,env)=>{
@@ -144,7 +183,7 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
       if(state.phase!=='ack'||env.body.offset!==state.offset)throw fail();
       state.previous?.noteProgress?.();
       const complete=state.offset===state.total;state.phase='part';
-      if(state.next){state.ackSending=true;await send(state.next,env,state.life.signal);drainedAck(state);}
+      if(state.next){state.ackSending=true;await send(state.next,env,state.life.signal);state.ackSending=false;pumpParts(state);}
       if(complete){dispose(state,false);return;}
       if(!state.next)await emitPart(state);
     }catch{dispose(state);}
@@ -177,9 +216,7 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
     }
     if(!state.hash||state.hash!==body.requestHash)return;
     if(env.typ===TYPE.PART&&carrier.signal===state.next?.signal&&env.from===state.env.body.path.at(-1)){
-      if(state.ackSending){
-        if(state.pendingPart)dispose(state);else state.pendingPart=structuredClone(env);
-      }else void part(state,structuredClone(env));
+      enqueuePart(state,env);
     }
     if(env.typ===TYPE.ACK&&carrier.signal===state.previous?.signal&&env.from===state.env.from){
       if(state.sending){
@@ -189,15 +226,15 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
   };
   const detach=mesh.onRetrieval(receive);
   return Object.freeze({
-    /** @param {readonly string[]} path @param {{kind:Kind,hash:string}} request @param {AbortSignal} signal */
-    async retrieve(path,request,signal){
+    /** @param {readonly string[]} path @param {{kind:Kind,hash:string}} request @param {AbortSignal} signal @param {PartObserver} [onPart] */
+    async retrieve(path,request,signal,onPart){
       const body={room:roomId,path:[...path],request:structuredClone(request)};
-      if(closed||signal.aborted||originating>=2||!validRetrievalCall(body,roomId,identity.did)||!body.path.every(isAllowed))throw fail();
+      if(closed||signal.aborted||originating>=RETRIEVAL_CONCURRENCY||!validRetrievalCall(body,roomId,identity.did)||!body.path.every(isAllowed))throw fail();
       originating++;/** @type {State|undefined} */let state;
       try{
         const env=await sign(TYPE.CALL,body);if(closed||signal.aborted||!fresh(env))throw fail();
         const next=mesh.retrievalCarrier(body.path[1]);if(!next)throw fail();
-        state=reserve(env,null,next);state.assembly=createRetrievalReply(request.kind);
+        state=reserve(env,null,next);state.assembly=createRetrievalReply(request.kind);state.onPart=onPart;
         const owned=state,abort=()=>dispose(owned);signal.addEventListener('abort',abort,{once:true});
         state.detach.push(()=>signal.removeEventListener('abort',abort));
         const result=new Promise((resolve,reject)=>{owned.resolve=resolve;owned.reject=reject;});

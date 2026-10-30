@@ -3,7 +3,7 @@ import { utf8, toBase64 } from '/shared/bundle/bytes.js';
 import { contentServiceBudget } from './service-budget.js';
 import { CHUNK_PART_BYTES } from './transfer.js';
 import { assertBundleWithinLimits } from './manifest.js';
-import { retrievalReplyLimit, RetrievalProtocolError } from '../transport/retrieval-protocol.js';
+import { retrievalReplyLimit, RetrievalProtocolError, RETRIEVAL_PART_BYTES } from '../transport/retrieval-protocol.js';
 
 /**
  * Only the announce-gated store getters may supply content. Keep the shared
@@ -40,38 +40,80 @@ export const createRoutedContentReader=({store,providers,budget=contentServiceBu
  * Adapter for the existing verified swarm client. It does not accept content:
  * swarmFetch still checks publisher, manifest signature, hashes and size limits.
  * The caller supplies a bounded route/read operation and owns its lifecycle.
- * @param {{read:(kind:'manifest'|'chunk',hash:string,signal:AbortSignal)=>Promise<Uint8Array>,isAllowed?:()=>boolean}} opts
+ * @param {{read:(kind:'manifest'|'chunk',hash:string,signal:AbortSignal,onPart?:import('../transport/retrieval-rpc.js').PartObserver)=>Promise<Uint8Array>,isAllowed?:()=>boolean}} opts
  * @returns {import('./transfer.js').ContentChannel}
  */
 export const createRoutedContentChannel=({read,isAllowed=()=>true})=>{
   /** @type {((msg:import('./transfer.js').ContentMsg)=>boolean|void)|null} */let handler=null;
   const life=new AbortController();let active=0;
+  /** @type {Set<()=>void>} */const closed=new Set();
+  const close=()=>{
+    if(life.signal.aborted)return;life.abort();handler=null;
+    for(const notify of closed){try{notify();}catch{ /* notify every owner */ }}closed.clear();
+  };
   return Object.freeze({
-    setHandler(next){if(next&&life.signal.aborted)throw new RetrievalProtocolError();handler=next;if(!next)life.abort();},
-    async send(message,options){
+    setHandler(next){if(next&&life.signal.aborted)throw new RetrievalProtocolError();handler=next;if(!next)close();},
+    onClose(notify){if(life.signal.aborted){notify();return ()=>{};}closed.add(notify);return ()=>closed.delete(notify);},
+    send(message,options){
       if(!handler||life.signal.aborted||!isAllowed()||active>=4
         ||!['MANIFEST_REQ','CHUNK_REQ'].includes(message.t)||!/^([0-9a-f]{64})$/.test(message.hash))throw new RetrievalProtocolError();
       const signal=options?.signal?AbortSignal.any([life.signal,options.signal]):life.signal;
       signal.throwIfAborted();const kind=message.t==='MANIFEST_REQ'?'manifest':'chunk';active++;
-      try{
-        const bytes=await read(kind,message.hash,signal);signal.throwIfAborted();
-        if(!isAllowed()||!(bytes instanceof Uint8Array)||bytes.length>retrievalReplyLimit(kind))throw new RetrievalProtocolError();
-        if(kind==='chunk'&&bytes.length&&message.requestId){
-          // why: preserve the client's existing correlated fragment contract;
-          // its per-part checks remain in force even though this adapter is local.
-          for(let offset=0;offset<bytes.length;offset+=CHUNK_PART_BYTES){
-            signal.throwIfAborted();if(!isAllowed())throw new RetrievalProtocolError();
-            handler?.({t:'CHUNK',hash:message.hash,requestId:message.requestId,offset,size:bytes.length,
-              bytes:toBase64(bytes.subarray(offset,offset+CHUNK_PART_BYTES))});
+      return new Promise((sent,rejected)=>{
+        let started=false,received=0,total=-1,filled=0,emitted=0;
+        /** @type {Uint8Array|null} */let fragment=null;
+        const check=()=>{signal.throwIfAborted();if(!isAllowed())throw new RetrievalProtocolError();};
+        const start=()=>{if(!started){started=true;sent(undefined);}};
+        const flush=()=>{
+          if(!fragment||!filled)return;check();
+          handler?.({t:'CHUNK',hash:message.hash,requestId:message.requestId,offset:emitted,size:total,
+            bytes:toBase64(fragment.subarray(0,filled))});
+          emitted+=filled;filled=0;
+        };
+        /** @type {import('../transport/retrieval-rpc.js').PartObserver} */
+        const progress=part=>{
+          check();
+          if(!Number.isSafeInteger(part.total)||part.total<0||part.total>retrievalReplyLimit(kind)
+            ||part.offset!==received||(total>=0&&total!==part.total)||!(part.bytes instanceof Uint8Array)
+            ||(part.bytes.length===0&&part.total!==0)||part.bytes.length>RETRIEVAL_PART_BYTES||received+part.bytes.length>part.total)throw new RetrievalProtocolError();
+          total=part.total;received+=part.bytes.length;start();
+          if(kind!=='chunk'||!message.requestId||!total)return;
+          fragment??=new Uint8Array(Math.min(CHUNK_PART_BYTES,total));
+          let offset=0;
+          while(offset<part.bytes.length){
+            const take=Math.min(fragment.length-filled,part.bytes.length-offset);
+            fragment.set(part.bytes.subarray(offset,offset+take),filled);filled+=take;offset+=take;
+            // The last fragment completes the client's request and aborts its
+            // send signal. Hold it until the RPC has drained its final ACK.
+            if(filled===fragment.length&&emitted+filled<total)flush();
           }
-          return;
-        }
-        const response={hash:message.hash,...(message.requestId?{requestId:message.requestId}:{}),
-          ...(bytes.length===0?{t:kind==='manifest'?'NOMANIFEST':'NOCHUNK'}:kind==='manifest'
-            ?{t:'MANIFEST',manifest:JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes))}
-            :{t:'CHUNK',bytes:toBase64(bytes)})};
-        handler?.(response);
-      }finally{active--;}
+        };
+        void (async()=>{
+          try{
+            const bytes=await read(kind,message.hash,signal,progress);check();
+            if(!(bytes instanceof Uint8Array)||bytes.length>retrievalReplyLimit(kind)
+              ||(total>=0&&(bytes.length!==total||received!==total)))throw new RetrievalProtocolError();
+            start();
+            if(fragment){flush();return;}
+            if(kind==='chunk'&&bytes.length&&message.requestId){
+              for(let offset=0;offset<bytes.length;offset+=CHUNK_PART_BYTES){
+                check();handler?.({t:'CHUNK',hash:message.hash,requestId:message.requestId,offset,size:bytes.length,
+                  bytes:toBase64(bytes.subarray(offset,offset+CHUNK_PART_BYTES))});
+              }
+              return;
+            }
+            handler?.({hash:message.hash,...(message.requestId?{requestId:message.requestId}:{}),
+              ...(bytes.length===0?{t:kind==='manifest'?'NOMANIFEST':'NOCHUNK'}:kind==='manifest'
+                ?{t:'MANIFEST',manifest:JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes))}
+                :{t:'CHUNK',bytes:toBase64(bytes)})});
+          }catch(error){
+            if(!started)rejected(error);
+            // Once send has settled, failures use the ordinary channel-close
+            // path so no pending client waits for bytes from a failed read.
+            else if(!signal.aborted)close();
+          }finally{fragment=null;active--;}
+        })();
+      });
     },
   });
 };

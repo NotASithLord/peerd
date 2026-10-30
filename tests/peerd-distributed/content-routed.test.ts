@@ -41,7 +41,7 @@ test('real signed routed transport feeds the unchanged swarm verifier across an 
  try{
   const before=meshes.map(m=>m.peers().map(p=>p.did));
   const result=await swarmFetch({uri:formatPeerdUri({did:ids[2].did,hash:bundle.hash}),providers:[ids[2].did],
-   channelFor:()=>createRoutedContentChannel({read:(kind,hash,signal)=>client.read(ids[2].did,{kind,hash},signal)})});
+   channelFor:()=>createRoutedContentChannel({read:(kind,hash,signal,onPart)=>client.read(ids[2].did,{kind,hash},signal,onPart)})});
   expect(result.payload).toEqual(payload);expect(result.verifiedContributors).toEqual([ids[2].did]);
   expect(meshes.map(m=>m.peers().map(p=>p.did))).toEqual(before);
   await until(()=>budget.stats().active===0&&rpcs.every(r=>r.stats().active===0));
@@ -64,4 +64,36 @@ test('closing the adapter or revoking permission prevents a late reply from reac
  const pending=Promise.resolve(channel.send({t:'CHUNK_REQ',hash:'a'.repeat(64)})).catch(e=>e);
  allowed=false;channel.setHandler(null);expect(signal!.aborted).toBe(true);release(utf8('late'));
  expect(await pending).toBeInstanceOf(Error);expect(calls).toBe(0);
+});
+
+test('routed send settles on authenticated progress and retains the last fragment until ACK completion',async()=>{
+ let observe!:import('../../extension/peerd-distributed/transport/retrieval-rpc.js').PartObserver;
+ let release!:(bytes:Uint8Array)=>void;
+ const bytes=Uint8Array.from({length:50000},(_,i)=>i%251),messages:any[]=[];
+ const channel=createRoutedContentChannel({read:async(_kind,_hash,_signal,onPart)=>{
+  observe=onPart!;return new Promise(resolve=>{release=resolve;});
+ }});
+ channel.setHandler(message=>{messages.push(message);});
+ const sent=Promise.resolve(channel.send({t:'CHUNK_REQ',hash:'a'.repeat(64),requestId:'request'}));
+ observe({offset:0,total:bytes.length,bytes:bytes.subarray(0,1024)});await sent;
+ expect(messages).toHaveLength(0);
+ for(let offset=1024;offset<bytes.length;offset+=1024)observe({offset,total:bytes.length,bytes:bytes.subarray(offset,offset+1024)});
+ expect(messages).toHaveLength(1);expect(messages[0].offset).toBe(0);
+ release(bytes);await until(()=>messages.length===2);
+ expect(messages[1].offset).toBe(48000);expect(messages[1].size).toBe(50000);
+ channel.setHandler(null);
+});
+
+test('a routed read failure after send completion closes its channel and aborts outstanding work',async()=>{
+ let observe!:import('../../extension/peerd-distributed/transport/retrieval-rpc.js').PartObserver;
+ let rejectRead!:(error:Error)=>void,signal:AbortSignal|undefined;let closed=0;
+ const channel=createRoutedContentChannel({read:async(_kind,_hash,s,onPart)=>{
+  signal=s;observe=onPart!;return new Promise((_resolve,reject)=>{rejectRead=reject;});
+ }});
+ channel.setHandler(()=>{throw new Error('partial bytes must not complete this request');});
+ channel.onClose!(()=>{closed++;});
+ const sent=Promise.resolve(channel.send({t:'CHUNK_REQ',hash:'a'.repeat(64),requestId:'request'}));
+ observe({offset:0,total:50000,bytes:new Uint8Array(1024)});await sent;
+ rejectRead(new Error('peer disappeared'));await until(()=>closed===1);expect(signal!.aborted).toBe(true);
+ channel.setHandler(null);expect(closed).toBe(1);
 });

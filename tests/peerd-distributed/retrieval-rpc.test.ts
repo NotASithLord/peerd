@@ -8,7 +8,7 @@ import {createRetrievalRpc} from '../../extension/peerd-distributed/transport/re
 import {signEnvelope,buildEnvelope} from '../../extension/peerd-distributed/transport/envelope.js';
 const hash='b'.repeat(64);
 const until=async(check:()=>boolean)=>{for(let i=0;i<200&&!check();i++)await new Promise(r=>setTimeout(r,5));expect(check()).toBe(true);};
-const fixture=async(read:(index:number,request:any,signal:AbortSignal)=>Promise<Uint8Array|null>,options:{dropParts?:boolean,delayAck?:boolean}={})=>{
+const fixture=async(read:(index:number,request:any,signal:AbortSignal)=>Promise<Uint8Array|null>,options:{dropParts?:boolean,delayAck?:boolean,delayAckMs?:number,reorderParts?:boolean}={})=>{
  const ids=await Promise.all(Array.from({length:4},()=>generateIdentity()));
  const meshes=ids.map(identity=>createRoomMesh({identity,roomId:'retrieve',budget:2}));
  const frames:Array<{from:number,to:number,env:any}>=[],pairs:ReturnType<typeof memoryPair>[]=[];
@@ -17,7 +17,10 @@ const fixture=async(read:(index:number,request:any,signal:AbortSignal)=>Promise<
   for(const i of [0,1]){
    const send=pair[i].send.bind(pair[i]);pair[i].send=async(env:any,opt:any)=>{
     if(env?.ch===RETRIEVAL_CHANNEL){frames.push({from:a+i,to:a+1-i,env:structuredClone(env)});if(options.dropParts&&a+i===3&&env.typ===TYPE.PART)return;}
-    await send(env,opt);if(options.delayAck&&env.typ===TYPE.ACK)await new Promise(r=>setTimeout(r,2));
+    if(options.reorderParts&&env.typ===TYPE.PART&&env.body.part.offset%16384===0){
+     setTimeout(()=>{void send(env,opt).catch(()=>{});},10);return;
+    }
+    await send(env,opt);if((options.delayAck||options.delayAckMs)&&env.typ===TYPE.ACK)await new Promise(r=>setTimeout(r,options.delayAckMs??2));
    };
   }
   const sessions=await Promise.all([0,1].map(i=>createSession({identity:ids[a+i],channel:pair[i],caps:[ROUTED_RETRIEVAL]})));
@@ -37,7 +40,7 @@ test('bounded immutable retrieval crosses a full chain without adding or replaci
   expect(f.meshes.map(m=>m.peers().map(p=>p.did))).toEqual(before);
   expect(f.meshes.every(m=>m.stats().totalDegree<=2)).toBe(true);
   expect(f.frames.filter(f=>f.env.typ===TYPE.PART&&f.from===3)).toHaveLength(256);
-  expect(f.frames.filter(f=>f.env.typ===TYPE.ACK&&f.from===0)).toHaveLength(256);
+  expect(f.frames.filter(f=>f.env.typ===TYPE.ACK&&f.from===0)).toHaveLength(16);
  }finally{f.close();}
 });
 test('absence completes with one part and ACK; completed signed calls cannot replay',async()=>{
@@ -106,16 +109,17 @@ test('predicted ACK floods cannot advance an endpoint before its current send dr
    return new Promise<void>((resolve,reject)=>{drain=resolve;options?.signal?.addEventListener('abort',()=>reject(new Error('aborted')),{once:true});});
   }};
  let receive!:(event:{env:any,carrier:typeof carrier})=>void;
- const rpc=createRetrievalRpc({identity:ids[1],roomId:'test',mesh:{retrievalCarrier:()=>null,onRetrieval:cb=>{receive=cb;return ()=>{};}},read:async()=>new Uint8Array(2048)});
+ const rpc=createRetrievalRpc({identity:ids[1],roomId:'test',mesh:{retrievalCarrier:()=>null,onRetrieval:cb=>{receive=cb;return ()=>{};}},read:async()=>new Uint8Array(32768)});
  try{
   const call=await signEnvelope(buildEnvelope({ch:RETRIEVAL_CHANNEL,typ:TYPE.CALL,from:ids[0].did,id:crypto.randomUUID(),ts:Date.now(),
    body:{room:'test',path:ids.map(x=>x.did),request:{kind:'chunk',hash}}}),ids[0]);
   receive({env:call,carrier});await until(()=>sent.length===1);
+  for(let count=1;count<16;count++){drain();await until(()=>sent.length===count+1);}
   const ack=await signEnvelope(buildEnvelope({ch:RETRIEVAL_CHANNEL,typ:TYPE.ACK,from:ids[0].did,id:crypto.randomUUID(),ts:Date.now(),
-   body:{room:'test',origin:ids[0].did,requestId:call.id,requestHash:await sha256hex(utf8(canonicalize(call))),offset:1024}}),ids[0]);
+   body:{room:'test',origin:ids[0].did,requestId:call.id,requestHash:await sha256hex(utf8(canonicalize(call))),offset:16384}}),ids[0]);
   for(let i=0;i<20;i++)receive({env:ack,carrier});
-  await new Promise(r=>setTimeout(r,25));expect(sent).toHaveLength(1);
-  drain();await until(()=>sent.length===2);expect(sent[1].body.part.offset).toBe(1024);
+  await new Promise(r=>setTimeout(r,25));expect(sent).toHaveLength(16);
+  drain();await until(()=>sent.length===17);expect(sent[16].body.part.offset).toBe(16384);
   expect(rpc.stats().active).toBe(1);
  }finally{rpc.close();}
 });
@@ -159,4 +163,35 @@ test('cancelled storage work keeps a capacity slot until its promise settles',as
   await until(()=>rpc.stats().active===0);expect(release).toHaveLength(16);
   release.forEach(done=>done());await until(()=>rpc.stats().serving===0);
  }finally{release.forEach(done=>done());rpc.close();}
+});
+
+test('a full next batch can arrive while the previous ACK transport still drains',async()=>{
+ const bytes=Uint8Array.from({length:65537},(_,i)=>i%253);
+ const f=await fixture(async()=>bytes,{delayAckMs:50});try{
+  expect(await f.rpcs[0].retrieve(f.path,{kind:'chunk',hash},new AbortController().signal)).toEqual(bytes);
+  await until(()=>f.rpcs.every(r=>r.stats().active===0));
+ }finally{f.close();}
+});
+
+test('bounded authenticated reordering preserves a full chunk without changing its bytes',async()=>{
+ const bytes=Uint8Array.from({length:262144},(_,i)=>i%251);
+ const f=await fixture(async()=>bytes,{reorderParts:true});try{
+  expect(await f.rpcs[0].retrieve(f.path,{kind:'chunk',hash},new AbortController().signal)).toEqual(bytes);
+  await until(()=>f.rpcs.every(r=>r.stats().active===0));
+ }finally{f.close();}
+});
+test('duplicate queued parts and offsets beyond one batch retire the request',async()=>{
+ for(const mode of ['duplicate','distant']){
+  const f=await fixture(async()=>new Uint8Array(65536),{dropParts:true});try{
+   const result=f.rpcs[0].retrieve(f.path,{kind:'chunk',hash},new AbortController().signal).catch(error=>error);
+   await until(()=>f.frames.filter(x=>x.env.typ===TYPE.PART).length===16);
+   const original=f.frames.find(x=>x.env.typ===TYPE.PART&&x.env.body.part.offset===1024)!.env;
+   const frame=mode==='duplicate'?original:await signEnvelope(buildEnvelope({...original,id:crypto.randomUUID(),
+    body:{...original.body,part:{...original.body.part,offset:16384}}}),f.ids[3]);
+   await f.pairs[0][1].send(frame);
+   if(mode==='duplicate')await f.pairs[0][1].send(frame);
+   expect(await result).toBeInstanceOf(Error);
+   await until(()=>f.rpcs.every(r=>r.stats().active===0));
+  }finally{f.close();}
+ }
 });

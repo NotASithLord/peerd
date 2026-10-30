@@ -1,6 +1,6 @@
 import {expect,test} from 'bun:test';
 import {generateIdentity} from '../../extension/peerd-distributed/identity/keypair.js';
-import {memoryPair} from '../../extension/peerd-distributed/transport/channel.js';
+import {memoryPair as immediatePair} from '../../extension/peerd-distributed/transport/channel.js';
 import {createSession} from '../../extension/peerd-distributed/transport/session.js';
 import {joinRoom} from '../../extension/peerd-distributed/transport/rooms.js';
 import {createAdmissionGovernor} from '../../extension/peerd-distributed/transport/admission.js';
@@ -8,7 +8,15 @@ import {ROUTING_WITNESS,ROUTED_RETRIEVAL} from '../../extension/peerd-distribute
 import {makeDhtDialer} from '../../extension/peerd-distributed/transport/dht-dialer.js';
 import {createBaseNetwork} from '../../extension/peerd-distributed/base-network.js';
 
-for(const [reserve,closeEndpoints,seeder] of [[0,false,4],[2,false,4],[0,true,4],[0,true,3],[2,true,3]] as const) test(`chain recovery reserve ${reserve}, explicit endpoint control ${closeEndpoints}, seeder ${seeder}`, async()=>{
+for(const [reserve,closeEndpoints,seeder,delayMs] of [[0,false,4,0],[2,false,4,0],[0,true,4,0],[0,true,3,0],[2,true,3,0],[0,false,4,50]] as const) test(`chain recovery reserve ${reserve}, explicit endpoint control ${closeEndpoints}, seeder ${seeder}, outbound drain delay ${delayMs}ms`, async()=>{
+ // The delayed control models both propagation and a transport whose sends
+ // take time to drain. Keep the ordinary deadlines and maximum chunk size.
+ const memoryPair=()=>{
+  const pair=immediatePair();if(!delayMs)return pair;
+  for(const channel of pair){const send=channel.send.bind(channel);channel.send=async(message,options)=>{
+   await new Promise(resolve=>setTimeout(resolve,delayMs));return send(message,options);
+  };}return pair;
+ };
  let clockOffset=0;const now=()=>Date.now()+clockOffset;
  const identities=await Promise.all(Array.from({length:5},()=>generateIdentity()));
  const pending=new Map<string,ReturnType<typeof memoryPair>[number]>();
@@ -31,8 +39,11 @@ for(const [reserve,closeEndpoints,seeder] of [[0,false,4],[2,false,4],[0,true,4]
  rooms.forEach((room,index)=>room.onPeerGone(detail=>traces.push({goneAt:index,peer:identities.findIndex(v=>v.did===detail.did),reason:detail.why})));
  const edges=[[0,2],[2,3],[3,1],[1,4]];
  try {
-  const app=await bases[0].publishApp({name:'chain recovery',entry:'index.html',files:{'index.html':'signed chain payload'}});
+  let seed=123456789;
+  const content=delayMs?Array.from({length:400000},()=>{seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;return (seed&255).toString(16).padStart(2,'0');}).join(''):'signed chain payload';
+  const app=await bases[0].publishApp({name:'chain recovery',entry:'index.html',files:{'index.html':content}});
   const original=await bases[0].fetchApp(app.uri);
+  if(delayMs){expect(original.manifest.chunks.some((chunk:any)=>chunk.size===262144)).toBe(true);expect(original.manifest.chunks.length).toBeGreaterThan(2);}
   await bases[seeder].seedApp(original);
   await bases[0].unshareApp({publisher:identities[0].did,hash:app.hash});
   for(const [a,b] of edges){
@@ -71,4 +82,4 @@ for(const [reserve,closeEndpoints,seeder] of [[0,false,4],[2,false,4],[0,true,4]
   expect(outcome.error).toBeNull();
   expect(outcome.value?.payload).toEqual(original.payload);
  }finally{bases.forEach(base=>base.close());rooms.forEach(room=>room.leave());channels.forEach(channel=>channel.close());}
-},30000);
+},60000);
