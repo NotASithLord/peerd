@@ -8,7 +8,12 @@ import { utf8, toBase64, fromBase64 } from '/shared/bundle/bytes.js';
 import { sha256hex } from '/shared/bundle/chunk.js';
 
 const WINDOW_PARTS=16;
-const LIVE_LIMIT=16, REPLAY_LIMIT=128, LIFETIME_MS=60_000, REPLAY_MS=130_000;
+const LIVE_LIMIT=16, LIFETIME_MS=60_000, REPLAY_MS=130_000;
+const REQUEST_WINDOW_MS=10_000, REQUEST_BURST=32;
+// why: retain every admitted request for the full replay horizon. A horizon
+// can straddle a window boundary, so include one additional burst. A smaller
+// table rejects sustained traffic that the existing admission rate permits.
+const REPLAY_LIMIT=REQUEST_BURST*(Math.ceil(REPLAY_MS/REQUEST_WINDOW_MS)+1);
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HASH=/^[0-9a-f]{64}$/;
 const exact=(/** @type {any} */ x,/** @type {string[]} */ keys)=>x&&typeof x==='object'&&!Array.isArray(x)
@@ -73,8 +78,8 @@ export const createRetrievalRpc=({identity,roomId,mesh,read,now=Date.now,timers=
     for(const [k,expiry] of seen)if(now()>=expiry)seen.delete(k);
     const k=key(env.from,env.id);
     if(closed||states.size>=LIVE_LIMIT||cleanup.size>=LIVE_LIMIT||seen.size>=REPLAY_LIMIT||seen.has(k))throw fail();
-    if(now()-windowStart>=10_000){windowStart=now();requests=0;}
-    if(requests>=32)throw fail();requests++;seen.set(k,now()+REPLAY_MS);
+    if(now()-windowStart>=REQUEST_WINDOW_MS){windowStart=now();requests=0;}
+    if(requests>=REQUEST_BURST)throw fail();requests++;seen.set(k,now()+REPLAY_MS);
     /** @type {State} */const state={env,hash:'',previous,next,life:new AbortController(),expires:now()+LIFETIME_MS,
       timer:undefined,live:true,phase:'part',offset:0,total:-1,sending:false,ackSending:false,partQueue:[],processingParts:false,detach:[]};
     states.set(k,state);state.timer=timers.setTimeout(()=>dispose(state),LIFETIME_MS);

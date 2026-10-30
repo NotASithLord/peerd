@@ -10,7 +10,8 @@ const hash='b'.repeat(64);
 const until=async(check:()=>boolean)=>{for(let i=0;i<200&&!check();i++)await new Promise(r=>setTimeout(r,5));expect(check()).toBe(true);};
 const fixture=async(read:(index:number,request:any,signal:AbortSignal)=>Promise<Uint8Array|null>,options:{dropParts?:boolean,delayAck?:boolean,delayAckMs?:number,reorderParts?:boolean}={})=>{
  const ids=await Promise.all(Array.from({length:4},()=>generateIdentity()));
- const meshes=ids.map(identity=>createRoomMesh({identity,roomId:'retrieve',budget:2}));
+ let offset=0;const now=()=>Date.now()+offset;
+ const meshes=ids.map(identity=>createRoomMesh({identity,roomId:'retrieve',budget:2,now}));
  const frames:Array<{from:number,to:number,env:any}>=[],pairs:ReturnType<typeof memoryPair>[]=[];
  for(let a=0;a<3;a++){
   const pair=memoryPair();pairs.push(pair);
@@ -26,7 +27,6 @@ const fixture=async(read:(index:number,request:any,signal:AbortSignal)=>Promise<
   const sessions=await Promise.all([0,1].map(i=>createSession({identity:ids[a+i],channel:pair[i],caps:[ROUTED_RETRIEVAL]})));
   for(const i of [0,1])expect(meshes[a+i].addLink(pair[i],sessions[i].remoteDid,{caps:sessions[i].remoteCaps})).toBe(true);
  }
- let offset=0;const now=()=>Date.now()+offset;
  const rpcs=meshes.map((mesh,i)=>createRetrievalRpc({identity:ids[i],roomId:'retrieve',mesh,now,read:(request,signal)=>read(i,request,signal)}));
  return {ids,meshes,rpcs,frames,pairs,now,advance:(ms:number)=>{offset+=ms;},path:ids.map(id=>id.did),close:()=>{rpcs.forEach(r=>r.close());meshes.forEach(m=>m.close());}};
 };
@@ -52,6 +52,37 @@ test('absence completes with one part and ACK; completed signed calls cannot rep
   expect(reads).toBe(1);expect(f.rpcs.every(r=>r.stats().active===0)).toBe(true);
  }finally{f.close();}
 });
+test('sustained admitted reads retain replay protection across the full horizon',async()=>{
+ let reads=0;const f=await fixture(async()=>{reads++;return new Uint8Array([1]);});try{
+  for(let i=0;i<300;i++){
+   expect(await f.rpcs[0].retrieve(f.path,{kind:'manifest',hash},new AbortController().signal)).toEqual(new Uint8Array([1]));
+   await until(()=>f.rpcs.every(r=>r.stats().active===0));
+   expect(f.rpcs.every(r=>r.stats().replay<=448)).toBe(true);
+   if(i===129){
+    // Re-sign the same request ID with a fresh timestamp: retention must
+    // still reject it after the old 128-entry capacity has been exceeded.
+    const first=f.frames.find(x=>x.from===0&&x.env.typ===TYPE.CALL)!.env;
+    const replay=await signEnvelope(buildEnvelope({...first,ts:f.now()}),f.ids[0]);
+    await f.pairs[0][0].send(replay);await new Promise(r=>setTimeout(r,30));expect(reads).toBe(130);
+   }
+   f.advance(500);
+  }
+  expect(reads).toBe(300);expect(f.rpcs.every(r=>r.stats().replay<300)).toBe(true);
+ }finally{f.close();}
+},15000);
+test('replay capacity accommodates admitted bursts without relaxing the request rate',async()=>{
+ const f=await fixture(async()=>new Uint8Array([1]));try{
+  for(let window=0;window<15;window++){
+   for(let request=0;request<32;request++){
+    expect(await f.rpcs[0].retrieve(f.path,{kind:'manifest',hash},new AbortController().signal)).toEqual(new Uint8Array([1]));
+    await until(()=>f.rpcs.every(r=>r.stats().active===0));
+   }
+   await expect(f.rpcs[0].retrieve(f.path,{kind:'manifest',hash},new AbortController().signal)).rejects.toThrow();
+   expect(f.rpcs.every(r=>r.stats().replay<=448)).toBe(true);
+   f.advance(10000);
+  }
+ }finally{f.close();}
+},15000);
 test('origin cancellation aborts pending endpoint read and retires every hop',async()=>{
  let endpointSignal:AbortSignal|undefined;
  const f=await fixture(async(_i,_request,signal)=>{endpointSignal=signal;return new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(new Error('aborted')),{once:true}));});
