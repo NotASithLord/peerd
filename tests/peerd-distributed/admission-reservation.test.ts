@@ -68,3 +68,37 @@ test('temporary content admission cannot claim an identity reserved for routing 
   expect(mesh.stats().peerDegree).toBe(1);
  }finally{mesh.close();}
 });
+
+test('pending free slot does not cause a sparse peer to reserve an unnecessary rotation', async () => {
+ const mesh=createRoomMesh({identity:await generateIdentity(),roomId:'pending-free-slot',budget:2,sparse:true});
+ try {
+  expect(mesh.addLink(memoryPair()[0],'established',{}, {locallySelected:false})).toBe(true);
+  const first=mesh.reserveAdmission('first',{locallySelected:true,requireWitness:true});
+  expect(first.rotates).toBe(false);
+  expect(()=>mesh.reserveAdmission('second',{locallySelected:true,requireWitness:true})).toThrow();
+  expect(mesh.hasLink('established')).toBe(true);
+  first.release();
+  const retry=mesh.reserveAdmission('second',{locallySelected:true,requireWitness:true});
+  expect(retry.rotates).toBe(false);
+  expect(mesh.addLink(memoryPair()[0],'second',{}, {locallySelected:true,reservation:retry})).toBe(true);
+  const full=mesh.reserveAdmission('third',{locallySelected:true,requireWitness:true});
+  expect(full.rotates).toBe(true);
+  full.release();
+ } finally { mesh.close(); }
+});
+
+test('isolated sparse peer serializes provisional admissions until its first routing link commits', async () => {
+ const mesh=createRoomMesh({identity:await generateIdentity(),roomId:'isolated-sparse',budget:4,sparse:true});
+ try {
+  const pending=mesh.reserveAdmission('a',{locallySelected:true});
+  expect(()=>mesh.reserveAdmission('b',{locallySelected:true})).toThrow();
+  expect(()=>mesh.reserveAdmission('c',{locallySelected:false})).toThrow();
+  pending.release();
+  const first=mesh.reserveAdmission('first',{locallySelected:true});
+  expect(mesh.addLink(memoryPair()[0],'first',{}, {locallySelected:true,reservation:first})).toBe(true);
+  const b=mesh.reserveAdmission('b',{locallySelected:true});
+  const c=mesh.reserveAdmission('c',{locallySelected:true});
+  b.release();c.release();
+  expect(mesh.stats().peerDegree).toBe(1);
+ } finally { mesh.close(); }
+});

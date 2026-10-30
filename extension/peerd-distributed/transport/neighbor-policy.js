@@ -4,6 +4,10 @@
 export const NEIGHBOR_GRACE_MS = 60_000;
 export const NEIGHBOR_ROTATION_MS = 30_000;
 export const TRANSFER_PROTECTION_MS = 30_000;
+// Local provisional ownership is not evidence that the remote peer failed.
+export class RoutingAdmissionBusyError extends Error {
+  constructor() { super('room admission reservation refused'); this.name = 'RoutingAdmissionBusyError'; }
+}
 /** @typedef {{ did: string, locallySelected: boolean, admittedAt: number,
  * protectedUntil: number, busy: boolean, rotationHeld?: boolean }} Neighbor */
 /** @param {{ peers: Neighbor[], budget: number, locallySelected: boolean, now: number, lastRotation: number, requireWitness?:boolean }} input

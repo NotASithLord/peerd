@@ -23,6 +23,7 @@ import { createGossip } from './gossip/topic.js';
 import { createPresence } from './gossip/presence.js';
 import { createTopicSync, createMemoryTopicStore } from './gossip/sync.js';
 import { createDirect } from './messaging/direct.js';
+import { createRoutedContentReader } from './content/routed.js';
 import { createContentStore } from './content/store.js';
 import { createDhtStore } from './dht/store.js';
 import { createProviderStore } from './dht/provider-store.js';
@@ -34,7 +35,7 @@ import { nodeIdOf } from './dht/distance.js';
  *   identity: import('./transport/mesh.js').Identity,
  *   mesh: any,                       // a createRoomMesh — its links come from any transport
  *   meta?: () => any,                // presence metadata (e.g. { name })
- *   dial?: ((contact: any, opts?: {signal?: AbortSignal}) => Promise<boolean>) | null, // DHT per-hop dialer (prod/sim)
+ *   dial?: (((contact: any, opts?: {signal?: AbortSignal}) => Promise<boolean>) & {retrieval?:ReturnType<typeof import('./transport/room-retrieval.js').createRoomRetrieval>}) | null, // DHT per-hop dialer (prod/sim)
  *   audit?: import('./transport/mesh.js').AuditFn,
  *   now?: () => number,
  * }} opts
@@ -48,6 +49,9 @@ export const createPeerNode = async ({ identity, mesh, meta = () => ({}), dial =
   const content = createContentStore();
   mesh.serveContent(content);
   const { node: dht, detach: detachDht } = attachDht({ mesh, identity, selfId, store: createDhtStore({ now }), providers: createProviderStore({ now }), dial, now });
+
+  const stopRetrieval=dial?.retrieval?.serve(createRoutedContentReader({store:content,
+    providers:key=>dht.handle(identity.did,{t:'GET_PROVIDERS',key})}));
 
   // A dropped mesh LINK means that peer is gone — forget its presence at once so
   // a disconnected peer leaves the room view immediately, instead of lingering
@@ -88,6 +92,7 @@ export const createPeerNode = async ({ identity, mesh, meta = () => ({}), dial =
     close() {
       offGone();
       offSeed();
+      stopRetrieval?.();
       detachDht();
       sync.close();
       presence.close();

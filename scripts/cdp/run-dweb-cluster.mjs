@@ -311,8 +311,15 @@ try {
     await meshReady();
     return gossip();
   });
-  await check('original bytes remain available from another seeder', async () =>
-    verify(await workers[0].call('fetch', { uri: published.uri })));
+  await check('original bytes remain available from another seeder', async () => {
+    const before=await workers[0].call('report');
+    const nonadjacent=!before.peers.some(peer=>peer.linked&&peer.did===dids[seederIndex]);
+    const value=verify(await workers[0].call('fetch', { uri: published.uri }));
+    const after=await workers[0].call('report');
+    const routedReads=after.retrievalReads.succeeded-before.retrievalReads.succeeded;
+    if(transferSlots===0&&nonadjacent)assert(routedReads>0,'Nonadjacent zero-reserve recovery did not exercise routed retrieval');
+    return {...value,nonadjacent,routedReads};
+  });
   await check('mesh survives signaling outage and recovery', async () => {
     const port = signaling.server.port;
     recordSignaling('intentional-outage');

@@ -34,6 +34,9 @@ and storage formats may move until the surface stabilizes.
 
 ### Fixed
 
+- Saturated meshes retrieve signed app content over existing authenticated
+  paths. Bounded batches support delayed links, and replay bookkeeping retains
+  the full protection window during sustained retrieval.
 - App retrieval retains authenticated provider routes until completion or
   cancellation, and bounded directory traversal recovers stale introductions.
 - Full routing meshes replace a connection only after proving a live alternate

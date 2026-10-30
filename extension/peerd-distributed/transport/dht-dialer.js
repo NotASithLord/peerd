@@ -53,7 +53,7 @@ export const makeDhtDialer = (room) => {
       return !active.aborted && room.mesh.hasLink(contact.did) ? true : null;
     }) ?? false;
   };
-  return Object.assign(dial, {createTraversal: room.temporaryCapacity >= 2 ? (/** @type {Parameters<typeof createDirectoryTraversal>[1]} */ options = {}) => createDirectoryTraversal(room,options) : undefined, acquireLookup: room.contentTransfersEnabled ?
+  return Object.assign(dial, {retrieval:room.retrieval, createTraversal: room.temporaryCapacity >= 2 ? (/** @type {Parameters<typeof createDirectoryTraversal>[1]} */ options = {}) => createDirectoryTraversal(room,options) : undefined, acquireLookup: room.contentTransfersEnabled ?
     /** @param {Contact} contact @param {{signal?:AbortSignal}} options */
     async (contact, options) => {
       options.signal?.throwIfAborted();
