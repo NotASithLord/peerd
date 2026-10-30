@@ -184,3 +184,23 @@ export const buildNonWasiModule = (): Uint8Array => commandModule({
   imports: [[...str('env'), ...str('mystery'), 0x00, ...uleb(1)]],
   body: [...i32c(0), ...call(0)],
 });
+
+/** Valid binary with a trapping start section, but no command entry export. */
+export const buildInvalidCommandWithStartModule = (): Uint8Array => {
+  const body = [0x00, 0x00, END]; // no locals, unreachable, end
+  return new Uint8Array([
+    ...MAGIC,
+    ...section(1, TYPES),
+    ...section(3, vec([uleb(2)])),
+    ...section(5, vec([[0x00, 0x01]])),
+    ...section(7, vec([[...str('memory'), 0x02, 0x00]])),
+    ...section(8, uleb(0)),
+    ...section(10, vec([[...uleb(body.length), ...body]])),
+  ]);
+};
+
+/** Exercise namespace members, including inherited JS names, as real imports. */
+export const buildNamedWasiImportModule = (name: string): Uint8Array => commandModule({
+  imports: [wasiImport(name, 1)],
+  body: [...i32c(0), ...call(0)],
+});

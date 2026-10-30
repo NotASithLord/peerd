@@ -177,6 +177,14 @@ export const runWasi = async (module, { args = [], env = {}, stdin = '', files =
     ? module
     : await WebAssembly.compile(/** @type {BufferSource} */ (toBytes(module)));
 
+  // why: instantiation can execute a Wasm start section. Refuse incompatible
+  // command shapes before any module code or caller filesystem is constructed.
+  const declaredExports = WebAssembly.Module.exports(compiled);
+  if (!declaredExports.some((entry) => entry.name === '_start' && entry.kind === 'function')
+      || !declaredExports.some((entry) => entry.name === 'memory' && entry.kind === 'memory')) {
+    throw new WasiRunError('not a WASI command module: expected exported `_start` and `memory` (reactor modules are not supported)');
+  }
+
   const tree = buildFileTree(files);
   const stdout = makeStreamCollector(MAX_STREAM_BYTES);
   const stderr = makeStreamCollector(MAX_STREAM_BYTES);
@@ -194,6 +202,16 @@ export const runWasi = async (module, { args = [], env = {}, stdin = '', files =
   // the logger ON — omitting the option floods the captured console with a
   // "wasi:" line per syscall.
   const wasiHost = new WASI(argv, envp, fds, { debug: false });
+
+  // why: only the shim's own syscall functions are imports; inherited Object
+  // methods are not WASI capabilities even when the JS linker could call them.
+  for (const entry of WebAssembly.Module.imports(compiled)) {
+    if (entry.module !== 'wasi_snapshot_preview1' || entry.kind !== 'function'
+        || !Object.hasOwn(wasiHost.wasiImport, entry.name)
+        || typeof wasiHost.wasiImport[entry.name] !== 'function') {
+      throw new WasiRunError(`unsupported import ${entry.module}.${entry.name}: peerd:wasi provides only WASI preview1 syscall functions`);
+    }
+  }
 
   let instance;
   try {
