@@ -26,14 +26,9 @@ export class RoutingPathSearchError extends Error {
 export const createRoutingPathSearch=({selfDid,readNeighbors,now=Date.now,timers=globalThis})=>{
   /** @type {Set<()=>void>} */const active=new Set();
   let closed=false;
-  return Object.freeze({
-    /** @param {{target:string,cuts:string[][],signal?:AbortSignal}} options */
-    async find({target,cuts,signal}){
-      if(closed || signal?.aborted || active.size>=MAX_ACTIVE_SEARCHES || !did(selfDid) || !did(target) || target===selfDid
-        || !Array.isArray(cuts) || cuts.length<1 || cuts.length>2
-        || !cuts.every(edge=>Array.isArray(edge)&&edge.length===2&&edge.every(did)&&edge[0]!==edge[1]))throw new RoutingPathSearchError();
-      const excluded=new Set(cuts.map(edgeKey));
-      if(excluded.size!==cuts.length || !excluded.has(edgeKey([selfDid,target])))throw new RoutingPathSearchError();
+  /** @param {string} target @param {Set<string>} excluded @param {AbortSignal} [signal] */
+  const search=async(target,excluded,signal)=>{
+      if(closed || signal?.aborted || active.size>=MAX_ACTIVE_SEARCHES || !did(selfDid) || !did(target) || target===selfDid)throw new RoutingPathSearchError();
       const lifetime=new AbortController(),deadline=now()+SEARCH_DEADLINE_MS;
       const cancel=()=>{
         active.delete(cancel);timers.clearTimeout(timer);signal?.removeEventListener('abort',cancel);lifetime.abort();
@@ -72,6 +67,25 @@ export const createRoutingPathSearch=({selfDid,readNeighbors,now=Date.now,timers
         }
         return null;
       }finally{cancel();}
+  };
+  return Object.freeze({
+    /** @param {{target:string,cuts:string[][],signal?:AbortSignal}} options */
+    async find({target,cuts,signal}){
+      // why: locating an existing route must never relax the separate proof
+      // required to replace an edge. Empty cuts remain invalid for this API.
+      if(!Array.isArray(cuts) || cuts.length<1 || cuts.length>2
+        || !cuts.every(edge=>Array.isArray(edge)&&edge.length===2&&edge.every(did)&&edge[0]!==edge[1]))throw new RoutingPathSearchError();
+      const excluded=new Set(cuts.map(edgeKey));
+      if(excluded.size!==cuts.length || !excluded.has(edgeKey([selfDid,target])))throw new RoutingPathSearchError();
+      return search(target,excluded,signal);
+    },
+    /** Locate only a hint over existing carriers, with no replacement authority.
+     * @param {{target:string,signal?:AbortSignal}} options */
+    async routeTo({target,signal}){
+      // why: a saturated intermediary can supply its authenticated roster over
+      // the current path without opening a new direct connection to the reader.
+      // Both entry points share the same active-search and traversal budgets.
+      return search(target,new Set(),signal);
     },
     close(){closed=true;for(const cancel of [...active])cancel();},
   });

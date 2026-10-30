@@ -73,3 +73,41 @@ test('mutating caller cuts during a query cannot authorize the excluded direct e
  try{expect(await owner.find({target:ids[2].did,cuts})).toBeNull();}
  finally{owner.close();}
 });
+
+test('existing route discovery crosses a bridge without granting permission to replace it',async()=>{
+ const f=await graphFixture([[0,1],[1,2],[2,3]]);
+ try{
+  expect(await f.owner.routeTo({target:f.ids[3].did})).toEqual([0,1,2,3].map(i=>f.ids[i].did));
+  expect(await f.find(1,[[0,1]])).toBeNull();
+  await expect(f.owner.find({target:f.ids[1].did,cuts:[]})).rejects.toThrow();
+  await expect(f.owner.routeTo({target:f.ids[0].did})).rejects.toThrow();
+  await expect(f.owner.routeTo({target:'invalid'})).rejects.toThrow();
+ }finally{f.owner.close();}
+});
+
+test('route discovery and replacement searches share capacity and cancellation cleanup',async()=>{
+ const ids=await Promise.all(Array.from({length:3},()=>generateIdentity()));let calls=0;
+ const owner=createRoutingPathSearch({selfDid:ids[0].did,readNeighbors:async()=>{calls++;return new Promise(()=>{});}});
+ const controller=new AbortController();
+ try{
+  const first=owner.routeTo({target:ids[1].did,signal:controller.signal});
+  const second=owner.find({target:ids[2].did,cuts:[[ids[0].did,ids[2].did]],signal:controller.signal});
+  const results=Promise.allSettled([first,second]);
+  await expect(owner.routeTo({target:ids[2].did})).rejects.toThrow();expect(calls).toBe(2);
+  controller.abort();expect((await results).every(result=>result.status==='rejected')).toBe(true);
+  const third=owner.routeTo({target:ids[1].did});
+  const stopped=Promise.allSettled([third]);expect(calls).toBe(3);owner.close();
+  expect((await stopped)[0].status).toBe('rejected');
+  await expect(owner.routeTo({target:ids[1].did})).rejects.toThrow();
+ }finally{owner.close();}
+});
+
+test('existing route discovery bounds cyclic exploration when the target is absent',async()=>{
+ const edges=Array.from({length:30},(_,i)=>[0,i+1]);
+ const f=await graphFixture(edges,32);
+ try{
+  expect(await f.owner.routeTo({target:f.ids[31].did})).toBeNull();
+  expect(f.queried).toHaveLength(MAX_ROUTING_PATH_QUERIES);
+  expect(new Set(f.queried.map(path=>path.at(-1))).size).toBe(f.queried.length);
+ }finally{f.owner.close();}
+});
