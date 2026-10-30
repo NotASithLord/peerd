@@ -16,6 +16,7 @@ let messages = [];
 const received = new Map();
 const audit = [];
 const contentDials = {started:0,succeeded:0,failed:0};
+const retrievalReads = {started:0,succeeded:0,failed:0,bytes:0};
 const connections = [];
 // why: keep candidate evidence for ICE attempts that do not enter the mesh.
 class ObservedConnection extends RTCPeerConnection {
@@ -60,7 +61,12 @@ window.cluster = {
       const result = await routing(contact, options);
       recordAudit('routing-dial-end', {ok:result, linkedBefore, routes:routes.length, linkedRoutes});
       return result;
-    }, {acquireContent:routing.acquireContent,acquireLookup:routing.acquireLookup,createTraversal:routing.createTraversal});
+    }, routing); // Preserve every production dialer capability through diagnostic wrapping.
+    if(routing.retrieval)dial.retrieval={...routing.retrieval,read:async(...args)=>{
+      retrievalReads.started++;
+      try{const bytes=await routing.retrieval.read(...args);retrievalReads.succeeded++;retrievalReads.bytes+=bytes.length;return bytes;}
+      catch(error){retrievalReads.failed++;throw error;}
+    }};
     const observeContent = acquire => async (contact, options) => {
       const started = performance.now();
       const routes = [...new Set([contact.hints?.broker, ...(contact.brokers ?? [])])].filter(Boolean);
@@ -130,7 +136,7 @@ window.cluster = {
   }))),
   report() {
     return { did: identity.did, online: !!base, rendezvous: room?.rendezvous(),
-      contentDials: {...contentDials}, peers: base?.snapshot().peers ?? [], messages, cards: base?.heardDwapps() ?? [], audit,
+      contentDials: {...contentDials}, retrievalReads: {...retrievalReads}, peers: base?.snapshot().peers ?? [], messages, cards: base?.heardDwapps() ?? [], audit,
       // Local protocol work, not wire bandwidth or remote delivery receipts.
       dissemination: base ? { mesh: base.mesh.stats(), gossip: base.node.gossip.stats(),
         discovery: base.discovery.stats() } : null };
