@@ -12,6 +12,7 @@ import {
 import {
   buildHelloModule, buildEchoModule, buildFloodModule,
   buildEmptyModule, buildNonWasiModule, buildWriteFileModule,
+  buildInvalidCommandWithStartModule, buildNamedWasiImportModule,
 } from './wasi-test-module.ts';
 
 describe('runWasi', () => {
@@ -197,5 +198,19 @@ describe('demoModule — the embedded self-test fixture', () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe('hello from wasi\n');
     expect(result.stderr).toBe('');
+  });
+});
+
+describe('WASI command preflight', () => {
+  test('rejects missing command exports before the binary start section executes', async () => {
+    const bytes = buildInvalidCommandWithStartModule();
+    const compiled = await WebAssembly.compile(bytes);
+    await expect(WebAssembly.instantiate(compiled, {})).rejects.toThrow(WebAssembly.RuntimeError);
+    await expect(runWasi(compiled)).rejects.toThrow(/not a WASI command module/);
+  });
+  test('refuses unknown and inherited imports with an explicit compatibility error', async () => {
+    for (const name of ['missing_syscall', 'toString', 'constructor']) {
+      await expect(runWasi(buildNamedWasiImportModule(name))).rejects.toThrow(/unsupported import.*WASI preview1/);
+    }
   });
 });

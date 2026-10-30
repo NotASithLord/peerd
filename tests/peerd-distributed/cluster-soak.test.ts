@@ -1,5 +1,17 @@
 import { expect, test } from 'bun:test';
-import { soakOptions, runSoak } from '../../scripts/cdp/dweb-cluster-soak.mjs';
+import { soakOptions, idleBaselineOptions, runSoak } from '../../scripts/cdp/dweb-cluster-soak.mjs';
+
+test('idle baseline requires real collection and bounds observer overhead and waiting', () => {
+  expect(idleBaselineOptions(undefined, false)).toBeNull();
+  expect(idleBaselineOptions({ durationMs: 60_000 }, true)).toEqual({ durationMs: 60_000, intervalMs: 30_000 });
+  for (const metrics of [false, undefined, 'true']) {
+    expect(() => idleBaselineOptions({ durationMs: 60_000 }, metrics)).toThrow('requires resourceMetrics');
+  }
+  for (const value of [null, { durationMs: 300_001 }, { durationMs: 60_000, intervalMs: 1000 },
+    { durationMs: 1000 }, { durationMs: 60_000, skipFailures: true }]) {
+    expect(() => idleBaselineOptions(value, true)).toThrow();
+  }
+});
 
 test('soak is opt-in and rejects unbounded or mistyped configuration', () => {
   expect(soakOptions(undefined)).toBeNull();

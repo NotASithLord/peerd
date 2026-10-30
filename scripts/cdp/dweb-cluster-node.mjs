@@ -2,14 +2,14 @@
 // production WebRTC carries every tested peer message and content byte.
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { hostname, tmpdir, networkInterfaces } from 'node:os';
 import { dirname, join, resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
 import { interfaceProof } from './dweb-address-proof.mjs';
-import { processTreeSample } from './dweb-process-evidence.mjs';
+import { processTreeSample, descriptorCounts } from './dweb-process-evidence.mjs';
 import { settleResponse } from './dweb-cluster-rpc.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -70,18 +70,19 @@ const evaluate = async expression => {
   return result.result.value;
 };
 
-const launch = async ({ chrome, mdns = true, allInterfaces = false }) => {
+const launch = async ({ chrome, mdns = true, allInterfaces = false, resourceMetrics = false }) => {
   if (typeof chrome !== 'string' || !existsSync(chrome)) throw new Error('Configure an existing Chrome binary');
   if (browser) throw new Error('Browser already launched');
   const host = fingerprint();
   server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
     const path = decodeURIComponent(new URL(request.url).pathname);
     if (path === '/') return new Response('<!doctype html><script type="module" src="/__cluster.js"></script>', { headers: { 'Content-Type': 'text/html' } });
-    const file = path === '/__cluster.js' ? join(root, 'scripts/cdp/dweb-cluster-page.js') : resolve(extension, `.${path}`);
-    if (path !== '/__cluster.js' && !file.startsWith(extension + sep)) return new Response(null, { status: 404 });
+    const harnessFile = path === '/__cluster.js' ? 'dweb-cluster-page.js' : path === '/__event-loop.js' ? 'dweb-event-loop-evidence.mjs' : null;
+    const file = harnessFile ? join(root, 'scripts/cdp', harnessFile) : resolve(extension, `.${path}`);
+    if (!harnessFile && !file.startsWith(extension + sep)) return new Response(null, { status: 404 });
     const bytes = Bun.file(file);
     if (!await bytes.exists()) { errors.push(`HTTP 404: ${path}`); return new Response(null, { status: 404 }); }
-    return new Response(bytes, { headers: { 'Content-Type': extname(file) === '.js' ? 'text/javascript' : bytes.type } });
+    return new Response(bytes, { headers: { 'Content-Type': ['.js', '.mjs'].includes(extname(file)) ? 'text/javascript' : bytes.type } });
   } });
   profile = mkdtempSync(join(tmpdir(), 'peerd-cluster-'));
   browser = spawn(chrome, ['--headless=new', '--no-first-run', '--no-default-browser-check',
@@ -134,6 +135,7 @@ const launch = async ({ chrome, mdns = true, allInterfaces = false }) => {
     if (Date.now() >= deadline) throw new Error(`Fixture readiness deadline: ${errors.join('')}`);
     await sleep(100);
   }
+  if (resourceMetrics) await evaluate('window.cluster.startResourceObservation()');
   hostMachine = host.machine;
   return { ...host, browser: version.Browser, mdns, allInterfaces, browserPid: browser.pid,
     profileFingerprint: createHash('sha256').update(profile).digest('hex') };
@@ -146,10 +148,22 @@ const resources = async () => {
     encoding:'utf8', timeout:5000, maxBuffer:1024*1024,
   });
   const processes = processTreeSample(table, browser.pid);
+  const pids = processes.processes.map(row => row.pid);
+  // why: request only PID/descriptor fields; never collect paths or socket endpoints.
+  const descriptorText = process.platform === 'darwin'
+    ? execFileSync('/usr/sbin/lsof', ['-nP','-a','-p',pids.join(','),'-Fpf'], {
+      encoding:'utf8', timeout:5000, maxBuffer:1024*1024, stdio:['ignore','pipe','ignore'],
+    })
+    : pids.map(pid => `p${pid}\n${readdirSync(`/proc/${pid}/fd`).map(fd => `f${fd}`).join('\n')}`).join('\n');
+  const descriptors = descriptorCounts(descriptorText, pids);
   const heap = await send('Runtime.getHeapUsage');
+  const rendererEventLoop = await evaluate('window.cluster.resourceObservation()');
   return {startedAt, finishedAt:Date.now(), ...processes,
+    descriptorProcesses:descriptors,
+    summedOpenFileDescriptors:descriptors.reduce((sum, row) => sum + row.openFileDescriptors, 0),
     rendererHeap:{usedBytes:heap.usedSize,totalBytes:heap.totalSize},
-    limitations:['RSS sum includes shared-page duplication','CPU covers processes present at observation','heap covers the controlled renderer only','FD and event-loop metrics not collected']};
+    rendererEventLoop,
+    limitations:['RSS sum includes shared-page duplication','CPU covers processes present at observation','heap covers the controlled renderer only','process and descriptor observations are not atomic','timer lateness covers only the controlled renderer and includes OS throttling; sampling adds ten timer callbacks per second']};
 };
 
 const lines = createInterface({ input: process.stdin });

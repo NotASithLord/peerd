@@ -739,6 +739,24 @@ throw new Error('unrelated failure');`,
     expect(v.seed).toBe('kept');   // the virtual FS round-trips through the run
   });
 
+  it('peerd:wasi refuses incompatible command shape before a Wasm start section executes', async () => {
+    // why: valid Wasm can run code during instantiation, before exported _start.
+    // One () => () function traps; section 8 selects it as the binary start.
+    const bytes = [0,97,115,109,1,0,0,0, 1,4,1,96,0,0, 3,2,1,0,
+      8,1,0, 10,5,1,3,0,0,11];
+    const r = await runJob({ code: [
+      'import { runWasi } from "peerd:wasi";',
+      `const bytes = new Uint8Array(${JSON.stringify(bytes)});`,
+      'const module = await WebAssembly.compile(bytes);',
+      'let trapped = false;',
+      'try { await WebAssembly.instantiate(module, {}); } catch (error) { trapped = error instanceof WebAssembly.RuntimeError; }',
+      'try { await runWasi(module); return { trapped, refused: false }; }',
+      'catch (error) { return { trapped, refused: error.name === "WasiRunError" && error.message.includes("not a WASI command module") }; }',
+    ].join('\n') }, { sendToSW: async () => ({ ok: true }) });
+    expect(r.error).toBe(null);
+    expect(r.value).toEqual({ trapped: true, refused: true });
+  });
+
   // The runtime self-test fixture, headless: demoModule() must be importable
   // and runnable from a headless job through the SAME builtin resolver chain
   // the live agent uses — pins "peerd:wasi is reachable from script" as a CI

@@ -13,7 +13,7 @@ import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
 import { sshArguments } from './dweb-cluster-ssh.mjs';
 import {validateCapacityConfig, validateCapacityHosts, capacityTopology, capacityPathsReady} from './dweb-capacity-evidence.mjs';
 import {validateConversations} from './dweb-conversation-evidence.mjs';
-import { soakOptions, runSoak } from './dweb-cluster-soak.mjs';
+import { soakOptions, idleBaselineOptions, runSoak } from './dweb-cluster-soak.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const configPath = process.argv[2];
@@ -25,6 +25,7 @@ assert(!(local && capacity), 'Capacity placement cannot be a local rehearsal');
 const transferSlots = config.transferSlots ?? 0;
 assert(Number.isSafeInteger(transferSlots) && transferSlots >= 0 && transferSlots < (config.budget ?? 16), 'invalid transfer reserve');
 const soak = soakOptions(config.soak);
+const idleBaseline = idleBaselineOptions(config.idleBaseline, config.resourceMetrics);
 const output = resolve(config.output ?? join(root, 'scripts/cdp/artifacts/cluster-result.json'));
 // why: remote agreement alone could certify identical but stale staged trees.
 const expectedSource = sourceFingerprint(root);
@@ -139,25 +140,25 @@ try {
     report.capacityQualification = {complete:false, missing:['paired degree comparisons', 'whole-browser resource metrics', 'adversarial workloads', 'sustained finalist and overnight runs']};
   }
   assert(['all-pairs', 'connected'].includes(topology), 'topology must be all-pairs or connected');
+  assert(config.resourceMetrics === undefined || typeof config.resourceMetrics === 'boolean', 'resourceMetrics must be boolean');
   signaling = openSignaling(0);
   for (const target of config.hosts) startWorker(target, signaling.server.port);
   report.hosts = await Promise.all(workers.map(async worker => ({ name: worker.target.name,
     ...await worker.call('launch', { chrome: worker.target.chrome, mdns: config.mdns !== false,
-      allInterfaces: config.allInterfaces === true }) })));
+      allInterfaces: config.allInterfaces === true, resourceMetrics: config.resourceMetrics === true }) })));
   await check(capacity ? 'shared-host browser placement and identical source' : local ? 'matching source and browser (rehearsal)' : 'identical source on distinct Macs', async () => {
     const options = {local, expectedSource, expectedRuntime:coordinator.runtime};
     if (capacity) report.placement = validateCapacityHosts(report.hosts, options);
     else validateHosts(report.hosts, options);
     return report.hosts;
   });
-  assert(config.resourceMetrics === undefined || typeof config.resourceMetrics === 'boolean', 'resourceMetrics must be boolean');
   let resourceAt = -Infinity;
   const resourceOutput = `${output}.resources.jsonl`;
   if (config.resourceMetrics) {
     mkdirSync(dirname(output), {recursive:true});
     writeFileSync(resourceOutput, '', {flag:'wx'});
     report.resourceEvidence = {file:resourceOutput, samples:0, minimumIntervalMs:30000,
-      complete:false, missing:['FD counts','event-loop latency','idle-only baseline','queue and bandwidth budgets']};
+      complete:false, missing:['whole-browser event-loop coverage','idle-only baseline','queue and bandwidth budgets']};
   }
   const sampleResources = async (phase, force = false) => {
     if (!config.resourceMetrics || (!force && Date.now() - resourceAt < 30000)) return;
@@ -167,6 +168,19 @@ try {
     report.resourceEvidence.samples++;
   };
   await sampleResources('fixture-ready', true);
+  if (idleBaseline) {
+    await check('idle browser resource baseline before peer startup', async () =>
+      runSoak({ options: idleBaseline, now: () => performance.now(), sleep,
+        probe: () => sampleResources('idle-before-peer-start', true),
+        save: async evidence => {
+          report.idleBaseline = { ...evidence, scope: 'fixture loaded; mesh not started; collector active' };
+          mkdirSync(dirname(output), { recursive: true });
+          writeFileSync(`${output}.pending`, `${JSON.stringify(report, null, 2)}\n`);
+          renameSync(`${output}.pending`, output);
+        },
+      }));
+    report.resourceEvidence.missing = report.resourceEvidence.missing.filter(value => value !== 'idle-only baseline');
+  }
   const roomId = config.roomId ?? `cluster-${crypto.randomUUID()}`;
   assert(typeof roomId === 'string' && roomId.length > 0, 'roomId must be a non-empty string');
   const start = (worker, id = roomId) => worker.call('start', { roomId: id, signaling: worker.signaling,

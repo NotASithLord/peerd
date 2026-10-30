@@ -127,9 +127,32 @@ controlled renderer heap at fixture readiness, periodically during the workload,
 and before cleanup. Missing observations fail the run. The result identifies
 the companion file and sample count; retain both with the source fingerprint.
 
+With resource collection enabled, an optional `idleBaseline` object uses the
+same duration/interval shape as `soak` to observe the loaded fixtures before
+any peer starts. Its tighter bounds are enforced by `idleBaselineOptions` in
+`dweb-cluster-soak.mjs`. Samples carry an `idle-before-peer-start` phase, and
+the result retains an incomplete checkpoint until a final observation succeeds
+after the requested interval. A missing observation fails the run. Compare
+these samples with the active workload on the same hosts; they include the
+collector's overhead and are not a blank-browser or connected-but-idle baseline.
+
 The collector in `dweb-process-evidence.mjs` records numeric process identities,
-RSS and cumulative CPU time, without command lines. Summed RSS can double-count
+RSS, cumulative CPU time and numeric open-file-descriptor counts, without command
+lines, file paths or socket endpoints. Descriptor counts exclude mapped-file
+pseudo-descriptors. Process and descriptor snapshots are not atomic; an exited
+or inaccessible process fails the observation instead of contributing zero. Summed RSS can double-count
 shared pages; CPU observations omit processes that exited between samples; the
 renderer heap is not the whole browser heap. These observations do not establish
-an idle baseline or qualify file-descriptor use, event-loop latency, queue or
-bandwidth budgets. The report keeps those missing measurements explicit.
+an idle baseline unless requested, or qualify queue or bandwidth budgets. The report keeps those
+missing measurements explicit.
+
+Resource observation also enables a 100ms timer in the controlled renderer.
+`dweb-event-loop-evidence.mjs` retains cumulative timer lateness in a fixed
+16-bucket histogram, with total and maximum delay; the final bucket includes
+delays above 16384ms. A delayed callback contributes once, without catch-up
+bursts. This measures renderer scheduling delay, including OS throttling, rather
+than network latency or every browser process. Sampling itself adds ten timer
+callbacks per second, so retain uninstrumented comparison runs. The timer is
+disabled unless resource observation is requested and retires with the page.
+These samples do not establish whole-browser event-loop or responsiveness
+budgets.

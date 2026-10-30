@@ -29,6 +29,8 @@ and storage formats may move until the surface stabilizes.
   an installed browser, preserving version and input-integrity checks.
 - Native visual verification requires complete evidence, and typed
   site-client reads retain their authority boundaries.
+- Cluster diagnostics can record file-descriptor counts, controlled-renderer
+  scheduling delays, and a fixture-idle baseline before the mesh starts.
 
 ### Fixed
 
@@ -48,6 +50,8 @@ and storage formats may move until the surface stabilizes.
   preserving execution limits, cancellation deadlines, and the separate stop lane.
 - Network verification diagnostics expose bounded queue pressure without
   recording message contents or weakening signature checks.
+- Notebook WASI commands reject incompatible imports and command exports
+  before module instantiation.
 
 ### Scope
 
