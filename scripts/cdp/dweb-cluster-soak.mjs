@@ -13,6 +13,18 @@ export const soakOptions = value => {
   return { durationMs, intervalMs };
 };
 
+// Idle observations are separate from the connected workload. Keep this phase
+// short and require the collector rather than silently recording empty evidence.
+export const idleBaselineOptions = (value, resourceMetrics) => {
+  if (value === undefined) return null;
+  if (resourceMetrics !== true) throw new Error('idleBaseline requires resourceMetrics: true');
+  const options = soakOptions(value);
+  if (options.durationMs > 300_000 || options.intervalMs < 30_000) {
+    throw new Error('Idle baseline must be at most five minutes with samples at least thirty seconds apart');
+  }
+  return options;
+};
+
 // why: keep checkpoints bounded even overnight, while preserving every failed
 // attempt and the number of completed cycles. A failed probe ends qualification.
 export const runSoak = async ({ options, probe, save, now, sleep }) => {
