@@ -14,7 +14,7 @@ export const createRetrievalClient=({routeTo,rpc,now=Date.now,timers=globalThis}
   /** @type {any} */let timer;
   /** @type {Map<string,{path:readonly string[],expires:number}>} */const paths=new Map();
   /** @typedef {{target:string,request:{kind:import('./retrieval-protocol.js').RetrievalKind,hash:string},signal:AbortSignal,
-   * onPart?:import('./retrieval-rpc.js').PartObserver,resolve:(value:Uint8Array)=>void,reject:(error:unknown)=>void,cancel:()=>void}} Job */
+   * recovery:boolean,onPart?:import('./retrieval-rpc.js').PartObserver,resolve:(value:Uint8Array)=>void,reject:(error:unknown)=>void,cancel:()=>void}} Job */
   /** @type {Job[]} */const queue=[];
   const fail=()=>new RetrievalRpcError();
   const pump=()=>{
@@ -26,16 +26,28 @@ export const createRetrievalClient=({routeTo,rpc,now=Date.now,timers=globalThis}
     active++;nextStart=now()+500;
     void (async()=>{
       let cached=paths.get(job.target);
+      const usedCached=!job.recovery&&!!cached&&now()<cached.expires;
+      let delivered=false;
       try{
-        if(!cached||now()>=cached.expires){
+        if(job.recovery||!cached||now()>=cached.expires){
           paths.delete(job.target);
           const path=await routeTo({target:job.target,signal:job.signal});job.signal.throwIfAborted();
           if(!path)throw fail();
           cached={path:Object.freeze([...path]),expires:now()+30_000};
           if(paths.size>=32)paths.delete(paths.keys().next().value??'');paths.set(job.target,cached);
         }
-        const result=await rpc.retrieve(cached.path,job.request,job.signal,job.onPart);job.signal.throwIfAborted();job.resolve(result);
-      }catch(error){if(paths.get(job.target)===cached)paths.delete(job.target);job.reject(error);}
+        const result=await rpc.retrieve(cached.path,job.request,job.signal,job.onPart?part=>{
+          delivered=true;job.onPart?.(part);
+        }:undefined);job.signal.throwIfAborted();job.resolve(result);
+      }catch(error){
+        if(paths.get(job.target)===cached)paths.delete(job.target);
+        // why: an old path is a hint, not a verdict that its provider vanished.
+        // Recover once before exposing bytes, through the ordinary bounded
+        // queue so rediscovery cannot bypass pacing, capacity or cancellation.
+        if(usedCached&&!delivered&&!job.signal.aborted&&queue.length<16){
+          job.recovery=true;queue.push(job);job.signal.addEventListener('abort',job.cancel,{once:true});
+        }else job.reject(error);
+      }
       finally{active--;pump();}
     })();pump();
   };
@@ -46,7 +58,7 @@ export const createRetrievalClient=({routeTo,rpc,now=Date.now,timers=globalThis}
         ||!retrievalReplyLimit(request.kind)||!/^[0-9a-f]{64}$/.test(request.hash))return Promise.reject(fail());
       const combined=AbortSignal.any([life.signal,signal]);
       return new Promise((resolve,reject)=>{
-        /** @type {Job} */const job={target,request:structuredClone(request),signal:combined,onPart,resolve,reject,cancel:()=>{
+        /** @type {Job} */const job={target,request:structuredClone(request),signal:combined,recovery:false,onPart,resolve,reject,cancel:()=>{
           const index=queue.indexOf(job);if(index<0)return;queue.splice(index,1);
           combined.removeEventListener('abort',job.cancel);reject(fail());
           if(!queue.length&&timer!==undefined){timers.clearTimeout(timer);timer=undefined;}
