@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
 import { interfaceProof } from './dweb-address-proof.mjs';
+import { processTreeSample } from './dweb-process-evidence.mjs';
 import { settleResponse } from './dweb-cluster-rpc.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -138,6 +139,19 @@ const launch = async ({ chrome, mdns = true, allInterfaces = false }) => {
     profileFingerprint: createHash('sha256').update(profile).digest('hex') };
 };
 
+const resources = async () => {
+  if (!browser || browser.exitCode !== null || !['darwin','linux'].includes(process.platform)) throw new Error('Browser resource observation unavailable');
+  const startedAt = Date.now();
+  const table = execFileSync('/bin/ps', ['-axo','pid=,ppid=,rss=,time='], {
+    encoding:'utf8', timeout:5000, maxBuffer:1024*1024,
+  });
+  const processes = processTreeSample(table, browser.pid);
+  const heap = await send('Runtime.getHeapUsage');
+  return {startedAt, finishedAt:Date.now(), ...processes,
+    rendererHeap:{usedBytes:heap.usedSize,totalBytes:heap.totalSize},
+    limitations:['RSS sum includes shared-page duplication','CPU covers processes present at observation','heap covers the controlled renderer only','FD and event-loop metrics not collected']};
+};
+
 const lines = createInterface({ input: process.stdin });
 lines.once('close', () => void finish(0));
 for await (const line of lines) {
@@ -146,6 +160,7 @@ for await (const line of lines) {
     request = JSON.parse(line);
     const { id, method, args } = request;
     const result = method === 'launch' ? await launch(args)
+      : method === 'resources' ? await resources()
       : method === 'diagnostics' ? { logs: errors, transports: await evaluate('window.cluster?.diagnostics()') }
       : await evaluate(`window.cluster[${JSON.stringify(method)}](${JSON.stringify(args ?? {})})`);
     if(method==='paths'&&Array.isArray(result)){
