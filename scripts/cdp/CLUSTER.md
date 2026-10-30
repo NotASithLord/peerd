@@ -128,8 +128,11 @@ and before cleanup. Missing observations fail the run. The result identifies
 the companion file and sample count; retain both with the source fingerprint.
 
 The collector in `dweb-process-evidence.mjs` records numeric process identities,
-RSS and cumulative CPU time, without command lines. Summed RSS can double-count
+RSS, cumulative CPU time and numeric open-file-descriptor counts, without command
+lines, file paths or socket endpoints. Descriptor counts exclude mapped-file
+pseudo-descriptors. Process and descriptor snapshots are not atomic; an exited
+or inaccessible process fails the observation instead of contributing zero. Summed RSS can double-count
 shared pages; CPU observations omit processes that exited between samples; the
 renderer heap is not the whole browser heap. These observations do not establish
-an idle baseline or qualify file-descriptor use, event-loop latency, queue or
+an idle baseline or qualify event-loop latency, queue or
 bandwidth budgets. The report keeps those missing measurements explicit.

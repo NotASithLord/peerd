@@ -157,7 +157,7 @@ try {
     mkdirSync(dirname(output), {recursive:true});
     writeFileSync(resourceOutput, '', {flag:'wx'});
     report.resourceEvidence = {file:resourceOutput, samples:0, minimumIntervalMs:30000,
-      complete:false, missing:['FD counts','event-loop latency','idle-only baseline','queue and bandwidth budgets']};
+      complete:false, missing:['event-loop latency','idle-only baseline','queue and bandwidth budgets']};
   }
   const sampleResources = async (phase, force = false) => {
     if (!config.resourceMetrics || (!force && Date.now() - resourceAt < 30000)) return;
