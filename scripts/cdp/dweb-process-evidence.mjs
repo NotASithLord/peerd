@@ -36,3 +36,27 @@ export const processTreeSample = (text, rootPid) => {
     summedRssBytes:processes.reduce((sum, row) => sum + row.rssBytes, 0),
     observedCpuTimeMs:processes.reduce((sum, row) => sum + row.cpuTimeMs, 0)};
 };
+
+// why: lsof's field format can omit inaccessible or exited processes. Refuse
+// incomplete snapshots rather than representing missing evidence as zero usage.
+export const descriptorCounts = (text, expectedPids) => {
+  if (!expectedPids.length || expectedPids.some(pid => !Number.isSafeInteger(pid) || pid <= 0) || new Set(expectedPids).size !== expectedPids.length) throw new Error('Invalid descriptor process set');
+  const expected = new Set(expectedPids);
+  const counts = new Map();
+  let descriptors;
+  for (const line of text.trim().split('\n')) {
+    if (/^p[1-9]\d*$/.test(line)) {
+      const pid = Number(line.slice(1));
+      if (!expected.has(pid) || counts.has(pid)) throw new Error('Unexpected descriptor process');
+      descriptors = new Set(); counts.set(pid, descriptors);
+    } else if (/^f\d+$/.test(line) && descriptors) {
+      const fd = Number(line.slice(1));
+      if (!Number.isSafeInteger(fd) || descriptors.has(fd)) throw new Error('Invalid descriptor observation');
+      descriptors.add(fd);
+    } else if (!(/^f(?:cwd|rtd|txt|mem)$/.test(line) && descriptors)) {
+      throw new Error('Malformed descriptor observation');
+    }
+  }
+  if (counts.size !== expected.size) throw new Error('Missing descriptor process');
+  return expectedPids.map(pid => ({pid, openFileDescriptors:counts.get(pid).size}));
+};
