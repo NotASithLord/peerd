@@ -134,5 +134,16 @@ pseudo-descriptors. Process and descriptor snapshots are not atomic; an exited
 or inaccessible process fails the observation instead of contributing zero. Summed RSS can double-count
 shared pages; CPU observations omit processes that exited between samples; the
 renderer heap is not the whole browser heap. These observations do not establish
-an idle baseline or qualify event-loop latency, queue or
-bandwidth budgets. The report keeps those missing measurements explicit.
+an idle baseline or qualify queue or bandwidth budgets. The report keeps those
+missing measurements explicit.
+
+Resource observation also enables a 100ms timer in the controlled renderer.
+`dweb-event-loop-evidence.mjs` retains cumulative timer lateness in a fixed
+16-bucket histogram, with total and maximum delay; the final bucket includes
+delays above 16384ms. A delayed callback contributes once, without catch-up
+bursts. This measures renderer scheduling delay, including OS throttling, rather
+than network latency or every browser process. Sampling itself adds ten timer
+callbacks per second, so retain uninstrumented comparison runs. The timer is
+disabled unless resource observation is requested and retires with the page.
+These samples do not establish whole-browser event-loop or responsiveness
+budgets.

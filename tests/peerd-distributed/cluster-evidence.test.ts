@@ -95,7 +95,7 @@ describe('cluster run provenance and SSH ownership', () => {
         mkdirSync(join(stage, 'extension'), { recursive: true });
         mkdirSync(join(stage, 'scripts/cdp'), { recursive: true });
         for (const name of index ? ['z.js', 'a.js'] : ['a.js', 'z.js']) writeFileSync(join(stage, 'extension', name), name);
-        for (const name of ['dweb-cluster-node.mjs', 'dweb-cluster-page.js', 'dweb-cluster-rpc.mjs', 'dweb-cluster-source.mjs', 'dweb-address-proof.mjs', 'dweb-process-evidence.mjs']) writeFileSync(join(stage, 'scripts/cdp', name), name);
+        for (const name of ['dweb-cluster-node.mjs', 'dweb-cluster-page.js', 'dweb-cluster-rpc.mjs', 'dweb-cluster-source.mjs', 'dweb-address-proof.mjs', 'dweb-process-evidence.mjs', 'dweb-event-loop-evidence.mjs']) writeFileSync(join(stage, 'scripts/cdp', name), name);
       }
       const first = stages[0]!;
       const second = stages[1]!;
@@ -105,6 +105,10 @@ describe('cluster run provenance and SSH ownership', () => {
       expect(sourceFingerprint(second)).not.toBe(digest);
       writeFileSync(join(second, 'extension/a.js'), 'a.js');
       writeFileSync(join(second, 'scripts/cdp/dweb-cluster-page.js'), 'changed fixture');
+      expect(sourceFingerprint(second)).not.toBe(digest);
+      writeFileSync(join(second, 'scripts/cdp/dweb-cluster-page.js'), 'dweb-cluster-page.js');
+      expect(sourceFingerprint(second)).toBe(digest);
+      writeFileSync(join(second, 'scripts/cdp/dweb-event-loop-evidence.mjs'), 'changed sampler');
       expect(sourceFingerprint(second)).not.toBe(digest);
       expect(gitMetadata(first)).toEqual({ revision: null, dirty: null });
     } finally { rmSync(root, { recursive: true, force: true }); }
