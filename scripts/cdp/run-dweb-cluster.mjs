@@ -8,7 +8,7 @@ import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { createSignalingServer } from '../../signaling-node/bun-server.mjs';
-import { validateHosts, validateMesh, pathsReady, repairableEdge } from './dweb-cluster-checks.mjs';
+import { validateHosts, validateMesh, pathsReady, repairableEdge, directProviderReader } from './dweb-cluster-checks.mjs';
 import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
 import { sshArguments } from './dweb-cluster-ssh.mjs';
 import {validateCapacityConfig, validateCapacityHosts, capacityTopology, capacityPathsReady} from './dweb-capacity-evidence.mjs';
@@ -272,9 +272,11 @@ try {
     (await workers[seederIndex].call('fetchMany', { uri: published.uri, count: 3 })).map(verify));
   const explicitProviderProbe = async () => {
     const states = await reports();
-    const providerNeighbors = new Set(states[0].peers.filter(peer => peer.linked).map(peer => peer.did));
-    const brokers = states[seederIndex].peers.filter(peer => peer.linked && providerNeighbors.has(peer.did)).map(peer => peer.did);
-    return workers[seederIndex].call('fetch', { uri: published.uri, provider: dids[0], brokers });
+    const reader = directProviderReader(states, dids);
+    // Record the actual carrier; never treat disconnection as the required
+    // hash-mismatch or unavailable-content response, and never retry a failure.
+    (report.explicitProviderProbes ??= []).push({ reader, provider: 0 });
+    return workers[reader].call('fetch', { uri: published.uri, provider: dids[0] });
   };
   await check('corrupt serving peer is rejected', async () => {
     await workers[0].call('corrupt', { enabled: true });
@@ -351,12 +353,12 @@ try {
   });
   if (soak) await check('sustained authenticated traffic and verified content', async () =>
     runSoak({ options: soak, now: () => performance.now(), sleep,
-      probe: async () => {
-        await meshReady();
-        await gossip();
-        verify(await workers[0].call('fetch', { uri: published.uri }));
-        await paths();
-        await sampleResources('sustained-workload');
+      probe: async timed => {
+        await timed('mesh', meshReady);
+        await timed('gossip', gossip);
+        await timed('fetch', async () => verify(await workers[0].call('fetch', { uri: published.uri })));
+        await timed('paths', paths);
+        await timed('resources', () => sampleResources('sustained-workload'));
       },
       save: async evidence => {
         report.soak = evidence;

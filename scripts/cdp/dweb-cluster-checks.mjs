@@ -79,3 +79,14 @@ export const repairableEdge = (adjacency, dids) => {
   }
   return null;
 };
+
+// why: sparse meshes may rotate an earlier seeder edge. Negative content
+// checks need a currently authenticated carrier, not an historical neighbor.
+export const directProviderReader = (states, dids, provider = 0) => {
+  assert.equal(states.length, dids.length, 'Every host needs a mesh report');
+  states.forEach((state, index) => assert.equal(state.did, dids[index], 'Mesh report identity changed'));
+  const linked = (from, to) => states[from].peers.some(peer => peer.linked && peer.did === dids[to]);
+  const reader = dids.findIndex((_, index) => index !== provider && linked(provider, index) && linked(index, provider));
+  assert(reader >= 0, 'Explicit provider probe needs a mutual authenticated link');
+  return reader;
+};

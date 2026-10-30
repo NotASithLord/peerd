@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sourceFingerprint, gitMetadata } from '../../scripts/cdp/dweb-cluster-source.mjs';
 import { sshArguments } from '../../scripts/cdp/dweb-cluster-ssh.mjs';
-import { validateHosts, validateMesh, validatePaths, pathsReady, repairableEdge } from '../../scripts/cdp/dweb-cluster-checks.mjs';
+import { validateHosts, validateMesh, validatePaths, pathsReady, repairableEdge, directProviderReader } from '../../scripts/cdp/dweb-cluster-checks.mjs';
 import { settleResponse } from '../../scripts/cdp/dweb-cluster-rpc.mjs';
 
 const hosts = () => [1, 2].map(number => ({ machine: String(number).repeat(64), source: 'a'.repeat(64),
@@ -13,6 +13,20 @@ const expected = { expectedSource: 'a'.repeat(64), expectedRuntime: 'test-runtim
 const path = () => ({ did: 'peer', state: 'succeeded', bytesSent: 100, bytesReceived: 100,
   local: { address: '169.254.1.1', protocol: 'udp', type: 'host' },
   remote: { address: '169.254.1.2', protocol: 'udp', type: 'host' } });
+
+test('negative content probes follow a current mutual edge after seeder rotation', () => {
+  const dids = ['publisher', 'old-seeder', 'current-reader'];
+  const states = [
+    { did: dids[0], peers: [{ did: dids[1], linked: false }, { did: dids[2], linked: true }] },
+    { did: dids[1], peers: [{ did: dids[0], linked: false }] },
+    { did: dids[2], peers: [{ did: dids[0], linked: true }] },
+  ];
+  expect(directProviderReader(states, dids)).toBe(2);
+  states[2].peers[0].linked = false;
+  expect(() => directProviderReader(states, dids)).toThrow('mutual authenticated link');
+  states[2].did = 'unknown';
+  expect(() => directProviderReader(states, dids)).toThrow('identity changed');
+});
 
 describe('physical cluster evidence cannot silently pass a local rehearsal', () => {
   test('accepts identical source on distinct Macs with an actual UDP pair', () => {
