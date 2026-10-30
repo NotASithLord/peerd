@@ -28,6 +28,8 @@ import {
 } from './content/manifest.js';
 import { packTransportBundle } from './content/bundle.js';
 import { chunkBytes, sha256hex as sha256ChunkHex } from './content/chunk.js';
+import { createRoutedContentChannel } from './content/routed.js';
+import { RETRIEVAL_CONCURRENCY } from './transport/retrieval-protocol.js';
 import { swarmFetch } from './content/swarm.js';
 import { formatPeerdUri, parsePeerdUri } from './content/uri.js';
 import { concat, utf8, toHex } from '/shared/bundle/bytes.js';
@@ -366,7 +368,12 @@ export const createBaseNetwork = async ({
     try {
       callerSignal?.throwIfAborted();
       /** @param {string} did */
-      const channelFor = (did) => isBlocked(did) ? null : node.mesh.contentChannel(did);
+      const channelFor = (did) => {
+        if(isBlocked(did))return null;
+        const direct=node.mesh.contentChannel(did);if(direct)return direct;
+        return dial?.retrieval?createRoutedContentChannel({isAllowed:()=>!closed&&!isBlocked(did),
+          read:(kind,hash,signal,onPart)=>dial.retrieval.read(did,{kind,hash},signal,onPart)}):null;
+      };
       const acceptManifest = (/** @type {any} */ manifest) => {
         if (expectedRuntime) assertAppRuntimeAgreement(expectedRuntime.value, manifest.meta?.runtime);
         assertAppRuntime(manifest.meta?.runtime);
@@ -425,9 +432,15 @@ export const createBaseNetwork = async ({
       const linked = node.mesh.peers().map((/** @type {{ did: string }} */ p) => p.did);
 
       const isAllowed = (/** @type {string} */ did) => !closed && !isBlocked(did);
+      // Match chunk scheduling to the bounded routed reader. A third chunk
+      // otherwise spends its send deadline waiting behind two healthy reads.
+      // Fully linked transfers keep the ordinary swarm concurrency.
+      const fetchProviders = (/** @type {string[]} */ providers) => swarmFetch({uri,providers,channelFor,timeoutMs,onProgress,
+        signal:callerSignal,isAllowed,acceptManifest,
+        alpha:dial?.retrieval&&providers.some(did=>!node.mesh.hasLink(did))?RETRIEVAL_CONCURRENCY:undefined});
       const preferred = [...new Set([...(publisher ? [publisher] : []), ...linked])];
       if (linked.length) {
-        try { return await swarmFetch({ uri, providers: preferred, channelFor, timeoutMs, onProgress, signal: callerSignal, isAllowed, acceptManifest }); }
+        try { return await fetchProviders(preferred); }
         catch (e) { callerSignal?.throwIfAborted(); if (e instanceof AppRuntimeError) throw e; dlog('base', `linked seeder fetch failed (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}); trying DHT providers (bounded)`); }
       }
       // Retain the DHT responder as the signaling broker for each provider.
@@ -447,6 +460,10 @@ export const createBaseNetwork = async ({
       }, undefined, callerSignal).catch(() => []);
       callerSignal?.throwIfAborted();
       const candidates = contacts.filter((/** @type {any} */ contact) => contact.did !== identity.did && !isBlocked(contact.did)).slice(0, 8);
+      if(dial?.retrieval&&candidates.length){
+        try{return await fetchProviders([...new Set([...candidates.map((/** @type {any} */ c)=>c.did),...linked])]);}
+        catch(error){callerSignal?.throwIfAborted();if(error instanceof AppRuntimeError)throw error;}
+      }
       let next = 0;
       const connectProvider = async () => {
         while (next < candidates.length && !closed && !callerSignal?.aborted) {
@@ -473,7 +490,7 @@ export const createBaseNetwork = async ({
       const providers = [...new Set([...provided, ...linked])];
       if (!providers.length && lookupCompleted && !contacts.length) throw new NoAppProviderError(uri);
       if (!providers.length) throw new Error(`no peer is serving ${uri} right now. The peer may have dropped; try again`);
-      return await swarmFetch({ uri, providers, channelFor, timeoutMs, onProgress, signal: callerSignal, isAllowed, acceptManifest });
+      return await fetchProviders(providers);
     } finally { for (const lease of leases) lease.release(); traversal?.close(); }
   };
 

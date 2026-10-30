@@ -1,10 +1,12 @@
 import { expect, test, spyOn } from 'bun:test';
+import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { signalingStep, initialSignalingState } from '../../extension/peerd-distributed/transport/signaling.js';
 import { SPARSE_PUBLIC_PROFILE, PUBLIC_ROOM } from '../../extension/peerd-distributed/transport/rendezvous-profile.js';
 import { joinRoom } from '../../extension/peerd-distributed/transport/rooms.js';
 import { createAdmissionGovernor } from '../../extension/peerd-distributed/transport/admission.js';
-import { generateIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
+import { generateIdentity, importIdentity } from '../../extension/peerd-distributed/identity/keypair.js';
 import { memoryPair } from '../../extension/peerd-distributed/transport/channel.js';
+import { ROUTING_WITNESS } from '../../extension/peerd-distributed/transport/capabilities.js';
 import { createPeerNode } from '../../extension/peerd-distributed/peer-node.js';
 
 const deadline = async <T>(promise: Promise<T>, stage: string, ms = 10_000): Promise<T> => {
@@ -15,8 +17,8 @@ const deadline = async <T>(promise: Promise<T>, stage: string, ms = 10_000): Pro
 
 // Real reducer/client/room/admission/HELLO/mesh. Only socket dispatch and the
 // native ICE carrier are replaced. Each browser owns its own governor.
-const fixture = () => {
-  let now = Date.now(), next = 0, seed = 42, nextTimer = 0, online = true, legacyServer = false, sampleRequests = 0;
+const fixture = ({ budget, transferSlots = 0, initialSeed = 42 }: { budget?: number; transferSlots?: number; initialSeed?: number } = {}) => {
+  let now = Date.now(), next = 0, seed = initialSeed, nextTimer = 0, online = true, legacyServer = false, sampleRequests = 0;
   const random = () => { seed = (1664525 * seed + 1013904223) >>> 0; return seed / 2 ** 32; };
   const peaks = { active: 0, queued: 0, timers: 0, carriers: 0 };
   let liveCarriers = 0;
@@ -134,12 +136,13 @@ const fixture = () => {
     return governor;
   };
   const nodes: Awaited<ReturnType<typeof createPeerNode>>[] = [];
-  const add = async ({ sparse = true, kind }: { sparse?: boolean; kind?: string } = {}) => {
-    const identity = await generateIdentity(); const admission = trackAdmissions(createAdmissionGovernor({ timers })); governors.push(admission);
+  const add = async ({ sparse = true, kind, identity: suppliedIdentity }: { sparse?: boolean; kind?: string; identity?: Awaited<ReturnType<typeof generateIdentity>> } = {}) => {
+    const identity = suppliedIdentity ?? await generateIdentity();
+    const admission = trackAdmissions(createAdmissionGovernor({ timers })); governors.push(admission);
     const owner = governors.length - 1;
     class OwnedSocket extends Socket { constructor(url: string) { super(url); this.owner = owner; } }
     const room = await joinRoom({ identity, roomId: PUBLIC_ROOM, profile: sparse ? SPARSE_PUBLIC_PROFILE : undefined, kind, url: 'ws://fixture',
-      awaitInitialRendezvous: false, WebSocket: OwnedSocket, transport: makeTransport(admission), admission, now: () => now, random, timers });
+      budget, transferSlots, awaitInitialRendezvous: false, WebSocket: OwnedSocket, transport: makeTransport(admission), admission, now: () => now, random, timers });
     room.mesh.stop(); // explicit churn below; wall-clock liveness has its own tests
     rooms.push(room);
     if (room.rendezvous() !== 'up') {
@@ -382,3 +385,85 @@ test('saturated legacy public component needs churn before sparse introductions 
   } finally { f.close(); }
   assertTeardown(f);
 }, 20_000);
+
+// why: the native failure occurs after a same-identity restart at degree two,
+// below the existing large-network fixture's default routing budget.
+for (const initialSeed of [1, 42, 100]) test(`low-degree same-identity rejoin keeps five peers connected (seed ${initialSeed})`, async () => {
+  const f = fixture({ budget: 4, transferSlots: 2, initialSeed });
+  const identity = await generateIdentity();
+  try {
+    await f.add({ identity });
+    for (let index = 1; index < 5; index++) await f.add();
+    await f.advance(60_000);
+    f.rooms[0]!.leave();
+    await f.advance(5_000);
+    const replacement = await f.add({ identity });
+    await f.advance(30_000);
+    const live = f.rooms.slice(1);
+    const reached = new Set<string>([identity.did]);
+    const nodes = f.nodes.slice(1);
+    for (let round = 0; round < live.length; round++) {
+      for (let index = 0; index < live.length; index++) {
+        if (reached.has(nodes[index]!.did)) for (const peer of live[index]!.peers()) reached.add(peer.did);
+      }
+    }
+    expect(replacement.peers().length).toBeGreaterThan(0);
+    expect(reached.size).toBe(5);
+    const received = new Set<string>();
+    const delivered = Promise.withResolvers<void>();
+    for (const node of nodes.slice(0, -1)) node.gossip.subscribe('low-degree-rejoin', () => {
+      received.add(node.did);
+      if (received.size === 4) delivered.resolve();
+    });
+    await nodes.at(-1)!.gossip.publish('low-degree-rejoin', { after: 'same-identity restart' });
+    await deadline(delivered.promise, 'low-degree rejoin gossip');
+    expect(received.size).toBe(4);
+    for (const room of live) expect(room.peers().length).toBeLessThanOrEqual(2);
+  } finally { f.close(); }
+  assertTeardown(f);
+}, 30_000);
+
+// Synthetic public test identities; never used outside this fixture.
+const fixedIdentity = async (value: number) => {
+  const seed = new Uint8Array(32).fill(value);
+  const key = createPrivateKey({key: Buffer.concat([Buffer.from('302e020100300506032b657004220420','hex'), seed]), format: 'der', type: 'pkcs8'});
+  const publicKey = new Uint8Array(createPublicKey(key).export({format:'der',type:'spki'}).subarray(-32));
+  return importIdentity({seed,publicKey});
+};
+
+test('low-degree newcomer joins an established four-peer component', async () => {
+  const f = fixture({ budget: 4, transferSlots: 2, initialSeed: 42 });
+  const seeded: Array<ReturnType<typeof memoryPair>[number]> = [];
+  try {
+    // Seed an explicit existing component independently of bootstrap policy.
+    // The newcomer still uses real signaling, admission and signed readiness.
+    f.holdOffers();
+    const identities = await Promise.all([1,2,3,4].map(fixedIdentity));
+    for (const identity of identities) await f.add({identity});
+    for (let index = 0; index < 4; index++) {
+      const other = (index + 1) % 4;
+      const pair = memoryPair();
+      seeded.push(...pair);
+      expect(f.rooms[index]!.mesh.addLink(pair[0], identities[other]!.did, {caps:[ROUTING_WITNESS]}, {locallySelected:true})).toBe(true);
+      expect(f.rooms[other]!.mesh.addLink(pair[1], identities[index]!.did, {caps:[ROUTING_WITNESS]}, {locallySelected:false})).toBe(true);
+    }
+    f.releaseOffers();
+    await f.advance(60_000);
+    expect(f.rooms.map(room => room.peers().length)).toEqual([2,2,2,2]);
+    const newcomer = await f.add({identity: await fixedIdentity(5)});
+    await f.advance(30_000);
+    expect(newcomer.peers().length).toBeGreaterThan(0);
+    const delivered = Promise.withResolvers<void>();
+    const received = new Set<string>();
+    for (const node of f.nodes.slice(0, 4)) node.gossip.subscribe('full-cycle-join', () => {
+      received.add(node.did);
+      if (received.size === 4) delivered.resolve();
+    });
+    await f.nodes[4]!.gossip.publish('full-cycle-join', { after: 'joining a saturated cycle' });
+    await deadline(delivered.promise, 'saturated-cycle gossip');
+    expect(received.size).toBe(4);
+    for (const room of f.rooms) expect(room.peers().length).toBeLessThanOrEqual(2);
+  } finally { f.close(); }
+  expect(seeded.every(channel => channel.isClosed())).toBe(true);
+  assertTeardown(f);
+}, 30_000);

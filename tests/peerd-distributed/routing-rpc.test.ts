@@ -43,6 +43,21 @@ test('signed multi-hop RPC returns only the requested endpoint roster',async()=>
   expect(new Set(result)).toEqual(new Set([f.ids[1].did,f.ids[3].did]));
  }finally{f.close();}
 });
+test('existing route discovery traverses saturated signed carriers without changing the mesh',async()=>{
+ for(const edges of [[[0,2],[2,3],[3,1],[1,4]],[[0,2],[2,3],[3,1],[1,4],[4,0]]]){
+  const f=await fixture(edges,5);
+  try{
+   const before=f.meshes.map(mesh=>mesh.peers().map(peer=>peer.did).sort());
+   const path=await f.searches[0].routeTo({target:f.ids[3].did});
+   expect(path).toEqual([0,2,3].map(i=>f.ids[i].did));
+   expect(Object.isFrozen(path)).toBe(true);
+   expect(f.meshes.map(mesh=>mesh.peers().map(peer=>peer.did).sort())).toEqual(before);
+   expect(f.meshes.every(mesh=>mesh.stats().totalDegree<=2)).toBe(true);
+   expect(f.frames.some(frame=>frame.env.typ===10)).toBe(true);
+   expect(f.frames.filter(frame=>frame.env.typ===10).every(frame=>frame.env.body.op==='neighbors')).toBe(true);
+  }finally{f.close();}
+ }
+});
 test('wire search excludes both planned cuts rather than traversing a bridge',async()=>{
  const f=await fixture([[0,1],[1,2],[2,3],[3,0]]);try{
   const cuts=[[f.ids[0].did,f.ids[1].did],[f.ids[2].did,f.ids[3].did]];
