@@ -2,14 +2,14 @@
 // production WebRTC carries every tested peer message and content byte.
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { hostname, tmpdir, networkInterfaces } from 'node:os';
 import { dirname, join, resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { sourceFingerprint, gitMetadata } from './dweb-cluster-source.mjs';
 import { interfaceProof } from './dweb-address-proof.mjs';
-import { processTreeSample } from './dweb-process-evidence.mjs';
+import { processTreeSample, descriptorCounts } from './dweb-process-evidence.mjs';
 import { settleResponse } from './dweb-cluster-rpc.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -146,10 +146,20 @@ const resources = async () => {
     encoding:'utf8', timeout:5000, maxBuffer:1024*1024,
   });
   const processes = processTreeSample(table, browser.pid);
+  const pids = processes.processes.map(row => row.pid);
+  // why: request only PID/descriptor fields; never collect paths or socket endpoints.
+  const descriptorText = process.platform === 'darwin'
+    ? execFileSync('/usr/sbin/lsof', ['-nP','-a','-p',pids.join(','),'-Fpf'], {
+      encoding:'utf8', timeout:5000, maxBuffer:1024*1024, stdio:['ignore','pipe','ignore'],
+    })
+    : pids.map(pid => `p${pid}\n${readdirSync(`/proc/${pid}/fd`).map(fd => `f${fd}`).join('\n')}`).join('\n');
+  const descriptors = descriptorCounts(descriptorText, pids);
   const heap = await send('Runtime.getHeapUsage');
   return {startedAt, finishedAt:Date.now(), ...processes,
+    descriptorProcesses:descriptors,
+    summedOpenFileDescriptors:descriptors.reduce((sum, row) => sum + row.openFileDescriptors, 0),
     rendererHeap:{usedBytes:heap.usedSize,totalBytes:heap.totalSize},
-    limitations:['RSS sum includes shared-page duplication','CPU covers processes present at observation','heap covers the controlled renderer only','FD and event-loop metrics not collected']};
+    limitations:['RSS sum includes shared-page duplication','CPU covers processes present at observation','heap covers the controlled renderer only','process and descriptor observations are not atomic','event-loop metrics not collected']};
 };
 
 const lines = createInterface({ input: process.stdin });
