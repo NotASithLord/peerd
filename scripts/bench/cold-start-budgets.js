@@ -147,8 +147,8 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 409, graphBytes: 4_104_517 }),
-  target: Object.freeze({ modules: 412, graphBytes: 4_195_880 }),
+  shared: Object.freeze({ modules: 411, graphBytes: 4_111_246 }),
+  target: Object.freeze({ modules: 414, graphBytes: 4_202_609 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_563 }),
@@ -193,7 +193,12 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // without reserve; Lab requests retain their narrow payload validators.
   // The opt-in first tab owns windows.onCreated in one small module. Exact.
   // It also knows a reopened window by its tabs. Same module. Exact.
-  kernel: Object.freeze({ modules: 409, graphBytes: 4_104_517, entryBytes: 200, directImports: 2 }),
+  // The engine process contract (instance resolution, tab round-trip and
+  // admission guards shared by the engine kinds) and the single Pod admission
+  // policy replace per-kind and per-host duplicates: +2 leaves, and the removed
+  // inline policy offsets most of their bytes. The Pod readiness route and the
+  // Pod destroy re-read grow existing leaves. Exact, no reserve.
+  kernel: Object.freeze({ modules: 411, graphBytes: 4_111_246, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -226,9 +231,12 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // Pin the measured pacing/consent/revocation closure with no reserve.
     // The first tab owner (background/kernel-first-tab.js) joins it. Exact.
     // Its reopened-window rows add 1,700 packaged bytes and no module. Exact.
+    // The shared engine process contract and the single Pod admission policy
+    // add two modules; removing the per-kind and per-host duplicates they
+    // replace shrinks the packaged graph. Exact, no reserve.
     serviceWorker: Object.freeze({
-      modules: 405, graphBytes: 2_105_846, entryBytes: 173,
-      inputSha256: 'a92fe66eab988f0dd4274f793bde7685b281429cd1540119be4550d785efd8de',
+      modules: 407, graphBytes: 2_102_086, entryBytes: 173,
+      inputSha256: 'f113146d338d1ddf501a41c6d71ad4e58dd6efee0686f62a0ac2d626863ed1cf',
     }),
     // One shared read-only authority schema/provenance validator rejects
     // corrupt or partial state before cold human controls become actionable.
@@ -265,9 +273,11 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
       // module and no module. Remeasured with no reserve.
       // The first tab owner joins it as one module. Exact.
       // Its reopened-window rows and the restart notice add 1,877 bytes. Exact.
+      // The shared engine process contract and the Pod admission policy add
+      // two modules and shrink the graph. Exact, no reserve.
       serviceWorker: Object.freeze({
-        modules: 412, graphBytes: 2_221_147, entryBytes: 207,
-        inputSha256: '44fb39a6e1e4ebb9e57381dc4d77cbc0f34e2dfb4d6e917b59b22cabbafcb8f6',
+        modules: 414, graphBytes: 2_217_373, entryBytes: 207,
+        inputSha256: '1391c105eedbd822d96be20b790b8b600f03bf9737fadadbae6f60cb943ca639',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 129_474, entryBytes: 564 }),
