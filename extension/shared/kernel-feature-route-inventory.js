@@ -60,7 +60,7 @@ export const KERNEL_EXECUTABLE_SEMANTIC_ROUTE_NAMES = Object.freeze([
 ]);
 
 export const KERNEL_ENGINE_ATTACH_ROUTE_NAMES = Object.freeze(
-  'vm/tab-ready vm/tab-failed js/tab-ready pod/tab-adopt app/tab-ready app/actor-retry'.split(' '),
+  'vm/tab-ready vm/tab-failed js/tab-ready pod/tab-adopt pod/tab-ready app/tab-ready app/actor-retry'.split(' '),
 );
 
 export const KERNEL_EXECUTABLE_ROUTE_NAMES = Object.freeze([
