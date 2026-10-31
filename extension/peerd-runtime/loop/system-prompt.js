@@ -13,6 +13,7 @@ import { PREWALK_NUDGE } from './prewalk.js';
 // — the App/Notebook ACTOR — not the orchestrator's create-result. Reused
 // from the one source of truth (intra-module deep import is allowed).
 import { CODE_STYLE_NOTE, JS_PITFALLS_NOTE } from '../tools/defs/code-style-note.js';
+import { projectSandboxText } from '../tools/sandbox-verbs.js';
 
 // why: prompt growth is a performance regression even when behavior still
 // passes. Tests render every profile against these fixed ceilings so new lore
@@ -737,7 +738,10 @@ export const actorBlock = (actorType, backing, instanceId, surface, schemaReply,
   const scope = isApi
     ? `origin:${promptValue(instanceId || 'runtime-pinned')}`
     : `instance:${promptValue(instanceId || 'runtime-pinned')}`;
-  return [
+  // why project the finished block: capability lines and lore name this kind's
+  // tools; a sandbox actor is shown the shared sandbox_* verbs instead, so the
+  // prose must use the same names as its descriptors (tools/sandbox-verbs.js).
+  return projectSandboxText(actorType, [
     '<actor_agent>',
     `kind: bound; type: ${promptValue(isApi ? 'api' : actorType)}`,
     `You are an address-bound actor — ${framing}`,
@@ -756,7 +760,7 @@ export const actorBlock = (actorType, backing, instanceId, surface, schemaReply,
     '  substitute another instance, tab, origin, address, or environment.',
     schemaReply === true && actorType === 'web' ? SCHEMA_REPLY_RULE : FREE_FORM_REPLY_RULE,
     '</actor_agent>',
-  ].join('\n');
+  ].join('\n'));
 };
 
 // Focus policy (DESIGN-12, owner 2026-06-18): tabs open in the BACKGROUND
