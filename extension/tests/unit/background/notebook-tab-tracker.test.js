@@ -1,7 +1,7 @@
 // @ts-check
 
 import { describe, expect, it } from '../../framework.js';
-import { createJsTabTracker } from '/background/notebook-tab-tracker.js';
+import { createJsTabTracker } from '/background/tab-tracker.js';
 
 describe('Notebook tab tracker quiescence', () => {
   it('flushes through an instance-pinned tab message', async () => {
