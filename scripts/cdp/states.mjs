@@ -12734,17 +12734,19 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
     name: 'actor-builds-app', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex, request) => {
       const body = (request && request.postData) || '';
-      // APP ACTOR (owns the created app; holds app_write_file).
+      // APP ACTOR (owns the created app; holds app_write_file). It is shown the
+      // shared verb sandbox_write and calls it; the worker dispatches app_write_file,
+      // which is what the audit check below still records.
       if (body.includes('client-side App builder') || body.includes('Your App is a multi-file artifact')) {
         actorAppState.appCalls += 1;
         if (actorAppState.appCalls === 1) {
-          return { sse: sseToolCall('app_write_file', { path: 'asset.bin', contentBase64: 'AP/AgH8=' }) };
+          return { sse: sseToolCall('sandbox_write', { path: 'asset.bin', contentBase64: 'AP/AgH8=' }) };
         }
         if (actorAppState.appCalls === 2) {
-          return { sse: sseToolCall('app_write_file', { path: 'empty.wasm', contentBase64: 'AGFzbQEAAAA=' }) };
+          return { sse: sseToolCall('sandbox_write', { path: 'empty.wasm', contentBase64: 'AGFzbQEAAAA=' }) };
         }
         if (actorAppState.appCalls === 3) {
-          return { sse: sseToolCall('app_write_file', { path: 'model.custom', contentBase64: 'QUJD' }) };
+          return { sse: sseToolCall('sandbox_write', { path: 'model.custom', contentBase64: 'QUJD' }) };
         }
         if (actorAppState.appCalls === 4) {
           const probe = JSON.stringify(actorAppProbeUrl);
@@ -12855,7 +12857,7 @@ Promise.resolve().then(async () => {
   setTimeout(() => { location.href = URL.createObjectURL(new Blob([${blobPayloadLiteral}], {type:'text/html'})); }, 250);
 }).catch((error) => parent.postMessage({ type: 'e2e-binary-error', error: String(error) }, '*'));
 </script></body>`;
-          return { sse: sseToolCall('app_write_file', { path: 'index.html', content }) };
+          return { sse: sseToolCall('sandbox_write', { path: 'index.html', content }) };
         }
         return { sse: sseText('APP-ACTOR-WROTE') };
       }

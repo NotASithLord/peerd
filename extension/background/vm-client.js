@@ -33,6 +33,7 @@ import {
   VMTabClosedError,
   createKeyedQueue,
 } from '/peerd-engine/background.js';
+import { createEngineInstanceResolver, raceTabReply, shortSessionSuffix } from './engine-process.js';
 
 // why ...any[]: these classes have genuinely different constructor arities
 // (VMRunTimeoutError(cmd, timeoutMs) vs VMNotReadyError(reason)); reviveError
@@ -89,7 +90,7 @@ export const VM_TAB_GROUP_TITLE = 'peerd';
 /**
  * @param {Object} deps
  * @param {ReturnType<typeof import('/peerd-engine/background.js').createVmRegistry>} deps.registry
- * @param {ReturnType<typeof import('./vm-tab-tracker.js').createVmTabTracker>} deps.tracker
+ * @param {ReturnType<typeof import('./tab-tracker.js').createVmTabTracker>} deps.tracker
  * @param {(tabId: number, message: object) => Promise<any>} [deps.sendTabMessage]
  *   Injected message IO (defaults to browser.tabs.sendMessage) so the
  *   queue/interrupt behavior is testable without live VM tabs.
@@ -134,45 +135,26 @@ export const createVmClient = ({
   /** @param {string} vmId */
   const commandKey = (vmId) => `cmd:${vmId}`;
 
-  /**
-   * Resolve which VM this call targets. Precedence:
-   *   1. Explicit opts.vmId.
-   *   2. The session's currentVmId from the registry.
-   *   3. Create a fresh VM owned by this session and set it as current.
-   * @param {{ sessionId?: string, vmId?: string }} [opts]
-   * @returns {Promise<string>}
-   */
-  const resolveVmId = async ({ sessionId, vmId } = {}) => {
-    if (vmId) {
-      const rec = await registry.get(vmId);
-      if (!rec) throw new VMNotReadyError(`vm not found: ${vmId}`);
-      return vmId;
-    }
-    if (!sessionId) {
-      throw new VMNotReadyError('sessionId or vmId required to resolve a VM');
-    }
-    const defaultId = await registry.getDefaultForSession(sessionId);
-    if (defaultId) return defaultId;
-    const shortChat = sessionId.length > 6 ? sessionId.slice(-6) : sessionId;
-    const created = await registry.create({
-      name: `chat-${shortChat}`,
+  // why the shared resolver: explicit vmId, then the session's currentVmId,
+  // then a fresh VM owned by this session (set as current) is the precedence
+  // every engine kind uses. Implicit resolution runs on this client's
+  // resolve:<sessionId> lane (see the queue note above).
+  const instances = createEngineInstanceResolver({
+    registry,
+    queue,
+    notFound: (id) => new VMNotReadyError(`vm not found: ${id}`),
+    missingTarget: () => new VMNotReadyError('sessionId or vmId required to resolve a VM'),
+    createOptions: (sessionId) => ({
+      name: `chat-${shortSessionSuffix(sessionId)}`,
       ownerSessionId: sessionId,
       pinned: false,
-    });
-    await registry.setDefaultForSession(sessionId, created.id);
-    return created.id;
-  };
-
-  /**
-   * resolveVmId behind the session lane when the target is implicit
-   * (see the queue header comment). Explicit vmId lookups are pure
-   * reads — no creation race — so they skip the lane.
-   * @param {{ sessionId?: string, vmId?: string }} [opts]
-   */
-  const resolveVmIdQueued = (opts = {}) => {
-    if (opts.vmId || !opts.sessionId) return resolveVmId(opts);
-    return queue.enqueue(`resolve:${opts.sessionId}`, () => resolveVmId(opts));
-  };
+    }),
+  });
+  /** @param {{ sessionId?: string, vmId?: string }} [opts] @returns {Promise<string>} */
+  const resolveVmId = ({ sessionId, vmId } = {}) => instances.resolve({ sessionId, id: vmId });
+  /** @param {{ sessionId?: string, vmId?: string }} [opts] @returns {Promise<string>} */
+  const resolveVmIdQueued = ({ sessionId, vmId } = {}) =>
+    instances.resolveQueued({ sessionId, id: vmId });
 
   /**
    * One round-trip to the tab, raced against a hard timeout. A timeout here means
@@ -185,28 +167,13 @@ export const createVmClient = ({
    * @param {number} [timeoutMs]
    * @returns {Promise<VmTabReply>}
    */
-  const sendRaced = async (tabId, vmId, message, timeoutMs = messageTimeoutMs) => {
-    /** @type {ReturnType<typeof setTimeout> | undefined} */
-    let timeoutId;
-    /** @type {Promise<never>} */
-    const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => {
-        const err = /** @type {Error & { vmUnresponsive?: boolean }} */ (new Error(
-          `vm ${message.type} timed out after ${timeoutMs / 1000}s (tab ${tabId} unresponsive).`,
-        ));
-        err.vmUnresponsive = true;
-        reject(err);
-      }, timeoutMs);
-    });
-    try {
-      return /** @type {VmTabReply} */ (await Promise.race([
-        sendTabMessage(tabId, { ...message, vmId }),
-        timeoutPromise,
-      ]));
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  };
+  const sendRaced = (tabId, vmId, message, timeoutMs = messageTimeoutMs) =>
+    /** @type {Promise<VmTabReply>} */ (raceTabReply(() => sendTabMessage(tabId, { ...message, vmId }), {
+      timeoutMs,
+      timeoutError: () => Object.assign(new Error(
+        `vm ${message.type} timed out after ${timeoutMs / 1000}s (tab ${tabId} unresponsive).`,
+      ), { vmUnresponsive: true }),
+    }));
 
   /**
    * Reload a wedged/frozen tab in place and wait for the fresh boot. why reload,

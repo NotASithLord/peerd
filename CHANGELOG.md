@@ -10,6 +10,31 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+### Changed
+
+- Engine actors (WebVM, Notebook, Pod, App) now see one verb family,
+  `sandbox_exec`, `sandbox_write` and `sandbox_read`, in place of per-kind
+  names for the same action. Destroying an instance, the App playtest tool and
+  kind-only operations keep their own names. Only the actor model sees the
+  verbs: calls are translated back to each kind's canonical tool before
+  dispatch, and transcripts, audit and the UI keep the canonical names, so the
+  authority plane is unchanged.
+- The tab-hosted engine kinds share one service-worker process contract for
+  instance resolution, tab round-trips and per-call admission guards, and the
+  Pod admission policy is one shared core for the controller and actors.
+
+### Fixed
+
+- A newly opened Pod tab now becomes ready when it reports readiness. Before,
+  only a service-worker restart marked it ready, so every Pod command that
+  opened the tab failed after the ready timeout, and creating a Pod stalled
+  for it.
+- Destroying a Pod re-reads its record inside the repository lock and refuses
+  if it was pinned or removed meanwhile, matching WebVM and Notebook.
+- A Pod command's remote-Git consent now binds to the command the call
+  resolved with, and unparsable relayed command text is refused instead of
+  leaving the call's claim unsettled.
+
 ## [0.10.0] - 2026-10-28
 
 ### Added

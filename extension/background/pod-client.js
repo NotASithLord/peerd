@@ -5,6 +5,7 @@
 
 import browser from '/shared/browser-api.js';
 import { createKeyedQueue } from '/peerd-engine/background.js';
+import { createEngineInstanceResolver, raceTabReply, shortSessionSuffix } from './engine-process.js';
 
 export const POD_TAB_GROUP_TITLE = 'peerd';
 const CALL_TIMEOUT_MS = 310_000;
@@ -19,38 +20,31 @@ export const createPodClient = ({
   clearIntervalFn = clearInterval,
 }) => {
   const resolveQueue = createKeyedQueue();
+  // why the shared resolver: explicit podId, then the session's current Pod,
+  // then a persistent Pod owned by this session is the precedence every engine
+  // kind uses. Reads, status and cancellation use resolveExisting so inspecting
+  // a chat with no Pod never creates durable state.
+  const instances = createEngineInstanceResolver({
+    registry,
+    queue: resolveQueue,
+    notFound: (id) => new Error(`Pod not found: ${id}`),
+    missingTarget: () => new Error('sessionId or podId required'),
+    createOptions: (sessionId) => ({
+      name: `pod-${shortSessionSuffix(sessionId)}`, ownerSessionId: sessionId, persistent: true,
+    }),
+    missingDefault: () => new Error('No current Pod for this session'),
+  });
 
   /** @param {{sessionId?:string,podId?:string}} [options] */
-  const resolveId = async ({ sessionId, podId } = {}) => {
-    if (podId) {
-      if (!await registry.get(podId)) throw new Error(`Pod not found: ${podId}`);
-      return podId;
-    }
-    if (!sessionId) throw new Error('sessionId or podId required');
-    const current = await registry.getDefaultForSession(sessionId);
-    if (current) return current;
-    const created = await registry.create({ name: `pod-${sessionId.slice(-6)}`, ownerSessionId: sessionId, persistent: true });
-    await registry.setDefaultForSession(sessionId, created.id);
-    return created.id;
-  };
+  const resolveId = ({ sessionId, podId } = {}) => instances.resolve({ sessionId, id: podId });
 
   /** @param {{sessionId?:string,podId?:string}} options */
-  const resolveQueued = (options) => options.podId || !options.sessionId
-    ? resolveId(options)
-    : resolveQueue.enqueue(`resolve:${options.sessionId}`, () => resolveId(options));
+  const resolveQueued = ({ sessionId, podId }) => instances.resolveQueued({ sessionId, id: podId });
 
   /** Resolve a Pod for a read/cancel operation without creating durable state.
    * @param {{sessionId?:string,podId?:string}} [options] */
-  const resolveExistingId = async ({ sessionId, podId } = {}) => {
-    if (podId) {
-      if (!await registry.get(podId)) throw new Error(`Pod not found: ${podId}`);
-      return podId;
-    }
-    if (!sessionId) throw new Error('sessionId or podId required');
-    const current = await registry.getDefaultForSession(sessionId);
-    if (!current) throw new Error('No current Pod for this session');
-    return current;
-  };
+  const resolveExistingId = ({ sessionId, podId } = {}) =>
+    instances.resolveExisting({ sessionId, id: podId });
 
   /** @param {string} podId @param {Record<string,any>} message @param {{open?:boolean,signal?:AbortSignal}} [options] */
   const callTab = async (podId, message, { open = true, signal } = {}) => {
@@ -61,15 +55,15 @@ export const createPodClient = ({
     if (signal?.aborted) throw new Error('Pod command cancelled before dispatch');
     const tabId = tracker.getTabId(podId);
     if (tabId == null) throw new Error(`Pod ${podId} is stopped`);
-    /** @type {ReturnType<typeof setTimeout>|undefined} */ let timer;
-    const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Pod ${message.type} timed out; outcome may be unknown`)), CALL_TIMEOUT_MS); });
-    try {
-      const response = /** @type {any} */ (await Promise.race([
-        sendTabMessage(tabId, { ...message, podId }), timeout,
-      ]));
-      if (!response?.ok) throw new Error(response?.error ?? 'Pod returned no response');
-      return response;
-    } finally { clearTimeout(timer); }
+    const response = /** @type {any} */ (await raceTabReply(
+      () => sendTabMessage(tabId, { ...message, podId }),
+      {
+        timeoutMs: CALL_TIMEOUT_MS,
+        timeoutError: () => new Error(`Pod ${message.type} timed out; outcome may be unknown`),
+      },
+    ));
+    if (!response?.ok) throw new Error(response?.error ?? 'Pod returned no response');
+    return response;
   };
 
   return {

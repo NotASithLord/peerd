@@ -39,7 +39,7 @@ import {
 import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
 import { ACTOR_LOOP_EVENT_BYTES } from '/shared/actor-channel-protocol.js';
 import { normalizeApiOrigin } from '/shared/api-origin.js';
-import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
+import { decidePodOperation } from './pod-tool-authority.js';
 import { bindRepositoryToolAuthority } from './repository-tool-authority.js';
 import { bindVmToolAuthority } from './vm-tool-authority.js';
 import { bindNotebookToolAuthority } from './notebook-tool-authority.js';
@@ -1598,6 +1598,45 @@ export const makeOffscreenActorClient = ({
       if (callDispatches.size === 0) entry.grant.dispatchesByCall.delete(entry.effect.callId);
     }
   };
+  // why one Pod policy: the admission checks, the actor instance pin and the
+  // Git-consent state machine live in pod-tool-authority.js, shared with the
+  // controller bridge. This relay owns only its envelope: grant, claim, refusal
+  // text, relay signal, liveness and receipt.
+  const runPodRoute = async (
+    /** @type {string} */ podOperation,
+    /** @type {any} */ msg,
+    /** @type {unknown} */ sender,
+    /** @type {any} */ boundGrant,
+    /** @type {string[]} */ fields,
+  ) => {
+    const route = `pod/${podOperation}`;
+    const grant = grantFor(msg, sender, boundGrant);
+    const entry = await domainEntry(grant, msg, 'pod', fields);
+    const refuse = (/** @type {string} */ error) =>
+      refuseClaimedEntry(entry, { ok: false, error, outcomeKnown: true });
+    if (!entry) return refuse(`${route}: authority mismatch`);
+    const decision = decidePodOperation(podOperation, {
+      message: msg, args: entry.args, domainState: entry.domainState, ctx: entry.ctx,
+    });
+    if ('refusal' in decision) {
+      return refuse(decision.refusal === 'invalid-remote' ? `${route}: invalid remote`
+        : decision.refusal === 'invalid-command' ? `${route}: invalid admitted command`
+          : `${route}: authority mismatch`);
+    }
+    decision.admit();
+    const effect = decision.effect({ signal: entry.grant.relaySignal });
+    if (!effect) {
+      return decision.whenUnavailable === 'decline'
+        ? refuseClaimedEntry(entry, { ok: true, value: false, outcomeKnown: true })
+        : refuse('pod_unavailable');
+    }
+    const result = /** @type {any} */ (await runDomainEffect(
+      entry, route, effect,
+      decision.outcome ? HOST_EFFECT_OUTCOME[decision.outcome] : null,
+    ));
+    decision.settle(exactAuthorityValue(result), () => runIsLive(entry.grant));
+    return result;
+  };
   const stampActorCallResult = (
     /** @type {any} */ grant,
     /** @type {string} */ callId,
@@ -2030,256 +2069,42 @@ export const makeOffscreenActorClient = ({
         }) : { ok: false, error: 'message_actor is not enabled' },
       HOST_EFFECT_OUTCOME.actorMessage);
     },
-    'pod/resolve': async (
+    'pod/resolve': (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
-    ) => {
-      const grant = grantFor(msg, sender, boundGrant);
-      const entry = await domainEntry(grant, msg, 'pod', [
+    ) => runPodRoute('resolve', msg, sender, boundGrant, [
         'podId', ...(typeof msg.command === 'string' ? ['command'] : []),
-      ]);
-      const boundPodId = entry?.ctx?.actorType === 'pod'
-        ? entry.ctx.actorInstanceId : null;
-      if (!entry || boundPodId && msg.podId !== undefined && msg.podId !== boundPodId
-          || !boundPodId && msg.podId !== entry.args?.podId) {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod/resolve: authority mismatch', outcomeKnown: true,
-        });
-      }
-      const resolve = entry.ctx?.podClient?.resolveId;
-      if (typeof resolve !== 'function') {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod_unavailable', outcomeKnown: true,
-        });
-      }
-      const result = /** @type {any} */ (await runDomainEffect(entry, 'pod/resolve', () => resolve({
-        sessionId: entry.ctx.session?.sessionId, podId: boundPodId ?? msg.podId,
-      })));
-      const resolvedPodId = exactAuthorityValue(result);
-      if (typeof resolvedPodId === 'string') {
-        entry.domainState.podId = resolvedPodId;
-        if (typeof msg.command === 'string') entry.domainState.command = msg.command;
-      }
-      return result;
-    },
-    'pod/read-remote': async (
+      ]),
+    'pod/read-remote': (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
-    ) => {
-      const grant = grantFor(msg, sender, boundGrant);
-      const entry = await domainEntry(grant, msg, 'pod', ['podId']);
-      const intent = entry ? podGitRemoteIntents(entry.domainState.command ?? '')[0] : null;
-      if (!entry || typeof msg.podId !== 'string' || msg.podId !== entry.domainState.podId
-          || !intent || intent.url) {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod/read-remote: authority mismatch', outcomeKnown: true,
-        });
-      }
-      const readRemote = entry.ctx?.repositories?.getRemote;
-      const result = /** @type {any} */ (await runDomainEffect(entry, 'pod/read-remote', () =>
-        typeof readRemote === 'function'
-          ? readRemote({ kind: 'pod', id: msg.podId }) : null));
-      const remote = exactAuthorityValue(result);
-      if (remote !== undefined) entry.domainState.remote = remote;
-      return result;
-    },
-    'pod/confirm-git': async (
+    ) => runPodRoute('read-remote', msg, sender, boundGrant, ['podId']),
+    'pod/confirm-git': (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
-    ) => {
-      const grant = grantFor(msg, sender, boundGrant);
-      const entry = await domainEntry(grant, msg, 'pod', ['op']);
-      const intents = entry ? podGitRemoteIntents(entry.domainState.command ?? '') : [];
-      const intent = intents.length === 1 ? intents[0] : null;
-      const target = intent?.url ?? entry?.domainState?.remote?.url;
-      if (!entry || typeof entry.domainState.podId !== 'string'
-          || !intent || msg.op !== intent.op || typeof target !== 'string') {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod/confirm-git: authority mismatch', outcomeKnown: true,
-        });
-      }
-      let origin;
-      try { origin = new URL(target).origin; }
-      catch {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod/confirm-git: invalid remote', outcomeKnown: true,
-        });
-      }
-      const confirm = entry.ctx?.confirm;
-      if (typeof confirm !== 'function') {
-        return refuseClaimedEntry(entry, { ok: true, value: false, outcomeKnown: true });
-      }
-      const result = /** @type {any} */ (await runDomainEffect(entry, 'pod/confirm-git', () => confirm({
-        tool: 'pod_exec', kind: `git_${intent.op}`,
-        sideEffect: intent.op === 'push' ? 'mutate_external' : 'write',
-        origins: [origin],
-        summary: intent.op === 'push'
-          ? `Allow this one Pod job to push code and commit history to ${target}?`
-          : `Allow this one Pod job to ${intent.op} ${target} through peerd's audited Git transport?`,
-      }, entry.grant.relaySignal), HOST_EFFECT_OUTCOME.confirmation));
-      const answer = exactAuthorityValue(result);
-      if (runIsLive(entry.grant) && [true, 'yes_once', 'yes_session'].includes(answer)) {
-        entry.domainState.remoteGitGrant = { op: intent.op, url: target };
-      }
-      return result;
-    },
-    'pod/exec': async (
+    ) => runPodRoute('confirm-git', msg, sender, boundGrant, ['op']),
+    'pod/exec': (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
-    ) => {
-      const grant = grantFor(msg, sender, boundGrant);
-      const entry = await domainEntry(grant, msg, 'pod', [
+    ) => runPodRoute('exec', msg, sender, boundGrant, [
         'command', 'podId', 'timeoutMs', 'background', 'remoteGitGrant',
-      ]);
-      const args = entry?.args;
-      let program;
-      let intents;
-      try {
-        program = parsePodShell(args?.command ?? '');
-        intents = podGitRemoteIntents(args?.command ?? '');
-      } catch {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod/exec: invalid admitted command', outcomeKnown: true,
-        });
-      }
-      const expectedTimeout = Math.min(300_000, Math.max(1, Number(args?.timeoutMs) || 30_000));
-      const expectedBackground = args?.background === true || program.background;
-      const expectedGrant = intents.length === 1
-        ? entry?.domainState?.remoteGitGrant ?? null : null;
-      if (!entry || intents.length > 1 || typeof entry.domainState.podId !== 'string'
-          || msg.command !== args?.command || msg.podId !== entry.domainState.podId
-          || msg.timeoutMs !== expectedTimeout || msg.background !== expectedBackground
-          || !sameCanonicalStructuredClone(msg.remoteGitGrant, expectedGrant)) {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod/exec: authority mismatch', outcomeKnown: true,
-        });
-      }
-      if (expectedGrant) entry.domainState.remoteGitGrant = null;
-      const execute = entry.ctx?.podClient?.exec;
-      if (typeof execute !== 'function') {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod_unavailable', outcomeKnown: true,
-        });
-      }
-      return runDomainEffect(entry, 'pod/exec', () => execute(msg.command, {
-        podId: msg.podId,
-        timeoutMs: expectedTimeout,
-        background: expectedBackground,
-        remoteGitGrant: expectedGrant,
-        signal: expectedBackground ? undefined : /** @type {any} */ (grant).relaySignal,
-      }), HOST_EFFECT_OUTCOME.podExecution);
-    },
-    'pod/status': async (
+      ]),
+    'pod/status': (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
-    ) => {
-      const grant = grantFor(msg, sender, boundGrant);
-      const entry = await domainEntry(grant, msg, 'pod', [
-        'podId', 'jobId', 'stream', 'offset', 'limit',
-      ]);
-      const args = entry?.args;
-      const boundPodId = entry?.ctx?.actorType === 'pod'
-        ? entry.ctx.actorInstanceId : null;
-      if (!entry || msg.podId !== args?.podId || msg.jobId !== args?.jobId
-          || msg.stream !== args?.stream || msg.offset !== args?.offset
-          || msg.limit !== args?.limit
-          || boundPodId && msg.podId !== boundPodId) {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod/status: authority mismatch', outcomeKnown: true,
-        });
-      }
-      const status = entry.ctx?.podClient?.status;
-      if (typeof status !== 'function') {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod_unavailable', outcomeKnown: true,
-        });
-      }
-      return runDomainEffect(entry, 'pod/status', () => status({
-        sessionId: entry.ctx.session?.sessionId,
-        podId: msg.podId, jobId: msg.jobId, stream: msg.stream,
-        offset: msg.offset, limit: msg.limit,
-      }));
-    },
-    'pod/cancel': async (
+    ) => runPodRoute('status', msg, sender, boundGrant, ['podId', 'jobId', 'stream', 'offset', 'limit']),
+    'pod/cancel': (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
-    ) => {
-      const grant = grantFor(msg, sender, boundGrant);
-      const entry = await domainEntry(grant, msg, 'pod', ['podId', 'jobId']);
-      const args = entry?.args;
-      const boundPodId = entry?.ctx?.actorType === 'pod'
-        ? entry.ctx.actorInstanceId : null;
-      if (!entry || typeof msg.jobId !== 'string' || msg.jobId !== args?.jobId
-          || msg.podId !== args?.podId || boundPodId && msg.podId !== boundPodId) {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod/cancel: authority mismatch', outcomeKnown: true,
-        });
-      }
-      const cancel = entry.ctx?.podClient?.cancel;
-      if (typeof cancel !== 'function') {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod_unavailable', outcomeKnown: true,
-        });
-      }
-      return runDomainEffect(entry, 'pod/cancel', () => cancel(msg.jobId, {
-        sessionId: entry.ctx.session?.sessionId, podId: msg.podId,
-      }), HOST_EFFECT_OUTCOME.podCancel);
-    },
-    'pod/read-file': async (
+    ) => runPodRoute('cancel', msg, sender, boundGrant, ['podId', 'jobId']),
+    'pod/read-file': (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
-    ) => {
-      const grant = grantFor(msg, sender, boundGrant);
-      const entry = await domainEntry(grant, msg, 'pod', ['podId', 'path']);
-      const args = entry?.args;
-      const boundPodId = entry?.ctx?.actorType === 'pod'
-        ? entry.ctx.actorInstanceId : null;
-      if (!entry || typeof msg.path !== 'string' || msg.path !== args?.path
-          || msg.podId !== args?.podId || boundPodId && msg.podId !== boundPodId) {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod/read-file: authority mismatch', outcomeKnown: true,
-        });
-      }
-      const readFile = entry.ctx?.podClient?.readFile;
-      if (typeof readFile !== 'function') {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod_unavailable', outcomeKnown: true,
-        });
-      }
-      return runDomainEffect(entry, 'pod/read-file', () => readFile(msg.path, {
-        sessionId: entry.ctx.session?.sessionId, podId: msg.podId,
-      }));
-    },
-    'pod/write-file': async (
+    ) => runPodRoute('read-file', msg, sender, boundGrant, ['podId', 'path']),
+    'pod/write-file': (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,
-    ) => {
-      const grant = grantFor(msg, sender, boundGrant);
-      const entry = await domainEntry(grant, msg, 'pod', [
-        'podId', 'path', 'content',
-      ]);
-      const args = entry?.args;
-      const boundPodId = entry?.ctx?.actorType === 'pod'
-        ? entry.ctx.actorInstanceId : null;
-      if (!entry || typeof msg.path !== 'string' || typeof msg.content !== 'string'
-          || msg.path !== args?.path || msg.content !== args?.content
-          || msg.podId !== args?.podId || boundPodId && msg.podId !== boundPodId) {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod/write-file: authority mismatch', outcomeKnown: true,
-        });
-      }
-      const writeFile = entry.ctx?.podClient?.writeFile;
-      if (typeof writeFile !== 'function') {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'pod_unavailable', outcomeKnown: true,
-        });
-      }
-      return runDomainEffect(entry, 'pod/write-file', () => writeFile(
-        msg.path, msg.content, {
-          sessionId: entry.ctx.session?.sessionId, podId: msg.podId,
-        },
-      ), HOST_EFFECT_OUTCOME.podMutation);
-    },
+    ) => runPodRoute('write-file', msg, sender, boundGrant, ['podId', 'path', 'content']),
     'repository/read-pod': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,

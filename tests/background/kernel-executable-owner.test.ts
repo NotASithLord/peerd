@@ -129,7 +129,7 @@ describe('kernel executable owner', () => {
       ['site-fetch/call', 'relay'], ['script/model-call', 'relay'],
       ['script-run/abort', 'relay'], ['a2a/call', 'relay'],
       ['vm/tab-ready', 'engine'], ['vm/tab-failed', 'engine'], ['js/tab-ready', 'engine'],
-      ['pod/tab-adopt', 'engine'], ['app/tab-ready', 'engine'],
+      ['pod/tab-adopt', 'engine'], ['pod/tab-ready', 'engine'], ['app/tab-ready', 'engine'],
       ['app/actor-retry', 'engine'],
     ]);
     for (const [route, owner] of expected) {
@@ -302,9 +302,11 @@ describe('kernel executable owner', () => {
     expect(await control.routes['js/tab-ready'](
       { notebookId: 'notebook-1' }, sender('notebook', 'notebook-2'),
     )).toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
-    expect(await control.routes['pod/tab-adopt'](
-      { podId: 'pod-1' }, sender('pod', 'pod-2'),
-    )).toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
+    for (const route of ['pod/tab-adopt', 'pod/tab-ready']) {
+      expect(await control.routes[route](
+        { podId: 'pod-1' }, sender('pod', 'pod-2'),
+      )).toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
+    }
     expect(await control.routes['app/tab-ready']({ appId: 'app-2' }, 'app-sender'))
       .toMatchObject({ ok: false, error: 'kernel-route-unauthorized' });
     expect(loads).toBe(0);
@@ -316,9 +318,11 @@ describe('kernel executable owner', () => {
     expect(await control.routes['js/tab-ready'](
       { notebookId: 'notebook-1' }, sender('notebook', 'notebook-1'),
     )).toMatchObject({ ok: true, name: 'js/tab-ready' });
-    expect(await control.routes['pod/tab-adopt'](
-      { podId: 'pod-1' }, sender('pod', 'pod-1'),
-    )).toMatchObject({ ok: true, name: 'pod/tab-adopt' });
+    for (const route of ['pod/tab-adopt', 'pod/tab-ready']) {
+      expect(await control.routes[route](
+        { podId: 'pod-1' }, sender('pod', 'pod-1'),
+      )).toMatchObject({ ok: true, name: route });
+    }
     expect(await control.routes['app/actor-retry']({ appId: 'app-1' }, 'app-sender'))
       .toMatchObject({ ok: true, name: 'app/actor-retry' });
     expect(loads).toBe(1);
