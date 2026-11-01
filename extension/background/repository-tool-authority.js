@@ -117,9 +117,13 @@ export const createRepositoryToolAuthority = ({ binding, ctx, signal, shared = {
           || (boundPodId !== null && podId !== boundPodId)
           || shared.podRecord?.id !== podId || shared.podRecord.pinned
           || typeof ctx?.podTabTracker?.closeTab !== 'function'
+          || typeof ctx?.podRegistry?.get !== 'function'
           || typeof ctx?.podRegistry?.delete !== 'function'
           || !repositories) throw mismatch();
       return repositories.coordinate({ kind: 'pod', id: podId }, async () => {
+        // why: The Pod can change while it waits for the repository lane.
+        const fresh = await ctx.podRegistry.get(podId);
+        if (!fresh || fresh.pinned === true) throw mismatch();
         requireLive();
         await ctx.podTabTracker.closeTab(podId);
         await repositories.destroy({ kind: 'pod', id: podId }, { worktree: true });
