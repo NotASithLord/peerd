@@ -1265,9 +1265,28 @@ describe('kernel turn authority adapter', () => {
     expect(await routes['js/tab-ready'](
       { notebookId: 'notebook-1' }, { tab: { id: 22, url: 'notebook://notebook-1' } },
     )).toBe(false);
+    // Readiness before adoption, from another tab, or for another Pod is ignored.
+    const readied: any[] = [];
+    const markReady = h.engine.podTabTracker.onTabReady;
+    h.engine.podTabTracker.onTabReady = (...args: any[]) => { readied.push(args); return markReady(...args); };
+    expect(await routes['pod/tab-ready'](
+      { podId: 'pod-1' }, { tab: { id: 23, url: 'pod://pod-1' } },
+    )).toBe(false);
     expect(await routes['pod/tab-adopt'](
       { podId: 'pod-1' }, { tab: { id: 23, url: 'pod://pod-1' } },
     )).toEqual({ ok: true });
+    expect(await routes['pod/tab-ready'](
+      { podId: 'pod-1' }, { tab: { id: 99, url: 'pod://pod-1' } },
+    )).toBe(false);
+    expect(await routes['pod/tab-ready'](
+      { podId: 'pod-1' }, { tab: { id: 23, url: 'pod://pod-other' } },
+    )).toBe(false);
+    expect(readied).toEqual([]);
+    // The adopting tab's own readiness is accepted.
+    expect(await routes['pod/tab-ready'](
+      { podId: 'pod-1' }, { tab: { id: 23, url: 'pod://pod-1' } },
+    )).toBe(false);
+    expect(readied).toEqual([['pod-1', 23]]);
     expect(await routes['vm/tab-ready'](
       { vmId: 'vm-1' }, { tab: { id: 24, url: 'vm://other' } },
     )).toBe(false);

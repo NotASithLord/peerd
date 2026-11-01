@@ -2959,6 +2959,15 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         await syncNetworkCustody();
         return { ok: true };
       },
+      // why: A new Pod must report readiness before its first command.
+      'pod/tab-ready': async (/** @type {any} */ message, /** @type {any} */ sender) => {
+        if (!trustedEngineMessage(sender) || typeof message?.podId !== 'string'
+            || engine.podTabTracker.parseIdFromUrl(sender.tab.url) !== message.podId
+            || !await engine.podRegistry.get(message.podId)
+            || engine.podTabTracker.getTabId(message.podId) !== sender.tab.id) return false;
+        engine.podTabTracker.onTabReady(message.podId, sender.tab.id);
+        return false;
+      },
       'app/tab-ready': (/** @type {any} */ message, /** @type {any} */ sender) =>
         trustedEngineMessage(sender) ? attachAppTabActor(message, sender) : false,
       'app/actor-retry': (/** @type {any} */ message, /** @type {any} */ sender) =>
