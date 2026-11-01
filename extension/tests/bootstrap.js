@@ -32,7 +32,7 @@
   // this global, so assign through a writable view of the same object.
   /** @type {{ id: string }} */ (globalThis.chrome.runtime).id = 'peerd-test-runner';
   // Same evaluation-time class as runtime.id, not a behavioral stub:
-  // background/vm-tab-tracker.js computes its tab-URL prefix via
+  // background/tab-tracker.js computes its tab-URL prefix via
   // browser.runtime.getURL at module top, so merely IMPORTING it under
   // the http harness needs this sync string mapping. Behavior still
   // goes through injected deps / tests/mocks.

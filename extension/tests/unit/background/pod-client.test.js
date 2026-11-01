@@ -5,7 +5,7 @@
 
 import { describe, it, expect } from '../../framework.js';
 import { createPodClient } from '/background/pod-client.js';
-import { createPodTabTracker } from '/background/pod-tab-tracker.js';
+import { createPodTabTracker } from '/background/tab-tracker.js';
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
