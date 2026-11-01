@@ -49,7 +49,16 @@ import {
   semanticHooksFor,
 } from '/peerd-runtime/controller-turn.js';
 import { makeInMemorySessions, runActorLoop, makeActorSummaryFence } from '/peerd-runtime/actor/actor-worker-core.js';
-import { hydrateToolDescriptors } from '/peerd-runtime/semantic.js';
+import {
+  canonicalSandboxHistory,
+  canonicalSandboxLoopEvent,
+  canonicalSandboxToolName,
+  hydrateToolDescriptors,
+  isSandboxActorType,
+  projectSandboxHistory,
+  projectSandboxTools,
+  projectSandboxTrimSummary,
+} from '/peerd-runtime/semantic.js';
 import {
   callModel as callProviderModel,
   costOf,
@@ -459,6 +468,13 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       [...hydratedTools, ...programTools].map((tool) => [tool.name, tool]),
     );
     const visibleToolNames = new Set(hydratedTools.map((tool) => tool.name));
+    // why: a bound engine actor is shown the shared sandbox_* verbs. Only the
+    // model sees them; every name below this line (descriptor lookup, gates,
+    // grants, the operation log) stays canonical. See tools/sandbox-verbs.js.
+    const sandboxActorType = metadata.recordKind === 'actor'
+      && isSandboxActorType(metadata.actorType) ? metadata.actorType : null;
+    const canonicalToolName = (/** @type {unknown} */ name) => sandboxActorType
+      && typeof name === 'string' ? canonicalSandboxToolName(sandboxActorType, name) : name;
     const childOperationsFor = (/** @type {any} */ request) =>
       controllerOperationsForSpawnedTools(
         visibleToolNames, request.tools, request.allowRecursion === true,
@@ -1173,8 +1189,10 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         model: program.model,
         kind: metadata.recordKind === 'spawned' ? 'spawned' : 'actor',
         depth: metadata.depth,
-        messages: state.messages,
-        trimSummary: state.trimSummary,
+        messages: sandboxActorType
+          ? projectSandboxHistory(sandboxActorType, state.messages) : state.messages,
+        trimSummary: sandboxActorType
+          ? projectSandboxTrimSummary(sandboxActorType, state.trimSummary) : state.trimSummary,
       });
       semanticSession = await sessions.get(metadata.sessionId);
       const modelEgress = createActorModelEgress({
@@ -1200,11 +1218,24 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           : {}),
         modelEgress,
       });
-      const toolDispatch = (/** @type {any} */ call) => controllerHostsTool(call?.name)
-        ? executeActorTool(call)
-        : Promise.resolve({
-          ok: false, error: 'actor tool has no controller owner', outcomeKnown: true,
-        });
+      const toolDispatch = (/** @type {any} */ modelCall) => {
+        const name = canonicalToolName(modelCall?.name);
+        // A verb this kind does not have is refused like any unknown tool,
+        // with an error that tells the model why.
+        if (name === null) {
+          return Promise.resolve({
+            ok: false, outcomeKnown: true,
+            error: `unknown_tool: ${String(modelCall?.name)} is not available to this ${sandboxActorType} actor`,
+            meta: { toolName: modelCall?.name, primitive: 'unknown', gates: [], durationMs: 0 },
+          });
+        }
+        const call = name === modelCall?.name ? modelCall : { ...modelCall, name };
+        return controllerHostsTool(call?.name)
+          ? executeActorTool(call)
+          : Promise.resolve({
+            ok: false, error: 'actor tool has no controller owner', outcomeKnown: true,
+          });
+      };
       // Phase 3: a WEB/API actor self-fences its own untrusted-provenance rolling
       // summary. The SW's closure (over a policy-reduced live tab origin) can't
       // cross postMessage, so rebuild it here from the pure fence fns using the
@@ -1215,13 +1246,15 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
         tabOrigin: metadata.tabOrigin,
         origin: metadata.origin,
       });
-      const result = await runActorLoop(
+      const loopResult = await runActorLoop(
         {
           runUserTurn, sessions, callModel, toolDispatch,
           // Scheduling is semantic, not authority. Classify the exact hydrated
           // descriptor the actor was shown under the immutable permission
           // projection pinned for this run, matching the main controller.
-          classifyToolCall: (/** @type {string} */ name) => {
+          classifyToolCall: (/** @type {string} */ modelName) => {
+            const name = canonicalToolName(modelName);
+            if (typeof name !== 'string') return null;
             const descriptor = descriptorsByName.get(name);
             if (!descriptor || !visibleToolNames.has(name)) return null;
             return decideAction({
@@ -1232,8 +1265,14 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           },
           getSystemPrompt: () => program.systemPrompt,
           appendAudit: async () => {},
-          onEvent: (/** @type {object} */ event) => self.postMessage({ type: 'loop-event', runId, event }),
-          tools: hydratedTools,
+          // why canonical on the way out: the verbs are the model's view only.
+          // Persisted turns, audit labels, the UI and evals keep canonical names.
+          onEvent: (/** @type {object} */ event) => self.postMessage({
+            type: 'loop-event', runId,
+            event: sandboxActorType ? canonicalSandboxLoopEvent(sandboxActorType, event) : event,
+          }),
+          tools: sandboxActorType
+            ? projectSandboxTools(sandboxActorType, hydratedTools) : hydratedTools,
           ...(fenceActorSummary ? { fenceActorSummary } : {}),
         },
         {
@@ -1248,6 +1287,9 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
           preflightReply: metadata.preflightReply,
         },
       );
+      const result = sandboxActorType
+        ? { ...loopResult, newMessages: canonicalSandboxHistory(sandboxActorType, loopResult.newMessages) }
+        : loopResult;
       // why the worker does NOT stamp `aborted`: a Stop unwinds the loop cleanly (the
       // relay rejects, the loop stops with an empty reply), but whether that counts as
       // a cancellation vs a raced-but-completed turn is decided at the SW client, which

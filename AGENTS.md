@@ -388,7 +388,28 @@ gotchas to know going in:
   Pod, App (opaque-origin iframe) - each with its own registry + tab
   tracker + RPC client. The fifth, the headless worker (`script`), is the
   same sealed worker run offscreen with no tab, for the agent's own quick
-  compute (code mode).
+  compute (code mode). The tab-hosted kinds share ONE process contract in
+  the SW (`background/engine-process.js`: instance resolution and its create
+  lane, the timed tab round-trip, and the per-call authority admission guards;
+  the file header says which kinds use which part); a client or authority
+  keeps only what its kind MEANS. The Pod
+  admission policy (including the single-use remote-Git consent) is one pure
+  core (`background/pod-tool-authority.js`) that both the controller bridge
+  and the actor relay call, so the two hosts cannot drift.
+- Engine actors see ONE verb family for the actions every kind shares:
+  `sandbox_exec`, `sandbox_write`, `sandbox_read`
+  (`peerd-runtime/tools/sandbox-verbs.js`). Destroying an instance and the
+  App's playtest tool deliberately keep their own names (the module says why).
+  It is a model-surface PROJECTION of the canonical per-kind tools (`vm_boot`,
+  `js_write_file`, `pod_read`, ...). Only the actor's model view changes (its
+  prompt, and in the actor worker its descriptors and replayed history):
+  descriptors, the actor prompt and replayed history are projected on the way
+  to the model, a verb call is translated back to its kind's canonical name
+  before dispatch, and the transcript and loop events leave the worker under
+  canonical names. The catalog, ownership families, exact grants, gates, pins,
+  operation log, audit, persisted transcripts and UI therefore all stay keyed
+  by the canonical names, so no security check moves. Kind-only operations
+  keep their names.
 - Policy-gated dispatcher with full lineage attached to every tool
   result. The live stack is defined in `gates.js` plus the default
   pre/post tool-use hooks; keep prose at the invariant level so it does

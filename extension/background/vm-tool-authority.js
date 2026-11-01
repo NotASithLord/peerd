@@ -7,10 +7,9 @@
 import {
   abortError, cancelBestEffort, readBoundedResponseBytes, ResponseTooLargeError,
 } from '/shared/abort.js';
+import { createEngineAuthorityGuards, engineAuthorityMismatch } from './engine-process.js';
 
-const mismatch = () => Object.assign(new Error('VM authority mismatch'), {
-  outcomeKnown: true, retryable: false,
-});
+const mismatch = () => engineAuthorityMismatch('VM');
 
 /** Stop owns settlement even when a transport ignores its signal. Any response
  * arriving after settlement is observed only long enough to cancel its body.
@@ -43,20 +42,9 @@ const fetchForImport = (webFetch, url, signal) => {
 export const createVmToolAuthority = ({ binding, ctx, signal = ctx?.abortSignal, shared = {} }) => {
   const args = binding.args;
   const sessionId = ctx?.session?.sessionId;
-  const boundVmId = ctx?.actorType === 'webvm' ? ctx.actorInstanceId : null;
-  const requireBoundVm = (/** @type {unknown} */ vmId) => {
-    if (boundVmId && vmId !== boundVmId) throw mismatch();
-  };
-
-  const requireOperation = (/** @type {string} */ name) => {
-    if (binding.operation !== name) throw mismatch();
-  };
-  const requireLive = () => {
-    if (!signal?.aborted) return;
-    throw Object.assign(new Error('VM operation stopped before mutation'), {
-      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
-    });
-  };
+  const {
+    boundId: boundVmId, requireBound: requireBoundVm, requireOperation, requireLive,
+  } = createEngineAuthorityGuards({ label: 'VM', actorType: 'webvm', binding, ctx, signal });
 
   return Object.freeze({
     readVm: async (/** @type {string} */ vmId) => {

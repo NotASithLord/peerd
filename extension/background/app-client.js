@@ -12,6 +12,7 @@ import {
 } from '/peerd-engine/background.js';
 import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
 import { APP_DATA_PATH_RE } from '/shared/app-dweb-identity.js';
+import { createEngineInstanceResolver } from './engine-process.js';
 export { appReleaseDescriptorMatches } from '/shared/app-dweb-identity.js';
 
 export const APP_TAB_GROUP_TITLE = 'peerd';
@@ -393,18 +394,18 @@ export const createAppClient = ({
     throw appRollbackCompleted(cause, 'App mutation failed; rollback completed');
   };
 
+  // why the shared resolver: same precedence as every engine kind, except an
+  // App is never created implicitly (an App needs authored files), so a chat
+  // with no current App is refused with the typed AppDefaultMissingError.
+  const instances = createEngineInstanceResolver({
+    registry,
+    notFound: (id) => new Error(`app not found: ${id}`),
+    missingTarget: () => new Error('sessionId or appId required'),
+    createOptions: null,
+    missingDefault: () => new AppDefaultMissingError(),
+  });
   /** @param {{ sessionId?: string, appId?: string }} [opts] @returns {Promise<string>} */
-  const resolveId = async ({ sessionId, appId } = {}) => {
-    if (appId) {
-      const rec = await registry.get(appId);
-      if (!rec) throw new Error(`app not found: ${appId}`);
-      return appId;
-    }
-    if (!sessionId) throw new Error('sessionId or appId required');
-    const defaultId = await registry.getDefaultForSession(sessionId);
-    if (!defaultId) throw new AppDefaultMissingError();
-    return defaultId;
-  };
+  const resolveId = ({ sessionId, appId } = {}) => instances.resolve({ sessionId, id: appId });
 
   /**
    * Create a new app. `files` is a path → content map; we write each

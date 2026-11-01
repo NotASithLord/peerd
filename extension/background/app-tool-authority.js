@@ -5,12 +5,11 @@
 // controller owns validation, search presentation, paging, and result shaping.
 
 import { sameCanonicalStructuredClone } from '/shared/canonical-clone-digest.js';
+import { createEngineAuthorityGuards, engineAuthorityMismatch } from './engine-process.js';
 
 const APP_AUTHORITY_ARGUMENT_BYTES = 8 * 1024 * 1024;
 
-const mismatch = () => Object.assign(new Error('App authority mismatch'), {
-  outcomeKnown: true, retryable: false,
-});
+const mismatch = () => engineAuthorityMismatch('App');
 
 /** @param {{binding:any,ctx:any,signal?:AbortSignal,shared?:any,appProgramSemanticToken?:string}} input */
 export const createAppToolAuthority = ({
@@ -18,20 +17,15 @@ export const createAppToolAuthority = ({
 }) => {
   const args = binding.args;
   const sessionId = ctx?.session?.sessionId;
-  const boundAppId = ctx?.actorType === 'app' ? ctx.actorInstanceId : null;
-  const requireOperation = (/** @type {string} */ name) => {
-    if (binding.operation !== name) throw mismatch();
-  };
+  const {
+    boundId: boundAppId, requireOperation, requireLive,
+  } = createEngineAuthorityGuards({ label: 'App', actorType: 'app', binding, ctx, signal });
+  // why App's own pin: an App call may omit appId to mean the bound App, so
+  // the shared requireBound (which demands the id) is too strict here.
   const sameApp = (/** @type {unknown} */ appId) => boundAppId
     ? appId === undefined || appId === boundAppId
     : appId === args.appId;
   const appIdFor = (/** @type {string|undefined} */ appId) => boundAppId ?? appId;
-  const requireLive = () => {
-    if (!signal?.aborted) return;
-    throw Object.assign(new Error('App operation stopped before mutation'), {
-      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
-    });
-  };
 
   return Object.freeze({
     updateApp: async (
