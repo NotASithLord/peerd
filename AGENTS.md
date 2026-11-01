@@ -388,7 +388,14 @@ gotchas to know going in:
   Pod, App (opaque-origin iframe) - each with its own registry + tab
   tracker + RPC client. The fifth, the headless worker (`script`), is the
   same sealed worker run offscreen with no tab, for the agent's own quick
-  compute (code mode).
+  compute (code mode). The tab-hosted kinds share ONE process contract in
+  the SW (`background/engine-process.js`: instance resolution and its create
+  lane, the timed tab round-trip, and the per-call authority admission guards;
+  the file header says which kinds use which part); a client or authority
+  keeps only what its kind MEANS. The Pod
+  admission policy (including the single-use remote-Git consent) is one pure
+  core (`background/pod-tool-authority.js`) that both the controller bridge
+  and the actor relay call, so the two hosts cannot drift.
 - Policy-gated dispatcher with full lineage attached to every tool
   result. The live stack is defined in `gates.js` plus the default
   pre/post tool-use hooks; keep prose at the invariant level so it does
