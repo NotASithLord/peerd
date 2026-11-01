@@ -25,6 +25,7 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   GIT_FIXTURE_HOST, GIT_FIXTURE_TLS_CERT, GIT_FIXTURE_TLS_KEY,
 } from '../acceptance/git-smart-http-fixture.mjs';
@@ -3160,7 +3161,7 @@ export const STATES = [
       const baseRender = process.env.PEERD_VISUAL_BASE_RENDER === '1';
       const ownText = 'Send from this reading surface.';
       const delayedReply = 'The delayed reply arrived. Keep the earlier reading position.';
-      let other, waiting = false, complete = false, releaseReply = () => {};
+      let other, home, panelUrl, waiting = false, complete = false, releaseReply = () => {};
       const view = (page) => evalIn(page, `(async () => {
         'use strict';
         (await import('/vendor/mithril/mithril.js')).default.redraw.sync();
@@ -3256,10 +3257,36 @@ export const STATES = [
           rec.check(`reply and settlement keep both readers in place (${theme})`,
             own?.top === 0 && foreign?.top === 0 && !own.busy && !foreign.busy, JSON.stringify({ own, foreign }));
         } });
+        await other.close(); other = null;
+        await chooseFixtureNetwork(ctx, false);
+        panelUrl = await evalIn(ctx.page, 'location.href');
+        await releasePanelDocument(ctx);
+        home = await openWidePage(ctx, 'home/home.html#chat', { ready: '.message-list' });
+        await settled(home, ownText, delayedReply);
+        const top = await evalIn(home, `new Promise((resolve, reject) => {
+          const list = globalThis.__homeReadingList = document.querySelector('.message-list');
+          const middle = Math.floor((list.scrollHeight - list.clientHeight) / 2);
+          if (middle < 50) throw new Error('Home history does not overflow');
+          const timer = setTimeout(() => reject(new Error('Home reader scroll did not arrive')), 3_000);
+          list.addEventListener('scroll', () => { clearTimeout(timer); resolve(list.scrollTop); }, { once: true });
+          list.scrollTop = middle;
+        })`, true);
+        await clickAndSyncRedraw(home, '[data-home-view="library"]');
+        await clickAndSyncRedraw(home, '[data-home-view="chat"]');
+        const returned = await evalIn(home, `({
+          same: document.querySelector('.message-list') === globalThis.__homeReadingList,
+          top: document.querySelector('.message-list')?.scrollTop,
+        })`);
+        if (baseRender) rec.observe('merge-base Home reading position after Library', { top, returned });
+        else rec.check('Home keeps the same transcript and its middle reading position after Library',
+          top > 0 && returned?.same && Math.abs(returned.top - top) <= 2, JSON.stringify({ top, returned }));
+        await rec.shotPage('home-chat-reading-position', home);
       } finally {
         releaseReply();
         if (!complete) await rpc(ctx.page, { type: 'agent/stop' });
         if (other) await other.close();
+        if (home) await retirePrivateTransferPage(home);
+        if (panelUrl) await restorePanelDocument(ctx, panelUrl);
         await setEmulatedTheme(ctx.page, 'light');
       }
     },
@@ -7400,6 +7427,7 @@ export const STATES = [
       return { sse: sseText(callIndex === 0 ? 'HOME-COMPOSER-REPLY' : 'HOME-STOPPED-REPLY-MUST-NOT-RENDER') };
     },
     async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
       const panelUrl = await evalIn(ctx.page, 'location.href');
       let page = null;
       let releaseLive = () => {};
@@ -7597,7 +7625,36 @@ export const STATES = [
       try {
         await releasePanelDocument(ctx);
         page = await openWidePage(ctx, 'home/home.html#chat', { ready: '.home-shell' });
-        rec.check('Home owns Chat while no panel is connected', (await view(page)) === 'chat' && !(await panelBar(page)));
+        const ownsChat = (await view(page)) === 'chat' && !(await panelBar(page));
+        const draft = 'Keep this draft while I open Library.';
+        const callsBefore = ctx.modelCallCount();
+        const messagesBefore = await evalIn(page, `(() => {
+          const input = document.querySelector('form.input-bar textarea');
+          if (!input) throw new Error('Home composer is unavailable');
+          globalThis.__homeNavigationComposer = input;
+          input.focus();
+          return document.querySelectorAll('.message-user, .message-assistant').length;
+        })()`);
+        await page.send('Input.insertText', { text: draft });
+        await clickAndSyncRedraw(page, '[data-home-view="library"]');
+        const hiddenComposer = (await view(page)) === 'library'
+          && await evalIn(page, `globalThis.__homeNavigationComposer.isConnected
+            && globalThis.__homeNavigationComposer.getClientRects().length === 0`);
+        await clickAndSyncRedraw(page, '[data-home-view="chat"]');
+        const composer = await evalIn(page, `({
+          same: document.querySelector('form.input-bar textarea') === globalThis.__homeNavigationComposer,
+          draft: document.querySelector('form.input-bar textarea')?.value,
+          visible: [...document.querySelectorAll('form.input-bar textarea')].filter((input) => input.getClientRects().length > 0).length,
+          messages: document.querySelectorAll('.message-user, .message-assistant').length,
+        })`);
+        rec.check('Home owns Chat and keeps its draft and composer while opening Library',
+          ownsChat && hiddenComposer && (await view(page)) === 'chat' && composer?.same && composer.draft === draft && composer.visible === 1
+            && composer.messages === messagesBefore && ctx.modelCallCount() === callsBefore, JSON.stringify(composer));
+        await evalIn(page, `(() => {
+          const input = globalThis.__homeNavigationComposer;
+          input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true }));
+          delete globalThis.__homeNavigationComposer;
+        })()`);
         // The panel comes back (its port connects): Home hands Chat over.
         await restorePanelDocument(ctx, panelUrl);
         const handed = await waitFor(async () => (await panelBar(page)) && (await view(page)) !== 'chat', { budgetMs: 8_000, pollMs: 80 });
@@ -9706,6 +9763,47 @@ export const STATES = [
         const provider = await rpc(ctx.page, { type: 'settings/update', patch: { providerName: 'anthropic', providerModel: '' } });
         if (key?.ok !== true || provider?.ok !== true) throw new Error('the attachment provider did not initialize');
         if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('input.attach-input')`), { budgetMs: 15_000 })) throw new Error('the real file picker is unavailable');
+        const panelUrl = await evalIn(ctx.page, 'location.href');
+        let home;
+        try {
+          await chooseFixtureNetwork(ctx, false);
+          await releasePanelDocument(ctx);
+          home = await openWidePage(ctx, 'home/home.html#chat', { ready: 'input.attach-input' });
+          const { root } = await home.send('DOM.getDocument');
+          const { nodeId } = await home.send('DOM.querySelector', { nodeId: root.nodeId, selector: 'input.attach-input' });
+          await home.send('DOM.setFileInputFiles', { nodeId,
+            files: [fileURLToPath(new URL('../../extension/icons/icon128.png', import.meta.url))] });
+          if (!await waitFor(() => evalIn(home, `document.querySelector('.attach-chip-name')?.textContent === 'icon128.png'`))) throw new Error('the real icon did not stage');
+          const chip = await evalIn(home, `(() => {
+            const input = globalThis.__homeAttachmentComposer = document.querySelector('form.input-bar textarea');
+            globalThis.__homeAttachmentChip = document.querySelector('.attach-chip');
+            input.focus();
+            return globalThis.__homeAttachmentChip.textContent;
+          })()`);
+          const draft = 'Keep this image while I open Library.';
+          await home.send('Input.insertText', { text: draft });
+          const callsBefore = ctx.modelCallCount();
+          await clickAndSyncRedraw(home, '[data-home-view="library"]');
+          await clickAndSyncRedraw(home, '[data-home-view="chat"]');
+          const returned = await evalIn(home, `({
+            composer: document.querySelector('form.input-bar textarea') === globalThis.__homeAttachmentComposer,
+            chip: document.querySelector('.attach-chip') === globalThis.__homeAttachmentChip,
+            text: document.querySelector('.attach-chip')?.textContent,
+            draft: document.querySelector('form.input-bar textarea')?.value,
+          })`);
+          if (baseRender) rec.observe('merge-base Home composer and file after Library', returned);
+          else rec.check('Home keeps the original composer, draft and real file chip after Library',
+            returned?.composer && returned.chip && returned.text === chip && returned.draft === draft
+              && ctx.modelCallCount() === callsBefore, JSON.stringify(returned));
+          await rec.shotPage('home-attachment-continuity', home);
+          await evalIn(home, `(() => {
+            const input = globalThis.__homeAttachmentComposer;
+            input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true }));
+          })()`);
+        } finally {
+          if (home) await retirePrivateTransferPage(home);
+          await restorePanelDocument(ctx, panelUrl);
+        }
         const legacy = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
         for (const [name, bytes, expected] of [
           ['report.doc', legacy, 'older or password-protected Office file'],
