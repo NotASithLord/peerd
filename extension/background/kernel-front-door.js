@@ -6,7 +6,7 @@
 
 /**
  * @param {{homeOpen:boolean,panelOpen?:boolean,hasSidePanel:boolean,hasSidebar:boolean,
- * fromShortcut?:boolean,frontDoorView?:'panel'|'home',nativePanelMirror?:boolean}} input
+ * fromShortcut?:boolean,frontDoorView?:'panel'|'home',nativePanelMirror?:boolean,homeWorkspace?:boolean}} input
  */
 export const decidePullIn = ({
   homeOpen,
@@ -16,7 +16,9 @@ export const decidePullIn = ({
   fromShortcut = false,
   frontDoorView = 'panel',
   nativePanelMirror = false,
+  homeWorkspace = false,
 }) => {
+  if (homeWorkspace) return 'home';
   if (fromShortcut && panelOpen && (hasSidePanel || hasSidebar)) return 'close';
   const view = !fromShortcut && nativePanelMirror ? 'home' : frontDoorView;
   if (fromShortcut || homeOpen || view !== 'home') {
@@ -41,7 +43,7 @@ const observe = (value, onError) => {
  * @param {()=>boolean} deps.isPanelOpen
  * @param {()=>('panel'|'home')} deps.getFrontDoorView
  * @param {(windowId?:number|null)=>unknown} deps.closePanel
- * @param {()=>unknown} deps.openHome
+ * @param {(windowId?:number|null)=>unknown} deps.openHome
  * @param {(cause:unknown)=>void} [deps.onError]
  */
 export const createKernelFrontDoor = ({
@@ -82,7 +84,9 @@ export const createKernelFrontDoor = ({
       if (!none) lastFocusedWindowId = windowId;
     });
 
-  const fallbackHome = () => observe(openHome(), onError);
+  const homeWorkspace = typeof browser.sidePanel?.onOpened?.addListener === 'function'
+    && typeof browser.sidePanel?.onClosed?.addListener === 'function';
+  const fallbackHome = (/** @type {number|null|undefined} */ windowId) => observe(openHome(windowId), onError);
   const pullIn = (/** @type {number|null|undefined} */ windowId,
     /** @type {boolean} */ fromShortcut) => {
     const target = decidePullIn({
@@ -93,6 +97,7 @@ export const createKernelFrontDoor = ({
       fromShortcut,
       frontDoorView: getFrontDoorView(),
       nativePanelMirror: typeof browser.sidePanel?.setPanelBehavior === 'function',
+      homeWorkspace,
     });
     if (target === 'close') {
       observe(closePanel(windowId), onError);
@@ -101,17 +106,17 @@ export const createKernelFrontDoor = ({
     try {
       const panelWindowId = windowId ?? lastFocusedWindowId;
       if (target === 'panel' && typeof panelWindowId === 'number') {
-        observe(browser.sidePanel.open({ windowId: panelWindowId }), () => fallbackHome());
+        observe(browser.sidePanel.open({ windowId: panelWindowId }), () => fallbackHome(panelWindowId));
         return 'panel';
       }
       if (target === 'sidebar') {
-        observe(browser.sidebarAction.open(), () => fallbackHome());
+        observe(browser.sidebarAction.open(), () => fallbackHome(windowId));
         return 'sidebar';
       }
     } catch (cause) {
       onError(cause);
     }
-    fallbackHome();
+    fallbackHome(windowId ?? lastFocusedWindowId);
     return 'home';
   };
 
@@ -128,7 +133,7 @@ export const createKernelFrontDoor = ({
   const syncNativeBehavior = async () => {
     if (typeof browser.sidePanel?.setPanelBehavior !== 'function') return false;
     await browser.sidePanel.setPanelBehavior({
-      openPanelOnActionClick: getFrontDoorView() === 'panel',
+      openPanelOnActionClick: !homeWorkspace && getFrontDoorView() === 'panel',
     });
     return true;
   };
@@ -143,6 +148,13 @@ export const createKernelFrontDoor = ({
 
 /** @param {Record<string,any>} deps */
 export const attachKernelFrontDoor = (deps) => {
+  const openWindowHome = async (/** @type {number|null|undefined} */ windowId) => {
+    const surface = typeof windowId === 'number' ? await deps.windowSurfaces?.inWindow(windowId) : null;
+    return deps.openHome('chat', {
+      ...(typeof windowId === 'number' ? { windowId } : {}),
+      tabId: surface?.homeTabId, pinned: deps.settingsStore.get().firstTabEnabled === true,
+    });
+  };
   const closePanel = async (
     /** @type {unknown} */ target = undefined,
     /** @type {{ tab?: { windowId?: number } }} */ sender = {},
@@ -176,13 +188,14 @@ export const attachKernelFrontDoor = (deps) => {
     isPanelOpen: () => deps.uiPorts.hasNamed('sidepanel'),
     getFrontDoorView: () => deps.settingsStore.get().frontDoorView === 'home' ? 'home' : 'panel',
     closePanel,
-    openHome: deps.openHome,
+    openHome: openWindowHome,
   });
   deps.events.registerRecovery({
     event: 'windows.onFocusChanged',
     owner: 'kernel-front-door',
     reconcile: () => frontDoor.refreshFocus(),
   });
+  void frontDoor.syncNativeBehavior().catch(() => {});
   void deps.ready.then(() => frontDoor.syncNativeBehavior()).catch(() => {});
-  return Object.freeze({ closePanel, frontDoor });
+  return Object.freeze({ closePanel, frontDoor, openWindowHome });
 };

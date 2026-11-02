@@ -125,6 +125,25 @@
   cursor: pointer;
 }
 .home-popout:hover { color: var(--fg); border-color: var(--border-strong); }
+.home-workspace-heading { flex: none; }
+.home-workspace-controls { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.home-workspace-menu {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 30;
+  width: min(280px, calc(100vw - 32px)); padding: 4px;
+  max-height: calc(100dvh - 180px); overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--sh-menu);
+}
+.home-workspace-menu button {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  width: 100%; padding: 8px 10px; border: 0; border-radius: var(--radius);
+  background: transparent; color: var(--fg); font-size: 13px; text-align: left; white-space: normal;
+}
+.home-workspace-menu button:hover { background: var(--bg); }
+.home-workspace-menu small { color: var(--fg-muted); font-size: 11px; }
+.home-workspace-notice { padding: 8px 16px 0; }
+.home-workspace-notice .notice-action { background: var(--bg-elev); color: var(--fg); border-color: var(--border); }
 
 /* The shared ChatView (.chat-view) is a flex:1 column; let it fill the chat
    region and own its own scroll (the message list scrolls, the input pins). */
@@ -550,6 +569,7 @@
 }
 @media (max-width: 620px) {
   .home-shell { flex-direction: column; }
+  .home-workspace-heading .home-chat-bar { flex-wrap: wrap; }
   .home-rail {
     width: 100%;
     flex: 0 0 auto;

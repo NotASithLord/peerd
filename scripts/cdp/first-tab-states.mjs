@@ -7,7 +7,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  evalIn, openWidePage, rpc, sleep, sseText, waitFor, PANEL_METRICS, WIDE_METRICS,
+  evalIn, openWidePage, rpc, sleep, sseText, waitFor, WIDE_METRICS,
 } from './e2e-harness.mjs';
 
 const HINT_KEY = 'peerd.home.firstTabHintSeen';
@@ -75,23 +75,39 @@ const inView = (page, selector) => evalIn(page, `(() => {
     visible: rect.top >= 0 && rect.bottom <= innerHeight } : null;
 })()`);
 
-// Home owns Chat only while no side panel port is connected. Release the panel
-// document for a Home scenario, then put the live panel back.
+// Close the native panel. A port disconnect does not release its chat owner.
 const releasePanel = async (ctx) => {
-  await ctx.page.send('Page.navigate', { url: 'about:blank' });
-  const released = await waitFor(() => evalIn(ctx.page, `location.href === 'about:blank'`).catch(() => false),
-    { budgetMs: 5_000, pollMs: 50 });
-  if (!released) throw new Error('the side-panel document did not release its port');
+  const windowId = await evalIn(ctx.page, 'chrome.windows.getCurrent().then((window) => window.id)', true);
+  await evalIn(ctx.swConn, `(() => {
+    const listener = (info) => {
+      if (info.windowId === ${windowId}) globalThis.__e2ePanelClosed = true;
+    };
+    globalThis.__e2ePanelClosed = false;
+    globalThis.__e2ePanelClosedListener = listener;
+    chrome.sidePanel.onClosed.addListener(listener);
+  })()`);
+  try {
+    await evalIn(ctx.page, `chrome.sidePanel.close({ windowId: ${windowId} })`, true).catch(() => {});
+    const closed = await waitFor(() => evalIn(ctx.swConn, 'globalThis.__e2ePanelClosed === true'),
+      { budgetMs: 5_000, pollMs: 50 });
+    if (!closed) throw new Error('The native side panel did not close.');
+  } finally {
+    await evalIn(ctx.swConn, `(() => {
+      chrome.sidePanel.onClosed.removeListener(globalThis.__e2ePanelClosedListener);
+      delete globalThis.__e2ePanelClosedListener;
+      delete globalThis.__e2ePanelClosed;
+    })()`);
+  }
 };
 const awaitLivePanel = async (ctx) => {
   const live = await waitFor(() => evalIn(ctx.page,
-    `document.documentElement.dataset.peerdBootStage === 'app-ready' && !!document.querySelector('.input-bar textarea')`).catch(() => false),
+    `document.documentElement.dataset.peerdBootStage === 'app-ready'
+      && !!document.querySelector('.input-bar textarea, .home-chat-status')`).catch(() => false),
   { budgetMs: 20_000, pollMs: 80 });
-  if (!live) throw new Error('the live side panel did not restore');
+  if (!live) throw new Error('The live side panel did not restore.');
 };
-const restorePanel = async (ctx, panelUrl) => {
-  await ctx.page.send('Page.navigate', { url: panelUrl });
-  await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
+const restorePanel = async (ctx) => {
+  await ctx.reopenNativePanel();
   await awaitLivePanel(ctx);
 };
 
@@ -536,17 +552,17 @@ export const FIRST_TAB_STATES = [
         rec.check('"Got it" hides the hint for good', stored === '1' && await hint(page) === null, JSON.stringify({ stored }));
         await second.close(); second = null;
 
-        // Back on the chat, then the side panel takes it.
+        // The Home owner keeps its chat when the native panel opens.
         await clickAndRedraw(page, '[data-home-view="chat"]');
         await restorePanel(ctx, panelUrl);
         panelBack = true;
         const besidePanel = await waitFor(() => evalIn(page, `(() => {
           const content = document.querySelector('.home-content');
-          return content?.classList.contains('home-content--library') && !!document.querySelector('.home-panel-bar')
-            ? content.className : null;
+          return content?.classList.contains('home-content--chat') && !document.querySelector('.home-panel-bar')
+            && !!document.querySelector('form.input-bar textarea') ? content.className : null;
         })()`), { budgetMs: 10_000, pollMs: 80 });
-        rec.check('with chat in the side panel, the pinned Home tab shows the apps, not the actor map',
-          !!besidePanel, String(besidePanel ?? await evalIn(page, `document.querySelector('.home-content')?.className`)));
+        rec.check('the pinned Home keeps its composer while the panel shows chat status',
+          !!besidePanel && await evalIn(ctx.page, `!!document.querySelector('.home-chat-status') && !document.querySelector('form.input-bar textarea')`), String(besidePanel ?? await evalIn(page, `document.querySelector('.home-content')?.className`)));
         await page.send('Emulation.setDeviceMetricsOverride', WIDE_METRICS);
         await rec.visualPage('home-first-tab-beside-panel', page);
         if (process.env.PEERD_BROWSER_WINDOW_EVIDENCE === '1') await rec.browserWindow('pinned-home-beside-panel', ctx, page);

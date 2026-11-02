@@ -47,18 +47,20 @@ export const App = {
  *   stateFailed?: boolean, retryState?: () => void,
    *   activeTabStatus?: 'none'|'unknown'|'web'|'protected_private'|'protected_sensitive',
    *   firstTabPrompt?: unknown,
+   *   chatOwner?: 'home'|'panel'|null,
    * } }} vnode
    */
   view: ({ attrs }) => {
     const {
       state, send, voiceManager, uiActions, view, optionsActive, activeTabStatus,
-      stateFailed, retryState, firstTabPrompt,
+      stateFailed, retryState, firstTabPrompt, chatOwner,
     } = attrs;
     if (stateFailed) return m('div.app-shell', [
       null,
       m('.body', m('.placeholder', m(StateRuntimeFailure, { retry: retryState }))),
     ]);
     const unlocked = state.vault.initialized && !state.vault.locked;
+    const statusOnly = chatOwner !== 'panel';
     // First-run onboarding is a HOME-page blocker (home.js), not a side-panel
     // route — the panel is reached by popping it from an onboarded home.
 
@@ -72,7 +74,7 @@ export const App = {
     // in place instead of tearing it down and flashing.
     // Confirmation prompt overlay. Present only when confirmations are
     // enabled (Settings) AND a non-read action is waiting on the user.
-    const confirm = unlocked && state.pendingConfirm
+    const confirm = unlocked && !statusOnly && state.pendingConfirm
       ? m(ConfirmModal, { prompt: state.pendingConfirm, uiActions })
       : null;
 
@@ -86,11 +88,30 @@ export const App = {
       : null;
 
     return m('div', { class: 'app-shell' }, [
-      unlocked ? m(TopBar, { state, send, optionsActive, uiActions }) : null,
+      unlocked ? m(TopBar, { state, send, optionsActive, uiActions, statusOnly }) : null,
       notices,
       actorIsolation,
       m('.body', unlocked
-        ? [
+        ? statusOnly ? m('.home-chat-status', {
+            role: 'region', 'aria-label': 'Chat status',
+            style: 'display:flex;flex-direction:column;align-items:flex-start;gap:12px;padding:16px;',
+          }, chatOwner === 'home' ? [
+            m('h3', { style: 'margin:0;' }, 'This chat is open in the Home tab'),
+            m('p.muted', { style: 'margin:0;' }, state.session?.title
+              ? `“${state.session.title}” has one composer in this window, in the Home tab. Go there to type, review or approve.`
+              : 'The Home tab has the composer for this window. Go there to type, review or approve.'),
+            state.pendingConfirm
+              ? m('.notice', { role: 'status' }, m('span.notice-text', 'An action is waiting for your approval. Nothing has been approved.'))
+              : state.streaming || Object.values(state.actors ?? {}).some((actor) => actor.streaming)
+                || Object.values(state.goalRuns ?? {}).some((run) => run.active && run.sessionId === state.session?.sessionId)
+                ? m('div', { role: 'status', style: 'display:flex;align-items:center;gap:8px;' }, [
+                    m('span.peerd-spinner.peerd-spinner--sm', { 'aria-hidden': 'true' }), 'Working…',
+                  ]) : null,
+            m('button.secondary', { type: 'button', onclick: () => settleUiEffect(uiActions.goToChat?.()) }, 'Go to chat'),
+          ] : [
+            m('p.muted', 'Peerd is checking which surface owns this chat.'),
+            m('button.secondary', { type: 'button', onclick: () => settleUiEffect(uiActions.retryChatOwner?.()) }, 'Retry'),
+          ]) : [
             // The one-time "Keep peerd as the first tab" offer (sidepanel.js).
             view === 'chat' ? firstTabPrompt : null,
             view === 'chat'   ? m(ChatView, {
@@ -159,10 +180,10 @@ const Wordmark = () => {
 };
 
 const TopBar = {
-  /** @param {{ attrs: { state: ChatState, send: Send, optionsActive: boolean, uiActions: UiActions } }} vnode */
-  view: ({ attrs: { state, send, optionsActive, uiActions } }) => {
+  /** @param {{ attrs: { state: ChatState, send: Send, optionsActive: boolean, uiActions: UiActions, statusOnly: boolean } }} vnode */
+  view: ({ attrs: { state, send, optionsActive, uiActions, statusOnly } }) => {
     const unlocked = state.vault.initialized && !state.vault.locked;
-    return m('.topbar', [
+    return m('.topbar', { style: statusOnly ? 'flex-wrap:nowrap;' : undefined }, [
       // Brand cluster: the preview badge sits inline to the RIGHT of the
       // wordmark, vertically centered (keeps the top bar thin). The hand-off
       // animation still drives both — the wordmark self-deletes and the
@@ -183,7 +204,10 @@ const TopBar = {
       // Spacer BEFORE the actions: brand hugs the left edge, the action icons
       // right-align (owner call, 2026-06-12).
       m('.spacer'),
-      unlocked ? m('.topbar-actions', [
+      unlocked ? m('.topbar-actions', { style: statusOnly ? 'flex:0 0 auto;margin-left:auto;' : undefined }, statusOnly ? [
+        m('button.icon', { 'aria-label': 'Close panel', title: 'Close panel',
+          onclick: () => settleUiEffect(uiActions.closePanel?.()) }, icon('x')),
+      ] : [
         // Watch mode: bring the agent's tab to the foreground and follow it, so
         // you see the real page it's driving. Opt-in inverse of no-focus-steal;
         // active state + tooltip carry the meaning (the top bar is icon-only).

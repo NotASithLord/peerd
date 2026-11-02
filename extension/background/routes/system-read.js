@@ -5,10 +5,10 @@
 
 /**
  * @param {Record<string, any>} deps
- * @returns {Record<string, (msg?: any) => any>}
+ * @returns {Record<string, (msg?: any, sender?: any) => any>}
  */
 export const makeSystemReadRoutes = (deps) => {
-  const { vault, auditLog, sessions, buildStateSnapshot, uiPorts } = deps;
+  const { vault, auditLog, sessions, buildStateSnapshot, uiPorts, getSurfaces } = deps;
   return ({
   'state/get': async () => ({ ok: true, state: await buildStateSnapshot() }),
   'audit/list': async ({ limit = 500 } = {}) => {
@@ -49,6 +49,7 @@ export const makeSystemReadRoutes = (deps) => {
       };
     }
   },
-  'surfaces/get': () => ({ ok: true, sidePanelOpen: uiPorts.hasNamed('sidepanel') }),
+  'surfaces/get': (message, sender) => getSurfaces
+    ? getSurfaces(message, sender) : { ok: true, sidePanelOpen: uiPorts.hasNamed('sidepanel') },
   });
 };

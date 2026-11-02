@@ -37,8 +37,8 @@ const richUiEntries = {
 // ui.js surfaces are first-paint contracts; Settings-only features stay outside.
 // Home includes the reviewed read-only onboarding readiness projection.
 const RICH_UI_GRAPH_CEILINGS = {
-  sidepanel: { modules: 62, graphBytes: 670_566 },
-  home: { modules: 69, graphBytes: 850_085 },
+  sidepanel: { modules: 62, graphBytes: 658_641 },
+  home: { modules: 69, graphBytes: 812_114 },
 } as const;
 
 const nativeKernelEntry = 'background/vault-kernel-chrome.js';

@@ -657,7 +657,7 @@ describe('kernel first tab: a browser start', () => {
 });
 
 describe('kernel first tab: wiring', () => {
-  test('the kernel attaches it and calls it on an update, a browser start, tab events and the setting turning on', () => {
+  test('the kernel keeps first-tab and custody handlers when surface refresh wraps the tab events', async () => {
     const source = readFileSync(join(import.meta.dir, '..', '..', 'extension', 'background', 'vault-kernel.js'), 'utf8');
     expect(source).toContain('const firstTab = attachKernelFirstTab({');
     expect(source).toContain('session: sessionCache, store: kv,');
@@ -667,6 +667,33 @@ describe('kernel first tab: wiring', () => {
     expect(source).toContain('firstTabWasOn = settingsStore.get().firstTabEnabled === true;');
     expect(source).toContain('if (patch.firstTabEnabled === true && !firstTabWasOn) void firstTab.coverEveryWindow();');
     expect(source).toContain('void firstTab.browserStarted();');
-    expect(source).toContain('...firstTab.watchTabs(browserEventOwners.tabs),');
+    const fake = makeBrowser({
+      windows: [{ id: 1, type: 'normal' }],
+      tabs: [{ id: 11, windowId: 1, index: 0, pinned: true, url: HOME },
+        { id: 12, windowId: 1, index: 1, pinned: false, url: 'https://example.com/' }],
+      local: new Map([[FIRST_TAB_KEPT_KEY, [1]]]),
+    });
+    const { api } = attach(fake);
+    await flush();
+    const prior = custody();
+    let callbacks: any;
+    let refreshed = 0;
+    const start = source.indexOf('const windowTabOwners = firstTab.watchTabs(');
+    const end = source.indexOf('\nif (kernelFirefox) {', start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    new Function('firstTab', 'browserEventOwners', 'attachKernelTabEvents', 'browser',
+      'kernelEvents', 'kernelFirefox', 'windowSurfaces', source.slice(start, end))(
+      api, { tabs: prior.owner }, (value: any) => { callbacks = value; },
+      fake.browser, {}, false, { refresh: async () => { refreshed++; } },
+    );
+    fake.tabs[0].pinned = false;
+    expect(callbacks.onUpdated(11, { pinned: false, url: `${HOME}#chat` }, fake.tabs[0])).toBe('custody');
+    await flush();
+    expect(fake.local.get(FIRST_TAB_KEPT_KEY)).toEqual([]);
+    fake.tabs.splice(0, 1);
+    expect(callbacks.onRemoved(11, { windowId: 1, isWindowClosing: false })).toBe('custody');
+    expect(prior.seen).toEqual(['updated 11', 'removed 11']);
+    expect(refreshed).toBe(2);
   });
 });

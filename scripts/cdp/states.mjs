@@ -47,6 +47,7 @@ import { PERF_CHAT_NOTEBOOK_STATES } from './perf-chat-notebook-state.mjs';
 import { CHAT_ONBOARDING_STATES } from './chat-onboarding-state.mjs';
 import { HOME_SETTINGS_STATES } from './home-settings-state.mjs';
 import { FIRST_TAB_STATES } from './first-tab-states.mjs';
+import { WORKSPACE_CUSTODY_STATES } from './workspace-custody-state.mjs';
 import { IMMUTABLE_ADDRESS_VISUAL_STATES } from './immutable-address-visuals.mjs';
 import { CONSENT_LOCK_VISUAL_STATES } from './consent-lock-visuals.mjs';
 import { PEER_NETWORK_STATUS_STATES } from './peer-network-status-states.mjs';
@@ -114,24 +115,39 @@ const realClick = async (page, selector) => {
   await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
 };
 
-// why: Home owns Chat only while no side-panel port is connected (single-homed
-// chat). Retire the panel document to release its port before a Home scenario,
-// then put the live panel back for the states that follow.
+// Close the native panel. A port disconnect does not release its chat owner.
 const releasePanelDocument = async (ctx) => {
-  await ctx.page.send('Page.navigate', { url: 'about:blank' });
-  const released = await waitFor(() => evalIn(ctx.page, `location.href === 'about:blank'`).catch(() => false),
-    { budgetMs: 5_000, pollMs: 50 });
-  if (!released) throw new Error('the side-panel document did not release its port');
+  const windowId = await evalIn(ctx.page, 'chrome.windows.getCurrent().then((window) => window.id)', true);
+  await evalIn(ctx.swConn, `(() => {
+    const listener = (info) => {
+      if (info.windowId === ${windowId}) globalThis.__e2ePanelClosed = true;
+    };
+    globalThis.__e2ePanelClosed = false;
+    globalThis.__e2ePanelClosedListener = listener;
+    chrome.sidePanel.onClosed.addListener(listener);
+  })()`);
+  try {
+    await evalIn(ctx.page, `chrome.sidePanel.close({ windowId: ${windowId} })`, true).catch(() => {});
+    const closed = await waitFor(() => evalIn(ctx.swConn, 'globalThis.__e2ePanelClosed === true'),
+      { budgetMs: 5_000, pollMs: 50 });
+    if (!closed) throw new Error('The native side panel did not close.');
+  } finally {
+    await evalIn(ctx.swConn, `(() => {
+      chrome.sidePanel.onClosed.removeListener(globalThis.__e2ePanelClosedListener);
+      delete globalThis.__e2ePanelClosedListener;
+      delete globalThis.__e2ePanelClosed;
+    })()`);
+  }
 };
 const awaitLivePanel = async (ctx) => {
-  const restored = await waitFor(() => evalIn(ctx.page,
-    `document.documentElement.dataset.peerdBootStage === 'app-ready' && !!document.querySelector('.input-bar textarea')`).catch(() => false),
+  const live = await waitFor(() => evalIn(ctx.page,
+    `document.documentElement.dataset.peerdBootStage === 'app-ready'
+      && !!document.querySelector('.input-bar textarea, .home-chat-status')`).catch(() => false),
   { budgetMs: 20_000, pollMs: 80 });
-  if (!restored) throw new Error('the live side panel did not restore');
+  if (!live) throw new Error('The live side panel did not restore.');
 };
-const restorePanelDocument = async (ctx, panelUrl) => {
-  await ctx.page.send('Page.navigate', { url: panelUrl });
-  await ctx.page.send('Emulation.setDeviceMetricsOverride', PANEL_METRICS);
+const restorePanelDocument = async (ctx) => {
+  await ctx.reopenNativePanel();
   await awaitLivePanel(ctx);
 };
 
@@ -714,6 +730,7 @@ export const STATES = [
   ...CHAT_ONBOARDING_STATES,
   ...HOME_SETTINGS_STATES,
   ...FIRST_TAB_STATES,
+  ...WORKSPACE_CUSTODY_STATES,
   WASMER_STATE,
   {
     name: 'pacing-wait-stop', kind: 'functional', phase: 'post-unlock',
@@ -7613,6 +7630,118 @@ export const STATES = [
   // panel auto-closes), and closing the panel after navigating must not yank
   // Home back to Chats.
   {
+    name: 'workspace-layout', kind: 'functional', phase: 'post-unlock', responder: null,
+    async run(ctx, rec) {
+      const child = await launchPeerd({ extensionDir: ctx.extensionDir,
+        panelPath: 'home/home.html#chat', interceptModel: false, enforceWebSecurity: true });
+      const page = child.page;
+      let browser;
+      try {
+        await unlockAndReady(page);
+        await chooseFixtureNetwork(child, false);
+        const ready = await waitFor(() => evalIn(page,
+          `!!document.querySelector('form.input-bar textarea') && !!document.querySelector('[data-workspace-split]')`),
+        { budgetMs: 20_000, pollMs: 50 });
+        if (!ready) throw new Error('The Home workspace did not open.');
+        await page.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 750, deviceScaleFactor: 1, mobile: false });
+        const initial = await evalIn(page, `(async () => {
+          const tab = await chrome.tabs.getCurrent();
+          globalThis.__workspaceComposer = document.querySelector('form.input-bar textarea');
+          globalThis.__workspaceComposer.focus();
+          return { tab, timeOrigin: performance.timeOrigin,
+            nativeSplit: typeof chrome.tabs.createSplit === 'function' && typeof chrome.tabs.unsplit === 'function' };
+        })()`, true);
+        await page.send('Input.insertText', { text: 'Keep this draft while I change the browser layout.' });
+        const peer = await evalIn(page,
+          `chrome.tabs.create({windowId:${initial.tab.windowId},url:'about:blank',active:false})`, true);
+        const checkRetained = async (label) => {
+          const state = await evalIn(page, `(async () => ({
+            same: document.querySelector('form.input-bar textarea') === globalThis.__workspaceComposer,
+            draft: globalThis.__workspaceComposer?.value,
+            timeOrigin: performance.timeOrigin,
+            tab: await chrome.tabs.getCurrent(),
+            users: document.querySelectorAll('.message-user').length,
+            homes: (await chrome.tabs.query({windowId:${initial.tab.windowId}}))
+              .filter(tab => (tab.url || '').split(/[?#]/)[0] === chrome.runtime.getURL('home/home.html')).length,
+          }))()`, true);
+          rec.check(label, state.same && state.draft === 'Keep this draft while I change the browser layout.'
+            && state.timeOrigin === initial.timeOrigin && state.tab.id === initial.tab.id
+            && state.users === 0 && state.homes === 1, JSON.stringify(state));
+          return state;
+        };
+        await evalIn(page, `document.querySelector('[data-workspace-split]').focus()`);
+        await page.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
+        await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
+        rec.check('The keyboard opens Split view and focuses its first item', !!await waitFor(() => evalIn(page,
+          `document.activeElement === document.querySelector('[role="menuitem"]')`), { budgetMs: 3_000, pollMs: 25 }));
+        await rec.visualPage('workspace-split-menu', page);
+        await pressKey(page, 'Escape');
+        rec.check('Escape closes the menu and returns focus', await evalIn(page,
+          `!document.querySelector('[role="menu"]') && document.activeElement === document.querySelector('[data-workspace-split]')`));
+        await clickAndSyncRedraw(page, '[data-workspace-split]');
+        await waitFor(() => evalIn(page, `document.querySelectorAll('[role="menuitem"]').length > 1`), { budgetMs: 3_000, pollMs: 25 });
+        await clickAndSyncRedraw(page, '[role="menuitem"]:last-child');
+        const outcome = await waitFor(() => evalIn(page,
+          `!!document.querySelector('[data-workspace-page], .home-workspace-notice')`), { budgetMs: 5_000, pollMs: 25 });
+        rec.check('Split view gives a native pair or an explicit refusal', !!outcome);
+        if (initial.nativeSplit) {
+          const paired = await evalIn(page, `(async () => ({ home:await chrome.tabs.getCurrent(),peer:await chrome.tabs.get(${peer.id}) }))()`, true);
+          rec.check('The browser owns the split and protects the existing Home document',
+            typeof paired.home.splitViewId === 'number' && paired.home.splitViewId >= 0
+              && paired.home.splitViewId === paired.peer.splitViewId && paired.home.autoDiscardable === false,
+            JSON.stringify(paired));
+          await rec.visualPage('workspace-native-split', page);
+          await page.send('Emulation.setDeviceMetricsOverride', { width: 380, height: 760, deviceScaleFactor: 1, mobile: false });
+          await rec.visualPage('workspace-native-narrow', page);
+          rec.check('The narrow Home pane keeps the layout controls in view', await evalIn(page, `(() => {
+            const buttons = [...document.querySelectorAll('.home-workspace-controls button')];
+            return buttons.length === 2 && buttons.every(button => {
+              const box = button.getBoundingClientRect();
+              return box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight;
+            });
+          })()`));
+          await page.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 750, deviceScaleFactor: 1, mobile: false });
+          await checkRetained('Native split keeps the draft, composer, document and Home tab');
+          await evalIn(page, `[...document.querySelectorAll('.home-workspace-controls button')].find(button => button.textContent === 'Close split view').click()`);
+          rec.check('Close split view keeps both tabs', !!await waitFor(() => evalIn(page,
+            `!!document.querySelector('[data-workspace-split]')`), { budgetMs: 5_000, pollMs: 25 }));
+          await checkRetained('Ending the split keeps the same draft and document');
+          await clickAndSyncRedraw(page, '[data-workspace-split]');
+          await waitFor(() => evalIn(page, `!!document.querySelector('[role="menuitem"]')`), { budgetMs: 3_000, pollMs: 25 });
+          await clickAndSyncRedraw(page, '[role="menuitem"]');
+          rec.check('New tab beside chat opens a real blank browser tab', !!await waitFor(() => evalIn(page, `(async () => {
+            const home=await chrome.tabs.getCurrent();
+            const tabs=await chrome.tabs.query({windowId:home.windowId});
+            const peer=tabs.find(tab => tab.id !== home.id && home.splitViewId >= 0 && tab.splitViewId === home.splitViewId);
+            return peer?.url === 'about:blank';
+          })()`, true), { budgetMs: 5_000, pollMs: 25 }));
+          await waitFor(() => evalIn(page, `!!document.querySelector('[data-workspace-page]:not(:disabled)')`),
+            { budgetMs: 5_000, pollMs: 25 });
+          await clickAndSyncRedraw(page, '[data-workspace-page]');
+        } else {
+          rec.check('Unsupported browsers show one honest fallback', await evalIn(page,
+            `document.querySelectorAll('.home-workspace-notice').length === 1 && !!document.querySelector('.home-workspace-notice .notice-action')`));
+          await rec.visualPage('workspace-split-unavailable', page);
+          await clickAndSyncRedraw(page, '.home-workspace-notice .notice-action');
+        }
+        const hidden = await waitFor(() => evalIn(page, 'document.hidden'), { budgetMs: 5_000, pollMs: 25 });
+        rec.check('Browser view shows the browser page and keeps Home open', !!hidden);
+        const version = await (await fetch(`http://127.0.0.1:${child.port}/json/version`)).json();
+        browser = await attach(version.webSocketDebuggerUrl);
+        const { targetInfos } = await browser.send('Target.getTargets', { filter: [{ type: 'tab', exclude: false }, { exclude: false }] });
+        const target = targetInfos.find(entry => entry.type === 'tab' && entry.url === 'about:blank');
+        if (!target) throw new Error('The browser page has no toolbar target.');
+        await browser.send('Extensions.triggerAction', { id: child.sw.id, targetId: target.targetId });
+        const returned = await waitFor(() => evalIn(page,
+          `!document.hidden && document.activeElement === globalThis.__workspaceComposer`), { budgetMs: 5_000, pollMs: 25 });
+        rec.check('The toolbar returns to the same Home tab and composer', !!returned, JSON.stringify(await evalIn(page,
+          `({hidden:document.hidden,focus:document.activeElement?.outerHTML.slice(0,300)})`)));
+        await checkRetained('Browser view and toolbar return keep the same draft and document');
+        await rec.visualPage('workspace-returned-home', page);
+      } finally { browser?.close(); await child.close(); }
+    },
+  },
+  {
     name: 'home-panel-navigation', kind: 'functional', phase: 'post-unlock',
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
@@ -7655,10 +7784,11 @@ export const STATES = [
           input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true }));
           delete globalThis.__homeNavigationComposer;
         })()`);
-        // The panel comes back (its port connects): Home hands Chat over.
         await restorePanelDocument(ctx, panelUrl);
-        const handed = await waitFor(async () => (await panelBar(page)) && (await view(page)) !== 'chat', { budgetMs: 8_000, pollMs: 80 });
-        rec.check('an open panel takes Chat and Home drops to a tool view', !!handed, JSON.stringify({ view: await view(page) }));
+        const retained = await waitFor(async () => !(await panelBar(page)) && (await view(page)) === 'chat'
+          && await evalIn(ctx.page, `!!document.querySelector('.home-chat-status') && !document.querySelector('form.input-bar textarea')`),
+        { budgetMs: 8_000, pollMs: 80 });
+        rec.check('Home keeps its composer and the open panel shows chat status', !!retained, JSON.stringify({ view: await view(page) }));
         await clickAndSyncRedraw(page, '[data-home-view="library"]');
         rec.check('Library opens beside the panel', (await view(page)) === 'library');
         // Leave for another tab and come back: a panel the user opened stays.
@@ -7675,10 +7805,11 @@ export const STATES = [
         const surfaces = await rpc(page, { type: 'surfaces/get' }).catch(() => null);
         const returned = { surfaces, view: await view(page), panelBar: await panelBar(page) };
         rec.check('a panel the user opened stays open when Home returns',
-          surfaces?.sidePanelOpen === true && returned.panelBar && returned.view === 'library', JSON.stringify(returned));
+          surfaces?.sidePanelOpen === true && surfaces.chatOwner === 'home' && !returned.panelBar && returned.view === 'library', JSON.stringify(returned));
         // Closing the panel now keeps Library instead of yanking Home to Chats.
         await releasePanelDocument(ctx);
-        const closed = await waitFor(async () => !(await panelBar(page)), { budgetMs: 8_000, pollMs: 80 });
+        const closed = await waitFor(async () => (await rpc(page, { type: 'surfaces/get' }))?.sidePanelOpen === false,
+          { budgetMs: 8_000, pollMs: 80 });
         await sleep(300);
         rec.check('closing the panel keeps the view the user navigated to', !!closed && (await view(page)) === 'library', JSON.stringify({ view: await view(page) }));
         await rec.shotPage('home-panel-navigation', page);
@@ -7690,12 +7821,7 @@ export const STATES = [
     },
   },
 
-  // --- functional: a card-opened side panel closes when you return to Home ---
-  // "Go ↗" on a "peerd opened a tab" card opens the side panel to follow the
-  // agent's tab. Coming back to Home must close that panel and hand Chat back,
-  // while a panel the user opened stays (home-panel-navigation). The close is
-  // the real one, which destroys the browser-owned panel document, so the
-  // harness reopens the panel for the states that follow.
+  // The Home owner follows an agent tab without moving chat to a panel.
   {
     name: 'home-card-panel-return', kind: 'functional', phase: 'post-unlock',
     responder: (callIndex) => (callIndex === 0
@@ -7738,18 +7864,20 @@ export const STATES = [
         rec.check('the opened-tab card renders on Home', !!card && !!settled);
         await page.send('Page.bringToFront');
         await waitFor(() => evalIn(page, `document.visibilityState === 'visible'`), { budgetMs: 5_000, pollMs: 50 });
-        // Go: a real click, since the gesture is what lets Home open the panel.
+        // Use the real card control to follow the agent tab.
+        await evalIn(page, `globalThis.__cardReturnComposer = document.querySelector('form.input-bar textarea')`);
         await realClick(page, '.agent-tab-notice-go');
         const followed = await waitFor(async () => {
           const s = await snap(page);
-          return s.visibility === 'hidden' && s.sidePanelOpen === true && s.panelBar;
+          return s.visibility === 'hidden' && s.sidePanelOpen === false && !s.panelBar
+            && await evalIn(page, `globalThis.__cardReturnComposer?.isConnected === true`);
         }, { budgetMs: 15_000, pollMs: 80 });
-        rec.check('Go opens the side panel and leaves Home for the agent tab', !!followed, JSON.stringify(await snap(page)));
+        rec.check('Go activates the agent tab and keeps the Home composer', !!followed, JSON.stringify(await snap(page)));
         const returnedAt = Date.now();
         await page.send('Page.bringToFront');
         const closed = await waitFor(() => homeOwnsChat(page), { budgetMs: 3_000, pollMs: 50 });
-        rec.check('returning to Home closes the card-opened panel and Chat is back',
-          !!closed, JSON.stringify({ ...(await snap(page)), afterMs: Date.now() - returnedAt }));
+        rec.check('returning to Home keeps the same composer and no panel',
+          !!closed && await evalIn(page, `document.querySelector('form.input-bar textarea') === globalThis.__cardReturnComposer`), JSON.stringify({ ...(await snap(page)), afterMs: Date.now() - returnedAt }));
         await rec.shotPage('home-card-panel-return', page);
       } finally {
         if (page) {
