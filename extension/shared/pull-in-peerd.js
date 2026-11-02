@@ -70,13 +70,16 @@ export const openPanel = () => {
   } catch (e) { console.warn('[pull-in-peerd] open threw', e); }
 };
 
-// Close: on Chrome, ask the SW, which closes the panel in every window (the
-// same path home's "bring it here" uses). Firefox closes the sidebar directly.
+// Close the panel in this tab's window. Firefox closes the sidebar directly.
 const closePanel = () => {
   try {
     if (sidePanelApi()?.open) {
       browser.runtime.sendMessage({ type: 'sidepanel/close' })
-        .catch((e) => console.warn('[pull-in-peerd] sidepanel/close failed', e));
+        .then((raw) => {
+          const reply = /** @type {{ ok?: unknown } | null} */ (raw);
+          if (reply?.ok !== true) syncPanelState();
+        })
+        .catch((e) => { console.warn('[pull-in-peerd] sidepanel/close failed', e); syncPanelState(); });
       return;
     }
     if (browser.sidebarAction?.close) {
