@@ -9,6 +9,7 @@
  * @property {ColdPlacement} placement
  * @property {boolean} [common]
  * @property {boolean} [firefox]
+ * @property {boolean} [chrome]
  * @property {boolean} [selfHostedChrome]
  */
 
@@ -36,6 +37,7 @@ export const KERNEL_COLD_EVENTS = Object.freeze([
   Object.freeze({ key: 'tabs.onCreated', placement: 'kernel-authority', common: true }),
   Object.freeze({ key: 'tabs.onUpdated', placement: 'kernel-authority', common: true }),
   Object.freeze({ key: 'tabs.onRemoved', placement: 'kernel-authority', common: true }),
+  Object.freeze({ key: 'tabs.onAttached', placement: 'kernel-immediate', common: true }),
   Object.freeze({ key: 'tabs.onActivated', placement: 'durable-hint', common: true }),
   Object.freeze({ key: 'windows.onFocusChanged', placement: 'durable-hint', common: true }),
   // The opt-in first tab acts on the live window once. A replay could add a
@@ -45,6 +47,8 @@ export const KERNEL_COLD_EVENTS = Object.freeze([
   Object.freeze({ key: 'webRequest.onBeforeRequest', placement: 'kernel-authority', firefox: true }),
   Object.freeze({ key: 'action.onClicked', placement: 'kernel-immediate', common: true }),
   Object.freeze({ key: 'commands.onCommand', placement: 'kernel-immediate', common: true }),
+  Object.freeze({ key: 'sidePanel.onOpened', placement: 'kernel-immediate', chrome: true }),
+  Object.freeze({ key: 'sidePanel.onClosed', placement: 'kernel-immediate', chrome: true }),
 ]);
 
 /**
@@ -82,6 +86,7 @@ export const coldEventKeysFor = ({
   selfHostedChrome = false,
 } = {}) => KERNEL_COLD_EVENTS
   .filter((entry) => entry.common || (firefox && entry.firefox)
+    || (!firefox && entry.chrome)
     || (selfHostedChrome && entry.selfHostedChrome))
   .map((entry) => entry.key);
 

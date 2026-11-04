@@ -26,6 +26,22 @@ export const makeConfirmAnswerRoute = ({
 /** @param {any} deps */
 export const createKernelConfirmation = (deps) => {
   let delivery = Promise.resolve();
+  let pendingCount = 0;
+  let badgeRevision = 0;
+  const refreshBadge = async () => {
+    const revision = ++badgeRevision;
+    try {
+      let working = false;
+      if (pendingCount === 0) {
+        try { working = await deps.readStreaming?.() === true; } catch {}
+      }
+      if (revision !== badgeRevision) return;
+      await deps.browser.action?.setBadgeText?.({ text: pendingCount > 0 ? String(pendingCount) : working ? '…' : '' });
+      if (pendingCount > 0 || working) {
+        await deps.browser.action?.setBadgeBackgroundColor?.({ color: pendingCount > 0 ? '#F59E0B' : '#20252E' });
+      }
+    } catch {}
+  };
   const deliver = (/** @type {any} */ prompt, /** @type {(prompt:any)=>void} */ send) => {
     delivery = delivery.then(async () => {
       const current = await deps.sessionCache.sessionGet('currentSessionId');
@@ -41,15 +57,14 @@ export const createKernelConfirmation = (deps) => {
       deps.uiPorts.broadcast({ type: 'confirm/resolved', id, outcome });
     }),
     onPendingChange: (count) => {
-      try {
-        deps.browser.action?.setBadgeText?.({ text: count > 0 ? String(count) : '' });
-        if (count > 0) deps.browser.action?.setBadgeBackgroundColor?.({ color: '#F59E0B' });
-      } catch {}
+      pendingCount = count;
+      void refreshBadge();
     },
   });
   const answer = makeConfirmAnswerRoute({ ...deps, confirmCoordinator: coordinator });
   return Object.freeze({
     coordinator,
+    refreshBadge,
     routes: Object.freeze({ 'confirm/answer': answer }),
   });
 };

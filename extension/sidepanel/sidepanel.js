@@ -32,6 +32,10 @@ import { eventBelongsToSidepanelWindow, focusBrowserTab } from './tab-context.js
 
 /** @type {ChatState} */
 let currentState = INITIAL_STATE;
+/** @type {'home'|'panel'|null} */
+let chatOwner = null;
+/** @type {number|null} */
+let homeTabId = null;
 
 // "Keep peerd as the first tab": the panel that showed the first vault setup
 // offers it once (home/first-tab-prompts.js). The vault shell shows that setup
@@ -65,6 +69,7 @@ const noteFirstRun = () => {
 const handlePortMessage = (raw) => {
   const msg = /** @type {ReducerMsg & { ok?: boolean }} */ (raw);
   if (!msg || typeof msg.type !== 'string') return false;
+  if (msg.type === 'surfaces') return applySurfaces(/** @type {any} */ (raw));
   // Voice events are side-panel-only — the voice manager lives HERE; route
   // them to its subscribers (they don't touch chat state). On a successful
   // permission grant, clear any sticky mic error so the UI resets.
@@ -87,7 +92,7 @@ const handlePortMessage = (raw) => {
   noteFirstRun();
   // Side-panel-only: the voice manager doesn't survive the panel, so re-enable
   // it on a full snapshot when the persisted setting says it was on.
-  if (msg.type === 'state') maybeRestoreVoice(currentState);
+  if (msg.type === 'state' && chatOwner === 'panel') maybeRestoreVoice(currentState);
   redrawForRuntimeMessage(m.redraw, msg);
   return true;
 };
@@ -97,6 +102,7 @@ const resetAfterDisconnect = () => {
   currentState = resetChatAfterRuntimeLoss(currentState);
   m.redraw();
   actorFetchInFlight.clear();
+  void refreshChatOwner();
 };
 
 const uiRuntime = makeUiRuntimeClient({ browser });
@@ -300,7 +306,26 @@ const closePanel = async () => {
     return { ok: false };
   }
 };
-const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, openAgentTab, prefillComposer, closePanel };
+const goToChat = async () => {
+  try {
+    const windowId = await resolveSidepanelWindowId();
+    const tabId = homeTabId;
+    if (chatOwner !== 'home' || tabId === null || windowId === null) throw new Error('home-owner-unavailable');
+    const home = await browser.tabs.get(tabId);
+    if (home.windowId !== windowId || home.url?.split(/[?#]/, 1)[0] !== browser.runtime.getURL('home/home.html')) {
+      throw new Error('home-owner-changed');
+    }
+    await browser.tabs.update(tabId, { active: true });
+    await browser.windows.update(windowId, { focused: true });
+    return { ok: true };
+  } catch (cause) {
+    showEffectFailure({ type: 'home/focus' }, cause);
+    void refreshChatOwner();
+    return { ok: false };
+  }
+};
+const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, openAgentTab, prefillComposer, closePanel, goToChat,
+  retryChatOwner: () => refreshChatOwner() };
 
 // ---- brand hand-off: is the options tab the active one? -------------------
 //
@@ -333,21 +358,42 @@ let activeTabRefreshGeneration = 0;
 /** @type {number|null} */
 let sidepanelWindowId = null;
 const resolveSidepanelWindowId = async () => {
-  if (Number.isInteger(sidepanelWindowId)) return sidepanelWindowId;
+  if (Number.isInteger(sidepanelWindowId) && /** @type {number} */ (sidepanelWindowId) >= 0) return sidepanelWindowId;
   try {
     const current = await browser.windows?.getCurrent?.();
-    if (typeof current?.id === 'number' && Number.isInteger(current.id)) {
+    if (typeof current?.id === 'number' && Number.isInteger(current.id) && current.id >= 0) {
       sidepanelWindowId = current.id;
       return sidepanelWindowId;
     }
   } catch { /* fall through to the tab-scoped lookup */ }
   try {
     const current = (await browser.tabs.query({ active: true, currentWindow: true }))[0];
-    if (typeof current?.windowId === 'number' && Number.isInteger(current.windowId)) {
+    if (typeof current?.windowId === 'number' && Number.isInteger(current.windowId) && current.windowId >= 0) {
       sidepanelWindowId = current.windowId;
     }
   } catch { /* the caller keeps the fail-safe unknown state */ }
   return sidepanelWindowId;
+};
+/** @param {{windowId?:number,chatOwner?:'home'|'panel'|null,homeTabId?:number|null}} surface */
+const applySurfaces = (surface) => {
+  if (surface.windowId !== sidepanelWindowId
+      || (surface.chatOwner !== 'home' && surface.chatOwner !== 'panel' && surface.chatOwner !== null)) return false;
+  // why: a live panel keeps its staged files until it closes. Handoff is separate.
+  if (chatOwner === 'panel' && surface.chatOwner !== 'panel') return true;
+  chatOwner = surface.chatOwner ?? null;
+  homeTabId = typeof surface.homeTabId === 'number' && Number.isInteger(surface.homeTabId) && surface.homeTabId >= 0
+    ? surface.homeTabId : null;
+  if (chatOwner === 'panel') maybeRestoreVoice(currentState);
+  m.redraw();
+  return true;
+};
+const refreshChatOwner = async () => {
+  try {
+    const windowId = await resolveSidepanelWindowId();
+    if (windowId === null) return;
+    const reply = await uiRuntime.send({ type: 'surfaces/get', windowId });
+    if (reply?.ok) applySurfaces(reply);
+  } catch (cause) { console.warn('[sidepanel] chat owner read failed', cause); }
 };
 /**
  * @param {number|null} [preferredTabId]
@@ -424,6 +470,7 @@ const onWindowFocusChanged = (windowId) => refreshOptionsActive(null, windowId);
 const routeArgs = (view) => ({
   state: currentState, send, voiceManager, uiActions, view, optionsActive,
   activeTabStatus, stateFailed: statePort.failed, retryState: statePort.retry,
+  chatOwner,
   firstTabPrompt: firstTab?.view(currentState) ?? null,
 });
 
@@ -457,6 +504,7 @@ export const startSidepanel = () => {
   if (document.documentElement.dataset.peerdBootStage === 'failed') return;
   started = true;
   statePort.start();
+  void refreshChatOwner();
   document.addEventListener('keydown', onGlobalKeydown);
   if (browser.tabs?.onActivated) {
     browser.tabs.onActivated.addListener(onTabActivated);

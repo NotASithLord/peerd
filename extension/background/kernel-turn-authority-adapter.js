@@ -2321,6 +2321,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
     const tabAffordances = makeTabAffordances({
       browser: deps.browser, uiPorts: shared.uiPorts,
       denylistStore: deps.denylist, closeSidePanel: deps.closePanel,
+      openWindowHome: deps.openWindowHome,
       isWatchOn: () => deps.settingsStore.get().watchAgentTab === true,
       getFrontDoorView: () => deps.settingsStore.get().frontDoorView === 'home' ? 'home' : 'panel',
       coldEvent: (key) => captureTabListener(key),

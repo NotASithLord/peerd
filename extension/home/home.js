@@ -1,17 +1,7 @@
 // @ts-check
-// peerd — the home page. A standalone full-tab SPA (NOT the options page):
-// a left rail switches between the agent Chat and the Library / Discover /
-// Network sections. The Chat is an EQUAL live view of the same SW session the
-// side panel shows (DESIGN-12): home connects a 'home' port and folds the SAME
-// pushes through the SHARED reduceChat, so switching between home and the side
-// panel never loses history — they're two projections of one worker session.
-// "Pop to the side" hands the chat to the window-global side panel so it
-// follows you across tabs while the agent drives the browser.
-//
-// Opened from the side-panel header (▦) — or the toolbar icon, when the
-// frontDoorView setting is 'home' (the default front door is the side panel).
-// Settings is a link from the rail (configuration stays distinct from the
-// home surface).
+// Home shows the shared active chat and product pages.
+// Native Split View changes the tab layout and keeps this chat document.
+// The first chat surface in each window owns its composer until it closes.
 
 import m from '/vendor/mithril/mithril.js';
 import browser from '/shared/browser-api.js';
@@ -185,10 +175,25 @@ const navigateHome = (view) => {
   m.redraw();
   focusActiveContent();
 };
-// Single-homed chat (DESIGN-12, owner 2026-06-18): when a side panel is open it
-// OWNS Chat + Chats, and home shows only the tool sections. The SW broadcasts
-// this on every surface connect/disconnect.
+// Each window keeps its chat owner until that surface closes.
 let sidePanelOpen = false;
+let surfaceReady = false, homeChatMounted = false;
+/** @type {number|null} */ let homeOwnerTabId = null;
+const ownsHomeChat = () => surfaceReady && !sidePanelOpen && homeOwnerTabId === homeTab?.id;
+/** @param {any} surface */
+const applySurfaces = (surface) => {
+  if (!homeTab || surface?.windowId !== homeTab.windowId) return;
+  if (!['home', 'panel', null].includes(surface.chatOwner)) return;
+  surfaceReady = true;
+  homeOwnerTabId = surface.homeTabId ?? null;
+  if (surface.chatOwner === 'home' && homeOwnerTabId === homeTab.id) homeChatMounted = true;
+  applySidePanelOpen(surface.chatOwner === 'panel');
+  refreshPresence();
+  m.redraw();
+};
+const refreshSurfaces = () => {
+  void uiRuntime.send({ type: 'surfaces/get' }).then(applySurfaces).catch(() => {});
+};
 /** @type {string | null} */
 let stashedChatView = null;  // the chat/chats view we auto-left when the panel opened — restored on close
 // Only a panel opened by an "Open ↗" tab card auto-closes when you come back to
@@ -199,7 +204,13 @@ let stashedChatView = null;  // the chat/chats view we auto-left when the panel 
 // that resets on close is gone before you ever return.
 let panelOpenedByCard = false;
 // The recent-chats list column is collapsible (it gets noisy) — persisted.
-let chatListCollapsed = (() => { try { return localStorage.getItem('peerd.home.chatsCollapsed') === '1'; } catch { return false; } })();
+const savedChatListCollapsed = () => { try { return localStorage.getItem('peerd.home.chatsCollapsed') === '1'; } catch { return false; } };
+const narrowChat = window.matchMedia('(max-width: 900px)');
+let chatListCollapsed = narrowChat.matches || savedChatListCollapsed();
+narrowChat.addEventListener('change', ({ matches }) => {
+  chatListCollapsed = matches || savedChatListCollapsed();
+  m.redraw();
+});
 const toggleChatList = () => {
   chatListCollapsed = !chatListCollapsed;
   try { localStorage.setItem('peerd.home.chatsCollapsed', chatListCollapsed ? '1' : '0'); } catch { /* private mode */ }
@@ -291,12 +302,10 @@ const handlePortMessage = (msg) => {
   if (!msg || typeof msg.type !== 'string') return false;
   // Voice is side-panel-only (no mic surface here) — ignore voice/* pushes.
   if (msg.type.startsWith('voice/')) return true;
-  // Surface presence (not chat state, so it bypasses the reducer): when a side
-  // panel opens, hand Chat + Chats to it and drop to a tool view; when it closes,
-  // take chat back to where we were.
+  // Surface ownership does not change the shared active chat.
   if (msg.type === 'surfaces') {
-    applySidePanelOpen(!!msg.sidePanelOpen);
-    refreshPresence();
+    applySurfaces(msg);
+    if (msg.windowId === homeTab?.windowId && msg.chatOwner === null) refreshSurfaces();
     return true;
   }
   // §4e: tag which surface this fold is FOR, so the answering surface doesn't
@@ -305,7 +314,7 @@ const handlePortMessage = (msg) => {
   const next = reduceChat(currentState, folded);
   if (next === currentState) return msg.type === 'state';
   currentState = next;
-  if (msg.type === 'state') { booted = true; }
+  if (msg.type === 'state') { booted = true; if (homeTab) refreshSurfaces(); }
   if (setupPending(currentState, DWEB_ENABLED)) sawSetup = true;
   refreshPresence();
   redrawForRuntimeMessage(m.redraw, msg);
@@ -411,26 +420,27 @@ const requestDebugger = async (noticeId) => {
   m.redraw();
   return ok;
 };
-// "Open ↗" on a "peerd opened a tab" card: focus the agent's background tab AND
-// open the side panel — BOTH inside this click gesture, the only moment Chrome
-// lets us open the panel (DESIGN-12). A card-opened panel follows you to that
-// tab and auto-closes when you come back to home (onVisibility). The card itself
-// persists (tracks the live tab).
+// Open the agent's tab. Home keeps its composer while the page is visible.
 /**
  * @param {number} tabId
  * @param {number} [windowId]
  */
-const openAgentTab = (tabId, windowId) => {
-  // Panel FIRST — sidePanel.open() must run synchronously in the click gesture,
-  // before any other call, or Chrome drops the activation. Open it in THIS window
-  // (where the click is); the agent's tab opened in the same window.
+const openAgentTab = async (tabId, windowId) => {
   const wid = homeTab?.windowId ?? windowId;
+  if (ownsHomeChat()) {
+    try {
+      const { showBrowserPage } = await import('./workspace-header.js');
+      const reply = await showBrowserPage(tabId);
+      if (!reply.ok) showEffectFailure(null, new Error(reply.notice));
+    } catch (cause) { showEffectFailure(null, cause); }
+    return;
+  }
   try {
     const p = sidePanelApi()?.open?.(wid != null ? { windowId: wid } : { tabId });
     if (p?.catch) p.catch((/** @type {unknown} */ e) => console.warn('[home] open panel failed', e));
   } catch (e) { console.warn('[home] open panel threw', e); }
   panelOpenedByCard = true;
-  try { browser.tabs.update(tabId, { active: true }); } catch (e) { console.warn('[home] focus tab failed', e); }
+  try { await browser.tabs.update(tabId, { active: true }); } catch (e) { console.warn('[home] focus tab failed', e); }
   // why no dismiss: the agent-tab card PERSISTS after click — it tracks the live
   // agent tab so you can jump back any time; it clears itself when the tab closes.
 };
@@ -459,6 +469,7 @@ const readHomeTab = () => {
     browser.tabs?.getCurrent?.()?.then?.((t) => {
       const pinnedChanged = !!t?.pinned !== !!homeTab?.pinned;
       homeTab = t ?? null;
+      refreshSurfaces();
       if (!pinnedChanged) return;
       // The view picked when the panel took the chat depends on the pin.
       if (sidePanelOpen && stashedChatView) activeView = besidePanel();
@@ -468,22 +479,22 @@ const readHomeTab = () => {
 };
 readHomeTab();
 
-// "Pop the chat to the side" — open the window-global side panel so the chat
-// follows across tabs (DESIGN-12). sidePanel.open() needs a user gesture, so
-// this MUST run synchronously inside the click handler (no await before it).
-const popToSide = () => {
-  try {
-    if (homeTab?.windowId == null) return; // id not resolved yet — no-op beats a reject
-    const p = sidePanelApi()?.open?.({ windowId: homeTab.windowId });
-    if (p?.catch) p.catch((/** @type {unknown} */ e) => console.warn('[home] sidePanel.open failed', e));
-  } catch (e) { console.warn('[home] sidePanel.open threw', e); }
+const focusHomeOwner = async () => {
+  if (homeOwnerTabId === null || !homeTab) return;
+  const target = await browser.tabs.get(homeOwnerTabId);
+  const base = browser.runtime.getURL('home/home.html');
+  if (target.windowId !== homeTab.windowId || target.url?.split(/[?#]/)[0] !== base) return;
+  await browser.tabs.update(homeOwnerTabId, { active: true, url: `${base}#chat` });
 };
-// Bring the chat back from the panel into home (the inverse of pop-to-side / the
-// "go to tab" card). The panel's own close button does the same.
-// why stash 'chat' here: the user asked for the chat, so the close must land on
-// Chat even after they navigated meanwhile (setView cleared the stash) or when
-// the panel opened while home was already on a tool view (nothing was stashed).
-const bringChatHome = () => { stashedChatView = 'chat'; settleUiEffect(send({ type: 'sidepanel/close' })); };
+
+// why: Firefox must close its sidebar inside the click handler.
+// Keep Chrome's window binding and return to Chat after either close.
+const bringChatHome = () => {
+  stashedChatView = 'chat';
+  settleUiEffect(browser.sidebarAction?.close
+    ? browser.sidebarAction.close().catch((cause) => showEffectFailure(null, cause))
+    : send({ type: 'sidepanel/close' }));
+};
 
 // Actor Space spans every session, but its room action still lands on one
 // concrete chat. When home owns chat, navigate there; when the side panel owns
@@ -506,13 +517,26 @@ const openActorSession = (sessionId) => settleSessionEffect(
 // the agent creates a tab is impossible: Chrome only opens the panel during a
 // user gesture.)
 let homeWasHidden = (typeof document !== 'undefined' && document.hidden);
+/** @type {HTMLElement|null} */ let lastHomeFocus = null;
 const onVisibility = () => {
   const hidden = document.hidden;
+  if (hidden) lastHomeFocus = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+    ? document.activeElement : null;
+  if (hidden && ownsHomeChat()) void import('./workspace-header.js')
+    .then(({ protectHomeDocument }) => protectHomeDocument()).catch(() => {});
   if (homeWasHidden && !hidden) {
     if (sidePanelOpen && panelOpenedByCard) settleUiEffect(send({ type: 'sidepanel/close' }));
     panelOpenedByCard = false;
     readHomeTab();
     markLooked();
+    requestAnimationFrame(() => {
+      if (!ownsHomeChat() || activeView !== 'chat') return;
+      const target = currentState.pendingConfirm
+        ? document.querySelector('.confirm-modal button.secondary')
+        : lastHomeFocus?.isConnected && lastHomeFocus.checkVisibility() ? lastHomeFocus
+          : document.querySelector('.home-chat textarea');
+      if (target instanceof HTMLElement) target.focus();
+    });
   }
   homeWasHidden = hidden;
   refreshPresence();
@@ -863,12 +887,25 @@ const notifBanner = (n) => m('.notif-banner', [
   m('button.notif-banner-x', { 'aria-label': 'Dismiss', onclick: () => peerNotifications.dismiss(n.id) }, '×'),
 ]);
 
+/** @type {any} */ let WorkspaceHeader = null;
+let workspaceHeaderLoading = false;
+/** @type {'first'|'last'|null} */ let workspaceMenuRequested = null;
+const loadWorkspaceHeader = () => {
+  if (WorkspaceHeader || workspaceHeaderLoading) return;
+  workspaceHeaderLoading = true;
+  import('./workspace-header.js').then(module => { WorkspaceHeader = module.WorkspaceHeader; })
+    .catch((cause) => console.warn('[home] browser controls failed to load', cause))
+    .finally(() => { workspaceHeaderLoading = false; m.redraw(); });
+};
+
 /** @param {boolean} showDweb @param {boolean} holdNudges @param {string|null} [view] */
 const content = (showDweb, holdNudges, view = activeView) => {
   if (view === 'chat') {
+    const openWorkspaceMenu = workspaceMenuRequested;
+    if (WorkspaceHeader) workspaceMenuRequested = null;
     // ChatGPT-style: a recent-chats column on the left, the live chat on the
     // right. Collapsible — when hidden it's a thin strip with new-chat + expand.
-    return m('.home-chat-layout', { style: activeView === 'chat' ? '' : 'display:none' }, [
+    return m('.home-chat-layout', { style: activeView === 'chat' && ownsHomeChat() ? '' : 'display:none' }, [
       chatListCollapsed
         ? m('.chat-list.is-collapsed', [
             m('button.chat-list-toggle', { title: 'Show chats', 'aria-label': 'Show chats', onclick: toggleChatList }, '»'),
@@ -879,13 +916,18 @@ const content = (showDweb, holdNudges, view = activeView) => {
           ])
         : m(ChatListPanel, { state: currentState }),
       m('.home-chat', [
-        m('.home-chat-bar', [
-          m('span.home-chat-title', (currentState.session?.title && currentState.session.title.trim()) || 'New chat'),
-          m('.spacer', { style: 'flex:1;' }),
-          sidePanelApi() ? m('button.home-popout.home-popout--pop', {
-            title: 'Open this chat in the side panel — it follows you to the tab the agent opens',
-            onclick: popToSide,
-          }, 'Pop to side ⇥') : null,
+        WorkspaceHeader ? m(WorkspaceHeader, {
+          title: currentState.session?.title?.trim() || 'New chat', openMenu: !!openWorkspaceMenu, lastItem: openWorkspaceMenu === 'last',
+        }) : m('.home-chat-bar', [
+          m('span.home-chat-title', currentState.session?.title?.trim() || 'New chat'),
+          m('.spacer', { style: 'flex:1' }),
+          m('button.home-popout', { 'data-workspace-split': '', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: () => {
+            workspaceMenuRequested = 'first'; loadWorkspaceHeader();
+          }, onkeydown: (/** @type {KeyboardEvent} */ event) => {
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault(); workspaceMenuRequested = event.key === 'ArrowUp' ? 'last' : 'first'; loadWorkspaceHeader();
+            }
+          } }, 'Split view'),
         ]),
         // Newest peerd notification, surfaced in the chat.
         peerNotifications.list()[0] ? notifBanner(peerNotifications.list()[0]) : null,
@@ -986,7 +1028,11 @@ const HomeApp = {
               class: it.id === activeView ? 'is-active' : '',
               'data-home-view': it.id,
               'aria-current': it.id === activeView ? 'page' : undefined,
-              onclick: () => { navigateHome(it.id); },
+              onclick: () => {
+                if (it.id === 'chat' && homeOwnerTabId !== null && homeOwnerTabId !== homeTab?.id) {
+                  void focusHomeOwner().catch(() => {});
+                } else navigateHome(it.id);
+              },
             }, [
               m('span.home-nav-label', it.label),
               it.id === 'actors' ? m(ActorsNavCount) : null,
@@ -1035,14 +1081,20 @@ const HomeApp = {
                 m('button.home-popout', { onclick: bringChatHome }, 'Bring it here ⇤'),
               ])
             : null,
-          // why: keep drafts and files in this document until the panel owns chat.
-          !sidePanelOpen ? content(showDweb, hintShown || offerShown, 'chat') : null,
+          !sidePanelOpen && homeOwnerTabId !== null && homeOwnerTabId !== homeTab?.id
+            ? m('.home-panel-bar', [
+                m('span', 'This chat is open in the Home tab.'),
+                m('button.home-popout', { onclick: () => focusHomeOwner() }, 'Go to chat'),
+              ]) : null,
+          !surfaceReady && activeView === 'chat' ? m('p', { role: 'status' }, 'Loading chat…') : null,
+          // Keep this document's composer when another surface opens.
+          homeChatMounted ? content(showDweb, hintShown || offerShown, 'chat') : null,
           activeView !== 'chat' ? content(showDweb, hintShown || offerShown) : null,
         ]),
       ]),
       // The agent's permission prompt — broadcast to every open surface
       // (DESIGN-12); render it here so it's answerable from home too.
-      currentState.pendingConfirm
+      currentState.pendingConfirm && ownsHomeChat()
         ? m(ConfirmModal, { prompt: currentState.pendingConfirm, uiActions })
         : null,
     ];
@@ -1068,5 +1120,9 @@ export const startHome = () => {
   document.addEventListener('visibilitychange', onVisibility);
   window.addEventListener('hashchange', onHashChange);
   window.addEventListener('storage', onStorage);
+  browser.tabs.onAttached?.addListener((tabId) => { if (tabId === homeTab?.id) readHomeTab(); });
+  browser.tabs.onUpdated?.addListener((tabId, change) => {
+    if (tabId === homeTab?.id && Object.hasOwn(change, 'pinned')) readHomeTab();
+  });
   m.mount(root, HomeApp);
 };
