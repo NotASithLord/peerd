@@ -39,7 +39,7 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
   test('the actual Save banner keeps unknown first, then names JSON and lock refusals', async () => {
     const source = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
     const show = source.slice(source.indexOf('const showSaveFailure ='), source.indexOf('const clearSaveFailure ='));
-    const context = { saveStatus: { hidden: false }, saveReturnFocus: null, saveOutcomeUnknown: false,
+    const context = { document: { getElementById: () => null }, saveStatus: { hidden: false }, saveReturnFocus: null, saveOutcomeUnknown: false,
       saveMessage: { textContent: '' }, saveRetry: { disabled: true, textContent: '' } };
     const run = runInNewContext(`${show}; showSaveFailure`, context);
     run('data/state.json', { code: 'app-file-invalid-json' });

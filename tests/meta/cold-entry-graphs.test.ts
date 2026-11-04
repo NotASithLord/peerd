@@ -33,12 +33,12 @@ const richUiEntries = {
   home: 'home/home.js',
 } as const;
 
-// Exact reviewed graphs including the shared pacing status bar. The shared
+// Bound the reviewed graphs with the game workflow copy. The shared
 // ui.js surfaces are first-paint contracts; Settings-only features stay outside.
 // Home includes the reviewed read-only onboarding readiness projection.
 const RICH_UI_GRAPH_CEILINGS = {
-  sidepanel: { modules: 62, graphBytes: 658_641 },
-  home: { modules: 69, graphBytes: 812_114 },
+  sidepanel: { modules: 62, graphBytes: 658_955 },
+  home: { modules: 69, graphBytes: 812_551 },
 } as const;
 
 const nativeKernelEntry = 'background/vault-kernel-chrome.js';
