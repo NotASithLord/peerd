@@ -392,13 +392,10 @@ describe('session-aware composer readiness', () => {
       m.redraw.sync?.();
       expect(mounted.root.querySelector('#composer-readiness-note')?.textContent)
         .toBe('Starting up. Try again in a moment.');
-      const sendButton = /** @type {HTMLButtonElement|null} */ (
-        mounted.root.querySelector('button.send-btn')
-      );
-      expect(sendButton?.disabled).toBe(true);
-      mounted.root.querySelector('form')?.dispatchEvent(
-        new Event('submit', { bubbles: true, cancelable: true }),
-      );
+      expect(/** @type {HTMLButtonElement|null} */ (mounted.root.querySelector('button.send-btn'))?.disabled).toBe(true);
+      expect(mounted.root.querySelector('#composer-readiness-note')?.getAttribute('role')).toBe('status');
+      expect(mounted.root.querySelector('#composer-readiness-note')?.getAttribute('aria-live')).toBe('polite');
+      mounted.root.querySelector('form')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       await settle();
       expect(mounted.sent.some((msg) => msg.type === 'agent/send')).toBe(false);
       expect(textarea.value).toBe('keep this startup draft');

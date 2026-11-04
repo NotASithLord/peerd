@@ -19,6 +19,7 @@
 // color, and glyphs (★/☆, ⋯) still do most of the state-carrying.
 
 import m from '/vendor/mithril/mithril.js';
+import { openOptions } from '/shared/open-options.js';
 
 /** @typedef {import('../options/sections/reset-row.js').Send} Send */
 /**
@@ -737,7 +738,7 @@ export const LibrarySection = {
     }
   },
 
-  // Pull a newer announced version of an installed app, overwriting it in place.
+  // Ask before replacing local edits with a newer peer release.
   /**
    * @param {{ state: any, attrs: { send: Send } }} vnode
    * @param {App} app
@@ -886,8 +887,10 @@ export const LibrarySection = {
       ]) : null,
     ]) : null;
     if (ui.apps.length === 0) {
-      return m('div', [header, ...banners, gitImport, m('p.muted',
-        'No apps yet. Ask the agent to build one — it will appear here automatically.')]);
+      return m('div', [header, ...banners, gitImport,
+        m('p.muted', 'No apps yet. Ask peerd in a chat to build one. It appears here when it is saved.'),
+        m('button.linklike', { type: 'button', onclick: () => openOptions('transfer') },
+          'Import a .peerd file in Settings > Backup & restore > Artifacts')]);
     }
 
     const q = ui.query.trim().toLowerCase();
@@ -1020,7 +1023,7 @@ export const LibrarySection = {
           ? m('button.library-btn', {
               disabled: busy,
               'data-library-action': 'update',
-              title: 'Download the newer version a peer published (overwrites your copy in place)',
+              title: 'Get the newer version its maker shared. If you changed this App, you choose what happens to your changes.',
               onclick: () => LibrarySection.updateApp(vnode, app),
             }, busy ? '…' : 'Update')
           : null,
@@ -1112,15 +1115,15 @@ export const LibrarySection = {
         disabled: locked,
         spellcheck: 'false',
         'aria-label': locked ? `Dweb namespace for ${app.name} (locked)` : `Dweb namespace for ${app.name}`,
+        'aria-describedby': `library-share-warning-${app.id}`,
         oncreate: (/** @type {{ dom: HTMLInputElement }} */ v) => { if (!locked) v.dom.focus(); },
         oninput: (/** @type {{ target: HTMLInputElement }} */ e) => { ui.shareSlug = e.target.value; },
         onkeydown: (/** @type {KeyboardEvent} */ e) => {
-          if (e.key === 'Enter' && slug) LibrarySection.shareApp(vnode, app);
           if (e.key === 'Escape') { LibrarySection.cancelShare(vnode); m.redraw(); }
         },
       }),
       m('.muted', { style: 'font-size:11px; font-family:monospace; word-break:break-all; margin-bottom:6px;' }, `peerd://${pubSuffix}/${slug || '…'}`),
-      m('.muted', { style: 'font-size:11px; margin-bottom:6px;' },
+      m('p', { id: `library-share-warning-${app.id}`, style: 'font-size:13px; margin:0 0 6px;' },
         'Sharing publishes every working-tree file, including data/*.json. Remove private data before continuing.'),
       m('.library-actions', { style: 'gap:6px;' }, [
         m('button.library-btn', { disabled: !slug, onclick: () => LibrarySection.shareApp(vnode, app) }, locked ? 'Publish update' : 'Share'),

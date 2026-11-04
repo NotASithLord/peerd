@@ -821,8 +821,8 @@ export const InputBar = {
     return m('form.input-bar', { onsubmit: submit }, [
       unavailableCopy || warningCopy || ui.sendError ? m('p.composer-readiness-note', {
         id: 'composer-readiness-note',
-        role: unavailableCopy || ui.sendError ? 'alert' : 'status',
-        'aria-live': unavailableCopy || ui.sendError ? 'assertive' : 'polite',
+        role: ui.sendError || unavailableCopy && composer.reason !== 'controller-not-ready' ? 'alert' : 'status',
+        'aria-live': ui.sendError || unavailableCopy && composer.reason !== 'controller-not-ready' ? 'assertive' : 'polite',
       }, ui.sendError ?? unavailableCopy ?? warningCopy) : null,
       m('.composer-wrap', [
         paletteOpen ? m(CommandPalette, {
