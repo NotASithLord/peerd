@@ -40,7 +40,7 @@ const observe = (value, onError) => {
  * @param {()=>boolean} deps.isHomeOpen
  * @param {()=>boolean} deps.isPanelOpen
  * @param {()=>('panel'|'home')} deps.getFrontDoorView
- * @param {()=>unknown} deps.closePanel
+ * @param {(windowId?:number|null)=>unknown} deps.closePanel
  * @param {()=>unknown} deps.openHome
  * @param {(cause:unknown)=>void} [deps.onError]
  */
@@ -71,8 +71,8 @@ export const createKernelFrontDoor = ({
     return Object.freeze({ lastFocusedWindowId, browserFocused });
   };
 
-  // This seed is diagnostic/backstop only. The gesture listeners use the tab's
-  // window id synchronously whenever the browser supplies it.
+  // This seed is an open-only backstop. Closing requires the browser event's
+  // window ID, so another window keeps its chat.
   observe(refreshFocus(), onError);
 
   coldEvent('windows.onFocusChanged', browser.windows?.onFocusChanged)
@@ -95,12 +95,13 @@ export const createKernelFrontDoor = ({
       nativePanelMirror: typeof browser.sidePanel?.setPanelBehavior === 'function',
     });
     if (target === 'close') {
-      observe(closePanel(), onError);
+      observe(closePanel(windowId), onError);
       return 'close';
     }
     try {
-      if (target === 'panel' && typeof windowId === 'number') {
-        observe(browser.sidePanel.open({ windowId }), () => fallbackHome());
+      const panelWindowId = windowId ?? lastFocusedWindowId;
+      if (target === 'panel' && typeof panelWindowId === 'number') {
+        observe(browser.sidePanel.open({ windowId: panelWindowId }), () => fallbackHome());
         return 'panel';
       }
       if (target === 'sidebar') {
@@ -116,12 +117,12 @@ export const createKernelFrontDoor = ({
 
   coldEvent('action.onClicked', browser.action?.onClicked)
     ?.addListener((/** @type {any} */ tab) => {
-      pullIn(tab?.windowId ?? lastFocusedWindowId, false);
+      pullIn(tab?.windowId, false);
     });
   coldEvent('commands.onCommand', browser.commands?.onCommand)
     ?.addListener((/** @type {string} */ command, /** @type {any} */ tab) => {
       if (command !== 'pull-in-peerd') return;
-      pullIn(tab?.windowId ?? lastFocusedWindowId, true);
+      pullIn(tab?.windowId, true);
     });
 
   const syncNativeBehavior = async () => {
@@ -142,29 +143,24 @@ export const createKernelFrontDoor = ({
 
 /** @param {Record<string,any>} deps */
 export const attachKernelFrontDoor = (deps) => {
-  const closePanel = async () => {
+  const closePanel = async (
+    /** @type {unknown} */ target = undefined,
+    /** @type {{ tab?: { windowId?: number } }} */ sender = {},
+  ) => {
     try {
       if (deps.browser.sidebarAction?.close) {
         await deps.browser.sidebarAction.close();
         return { ok: true };
       }
       const sidePanel = deps.browser.sidePanel;
-      // why every window: the open flag is global (any side panel port), and
-      // Chrome 141+ closes a panel per window. A window with no panel resolves.
-      if (typeof sidePanel?.close === 'function') {
-        const windows = await deps.browser.windows.getAll({ windowTypes: ['normal'] });
-        const closed = await Promise.allSettled(windows.map((/** @type {{id:number}} */ window) =>
-          sidePanel.close({ windowId: window.id })));
-        if (closed.length === 0 || closed.some(({ status }) => status === 'fulfilled')) {
-          return { ok: true };
-        }
+      if (typeof sidePanel?.close !== 'function') {
+        return { ok: false, error: 'sidepanel-close-unavailable' };
       }
-      // Older Chrome has no close: disable the panel, then turn it back on.
-      if (!sidePanel?.setOptions) return { ok: false, error: 'no-sidepanel' };
-      await sidePanel.setOptions({ enabled: false });
-      setTimeout(() => {
-        sidePanel.setOptions({ enabled: true, path: 'sidepanel/sidepanel.html' }).catch(() => {});
-      }, 250);
+      const windowId = typeof target === 'number' ? target : sender.tab?.windowId;
+      if (typeof windowId !== 'number' || !Number.isInteger(windowId) || windowId < 0) {
+        return { ok: false, error: 'no-sidepanel-window' };
+      }
+      await sidePanel.close({ windowId });
       return { ok: true };
     } catch (error) {
       return {

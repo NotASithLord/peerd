@@ -24,6 +24,7 @@ const makeHarness = ({
   const command = event();
   const focus = event();
   const calls: string[] = [];
+  const closedIn: Array<number|null|undefined> = [];
   const browser: any = {
     runtime: { id: 'extension-id' },
     action: { onClicked: action },
@@ -54,10 +55,10 @@ const makeHarness = ({
     isHomeOpen: () => homeOpen,
     isPanelOpen: () => panelOpen,
     getFrontDoorView: () => frontDoorView,
-    closePanel: () => { calls.push('close'); },
+    closePanel: (windowId) => { calls.push('close'); closedIn.push(windowId); },
     openHome: () => { calls.push('home'); },
   });
-  return { action, command, focus, calls, coldKeys, api };
+  return { action, command, focus, calls, closedIn, coldKeys, api };
 };
 
 describe('thin-kernel synchronous front door', () => {
@@ -82,6 +83,7 @@ describe('thin-kernel synchronous front door', () => {
     toggle.command.emit('unrelated', { windowId: 5 });
     toggle.command.emit('pull-in-peerd', { windowId: 5 });
     expect(toggle.calls).toEqual(['close']);
+    expect(toggle.closedIn).toEqual([5]);
 
     const firefox = makeHarness({ firefox: true });
     firefox.command.emit('pull-in-peerd', { windowId: 6 });
@@ -90,7 +92,7 @@ describe('thin-kernel synchronous front door', () => {
     expect(firefox.calls).toEqual(['sidebar']);
   });
 
-  test('uses the focused-window backstop and mirrors the native Chrome preference', async () => {
+  test('keeps the focused-window backstop for opening only', async () => {
     const harness = makeHarness({ nativeMirror: true });
     await Promise.resolve();
     harness.command.emit('pull-in-peerd', {});
@@ -99,6 +101,14 @@ describe('thin-kernel synchronous front door', () => {
     expect(harness.calls).toEqual(['panel:8', 'native:true']);
     harness.focus.emit(-1);
     expect(harness.api.snapshot()).toEqual({ lastFocusedWindowId: 8, browserFocused: false });
+  });
+
+  test('a shortcut without a browser tab never closes the remembered window', async () => {
+    const harness = makeHarness({ panelOpen: true });
+    await Promise.resolve();
+    harness.command.emit('pull-in-peerd', {});
+    expect(harness.closedIn).toEqual([undefined]);
+    expect(harness.api.snapshot().lastFocusedWindowId).toBe(8);
   });
 
   test('attaches recovery and returns one shared panel closer', async () => {
@@ -138,21 +148,18 @@ describe('thin-kernel synchronous front door', () => {
 describe('closing the side panel', () => {
   type Closer = { close?: (options: { windowId: number }) => Promise<void> };
   const attachCloser = (sidePanel: Closer) => {
-    const calls: string[] = [];
+    const calls: unknown[] = [];
     const browser = {
       runtime: {},
       windows: {
         WINDOW_ID_NONE: -1,
         onFocusChanged: event(),
         getLastFocused: async () => ({ id: 4, focused: true }),
-        getAll: async ({ windowTypes }: { windowTypes: string[] }) => {
-          calls.push(`getAll:${windowTypes.join(',')}`);
-          return [{ id: 4 }, { id: 9 }];
-        },
+        getAll: async () => { throw new Error('must not inspect other windows'); },
       },
       sidePanel: {
         ...sidePanel,
-        setOptions: async (options: { enabled: boolean }) => { calls.push(`setOptions:${options.enabled}`); },
+        setOptions: async () => { throw new Error('must not disable every panel'); },
       },
     };
     const { closePanel } = attachKernelFrontDoor({
@@ -166,33 +173,43 @@ describe('closing the side panel', () => {
     return { closePanel, calls };
   };
 
-  test('Chrome 141+ closes the panel in every normal window, with no disable and re-enable', async () => {
+  test('Home closes only its browser-reported window and ignores a supplied target', async () => {
     const closedIn: number[] = [];
     const { closePanel, calls } = attachCloser({
       close: async ({ windowId }) => { closedIn.push(windowId); },
     });
-    expect(await closePanel()).toEqual({ ok: true });
-    expect(closedIn).toEqual([4, 9]);
-    expect(calls).toEqual(['getAll:normal']);
+    expect(await closePanel({ windowId: 9 }, { tab: { windowId: 4 } })).toEqual({ ok: true });
+    expect(closedIn).toEqual([4]);
+    expect(calls).toEqual([]);
   });
 
-  test('a window without the panel does not fail the close', async () => {
-    const { closePanel, calls } = attachCloser({
-      close: async ({ windowId }) => { if (windowId === 4) throw new Error('No active side panel'); },
-    });
-    expect(await closePanel()).toEqual({ ok: true });
-    expect(calls).toEqual(['getAll:normal']);
+  test('the shortcut closes only the window from its browser event', async () => {
+    const closedIn: number[] = [];
+    const { closePanel } = attachCloser({ close: async ({ windowId }) => { closedIn.push(windowId); } });
+    expect(await closePanel(9)).toEqual({ ok: true });
+    expect(closedIn).toEqual([9]);
   });
 
-  test('falls back to the disable and re-enable trick without close, or when every close fails', async () => {
-    const old = attachCloser({});
-    expect(await old.closePanel()).toEqual({ ok: true });
-    expect(old.calls).toEqual(['setOptions:false']);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(old.calls).toEqual(['setOptions:false', 'setOptions:true']);
+  test('a sender without a tab cannot choose or guess a window', async () => {
+    const closedIn: number[] = [];
+    const { closePanel } = attachCloser({ close: async ({ windowId }) => { closedIn.push(windowId); } });
+    expect(await closePanel()).toEqual({ ok: false, error: 'no-sidepanel-window' });
+    expect(await closePanel({ windowId: 9 })).toEqual({ ok: false, error: 'no-sidepanel-window' });
+    expect(await closePanel(-1)).toEqual({ ok: false, error: 'no-sidepanel-window' });
+    expect(closedIn).toEqual([]);
+  });
 
-    const failing = attachCloser({ close: async () => { throw new Error('close failed'); } });
-    expect(await failing.closePanel()).toEqual({ ok: true });
-    expect(failing.calls).toEqual(['getAll:normal', 'setOptions:false']);
+  test('a failed native close does not disable panels in other windows', async () => {
+    const { closePanel, calls } = attachCloser({ close: async () => { throw new Error('close failed'); } });
+    expect(await closePanel({}, { tab: { windowId: 4 } }))
+      .toEqual({ ok: false, error: 'close failed' });
+    expect(calls).toEqual([]);
+  });
+
+  test('old Chrome reports the unavailable close API without a global fallback', async () => {
+    const { closePanel, calls } = attachCloser({});
+    expect(await closePanel({}, { tab: { windowId: 4 } }))
+      .toEqual({ ok: false, error: 'sidepanel-close-unavailable' });
+    expect(calls).toEqual([]);
   });
 });
