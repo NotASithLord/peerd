@@ -487,12 +487,14 @@ const focusHomeOwner = async () => {
   await browser.tabs.update(homeOwnerTabId, { active: true, url: `${base}#chat` });
 };
 
-// Bring the chat back from the panel into home (the inverse of pop-to-side / the
-// "go to tab" card). The panel's own close button does the same.
-// why stash 'chat' here: the user asked for the chat, so the close must land on
-// Chat even after they navigated meanwhile (setView cleared the stash) or when
-// the panel opened while home was already on a tool view (nothing was stashed).
-const bringChatHome = () => { stashedChatView = 'chat'; settleUiEffect(send({ type: 'sidepanel/close' })); };
+// why: Firefox must close its sidebar inside the click handler.
+// Keep Chrome's window binding and return to Chat after either close.
+const bringChatHome = () => {
+  stashedChatView = 'chat';
+  settleUiEffect(browser.sidebarAction?.close
+    ? browser.sidebarAction.close().catch((cause) => showEffectFailure(null, cause))
+    : send({ type: 'sidepanel/close' }));
+};
 
 // Actor Space spans every session, but its room action still lands on one
 // concrete chat. When home owns chat, navigate there; when the side panel owns

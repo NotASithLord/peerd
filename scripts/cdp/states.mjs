@@ -3303,7 +3303,7 @@ export const STATES = [
         if (!complete) await rpc(ctx.page, { type: 'agent/stop' });
         if (other) await other.close();
         if (home) await retirePrivateTransferPage(home);
-        if (panelUrl) await restorePanelDocument(ctx, panelUrl);
+        if (panelUrl) await restorePanelDocument(ctx);
         await setEmulatedTheme(ctx.page, 'light');
       }
     },
@@ -7571,7 +7571,6 @@ export const STATES = [
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
       await chooseFixtureNetwork(ctx, false);
-      const panelUrl = await evalIn(ctx.page, 'location.href');
       const sendChat = async (text) => {
         const sent = await rpc(ctx.page, { type: 'agent/send', text });
         if (!sent?.ok) throw new Error(`agent/send failed: ${JSON.stringify(sent)}`);
@@ -7620,7 +7619,7 @@ export const STATES = [
         await rec.shotPage('home-chat-list-keyboard', page);
       } finally {
         if (page) await retirePrivateTransferPage(page);
-        await restorePanelDocument(ctx, panelUrl);
+        await restorePanelDocument(ctx);
       }
     },
   },
@@ -7746,7 +7745,6 @@ export const STATES = [
     responder: () => ({ sse: sseText('noted') }),
     async run(ctx, rec) {
       await chooseFixtureNetwork(ctx, false);
-      const panelUrl = await evalIn(ctx.page, 'location.href');
       const view = (page) => evalIn(page, `document.querySelector('main.home-content')?.className.replace('home-content home-content--', '') ?? null`);
       const panelBar = (page) => evalIn(page, `!!document.querySelector('.home-panel-bar')`);
       let page = null;
@@ -7784,7 +7782,7 @@ export const STATES = [
           input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true }));
           delete globalThis.__homeNavigationComposer;
         })()`);
-        await restorePanelDocument(ctx, panelUrl);
+        await restorePanelDocument(ctx);
         const retained = await waitFor(async () => !(await panelBar(page)) && (await view(page)) === 'chat'
           && await evalIn(ctx.page, `!!document.querySelector('.home-chat-status') && !document.querySelector('form.input-bar textarea')`),
         { budgetMs: 8_000, pollMs: 80 });
@@ -7816,7 +7814,7 @@ export const STATES = [
       } finally {
         if (blank) await fetch(`http://127.0.0.1:${ctx.port}/json/close/${blank.id}`).catch(() => {});
         if (page) await retirePrivateTransferPage(page);
-        await restorePanelDocument(ctx, panelUrl);
+        await restorePanelDocument(ctx);
       }
     },
   },
@@ -9891,7 +9889,6 @@ export const STATES = [
         const provider = await rpc(ctx.page, { type: 'settings/update', patch: { providerName: 'anthropic', providerModel: '' } });
         if (key?.ok !== true || provider?.ok !== true) throw new Error('the attachment provider did not initialize');
         if (!await waitFor(() => evalIn(ctx.page, `!!document.querySelector('input.attach-input')`), { budgetMs: 15_000 })) throw new Error('the real file picker is unavailable');
-        const panelUrl = await evalIn(ctx.page, 'location.href');
         let home;
         try {
           await chooseFixtureNetwork(ctx, false);
@@ -9930,7 +9927,7 @@ export const STATES = [
           })()`);
         } finally {
           if (home) await retirePrivateTransferPage(home);
-          await restorePanelDocument(ctx, panelUrl);
+          await restorePanelDocument(ctx);
         }
         const legacy = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
         for (const [name, bytes, expected] of [

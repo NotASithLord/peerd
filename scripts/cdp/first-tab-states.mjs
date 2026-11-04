@@ -250,7 +250,6 @@ export const FIRST_TAB_STATES = [
     async run(ctx, rec) {
       if (absentOnBase(rec, 'home/first-tab.js')) return;
       presenceGate = new Promise((resolve) => { releasePresence = resolve; });
-      const panelUrl = await evalIn(ctx.page, 'location.href');
       let home = null;
       let other = null;
       const fronts = [];
@@ -299,7 +298,7 @@ export const FIRST_TAB_STATES = [
         for (const front of fronts) await front.close();
         try { home?.close(); } catch { /* */ }
         try { other?.close(); } catch { /* */ }
-        await restorePanel(ctx, panelUrl);
+        await restorePanel(ctx);
       }
     },
   },
@@ -364,7 +363,6 @@ export const FIRST_TAB_STATES = [
         return;
       }
       const before = await tabIds(ctx.page);
-      const panelUrl = await evalIn(ctx.page, 'location.href');
       // why: the voice card must be able to show here, and later states keep theirs.
       const voiceDismissed = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings?.voiceOnboardingDismissed === true;
       let page = null;
@@ -432,7 +430,7 @@ export const FIRST_TAB_STATES = [
         rec.check('once no first-run prompt is left, the voice card shows', !!voice);
       } finally {
         try { page?.close(); } catch { /* */ }
-        await restorePanel(ctx, panelUrl).catch(() => {});
+        await restorePanel(ctx).catch(() => {});
         await rpc(ctx.page, { type: 'settings/update', patch: { voiceOnboardingDismissed: voiceDismissed } }).catch(() => {});
         await resetFirstTab(ctx.page).catch(() => {});
         await rpc(ctx.page, { type: 'settings/update', patch: { dwebEnabled: false } }).catch(() => {});
@@ -486,7 +484,6 @@ export const FIRST_TAB_STATES = [
       await evalIn(ctx.page, `localStorage.removeItem(${JSON.stringify(HINT_KEY)})`);
       // why: rail clicks store the view, and later states open Home on it.
       const storedView = await evalIn(ctx.page, `localStorage.getItem(${JSON.stringify(VIEW_KEY)})`);
-      const panelUrl = await evalIn(ctx.page, 'location.href');
       let page = null;
       let second = null;
       let front = null;
@@ -554,7 +551,7 @@ export const FIRST_TAB_STATES = [
 
         // The Home owner keeps its chat when the native panel opens.
         await clickAndRedraw(page, '[data-home-view="chat"]');
-        await restorePanel(ctx, panelUrl);
+        await restorePanel(ctx);
         panelBack = true;
         const besidePanel = await waitFor(() => evalIn(page, `(() => {
           const content = document.querySelector('.home-content');
@@ -569,7 +566,7 @@ export const FIRST_TAB_STATES = [
       } finally {
         try { page?.close(); } catch { /* */ }
         try { second?.close(); } catch { /* */ }
-        if (!panelBack) await restorePanel(ctx, panelUrl).catch(() => {});
+        if (!panelBack) await restorePanel(ctx).catch(() => {});
         await evalIn(ctx.page, `localStorage.removeItem(${JSON.stringify(HINT_KEY)})`).catch(() => {});
         await evalIn(ctx.page, storedView === null
           ? `localStorage.removeItem(${JSON.stringify(VIEW_KEY)})`
