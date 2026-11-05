@@ -325,6 +325,10 @@ const readForRender = async () => {
   const textFiles = Object.create(null);
   /** @type {Record<string, ArrayBuffer>} */
   const binaryAssets = Object.create(null);
+  // why: The App file server answers reads of text files too. It needs the
+  // original bytes, because decoding is lossy for invalid UTF-8 and a BOM.
+  /** @type {Record<string, ArrayBuffer>} */
+  const textBytes = Object.create(null);
   binaryFilePaths.clear();
   for (const e of entries) {
     const path = e.path.replace(/^\/+/, '');
@@ -340,9 +344,10 @@ const readForRender = async () => {
       binaryAssets[path] = bytes.buffer;
     } else {
       textFiles[path] = new TextDecoder().decode(bytes);
+      textBytes[path] = bytes.buffer;
     }
   }
-  return { textFiles, binaryAssets };
+  return { textFiles, textBytes, binaryAssets };
 };
 
 // Built-in libraries available to every app without a download. Apps run in
@@ -398,6 +403,8 @@ let pendingRuntime;
 let runnerFeatures = [];
 /** @type {Record<string, ArrayBuffer>} */
 let pendingAssets = {};
+/** @type {Record<string, ArrayBuffer>} */
+let pendingFiles = {};
 /** @type {MessagePort | null} */
 let runnerPort = null;
 // The frame starts with NO src, so the browser fires one `load` for its initial
@@ -475,18 +482,20 @@ const tryDeliver = () => {
       type: 'app-body',
       html: pendingBody,
       assets: pendingAssets,
+      files: pendingFiles,
       entry: appMeta?.entryFile,
       agentRuntime: {
         observe: appMeta?.agent?.runtime?.includes('observe') === true,
         act: appMeta?.agent?.runtime?.includes('act') === true,
       },
     },
-    Object.values(pendingAssets),
+    [...Object.values(pendingAssets), ...Object.values(pendingFiles)],
   );
   // Transfer detaches these parent-side buffers. Clear the queue immediately;
   // every later delivery re-reads OPFS and gets fresh ownership.
   pendingBody = null;
   pendingAssets = {};
+  pendingFiles = {};
   runnerPhase = 'delivered';
   if (appMeta?.name) document.title = `peerd · ${appMeta.name}`;
   boot.classList.add('is-hidden');
@@ -518,6 +527,7 @@ const suspendRunnerForEdit = async () => {
   runnerPort = null;
   pendingBody = null;
   pendingAssets = {};
+  pendingFiles = {};
   runnerPhase = 'suspended';
   runnerStarted = false;
   expectingBodyLoad = false;
@@ -593,8 +603,8 @@ const renderMode = async () => {
   dwebBridgeLifecycle.allow();
   attachDwebBridge(); // no-op unless this app is a dwapp on a dweb build
 
-  let textFiles, binaryAssets;
-  try { ({ textFiles, binaryAssets } = await readForRender()); }
+  let textFiles, textBytes, binaryAssets;
+  try { ({ textFiles, textBytes, binaryAssets } = await readForRender()); }
   catch (e) { fail(`couldn't read app files: ${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}`); return; }
 
   if (!(appMeta.entryFile in textFiles)) {
@@ -623,6 +633,7 @@ const renderMode = async () => {
   pendingRuntime = runtime;
   pendingBody = composed;
   pendingAssets = binaryAssets;
+  pendingFiles = textBytes;
 
   if (runnerPhase === 'ready') {
     tryDeliver();

