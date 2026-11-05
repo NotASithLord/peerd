@@ -152,7 +152,7 @@ export const makeEngineRoutes = (deps) => {
   };
   // why: a Pod holding files from an App another person published must not
   // reach the web or a Git remote until the user says so in the Pod tab.
-  /** @param {any} record */
+  /** @param {{outsideFiles?:{publisher?:unknown}|null}|null} record */
   const outsideFilesRefusal = (record) => record?.outsideFiles
     ? `This Pod has files from an App made by someone else (${String(record.outsideFiles.publisher ?? 'unknown')}). Web access and Git remotes are off until the user allows them again in the Pod tab.`
     : null;

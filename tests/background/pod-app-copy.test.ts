@@ -13,6 +13,17 @@ import { getToolMetadata } from '../../extension/peerd-runtime/semantic.js';
 import { podAppCopyTool } from '../../extension/peerd-runtime/tools/defs/pod-app-copy.js';
 
 const OPERATION = 'turn.app.copy-pod-files';
+type AppClientDeps = Parameters<typeof createAppClient>[0];
+type AuthorityInput = Parameters<typeof createAppToolAuthority>[0];
+type Prompt = { kind?: string; oneShot?: boolean; sessionId?: string; summary: string };
+type CopyResult = {
+  ok: boolean; error?: string; declined?: boolean; performed?: boolean; outcomeKnown?: boolean;
+  direction?: string; podId?: string; appId?: string; outsideFiles?: { publisher: string };
+  files: Array<{ from: string; to: string; bytes: number; sha256: string }>;
+};
+type CopyAuthority = {
+  copyPodFiles: (direction: unknown, podId: unknown, appId: unknown, files: unknown) => Promise<CopyResult>;
+};
 const WASM = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0xff, 0x00, 0x80]);
 
 const hex = async (bytes: Uint8Array) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>))]
@@ -54,31 +65,32 @@ const fakePod = (events: Event[], files: Record<string, Uint8Array>) => {
 
 // A real App client over an in-memory OPFS. Its writes must run inside the
 // dweb authority with invalidate:true, then inside the repository lane.
-const fakeApp = (events: Event[], record: Record<string, any>, existing: Record<string, Uint8Array> = {}) => {
+type AppRecord = ReturnType<typeof appRecord>;
+const fakeApp = (events: Event[], record: AppRecord, existing: Record<string, Uint8Array> = {}) => {
   const opfs = new Map<string, Uint8Array>(Object.entries(existing));
-  let current = { ...record };
+  let current: AppRecord = { ...record };
   const client = createAppClient({
     registry: {
       get: async (id: string) => (id === current.id ? { ...current } : null),
-      update: async (id: string, patch: any) => {
+      update: async (id: string, patch: Partial<AppRecord>) => {
         if (id !== current.id) return null;
         current = { ...current, ...patch };
         return { ...current };
       },
-    } as any,
+    } as unknown as AppClientDeps['registry'],
     tracker: {
       reloadTab: async () => { events.push('reload'); return true; },
-      withDwebAuthority: async (_id: string, operation: () => Promise<unknown>, options: any) => {
+      withDwebAuthority: async (_id: string, operation: () => Promise<unknown>, options?: { invalidate?: boolean }) => {
         events.push(`dweb-authority:${options?.invalidate === true}`);
         return operation();
       },
-    } as any,
+    } as unknown as AppClientDeps['tracker'],
     repositories: {
       coordinate: async (_ref: unknown, operation: () => Promise<unknown>) => {
         events.push('app-lane');
         return operation();
       },
-    } as any,
+    } as unknown as AppClientDeps['repositories'],
     opfsForApp: () => ({
       list: async () => [...opfs.entries()].map(([path, bytes]) => ({ path: `/${path}`, size: bytes.byteLength })),
       readBytes: async (path: string) => {
@@ -91,12 +103,15 @@ const fakeApp = (events: Event[], record: Record<string, any>, existing: Record<
         opfs.set(path, typeof bytes === 'string' ? new TextEncoder().encode(bytes) : new Uint8Array(bytes));
       },
       delete: async (path: string) => { opfs.delete(path); },
-    }) as any,
+    }) as unknown as ReturnType<NonNullable<AppClientDeps['opfsForApp']>>,
   });
   return { client, opfs, record: () => current };
 };
 
-const appRecord = (extra: Record<string, any> = {}) => ({
+const appRecord = (extra: Record<string, unknown> = {}): {
+  id: string; name: string; entryFile: string; tags: string[];
+  fileKinds: Record<string, string>; [key: string]: unknown;
+} => ({
   id: 'app-1', name: 'Ball game', entryFile: 'index.html', tags: [],
   fileKinds: { 'index.html': 'text' }, ...extra,
 });
@@ -108,9 +123,9 @@ const authorityFor = ({
   args: Record<string, unknown>; events: Event[];
   pod: ReturnType<typeof fakePod>; app: ReturnType<typeof fakeApp>;
   answer?: unknown; mode?: string; modeAfterConfirm?: string; actorType?: string;
-  onConfirm?: (prompt: any) => void; signal?: AbortSignal;
+  onConfirm?: (prompt: Prompt) => void; signal?: AbortSignal;
 }) => {
-  const prompts: any[] = [];
+  const prompts: Prompt[] = [];
   let liveMode = mode;
   const authority = createAppToolAuthority({
     binding: { operation: OPERATION, args },
@@ -122,7 +137,7 @@ const authorityFor = ({
       podRegistry: { get: async (id: string) => (id === 'pod-1' ? { id, name: 'Builder' } : null) },
       appClient: app.client,
       appRegistry: { get: async (id: string) => app.record().id === id ? app.record() : null },
-      confirm: async (prompt: any) => {
+      confirm: async (prompt: Prompt) => {
         events.push('confirm');
         prompts.push(prompt);
         onConfirm?.(prompt);
@@ -131,14 +146,14 @@ const authorityFor = ({
       },
       readAuthorityPermission: async () => ({ mode: liveMode, confirmActions: false }),
     },
-  });
+  } as AuthorityInput) as unknown as CopyAuthority;
   return { authority, prompts };
 };
 
 const podToApp = (files: unknown = [{ from: 'build/game.wasm', to: 'game.wasm' }]) => ({
   direction: 'pod_to_app', podId: 'pod-1', appId: 'app-1', files,
 });
-const copy = (authority: any, args: any) =>
+const copy = (authority: CopyAuthority, args: ReturnType<typeof podToApp>) =>
   authority.copyPodFiles(args.direction, args.podId, args.appId, args.files);
 
 describe('pod_app_copy policy registration', () => {
@@ -164,7 +179,11 @@ describe('pod_app_copy policy registration', () => {
   });
 
   test('tool arguments carry names and paths only', () => {
-    const schema = getToolMetadata('pod_app_copy').schema as any;
+    const schema = getToolMetadata('pod_app_copy').schema as unknown as {
+      properties: Record<string, unknown> & {
+        files: { maxItems: number; items: { properties: Record<string, unknown> } };
+      };
+    };
     expect(Object.keys(schema.properties).sort()).toEqual(['appId', 'direction', 'files', 'podId']);
     expect(Object.keys(schema.properties.files.items.properties).sort()).toEqual(['from', 'to']);
     expect(schema.properties.files.maxItems).toBe(64);
@@ -233,7 +252,7 @@ describe('pod_app_copy Pod to App', () => {
         session: { sessionId: 's' }, podClient: pod.podClient, appClient: app.client,
         podRegistry: { get: async () => ({ id: 'pod-1' }) }, appRegistry: { get: async () => app.record() },
       },
-    });
+    }) as unknown as CopyAuthority;
     const result = await copy(authority, podToApp([{ from: 'a.wasm' }]));
     expect(result).toMatchObject({ ok: false, error: 'pod_app_copy_unavailable', performed: false });
     expect(events).toEqual([]);
@@ -361,7 +380,7 @@ describe('pod_app_copy arguments', () => {
           return { ok: true, direction: 'pod_to_app', podId: 'pod-1', appId: 'app-1', files: [{ from: 'build/game.wasm', to: 'game.wasm', bytes: 11, sha256: 'a'.repeat(64) }] };
         },
       },
-    } as any);
+    } as unknown as Parameters<typeof podAppCopyTool.execute>[1]);
     expect(seen).toEqual(['pod_to_app', 'pod-1', 'app-1', files]);
     expect(result.ok).toBe(true);
     expect(JSON.parse(String(result.content)).files[0]).toEqual({ from: 'build/game.wasm', to: 'game.wasm', bytes: 11, sha256: 'a'.repeat(64) });

@@ -16,8 +16,10 @@ export const podAppCopyTool = composeTool("pod_app_copy", {
     if (typeof args?.podId !== 'string' || !args.podId) return { ok: false, error: 'podId_required' };
     if (typeof args?.appId !== 'string' || !args.appId) return { ok: false, error: 'appId_required' };
     if (!Array.isArray(args?.files) || !args.files.length) return { ok: false, error: 'files_required' };
-    const authority = /** @type {{ copyPodFiles?: Function } | undefined} */ (
-      /** @type {any} */ (ctx).appAuthority);
+    const authority = /** @type {{ appAuthority?: { copyPodFiles?: (direction:string, podId:string,
+      appId:string, files:unknown)=>Promise<{ ok?:boolean, declined?:boolean, error?:unknown,
+      direction?:string, podId?:string, appId?:string, files?:unknown, outsideFiles?:unknown }> } }} */ (
+      /** @type {unknown} */ (ctx)).appAuthority;
     if (!authority?.copyPodFiles) return { ok: false, error: 'pod_app_copy_unavailable' };
     try {
       // why the files go unchanged: the host validates them, so it alone

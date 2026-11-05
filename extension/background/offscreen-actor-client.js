@@ -2650,8 +2650,8 @@ export const makeOffscreenActorClient = ({
         entry.authority.writeFile(msg.appId, msg.path, msg.content), HOST_EFFECT_OUTCOME.appMutation);
     },
     'app/copy-pod-files': async (
-      /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
-      /** @type {any} */ boundGrant = null,
+      /** @type {Record<string,unknown>} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {Parameters<typeof grantFor>[2]} */ boundGrant = null,
     ) => {
       const grant = grantFor(msg, sender, boundGrant);
       const entry = await appEntry(grant, msg, ['direction', 'podId', 'appId', 'files']);

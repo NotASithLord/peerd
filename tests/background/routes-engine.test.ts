@@ -264,12 +264,13 @@ describe('pod/git: instance-pinned isomorphic-git shell bridge', () => {
 describe('Pod outside-files mark', () => {
   const sender = { tab: { id: 99 } };
   const mark = { publisher: 'did:key:z6MkPeer', appId: 'app-9', appName: 'Game', markedAt: 1 };
-  const markedDeps = (over: any = {}) => {
-    const records: Record<string, any> = { 'pod-1': { id: 'pod-1', name: 'Pod', outsideFiles: mark } };
+  type PodRecord = { id: string; name: string; outsideFiles: typeof mark | null };
+  const markedDeps = (over: Record<string, unknown> = {}) => {
+    const records: Record<string, PodRecord> = { 'pod-1': { id: 'pod-1', name: 'Pod', outsideFiles: mark } };
     const deps = baseDeps({
       podRegistry: {
         get: async (id: string) => records[id] ?? null,
-        update: async (id: string, patch: any) => {
+        update: async (id: string, patch: Partial<PodRecord>) => {
           if (!records[id]) return null;
           records[id] = { ...records[id], ...patch };
           return records[id];
