@@ -151,8 +151,8 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 409, graphBytes: 4_126_017 }),
-  target: Object.freeze({ modules: 412, graphBytes: 4_217_380 }),
+  shared: Object.freeze({ modules: 409, graphBytes: 4_126_222 }),
+  target: Object.freeze({ modules: 412, graphBytes: 4_217_585 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_563 }),
@@ -198,7 +198,7 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // The opt-in first tab owns windows.onCreated in one small module. Exact.
   // It also knows a reopened window by its tabs. Same module. Exact.
   // The Pod and App file copy grows existing leaves only. Exact.
-  kernel: Object.freeze({ modules: 409, graphBytes: 4_126_017, entryBytes: 200, directImports: 2 }),
+  kernel: Object.freeze({ modules: 409, graphBytes: 4_126_222, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -233,7 +233,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // Its reopened-window rows add 1,700 packaged bytes and no module. Exact.
     // The Pod and App file copy adds packaged bytes and no module. Exact.
     serviceWorker: Object.freeze({
-      modules: 405, graphBytes: 2_118_291, entryBytes: 173,
+      modules: 405, graphBytes: 2_118_323, entryBytes: 173,
       inputSha256: 'a92fe66eab988f0dd4274f793bde7685b281429cd1540119be4550d785efd8de',
     }),
     // One shared read-only authority schema/provenance validator rejects
@@ -273,7 +273,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
       // Its reopened-window rows and the restart notice add 1,877 bytes. Exact.
       // The Pod and App file copy adds packaged bytes and no module. Exact.
       serviceWorker: Object.freeze({
-        modules: 412, graphBytes: 2_233_592, entryBytes: 207,
+        modules: 412, graphBytes: 2_233_624, entryBytes: 207,
         inputSha256: '44fb39a6e1e4ebb9e57381dc4d77cbc0f34e2dfb4d6e917b59b22cabbafcb8f6',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),
