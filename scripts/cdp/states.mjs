@@ -405,7 +405,7 @@ let actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
 let actorAppProbeUrl = '';
 let actorAppStunPort = 0;
 let podFirstCommand = { mainCalls: 0, actorCalls: 0, podId: null, result: '' };
-let podAppCopy = { phase: 'setup', mainCalls: 0, appId: null, podId: null, copyResult: '' };
+let podAppCopy = { phase: 'setup', mainCalls: 0, appId: null, podId: null, copyResult: '', backResult: '' };
 // add(i32, i32) -> i32 plus a custom section that is not valid UTF-8, so any
 // text round trip on the way from the Pod to the App would change the bytes.
 const POD_APP_COPY_WASM_B64 = 'AGFzbQEAAAABBwFgAn9/AX8DAgEABwcBA2FkZAAACgkBBwAgACABagsABQF4/4D+';
@@ -12814,6 +12814,16 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         podAppCopy.podId ??= last.match(/\bpod-[a-z0-9]+-[a-z0-9]+\b/)?.[0] ?? null;
         return { sse: sseText('POD-APP-COPY-SETUP-DONE') };
       }
+      if (podAppCopy.phase === 'back') {
+        if (!podAppCopy.backResult && !last.includes('app_to_pod') && !last.includes('declined')) {
+          return { sse: sseToolCall('pod_app_copy', {
+            direction: 'app_to_pod', podId: podAppCopy.podId, appId: podAppCopy.appId,
+            files: [{ from: 'add.wasm', to: 'from-app/add.wasm' }],
+          }) };
+        }
+        podAppCopy.backResult = last;
+        return { sse: sseText('POD-APP-COPY-BACK-DONE') };
+      }
       if (!podAppCopy.copyResult && !last.includes('"direction"') && !last.includes('declined')) {
         return { sse: sseToolCall('pod_app_copy', {
           direction: 'pod_to_app', podId: podAppCopy.podId, appId: podAppCopy.appId,
@@ -12824,7 +12834,7 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
       return { sse: sseText('POD-APP-COPY-DONE') };
     },
     async run(ctx, rec) {
-      podAppCopy = { phase: 'setup', mainCalls: 0, appId: null, podId: null, copyResult: '' };
+      podAppCopy = { phase: 'setup', mainCalls: 0, appId: null, podId: null, copyResult: '', backResult: '' };
       const wasm = Buffer.from(POD_APP_COPY_WASM_B64, 'base64');
       const sha256 = createHash('sha256').update(wasm).digest('hex');
       const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
@@ -12899,6 +12909,35 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
           entry.type === 'authority_effect' && entry.details?.operation === 'turn.app.copy-pod-files'),
         JSON.stringify(entries.map((entry) => entry.details?.operation ?? entry.type)));
 
+        // The reverse copy stages the App's file in the Pod. A local App
+        // makes no claim about who wrote it and leaves the Pod unmarked.
+        podAppCopy.phase = 'back';
+        const backSent = await rpc(ctx.page, { type: 'agent/send', text: 'Copy the adder back into the Pod.' });
+        rec.check('the App to Pod request is accepted', backSent?.ok === true, JSON.stringify(backSent));
+        const backPrompt = await waitFor(() => evalIn(ctx.page, `(() => {
+          const summary = document.querySelector('.confirm-modal .confirm-summary')?.textContent ?? '';
+          return summary.includes('from-app/add.wasm') ? summary : null;
+        })()`), { budgetMs: 30_000, pollMs: 80 });
+        rec.check('the App to Pod confirmation names the Pod and the exact hash, with no authorship claim', !!backPrompt
+          && backPrompt.includes('into Pod "Copy builder"')
+          && backPrompt.includes(`add.wasm to from-app/add.wasm: ${wasm.length} B, SHA-256 ${sha256.slice(0, 12)}`)
+          && !backPrompt.includes('You made') && !backPrompt.includes('someone else'), String(backPrompt));
+        const backApproved = await evalIn(ctx.page, `(() => {
+          const button = [...document.querySelectorAll('.confirm-modal button')]
+            .find((candidate) => candidate.textContent.trim() === 'Allow once');
+          button?.click();
+          return !!button;
+        })()`);
+        rec.check('the user approves the App to Pod copy', backApproved === true);
+        const backSettled = await waitFor(async () => podAppCopy.backResult && !(await probe(ctx)).busy,
+          { budgetMs: 30_000, pollMs: 100 });
+        rec.check('the App to Pod copy returns the hash and no mark', !!backSettled
+          && podAppCopy.backResult.includes(sha256) && !podAppCopy.backResult.includes('someone else published'),
+        podAppCopy.backResult.slice(0, 800));
+        const podBytes = await podCall({ type: 'pod/read-bytes', path: 'from-app/add.wasm' });
+        rec.check('the Pod file has the exact App bytes', podBytes?.ok === true
+          && podBytes.base64 === POD_APP_COPY_WASM_B64, JSON.stringify(podBytes));
+
         // The Pod tab renders the outside-files notice the host sends after a
         // copy from another person's App, and its button clears the mark.
         const podTarget = await waitFor(async () => (await fetch(`http://127.0.0.1:${ctx.port}/json/list`)
@@ -12910,6 +12949,8 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         await podPage.send('Page.enable');
         await podPage.send('Page.bringToFront');
         await podPage.send('Emulation.setDeviceMetricsOverride', { width: 900, height: 620, deviceScaleFactor: 1, mobile: false });
+        rec.check('the copy from a local App left the Pod notice hidden', await evalIn(podPage,
+          `document.getElementById('pod-outside-files').hidden === true`) === true);
         const marked = await podCall({ type: 'pod/outside-files', mark: {
           publisher: 'did:key:z6MkExamplePublisher', appId: podAppCopy.appId, appName: 'Copy adder', markedAt: 1,
         } });
