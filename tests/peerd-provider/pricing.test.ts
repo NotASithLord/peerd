@@ -18,6 +18,14 @@ describe('DEFAULT_PRICING ↔ MODEL_CATALOG parity', () => {
     }
   });
 
+  test('every OpenAI catalog id has a rate card', () => {
+    const ids = PROVIDER_MODEL_CATALOG.openai.map((row) => row.model);
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      expect(DEFAULT_PRICING[id]).toBeDefined();
+    }
+  });
+
   test('no rate card exists for the nonexistent claude-haiku-4-6', () => {
     expect(DEFAULT_PRICING['claude-haiku-4-6']).toBeUndefined();
   });

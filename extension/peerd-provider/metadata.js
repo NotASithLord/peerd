@@ -12,7 +12,7 @@ export const PROVIDER_METADATA = Object.freeze([
     defaultModel: 'z-ai/glm-5.1', defaultRunnerModel: 'anthropic/claude-haiku-4.5',
     keyless: false, liveModels: false }),
   Object.freeze({ name: 'openai', label: 'OpenAI',
-    defaultModel: 'gpt-5.1', defaultRunnerModel: 'gpt-5.1-mini',
+    defaultModel: 'gpt-5.1', defaultRunnerModel: 'gpt-5-mini',
     keyless: false, liveModels: false }),
   Object.freeze({ name: 'glm', label: 'Z.ai',
     defaultModel: 'glm-5.2', defaultRunnerModel: 'glm-4.5-air',
@@ -39,7 +39,7 @@ export const PROVIDER_MODEL_CATALOG = Object.freeze({
   ]),
   openai: Object.freeze([
     Object.freeze({ model: 'gpt-5.1', label: 'GPT-5.1' }),
-    Object.freeze({ model: 'gpt-5.1-mini', label: 'GPT-5.1 mini (cheap)' }),
+    Object.freeze({ model: 'gpt-5-mini', label: 'GPT-5 mini (cheap)' }),
     Object.freeze({ model: 'gpt-5', label: 'GPT-5' }),
     Object.freeze({ model: 'o4-mini', label: 'o4-mini (reasoning)' }),
   ]),
