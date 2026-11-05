@@ -1442,18 +1442,22 @@ describe('apps/import-files', () => {
     expect(reads).toBe(0);
   });
 
-  test('a locked vault, a bad upload id and a missing name refuse before any read', async () => {
+  test('a locked vault, a bad upload id and a missing name refuse, and a valid id never leaves its staging folder', async () => {
     const locked = await setup(game, { vault: { isLocked: () => true } });
     expect(await locked.r['apps/import-files']({ uploadId: UPLOAD, name: 'x' }))
       .toEqual({ ok: false, error: 'vault-locked' });
-    const { r, opfs } = await setup(game);
+    expect(locked.created).toEqual([]);
+    expect(locked.opfs.roots.has(`peerd-app-uploads/${UPLOAD}`)).toBe(false);
+    const { r, opfs, created } = await setup(game);
     for (const uploadId of ['../peerd-apps', '', 42, `${UPLOAD}/x`]) {
       expect(await r['apps/import-files']({ uploadId, name: 'x' }))
         .toEqual({ ok: false, error: 'uploadId-required' });
     }
+    expect(opfs.roots.has(`peerd-app-uploads/${UPLOAD}`)).toBe(true);
     expect(await r['apps/import-files']({ uploadId: UPLOAD, name: ' ' }))
       .toEqual({ ok: false, error: 'name-required' });
-    expect(opfs.roots.has(`peerd-app-uploads/${UPLOAD}`)).toBe(true);
+    expect(created).toEqual([]);
+    expect(opfs.roots.has(`peerd-app-uploads/${UPLOAD}`)).toBe(false);
   });
 
   test('the App client caps still apply, and a refusal still removes the staging folder', async () => {

@@ -150,8 +150,8 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 409, graphBytes: 4_114_978 }),
-  target: Object.freeze({ modules: 412, graphBytes: 4_206_341 }),
+  shared: Object.freeze({ modules: 409, graphBytes: 4_114_907 }),
+  target: Object.freeze({ modules: 412, graphBytes: 4_206_270 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_563 }),
@@ -197,7 +197,7 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // The opt-in first tab owns windows.onCreated in one small module. Exact.
   // It also knows a reopened window by its tabs. Same module. Exact.
   // The Library add-from-files route and its preview flag: no module. Exact.
-  kernel: Object.freeze({ modules: 409, graphBytes: 4_114_978, entryBytes: 200, directImports: 2 }),
+  kernel: Object.freeze({ modules: 409, graphBytes: 4_114_907, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity

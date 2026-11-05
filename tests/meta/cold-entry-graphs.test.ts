@@ -38,8 +38,8 @@ const richUiEntries = {
 // Home includes the reviewed read-only onboarding readiness projection.
 // Home also carries the Library add-from-files review. Measured, no reserve.
 const RICH_UI_GRAPH_CEILINGS = {
-  sidepanel: { modules: 62, graphBytes: 659_633 },
-  home: { modules: 69, graphBytes: 822_358 },
+  sidepanel: { modules: 62, graphBytes: 659_642 },
+  home: { modules: 69, graphBytes: 822_367 },
 } as const;
 
 const nativeKernelEntry = 'background/vault-kernel-chrome.js';

@@ -61,7 +61,6 @@ export const makeKernelArtifactRoutes = (deps) => {
   );
   const load = makeKernelLazyOwner(deps, (live) => live);
   const write = makeSerialLane();
-  // why one lane: both routes create an App from bytes the page supplied.
   const apply = (/** @type {'import/apply'|'apps/import-files'} */ name) => async (
     /** @type {any} */ message = {}, /** @type {any} */ sender = undefined,
   ) => {
