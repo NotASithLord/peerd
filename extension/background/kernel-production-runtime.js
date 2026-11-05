@@ -92,8 +92,8 @@ export const createKernelProductionRuntime = async (deps) => {
     onJsTabDrop: (/** @type {string} */ id) => onEngineDrop('notebook', id),
     onPodTabDrop: (/** @type {string} */ id) => onEngineDrop('pod', id),
     onAppTabDrop: (/** @type {string} */ id) => onEngineDrop('app', id),
-    onAppManifestMutation: (/** @type {string} */ appId) =>
-      liveRelays.onAppManifestMutation(appId),
+    onAppManifestMutation: (/** @type {string} */ appId, /** @type {string|undefined} */ writer) =>
+      liveRelays.onAppManifestMutation(appId, writer),
     resolveAppOwnerRoot: (/** @type {string} */ appId) =>
       liveRelays.resolveAppOwnerRoot(appId),
     onAppDeleted: (/** @type {string} */ appId) => liveRelays.onAppDeleted(appId),

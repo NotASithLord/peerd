@@ -1294,6 +1294,56 @@ describe('kernel turn authority adapter', () => {
     )).toEqual({ ok: false, error: 'app-tab-owner-mismatch' });
   });
 
+  const attachAppActor = async (h: Awaited<ReturnType<typeof harness>>): Promise<string> =>
+    (await h.runtime.relays.engineRoutes['app/tab-ready'](
+      { appId: 'app-1', ownerSessionId: h.root.sessionId },
+      { tab: { id: 17, url: `app://app-1?owner=${h.root.sessionId}` } },
+    )).actorSessionId;
+
+  test('an App actor manifest edit retires its own writer only after that turn releases', async () => {
+    const h = await harness();
+    const attach = () => attachAppActor(h);
+    const writer = await attach();
+    const writerTurn = h.shared.turnSlots.claim(writer);
+    await h.runtime.relays.onAppManifestMutation('app-1', writer);
+    let queuedWakeRan = false;
+    h.shared.turnSlots.runWhenIdle(writer, () => { queuedWakeRan = true; });
+    const replacement = await attach();
+    expect(replacement).not.toBe(writer);
+    expect(writerTurn.controller.signal.aborted).toBe(false);
+    expect((await h.sessions.get(writer))?.archivedAt).toBeFalsy();
+    writerTurn.release();
+    expect(queuedWakeRan).toBe(true);
+    for (let attempt = 0; !(await h.sessions.get(writer))?.archivedAt && attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect((await h.sessions.get(writer))?.archivedAt).toBeTruthy();
+    const writerStops = h.shared.turnSlots.generation(writer);
+
+    const otherTurn = h.shared.turnSlots.claim(replacement);
+    await h.runtime.relays.onAppManifestMutation('app-1');
+    expect(otherTurn.controller.signal.reason).toBe(ABORT_STOP);
+    expect(h.shared.turnSlots.generation(writer)).toBe(writerStops);
+  });
+
+  test.each(['another writer', 'an unattributed edit', 'App delete'])(
+    '%s still stops an App writer that waits for its own retirement',
+    async (path) => {
+      const h = await harness();
+      const writer = await attachAppActor(h);
+      const writerTurn = h.shared.turnSlots.claim(writer);
+      await h.runtime.relays.onAppManifestMutation('app-1', writer);
+      expect(await attachAppActor(h)).not.toBe(writer);
+      expect(writerTurn.controller.signal.aborted).toBe(false);
+      if (path === 'App delete') await h.runtime.relays.onAppDeleted('app-1');
+      else await h.runtime.relays.onAppManifestMutation(
+        'app-1', path === 'another writer' ? 'other-actor' : undefined,
+      );
+      expect(writerTurn.controller.signal.reason).toBe(ABORT_STOP);
+      writerTurn.release();
+    },
+  );
+
   test('attaches a Firefox App only after exact network admission', async () => {
     const h = await harness(undefined, { firefox: true });
     const url = `app://app-1?owner=${h.root.sessionId}`;

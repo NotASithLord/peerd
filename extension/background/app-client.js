@@ -131,6 +131,11 @@ const validateAppPath = (path) => {
   return path;
 };
 
+// why: listFiles reports OPFS paths with one leading '/'. A single-file call
+// accepts exactly that root slash; the strict check still refuses the rest.
+const requestedAppPath = (/** @type {string} */ path) =>
+  validateAppPath(typeof path === 'string' && path.startsWith('/') ? path.slice(1) : path);
+
 /** @param {string} path @param {string|Uint8Array<ArrayBuffer>} stored @param {'text'|'binary'} kind */
 const validateRuntimeData = (path, stored, kind) => {
   if (!APP_DATA_PATH_RE.test(path)) return;
@@ -235,7 +240,7 @@ const opfsForApp = (appId, beforeMutation = () => {}) =>
  * @param {ReturnType<typeof import('./app-tab-tracker.js').createAppTabTracker>} deps.tracker
  * @param {() => void | Promise<void>} [deps.beforeOpfsMutation]
  * @param {typeof opfsForApp} [deps.opfsForApp]
- * @param {(appId:string)=>void|Promise<void>} [deps.onManifestMutation]
+ * @param {(appId:string,writerSessionId?:string)=>void|Promise<void>} [deps.onManifestMutation]
  * @param {(ownerSessionId:string,record:any)=>Promise<string>} [deps.resolveOwnerRoot]
  * @param {ReturnType<typeof import('/peerd-engine/repository.js').createRepositoryService>} deps.repositories
  * @param {Pick<typeof import('/peerd-egress/background.js').idb, 'del'>} [deps.idb]
@@ -610,7 +615,7 @@ export const createAppClient = ({
 
     if (!updated) return null;
     if (sessionId) await registry.setDefaultForSession(sessionId, id);
-    if (path === 'peerd.json') await onManifestMutation(id);
+    if (path === 'peerd.json') await onManifestMutation(id, sessionId);
     await tracker.reloadTab(id).catch(() => {});
     return updated;
   };
@@ -639,13 +644,13 @@ export const createAppClient = ({
   /** Write a single file in the app's OPFS subdir.
    * @param {{ appId?: string, path: string, content: unknown, sessionId?: string,
    *   reload?: boolean, signal?: AbortSignal, invalidateDweb?: boolean }} args */
-  const writeFile = async ({ appId, path, content, sessionId, reload = true, signal, invalidateDweb = true }) => {
-    validateAppPath(path);
+  const writeFile = async ({ appId, path: requested, content, sessionId, reload = true, signal, invalidateDweb = true }) => {
+    const path = requestedAppPath(requested);
     normalizeFileContent(path, content);
     if (!invalidateDweb && !APP_DATA_PATH_RE.test(path)) throw new AppFileContentError('Only runtime data can retain App consent');
     const id = await resolveId({ sessionId, appId });
     const result = await withMutation(id, () => writeFileUnlocked(id, path, content, signal), invalidateDweb);
-    if (path === 'peerd.json') await onManifestMutation(id);
+    if (path === 'peerd.json') await onManifestMutation(id, sessionId);
     // why: a following actor write must not invalidate a document still
     // reloading. Wait outside the consent/repository lanes so attach can finish.
     if (reload) await tracker.reloadTab(id).catch(() => {});
@@ -658,11 +663,11 @@ export const createAppClient = ({
    *   expectedExists:boolean,expectedContent:string,signal?:AbortSignal,reload?:boolean}} args
    */
   const compareAndWriteFile = async ({
-    appId, path, content, sessionId, expectedExists, expectedContent, signal, reload = true,
+    appId, path: requested, content, sessionId, expectedExists, expectedContent, signal, reload = true,
   }) => {
+    const path = requestedAppPath(requested);
     const id = await resolveId({ sessionId, appId });
     const result = await withMutation(id, async () => {
-      validateAppPath(path);
       let exists = true;
       let source = '';
       try {
@@ -689,7 +694,7 @@ export const createAppClient = ({
       return { ok: true, value: await writeFileUnlocked(id, path, content, signal) };
     });
     if (result.ok) {
-      if (path === 'peerd.json') await onManifestMutation(id);
+      if (path === 'peerd.json') await onManifestMutation(id, sessionId);
       // why: preserve the same settled reload boundary as an ordinary write.
       if (reload) await tracker.reloadTab(id).catch(() => {});
     }
@@ -697,8 +702,8 @@ export const createAppClient = ({
   };
 
   /** @param {{ appId?: string, path: string, sessionId?: string }} args */
-  const readFile = async ({ appId, path, sessionId }) => {
-    validateAppPath(path);
+  const readFile = async ({ appId, path: requested, sessionId }) => {
+    const path = requestedAppPath(requested);
     const id = await resolveId({ sessionId, appId });
     const rec = await registry.get(id);
     if (!rec) throw new Error(`app not found: ${id}`);
@@ -918,8 +923,8 @@ export const createAppClient = ({
 
   /** @param {{ appId?: string, path: string, sessionId?: string, reload?: boolean,
    *   signal?: AbortSignal, invalidateDweb?: boolean }} args */
-  const deleteFile = async ({ appId, path, sessionId, reload = true, signal, invalidateDweb = true }) => {
-    validateAppPath(path);
+  const deleteFile = async ({ appId, path: requested, sessionId, reload = true, signal, invalidateDweb = true }) => {
+    const path = requestedAppPath(requested);
     if (!invalidateDweb && !APP_DATA_PATH_RE.test(path)) throw new AppFileContentError('Only runtime data can retain App consent');
     const id = await resolveId({ sessionId, appId });
     await withMutation(id, async () => {
@@ -939,7 +944,7 @@ export const createAppClient = ({
         return rollbackMutation(error, () => opfs.write(path, backup), id, rec);
       }
     }, invalidateDweb);
-    if (path === 'peerd.json') await onManifestMutation(id);
+    if (path === 'peerd.json') await onManifestMutation(id, sessionId);
     if (reload) await tracker.reloadTab(id).catch(() => {});
   };
 
