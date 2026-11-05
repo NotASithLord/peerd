@@ -16,7 +16,7 @@ import {
 import { applyDwebDisabledTemplates } from '../../packaging/package.ts';
 import { minifyColdArtifactModules } from '../../packaging/minify-artifact-js.ts';
 import {
-  dwebDisabledTemplateFailures, storeContributorBoundaryFailures,
+  dwebDisabledTemplateFailures, storeContributorBoundaryFailures, storePreviewOnlyFailures,
 } from '../../packaging/verify-store-artifact.ts';
 
 const temporaryRoots: string[] = [];
@@ -189,6 +189,16 @@ describe('dweb-disabled route factories', () => {
     write(root, 'offscreen/actor-worker-runtime.js', 'const contributor = projectResult();\n');
     expect(storeContributorBoundaryFailures(root)).toEqual([
       'offscreen/actor-worker-runtime.js contains Contributor code',
+    ]);
+  });
+
+  test('artifact verifier rejects the Preview-only Pod compiler in a Store artifact', () => {
+    const root = temporaryRoot();
+    write(root, 'engine-tabs/pod-tab/asc-command.js', 'export const runAssemblyScript = () => {};\n');
+    expect(storePreviewOnlyFailures(root)).toEqual([]);
+    write(root, 'vendor/assemblyscript/binaryen/index.js', '// leaked\n');
+    expect(storePreviewOnlyFailures(root)).toEqual([
+      'vendor/assemblyscript present in store artifact',
     ]);
   });
 

@@ -353,7 +353,12 @@ audited web fetch and every Git remote operation, also when the user typed the
 command. The mark is narrow: an App imported from a file or a Git URL counts as
 local, the mark does not follow built files from the Pod into an App, and App
 text that actors relay into a Pod with ordinary file writes does not mark it.
+The Chrome Preview Pod `asc` command runs the vendored AssemblyScript compiler in the
+sealed Pod command realm. It reads and writes only through that Pod's workspace
+handles. It refuses compiler transforms, from a flag or a config file, because
+a transform is the one compiler path that loads JavaScript.
 Code: `engine-tabs/notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
+`engine-tabs/pod-tab/asc-command.js`,
 `engine-tabs/notebook-tab/worker-source.js`,
 `engine-tabs/notebook-tab/notebook-tab.js`, `offscreen/job-runner.js`,
 `peerd-runtime/tools/defs/js-notebook.js`, `peerd-runtime/tools/defs/script.js`,
