@@ -2458,6 +2458,15 @@ export const makeControllerTurnBridge = ({
           return runDomainEffect(run, entry, operation, () =>
             entry.authority.deleteFile(value.appId, value.path), HOST_EFFECT_OUTCOME.appMutation);
         }
+        case 'turn.app.copy-pod-files': {
+          const entry = appExecutionEntry(
+            run, value, operation, ['direction', 'podId', 'appId', 'files'],
+          );
+          if (!entry) return failed('App copy authority mismatch', true);
+          return runDomainEffect(run, entry, operation, () =>
+            entry.authority.copyPodFiles(value.direction, value.podId, value.appId, value.files),
+          HOST_EFFECT_OUTCOME.partialMutation);
+        }
         case 'turn.app.observe': {
           const entry = appExecutionEntry(run, value, operation, []);
           if (!entry) return failed('App observe authority mismatch', true);

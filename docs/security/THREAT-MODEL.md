@@ -345,14 +345,20 @@ that refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggl
 field, and confirms body-bearing verbs. If a resolved Notebook or Script graph
 includes remote code, the entire run uses the compute-only profile. The worker
 and host both refuse every authority-bearing relay, and the tool boundary fences all remote-controlled
-output.
+output. Files copied from an App into a Pod pass through the host only, after
+the user approves their paths, sizes and hashes. When that App's dweb publisher
+is not the user, the host marks the Pod before the first write. Until the user
+clears the mark in the Pod tab, the host refuses the Pod's audited web fetch and
+every Git remote operation, also when the user typed the command.
 Code: `engine-tabs/notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
 `engine-tabs/notebook-tab/worker-source.js`,
 `engine-tabs/notebook-tab/notebook-tab.js`, `offscreen/job-runner.js`,
 `peerd-runtime/tools/defs/js-notebook.js`, `peerd-runtime/tools/defs/script.js`,
 `peerd-engine/app-compose.js`, `peerd-engine/vm-net/http-bridge.js`,
 `peerd-engine/module-resolver.js`, `peerd-egress/denylist/dnr-rules.js`,
-`background/kernel-turn-authority-adapter.js` (`attachAppTabActor`), and the manifest sandbox CSP.
+`background/kernel-turn-authority-adapter.js` (`attachAppTabActor`),
+`background/app-tool-authority.js` (`copyPodFiles`), `background/routes/engine.js`
+(`pod/web-fetch`, `pod/git`), `background/repository-tool-authority.js`, and the manifest sandbox CSP.
 Red-team: scenario 06,
 with the real-realm proof in
 `extension/tests/unit/engine-tabs/notebook-tab/notebook-seal.test.js`,

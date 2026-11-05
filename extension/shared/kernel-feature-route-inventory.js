@@ -36,7 +36,7 @@ export const KERNEL_SEMANTIC_OWNER_ROUTE_NAMES = Object.freeze([
 ]);
 
 export const KERNEL_POD_ROUTE_NAMES = Object.freeze(
-  'pod/cancel-io pod/get-meta pod/git pod/web-fetch'.split(' '),
+  'pod/cancel-io pod/clear-outside-files pod/get-meta pod/git pod/web-fetch'.split(' '),
 );
 
 export const KERNEL_WEB_FETCH_ROUTE_NAMES = Object.freeze(

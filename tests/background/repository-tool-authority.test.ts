@@ -11,6 +11,41 @@ const repositoryContext = (repositories: any, extra: any = {}) => ({
 });
 
 describe('repository tool authority', () => {
+  test('a Pod holding outside files refuses Git remote prompts and operations', async () => {
+    let asked = false;
+    let remoteCalls = 0;
+    const outsideFiles = { publisher: 'did:key:z6MkPeer', appId: 'app-9', appName: 'Game', markedAt: 1 };
+    const repositories = {
+      coordinate: async (_ref: unknown, operation: () => Promise<unknown>) => operation(),
+      getRemote: async () => ({ url: 'https://github.com/a/b.git', host: 'github.com' }),
+      setRemote: async () => { remoteCalls += 1; },
+      fetch: async () => { remoteCalls += 1; },
+    };
+    const ctx = repositoryContext(repositories, {
+      actorType: 'pod', actorInstanceId: 'pod-1',
+      podRegistry: { get: async () => ({ id: 'pod-1', outsideFiles }) },
+      confirm: async () => { asked = true; return 'yes_once'; },
+    });
+    const confirm = createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.confirm-remote', args: { url: 'https://github.com/a/b.git' } },
+      ctx, signal,
+    });
+    await expect(confirm.confirmRemote('link', 'https://github.com/a/b.git', undefined))
+      .rejects.toThrow('Git remotes are off');
+    expect(asked).toBe(false);
+    const shared: any = {
+      repositoryRemoteApproval: {
+        op: 'fetch', target: 'https://github.com/a/b.git', branch: undefined,
+        remote: { url: 'https://github.com/a/b.git', host: 'github.com' },
+      },
+    };
+    const fetchAuthority = createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.fetch', args: {} }, ctx, signal, shared,
+    });
+    await expect(fetchAuthority.fetch('https://github.com/a/b.git')).rejects.toThrow('Git remotes are off');
+    expect(remoteCalls).toBe(0);
+  });
+
   test.each([false, true])('App branch rotates consent without a live editor (persistence fails: %s)', async (fails) => {
     const order: string[] = [];
     const dwebAuthority = createAppDwebAuthority({

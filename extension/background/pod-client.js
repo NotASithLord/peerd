@@ -5,6 +5,7 @@
 
 import browser from '/shared/browser-api.js';
 import { createKeyedQueue } from '/peerd-engine/background.js';
+import { fromBase64, toBase64 } from '/shared/bundle/bytes.js';
 
 export const POD_TAB_GROUP_TITLE = 'peerd';
 const CALL_TIMEOUT_MS = 310_000;
@@ -120,10 +121,34 @@ export const createPodClient = ({
       const id = await resolveExistingId(options);
       return (await callTab(id, { type: 'pod/read-file', path })).content;
     },
-    /** @param {string} path @param {string} content @param {{sessionId?:string,podId?:string}} [options] */
+    /** Read one workspace file without text decoding. A lock token from
+     * withWorkspaceLock reads inside that hold instead of queuing behind it.
+     * @param {string} path @param {{sessionId?:string,podId?:string,lockToken?:string}} [options] */
+    readBytes: async (path, options = {}) => {
+      const id = await resolveExistingId(options);
+      const response = await callTab(id, {
+        type: 'pod/read-bytes', path, ...(options.lockToken ? { lockToken: options.lockToken } : {}),
+      }, { open: !options.lockToken });
+      return fromBase64(String(response.base64 ?? ''));
+    },
+    /** @param {string} path @param {string|Uint8Array} content @param {{sessionId?:string,podId?:string}} [options] */
     writeFile: async (path, content, options = {}) => {
-      const id = await resolveQueued(options);
-      await callTab(id, { type: 'pod/write-file', path, content });
+      // why: tab messages are JSON on Chrome, so bytes travel as base64.
+      const id = content instanceof Uint8Array
+        ? await resolveExistingId(options) : await resolveQueued(options);
+      await callTab(id, content instanceof Uint8Array
+        ? { type: 'pod/write-file', path, contentBase64: toBase64(content) }
+        : { type: 'pod/write-file', path, content });
+      return id;
+    },
+    /** Record or clear outside files, then tell a live Pod tab.
+     * @param {string} podId @param {{publisher:string,appId:string,appName:string,markedAt:number}|null} mark */
+    setOutsideFiles: async (podId, mark) => {
+      const id = await resolveExistingId({ podId });
+      if (!await registry.update(id, { outsideFiles: mark })) throw new Error(`Pod not found: ${id}`);
+      if (tracker.getTabId(id) != null) {
+        await callTab(id, { type: 'pod/outside-files', mark }, { open: false }).catch(() => {});
+      }
       return id;
     },
     /** @param {{sessionId?:string,podId?:string}} [options] */
@@ -132,10 +157,11 @@ export const createPodClient = ({
       return (await callTab(id, { type: 'pod/list-files' })).files;
     },
     /** Hold the live Pod tab's filesystem lane while trusted repository code runs.
-     * @template T @param {string} podId @param {()=>Promise<T>} operation @returns {Promise<T>} */
+     * The operation receives the lock token, or null when no tab is live.
+     * @template T @param {string} podId @param {(lockToken:string|null)=>Promise<T>} operation @returns {Promise<T>} */
     withWorkspaceLock: async (podId, operation) => {
       const id = await resolveExistingId({ podId });
-      if (tracker.getTabId(id) == null) return operation();
+      if (tracker.getTabId(id) == null) return operation(null);
       const token = `lock-${crypto.randomUUID()}`;
       // Start renewal while acquire is queued: the tab registers the token
       // before awaiting older workspace work, so a long predecessor cannot
@@ -152,7 +178,7 @@ export const createPodClient = ({
       }, WORKSPACE_LOCK_RENEW_MS);
       try {
         await acquiring;
-        return await operation();
+        return await operation(token);
       }
       finally {
         clearIntervalFn(renewal);

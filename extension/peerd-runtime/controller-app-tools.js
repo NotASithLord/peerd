@@ -15,6 +15,7 @@ import { appDeleteFileTool } from './tools/defs/app-delete-file.js';
 import { appObserveTool } from './tools/defs/app-observe.js';
 import { appActTool } from './tools/defs/app-act.js';
 import { appCodeTool } from './tools/defs/app-code.js';
+import { podAppCopyTool } from './tools/defs/pod-app-copy.js';
 
 const tools = Object.freeze({
   app_update: appUpdateTool,
@@ -28,6 +29,7 @@ const tools = Object.freeze({
   app_observe: appObserveTool,
   app_act: appActTool,
   app_code: appCodeTool,
+  pod_app_copy: podAppCopyTool,
 });
 
 export const CONTROLLER_APP_TOOL_NAMES = Object.freeze(Object.keys(tools));

