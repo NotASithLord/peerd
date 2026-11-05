@@ -640,7 +640,8 @@ stopButton.addEventListener('click', () => {
 outsideFilesClear.addEventListener('click', async () => {
   outsideFilesClear.disabled = true;
   try {
-    const reply = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'pod/clear-outside-files', podId }));
+    const reply = /** @type {{ok?:boolean,error?:string}|undefined} */ (
+      await browser.runtime.sendMessage({ type: 'pod/clear-outside-files', podId }));
     if (!reply?.ok) throw new Error(reply?.error ?? 'Web access could not be turned back on');
     showOutsideFiles(null);
     append('entry-meta', 'Web access and Git remotes are back on in this Pod.\n');

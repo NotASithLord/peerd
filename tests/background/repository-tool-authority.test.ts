@@ -33,7 +33,7 @@ describe('repository tool authority', () => {
     await expect(confirm.confirmRemote('link', 'https://github.com/a/b.git', undefined))
       .rejects.toThrow('Git remotes are off');
     expect(asked).toBe(false);
-    const shared: any = {
+    const shared: Record<string, unknown> = {
       repositoryRemoteApproval: {
         op: 'fetch', target: 'https://github.com/a/b.git', branch: undefined,
         remote: { url: 'https://github.com/a/b.git', host: 'github.com' },

@@ -149,8 +149,8 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 411, graphBytes: 4_130_820 }),
-  target: Object.freeze({ modules: 414, graphBytes: 4_222_183 }),
+  shared: Object.freeze({ modules: 411, graphBytes: 4_132_100 }),
+  target: Object.freeze({ modules: 414, graphBytes: 4_223_463 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_563 }),
@@ -201,7 +201,7 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // inline policy offsets most of their bytes. The Pod readiness route and the
   // Pod destroy re-read grow existing leaves. Exact, no reserve.
   // The Pod and App file copy grows existing leaves only. Exact.
-  kernel: Object.freeze({ modules: 411, graphBytes: 4_130_820, entryBytes: 200, directImports: 2 }),
+  kernel: Object.freeze({ modules: 411, graphBytes: 4_132_100, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -239,7 +239,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // replace shrinks the packaged graph. Exact, no reserve.
     // The Pod and App file copy adds packaged bytes and no module. Exact.
     serviceWorker: Object.freeze({
-      modules: 407, graphBytes: 2_114_610, entryBytes: 173,
+      modules: 407, graphBytes: 2_114_597, entryBytes: 173,
       inputSha256: 'f113146d338d1ddf501a41c6d71ad4e58dd6efee0686f62a0ac2d626863ed1cf',
     }),
     // One shared read-only authority schema/provenance validator rejects
@@ -281,7 +281,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
       // two modules and shrink the graph. Exact, no reserve.
       // The Pod and App file copy adds packaged bytes and no module. Exact.
       serviceWorker: Object.freeze({
-        modules: 414, graphBytes: 2_229_911, entryBytes: 207,
+        modules: 414, graphBytes: 2_229_898, entryBytes: 207,
         inputSha256: '1391c105eedbd822d96be20b790b8b600f03bf9737fadadbae6f60cb943ca639',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),

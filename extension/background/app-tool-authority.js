@@ -75,7 +75,7 @@ const validatePodAppCopy = (direction, podId, appId, files) => {
 /**
  * The person an App's files come from, or null when the user made it. A share
  * from this device marks its record local; an install never does.
- * @param {any} record
+ * @param {{dweb?:{local?:boolean,publisher?:string|null}|null}} record
  */
 const outsidePublisher = (record) => {
   const dweb = record?.dweb;
@@ -98,22 +98,50 @@ const shown = (value) => String(value ?? '').replace(/[\u0000-\u001f\u007f]+/g, 
 const messageOf = (cause) => /** @type {{message?:string}} */ (cause)?.message ?? String(cause);
 
 /**
+ * @typedef {{name?:unknown,entryFile?:string,shared?:boolean,
+ *   dweb?:{local?:boolean,publisher?:string|null}|null}} CopyAppRecord
+ * @typedef {Array<{from:string,to:string,bytes:Uint8Array<ArrayBuffer>,sha256:string}>} CopyBuffer
+ * @typedef {{
+ *   podClient?:{
+ *     withWorkspaceLock?:(podId:string,operation:(lockToken:string|null)=>Promise<CopyBuffer>)=>Promise<CopyBuffer>,
+ *     readBytes?:(path:string,options:{podId:string,lockToken?:string})=>Promise<Uint8Array<ArrayBuffer>>,
+ *     writeFile?:(path:string,bytes:Uint8Array,options:{podId:string})=>Promise<unknown>,
+ *     setOutsideFiles?:(podId:string,mark:{publisher:string,appId:string,appName:string,markedAt:number})=>Promise<unknown>,
+ *   },
+ *   podRegistry?:{get?:(id:string)=>Promise<{name?:unknown}|null>},
+ *   appRegistry?:{get?:(id:string)=>Promise<CopyAppRecord|null>},
+ *   appClient?:{
+ *     withWriteLock?:(appId:string,operation:()=>Promise<CopyBuffer>)=>Promise<CopyBuffer>,
+ *     readFileBytes?:(request:{appId:string,path:string})=>Promise<Uint8Array<ArrayBuffer>>,
+ *     writeFiles?:(request:{appId:string,files:Array<{path:string,bytes:Uint8Array}>,signal?:AbortSignal})=>Promise<unknown>,
+ *   },
+ *   confirm?:(prompt:Record<string,unknown>,signal?:AbortSignal)=>Promise<unknown>,
+ *   actStillLive:()=>Promise<boolean>,signal?:AbortSignal,sessionId?:string|null,
+ * }} CopyDeps
+ */
+
+/**
  * @param {{direction:'pod_to_app'|'app_to_pod',podId:string,appId:string,files:Array<{from:string,to:string}>}} request
- * @param {{podClient:any,podRegistry:any,appClient:any,appRegistry:any,
- *   confirm:(prompt:any,signal?:AbortSignal)=>Promise<unknown>,
- *   actStillLive:()=>Promise<boolean>,signal?:AbortSignal,sessionId?:string|null}} deps
+ * @param {CopyDeps} deps
  */
 const copyBetweenPodAndApp = async (request, deps) => {
   const { direction, podId, appId, files } = request;
-  const { podClient, podRegistry, appClient, appRegistry, signal } = deps;
-  if (typeof podClient?.withWorkspaceLock !== 'function' || typeof podClient?.readBytes !== 'function'
-      || typeof podClient?.writeFile !== 'function' || typeof podClient?.setOutsideFiles !== 'function'
-      || typeof podRegistry?.get !== 'function' || typeof appRegistry?.get !== 'function'
-      || typeof appClient?.writeFiles !== 'function' || typeof appClient?.readFileBytes !== 'function'
-      || typeof appClient?.withWriteLock !== 'function' || typeof deps.confirm !== 'function') {
+  const { signal } = deps;
+  const withWorkspaceLock = deps.podClient?.withWorkspaceLock;
+  const readPodBytes = deps.podClient?.readBytes;
+  const writePodFile = deps.podClient?.writeFile;
+  const setOutsideFiles = deps.podClient?.setOutsideFiles;
+  const readPod = deps.podRegistry?.get;
+  const readApp = deps.appRegistry?.get;
+  const withAppWriteLock = deps.appClient?.withWriteLock;
+  const readAppBytes = deps.appClient?.readFileBytes;
+  const writeAppFiles = deps.appClient?.writeFiles;
+  const confirm = deps.confirm;
+  if (!withWorkspaceLock || !readPodBytes || !writePodFile || !setOutsideFiles || !readPod
+      || !readApp || !withAppWriteLock || !readAppBytes || !writeAppFiles || !confirm) {
     return refused('pod_app_copy_unavailable');
   }
-  const [app, pod] = await Promise.all([appRegistry.get(appId), podRegistry.get(podId)]);
+  const [app, pod] = await Promise.all([readApp(appId), readPod(podId)]);
   if (!app) return refused(`App not found: ${appId}`);
   if (!pod) return refused(`Pod not found: ${podId}`);
   const toApp = direction === 'pod_to_app';
@@ -123,7 +151,7 @@ const copyBetweenPodAndApp = async (request, deps) => {
     if (protectedPath) return refused(`this copy cannot replace ${protectedPath.to}`);
   }
 
-  /** @type {Array<{from:string,to:string,bytes:Uint8Array<ArrayBuffer>,sha256:string}>} */
+  /** @type {CopyBuffer} */
   let buffered;
   try {
     // why one hold for the whole read: every file comes from the same moment,
@@ -142,10 +170,9 @@ const copyBetweenPodAndApp = async (request, deps) => {
       return out;
     };
     buffered = toApp
-      ? await podClient.withWorkspaceLock(podId, (/** @type {string|null} */ lockToken) => readAll((path) =>
-        podClient.readBytes(path, { podId, ...(lockToken ? { lockToken } : {}) })))
-      : await appClient.withWriteLock(appId, () => readAll((path) =>
-        appClient.readFileBytes({ appId, path })));
+      ? await withWorkspaceLock(podId, (lockToken) => readAll((path) =>
+        readPodBytes(path, { podId, ...(lockToken ? { lockToken } : {}) })))
+      : await withAppWriteLock(appId, () => readAll((path) => readAppBytes({ appId, path })));
   } catch (cause) {
     return refused(`pod_app_copy_read_failed: ${messageOf(cause)}`);
   }
@@ -170,7 +197,7 @@ const copyBetweenPodAndApp = async (request, deps) => {
     ];
   let answer;
   try {
-    answer = await deps.confirm({
+    answer = await confirm({
       tool: 'pod_app_copy', kind: 'pod_app_copy', sideEffect: 'write', actionClass: 'workspace_write', origins: [],
       summary: summary.join('\n'), oneShot: true, sessionId: deps.sessionId ?? null,
     }, signal);
@@ -189,7 +216,7 @@ const copyBetweenPodAndApp = async (request, deps) => {
   const receipt = buffered.map(({ from, to, bytes, sha256 }) => ({ from, to, bytes: bytes.byteLength, sha256 }));
   if (toApp) {
     try {
-      await appClient.writeFiles({
+      await writeAppFiles({
         appId, files: buffered.map(({ to, bytes }) => ({ path: to, bytes })), signal,
       });
     } catch (cause) {
@@ -208,14 +235,14 @@ const copyBetweenPodAndApp = async (request, deps) => {
   try {
     // why first: if a write fails part way, the Pod is already marked.
     if (publisher) {
-      await podClient.setOutsideFiles(podId, {
+      await setOutsideFiles(podId, {
         publisher, appId, appName: shown(app.name), markedAt: Date.now(),
       });
       marked = true;
     }
     for (const { to, bytes } of buffered) {
       if (signal?.aborted) throw new Error('the copy was stopped before it finished writing');
-      await podClient.writeFile(to, bytes, { podId });
+      await writePodFile(to, bytes, { podId });
       written.push(to);
     }
   } catch (cause) {
