@@ -420,6 +420,33 @@ const POD_APP_COPY_HTML = `<!doctype html><title>Copy adder</title><p id="out">w
 })().catch((error) => { document.getElementById('out').textContent = 'error ' + error.message; });
 <\/script>`;
 
+let podAsc = { phase: 'setup', asked: [], appId: null, podId: null, actorCalls: 0, actorSeen: [], copyIn: '', build: '', copyBack: '', reopened: '' };
+const POD_ASC_SOURCE = 'const SPEED: f32 = 2; export function step(x: f32): f32 { return x + SPEED; }';
+const POD_ASC_HTML = `<!doctype html><title>Speed game</title><p id="out">waiting</p><script>
+(async () => {
+  const { instance } = await WebAssembly.instantiate(peerd.assets.bytes('game.wasm'));
+  const value = instance.exports.step(10);
+  document.getElementById('out').textContent = 'step(10) = ' + value;
+  const before = await peerd.data.get('result');
+  await peerd.data.set('result', { value, runs: (before?.runs ?? 0) + 1 });
+})().catch((error) => { document.getElementById('out').textContent = 'error ' + error.message; });
+<\/script>`;
+// The App ships a .wasm built from its own source, by the same vendored
+// compiler and the same flags the Pod command uses.
+const compileGameWasm = async (source) => {
+  const asc = await import('../../extension/vendor/assemblyscript/asc.js');
+  let output = null;
+  const sink = { write: () => true };
+  const { error } = await asc.main(['src/game.ts', '-o', 'build/game.wasm'], {
+    stdout: sink, stderr: sink,
+    readFile: async (name) => (name === 'src/game.ts' ? source : null),
+    writeFile: async (_name, contents) => { if (contents instanceof Uint8Array) output = Buffer.from(contents); },
+    listFiles: async () => [],
+  });
+  if (error || !output) throw new Error(`fixture compile failed: ${error?.message}`);
+  return output;
+};
+
 const toolResultsIn = (postData) => {
   try {
     const body = JSON.parse(postData);
@@ -12976,6 +13003,222 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         await podPage?.close();
         await rpc(ctx.page, { type: 'agent/stop' }).catch(() => {});
         const ids = [podAppCopy.podId, podAppCopy.appId].filter(Boolean);
+        if (ids.length) await evalIn(ctx.page, `(async () => {
+          const ids = ${JSON.stringify(ids)};
+          const tabs = await chrome.tabs.query({});
+          await chrome.tabs.remove(tabs.filter((tab) => ids.some((id) => tab.url?.includes('#' + id))).map((tab) => tab.id));
+        })()`, true).catch(() => {});
+      }
+    },
+  },
+
+  // The AssemblyScript logic-edit loop in a real Pod: the App's source goes
+  // into a Pod, the Pod actor edits it and runs asc, and the new .wasm goes
+  // back. The user approves both copies, and the reopened App runs new logic.
+  {
+    name: 'pod-asc-logic-edit', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = request?.postData ?? '';
+      const last = toolResultsIn(body).at(-1) ?? '';
+      if (body.includes('kind: bound; type: pod')) {
+        podAsc.actorCalls += 1;
+        podAsc.actorSeen.push(last.slice(0, 600));
+        if (podAsc.actorCalls === 1) return { sse: sseToolCall('pod_read', { podId: podAsc.podId, path: 'src/game.ts' }) };
+        if (podAsc.actorCalls === 2) {
+          // why: the edit applies only when the App's own source reached the Pod.
+          if (!last.includes(POD_ASC_SOURCE)) return { sse: sseText('POD-ASC-SOURCE-MISSING') };
+          return { sse: sseToolCall('pod_write', { podId: podAsc.podId, path: 'src/game.ts', content: POD_ASC_SOURCE.replace('SPEED: f32 = 2', 'SPEED: f32 = 5') }) };
+        }
+        if (podAsc.actorCalls === 3) return { sse: sseToolCall('pod_exec', { podId: podAsc.podId, command: 'asc src/game.ts -o build/game.wasm' }) };
+        podAsc.build = last;
+        return { sse: sseText('POD-ASC-BUILT') };
+      }
+      if (podAsc.phase === 'setup') {
+        if (!podAsc.appId && !/\bapp-[a-z0-9]+-[a-z0-9]+\b/.test(last)) {
+          return { sse: sseToolCall('sandbox_create', { kind: 'app', name: 'Speed game', files: {
+            'index.html': POD_ASC_HTML, 'src/game.ts': POD_ASC_SOURCE, 'game.wasm': { base64: podAsc.wasmBase64 },
+          } }) };
+        }
+        podAsc.appId ??= last.match(/\bapp-[a-z0-9]+-[a-z0-9]+\b/)?.[0] ?? null;
+        if (podAsc.appId && !podAsc.podId && !/\bpod-[a-z0-9]+-[a-z0-9]+\b/.test(last)) {
+          return { sse: sseToolCall('sandbox_create', { kind: 'pod', name: 'Game builder', persistent: false }) };
+        }
+        podAsc.podId ??= last.match(/\bpod-[a-z0-9]+-[a-z0-9]+\b/)?.[0] ?? null;
+        return { sse: sseText('POD-ASC-SETUP-DONE') };
+      }
+      // why one flag per phase: earlier tool results stay in the transcript.
+      const ask = (call) => {
+        if (podAsc.asked.includes(podAsc.phase)) return null;
+        podAsc.asked.push(podAsc.phase);
+        return { sse: call };
+      };
+      if (podAsc.phase === 'copy-in') {
+        const asked = ask(sseToolCall('pod_app_copy', {
+          direction: 'app_to_pod', podId: podAsc.podId, appId: podAsc.appId,
+          files: [{ from: 'src/game.ts', to: 'src/game.ts' }],
+        }));
+        if (asked) return asked;
+        podAsc.copyIn = last;
+        return { sse: sseText('POD-ASC-COPY-IN-DONE') };
+      }
+      if (podAsc.phase === 'build') {
+        const asked = ask(sseToolCall('message_actor', {
+          to: podAsc.podId, await: true,
+          message: 'Set SPEED to 5 in src/game.ts, then rebuild it with asc src/game.ts -o build/game.wasm.',
+        }));
+        return asked ?? { sse: sseText('POD-ASC-BUILD-REPORTED') };
+      }
+      if (podAsc.phase === 'copy-back') {
+        const asked = ask(sseToolCall('pod_app_copy', {
+          direction: 'pod_to_app', podId: podAsc.podId, appId: podAsc.appId,
+          files: [{ from: 'build/game.wasm', to: 'game.wasm' }, { from: 'src/game.ts', to: 'src/game.ts' }],
+        }));
+        if (asked) return asked;
+        podAsc.copyBack = last;
+        return { sse: sseText('POD-ASC-COPY-BACK-DONE') };
+      }
+      const asked = ask(sseToolCall('app_open', { appId: podAsc.appId }));
+      if (asked) return asked;
+      podAsc.reopened = last;
+      return { sse: sseText('POD-ASC-REOPENED') };
+    },
+    async run(ctx, rec) {
+      const source5 = POD_ASC_SOURCE.replace('SPEED: f32 = 2', 'SPEED: f32 = 5');
+      const wasm2 = await compileGameWasm(POD_ASC_SOURCE);
+      podAsc = {
+        phase: 'setup', asked: [], appId: null, podId: null, actorCalls: 0, actorSeen: [], copyIn: '', build: '', copyBack: '', reopened: '',
+        wasmBase64: wasm2.toString('base64'),
+      };
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
+      const appRead = (path) => evalIn(ctx.page, `(async () => {
+        const { opfsHelpers } = await import('/peerd-engine/opfs.js');
+        const bytes = await opfsHelpers(['peerd-apps', ${JSON.stringify(podAsc.appId)}]).readBytes(${JSON.stringify(path)}).catch(() => null);
+        if (!bytes) return null;
+        let text = '';
+        for (const byte of bytes) text += String.fromCharCode(byte);
+        return btoa(text);
+      })()`, true);
+      const appResult = async () => {
+        const base64 = await appRead('data/result.json');
+        try { return base64 ? JSON.parse(Buffer.from(base64, 'base64').toString('utf8')) : null; } catch { return null; }
+      };
+      const approve = async (needle, shot) => {
+        const prompt = await waitFor(() => evalIn(ctx.page, `(() => {
+          const summary = document.querySelector('.confirm-modal .confirm-summary')?.textContent ?? '';
+          return summary.includes(${JSON.stringify(needle)}) ? summary : null;
+        })()`), { budgetMs: 30_000, pollMs: 80 });
+        if (prompt && shot) await rec.shot(shot);
+        const clicked = prompt ? await evalIn(ctx.page, `(() => {
+          const button = [...document.querySelectorAll('.confirm-modal button')]
+            .find((candidate) => candidate.textContent.trim() === 'Allow once');
+          button?.click();
+          return !!button;
+        })()`) : false;
+        return { prompt, clicked };
+      };
+      const closeAppTabs = () => evalIn(ctx.page, `(async () => {
+        const tabs = await chrome.tabs.query({});
+        await chrome.tabs.remove(tabs.filter((tab) => tab.url?.includes('#' + ${JSON.stringify(podAsc.appId)})).map((tab) => tab.id));
+      })()`, true);
+      let appPage;
+      try {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create the Speed game App and a Pod to build it.' });
+        rec.check('the setup request is accepted', sent?.ok === true, JSON.stringify(sent));
+        const ready = await waitFor(async () => podAsc.appId && podAsc.podId && !(await probe(ctx)).busy,
+          { budgetMs: 60_000, pollMs: 100 });
+        rec.check('the App and the Pod exist', !!ready, JSON.stringify({ appId: podAsc.appId, podId: podAsc.podId }));
+        const first = await waitFor(async () => {
+          const result = await appResult();
+          return result?.value === 12 ? result : null;
+        }, { budgetMs: 30_000, pollMs: 200 });
+        rec.check('the App first shows step(10) = 12 from its shipped .wasm', first?.value === 12, JSON.stringify(first));
+        const podCall = (message) => evalIn(ctx.swConn, `(async () => {
+          const tabs = await chrome.tabs.query({});
+          const tab = tabs.find((item) => item.url?.endsWith(${JSON.stringify(`#${podAsc.podId}`)}));
+          if (!tab?.id) return { ok: false, error: 'Pod tab missing' };
+          return chrome.tabs.sendMessage(tab.id, ${JSON.stringify({ ...message, podId: podAsc.podId })});
+        })()`, true);
+        rec.check('the Pod tab answers', !!await waitFor(async () => (await podCall({ type: 'pod/list-files' }))?.ok === true,
+          { budgetMs: 30_000, pollMs: 200 }));
+
+        podAsc.phase = 'copy-in';
+        await rpc(ctx.page, { type: 'agent/send', text: 'Copy the game source into the Pod.' });
+        const copyIn = await approve('src/game.ts to src/game.ts', 'copy-in-confirm');
+        rec.check('the copy into the Pod asks once and the user allows it', !!copyIn.prompt && copyIn.clicked
+          && copyIn.prompt.includes('into Pod "Game builder"'), String(copyIn.prompt));
+        await waitFor(async () => podAsc.copyIn && !(await probe(ctx)).busy, { budgetMs: 30_000, pollMs: 100 });
+        const podSource = await podCall({ type: 'pod/read-bytes', path: 'src/game.ts' });
+        rec.check('the Pod holds the App source byte for byte', podSource?.ok === true
+          && Buffer.from(podSource.base64, 'base64').toString('utf8') === POD_ASC_SOURCE, JSON.stringify(podSource));
+
+        podAsc.phase = 'build';
+        await rpc(ctx.page, { type: 'agent/send', text: 'Make the ship faster: set SPEED to 5 and rebuild.' });
+        const built = await waitFor(async () => podAsc.build && !(await probe(ctx)).busy, { budgetMs: 90_000, pollMs: 100 });
+        let job = null;
+        try {
+          const fenced = podAsc.build.match(/<untrusted_web_content\b[^>]*>\n([\s\S]*?)\n<\/untrusted_web_content>/);
+          if (fenced) job = JSON.parse(fenced[1]);
+        } catch { /* A missing or invalid job must fail the check below. */ }
+        rec.check('the Pod actor runs asc in the real Pod and it succeeds', !!built
+          && job?.exitCode === 0 && job?.state === 'completed' && job?.stderr === '', podAsc.build.slice(0, 1200));
+        rec.observe('asc job duration ms', job?.durationMs ?? null);
+        rec.observe('Pod actor tool results', podAsc.actorSeen);
+        const podWasm = await podCall({ type: 'pod/read-bytes', path: 'build/game.wasm' });
+        const podBytes = podWasm?.ok ? Buffer.from(podWasm.base64, 'base64') : Buffer.alloc(0);
+        const expected5 = await compileGameWasm(source5);
+        rec.check('the Pod build equals the vendored compiler output for the edited source',
+          podBytes.length > 8 && podBytes.equals(expected5), `${podBytes.length} vs ${expected5.length}`);
+        const { instance } = podBytes.length ? await WebAssembly.instantiate(podBytes) : { instance: null };
+        rec.check('the new module computes step(10) = 15', instance?.exports?.step?.(10) === 15);
+
+        podAsc.phase = 'copy-back';
+        await rpc(ctx.page, { type: 'agent/send', text: 'Copy the new build and source back into the App.' });
+        const sha = createHash('sha256').update(podBytes).digest('hex').slice(0, 12);
+        const copyBack = await approve('build/game.wasm to game.wasm', 'copy-back-confirm');
+        rec.check('the copy back names both files, the size and hash, and the user allows it', !!copyBack.prompt
+          && copyBack.clicked && copyBack.prompt.includes('into App "Speed game"')
+          && copyBack.prompt.includes(`build/game.wasm to game.wasm: ${podBytes.length} B, SHA-256 ${sha}`)
+          && copyBack.prompt.includes('src/game.ts to src/game.ts'), String(copyBack.prompt));
+        await waitFor(async () => podAsc.copyBack && !(await probe(ctx)).busy, { budgetMs: 30_000, pollMs: 100 });
+        const appWasm = await appRead('game.wasm');
+        rec.check('the App game.wasm has the exact Pod build bytes', appWasm === podBytes.toString('base64'));
+        const appSource = await appRead('src/game.ts');
+        rec.check('the App keeps the edited source next to its .wasm',
+          appSource && Buffer.from(appSource, 'base64').toString('utf8') === source5);
+
+        // Close every App tab, so the next run can only come from the reopen.
+        await sleep(1_500);
+        await closeAppTabs();
+        const before = await appResult();
+        podAsc.phase = 'reopen';
+        await rpc(ctx.page, { type: 'agent/send', text: 'Open the Speed game again.' });
+        const after = await waitFor(async () => {
+          const result = await appResult();
+          return result?.value === 15 && result.runs > (before?.runs ?? 0) ? result : null;
+        }, { budgetMs: 30_000, pollMs: 200 });
+        rec.check('the reopened App shows step(10) = 15', after?.value === 15, JSON.stringify({ before, after }));
+        const appTarget = await waitFor(async () => (await fetch(`http://127.0.0.1:${ctx.port}/json/list`)
+          .then((reply) => reply.json())).find((target) => target.type === 'page'
+            && target.url.includes(`#${podAsc.appId}`)) ?? null, { budgetMs: 10_000, pollMs: 100 });
+        if (appTarget) {
+          appPage = await attach(appTarget.webSocketDebuggerUrl);
+          await appPage.send('Page.enable');
+          await appPage.send('Page.bringToFront');
+          await appPage.send('Emulation.setDeviceMetricsOverride', { width: 900, height: 620, deviceScaleFactor: 1, mobile: false });
+          await sleep(500);
+          await rec.shotPage('reopened-app', appPage);
+        }
+        const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+        rec.check('both copies crossed the exact copy operation and asc ran through pod_exec',
+          entries.filter((entry) => entry.type === 'authority_effect'
+            && entry.details?.operation === 'turn.app.copy-pod-files').length >= 2
+          && entries.some((entry) => entry.type === 'tool_executed' && entry.details?.tool === 'pod_exec'),
+        JSON.stringify(entries.map((entry) => entry.details?.operation ?? entry.details?.tool ?? entry.type)));
+        rec.observe('actor errors', entries.filter((entry) => /error/.test(entry.type)).map((entry) => entry.details));
+      } finally {
+        await appPage?.close();
+        await rpc(ctx.page, { type: 'agent/stop' }).catch(() => {});
+        const ids = [podAsc.podId, podAsc.appId].filter(Boolean);
         if (ids.length) await evalIn(ctx.page, `(async () => {
           const ids = ${JSON.stringify(ids)};
           const tabs = await chrome.tabs.query({});
