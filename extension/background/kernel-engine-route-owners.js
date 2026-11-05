@@ -61,8 +61,11 @@ export const makeKernelArtifactRoutes = (deps) => {
   );
   const load = makeKernelLazyOwner(deps, (live) => live);
   const write = makeSerialLane();
-  const apply = async (/** @type {any} */ message = {}, /** @type {any} */ sender = undefined) => {
-    if (!deps.isAllowed('import/apply', message, sender)) {
+  // why one lane: both routes create an App from bytes the page supplied.
+  const apply = (/** @type {'import/apply'|'apps/import-files'} */ name) => async (
+    /** @type {any} */ message = {}, /** @type {any} */ sender = undefined,
+  ) => {
+    if (!deps.isAllowed(name, message, sender)) {
       return { ok: false, error: 'artifact-route-unauthorized', outcomeKnown: true };
     }
     return write(async () => {
@@ -106,13 +109,15 @@ export const makeKernelArtifactRoutes = (deps) => {
       };
       const route = makeEngineRoutes({
         ...live, appClient, jsRegistry, vmRegistry, browser, opfsHelpers, pushState,
-      })['import/apply'];
+      })[name];
       return settleKernelEffect(
         () => route(message, sender), state, 'artifact-import-outcome-unknown', true,
       );
     });
   };
-  return Object.freeze({ ...read, 'import/apply': apply });
+  return Object.freeze({
+    ...read, 'import/apply': apply('import/apply'), 'apps/import-files': apply('apps/import-files'),
+  });
 };
 
 /** @param {Record<string,any>} deps */

@@ -1355,3 +1355,119 @@ describe('import/apply', () => {
     await expect(r['import/apply']({ envelope: {} })).rejects.toThrow('weird');
   });
 });
+
+describe('apps/import-files', () => {
+  const UPLOAD = '0f1e2d3c-4b5a-4968-8776-655443322110';
+  const WASM = Uint8Array.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0xff]);
+  const encode = (value: string) => new TextEncoder().encode(value);
+  const manifest = encode(`${JSON.stringify({
+    schema: 1, kind: 'app', entry: 'drturtle.html',
+    agent: { kind: 'bound-app', profile: 'developer', surface: 'code' }, capabilities: [],
+    runtime: { schema: 1, target: 'browser-app', requires: ['wasm-core'] },
+  }, null, 2)}\n`);
+  // One in-memory OPFS shared by the staging folder and the new App's folder.
+  const memoryOpfs = () => {
+    const roots = new Map<string, Map<string, Uint8Array>>();
+    const helpers = (root: string[]) => {
+      const key = root.join('/');
+      const files = () => roots.get(key) ?? roots.set(key, new Map()).get(key)!;
+      return {
+        list: async () => [...(roots.get(key) ?? new Map()).entries()]
+          .map(([path, bytes]) => ({ path: `/${path}`, size: bytes.byteLength })),
+        readBytes: async (path: string) => {
+          const bytes = roots.get(key)?.get(path);
+          if (!bytes) throw Object.assign(new Error('missing'), { name: 'NotFoundError' });
+          return bytes;
+        },
+        write: async (path: string, content: string | Uint8Array) => {
+          files().set(path, typeof content === 'string' ? encode(content) : new Uint8Array(content));
+        },
+        nuke: async () => { roots.delete(key); },
+      };
+    };
+    return { roots, helpers };
+  };
+  const setup = async (staged: Record<string, Uint8Array>, over: any = {}) => {
+    const { createAppClient } = await import('../../extension/background/app-client.js');
+    const opfs = memoryOpfs();
+    for (const [path, bytes] of Object.entries(staged)) {
+      await opfs.helpers(['peerd-app-uploads', UPLOAD]).write(path, bytes);
+    }
+    const created: any[] = [];
+    const appClient = createAppClient({
+      registry: {
+        create: async (input: any) => { const record = { id: 'app-up', ...input }; created.push(record); return record; },
+        delete: async () => true,
+      } as any,
+      tracker: {} as any,
+      repositories: { coordinate: async (_ref: unknown, run: () => Promise<unknown>) => run() } as any,
+      opfsForApp: (appId: string) => opfs.helpers(['peerd-apps', appId]) as any,
+    });
+    const audits: any[] = [];
+    const r = makeEngineRoutes(baseDeps({
+      appClient,
+      opfsHelpers: opfs.helpers,
+      APP_UPLOAD_OPFS_ROOT: 'peerd-app-uploads',
+      APP_FILE_UPLOAD_ENABLED: true,
+      auditLog: { append: async (event: any) => { audits.push(event); } },
+      ...over,
+    }));
+    return { r, opfs, created, audits };
+  };
+  const game = { 'drturtle.html': encode('<title>Dr Turtle</title>'), 'drturtle.wasm': WASM, 'peerd.json': manifest };
+
+  test('adopts the staged files with exact bytes as an imported App and removes the staging folder', async () => {
+    const { r, opfs, created, audits } = await setup(game);
+    expect(await r['apps/import-files']({ uploadId: UPLOAD, name: 'Dr Turtle' }))
+      .toEqual({ ok: true, kind: 'app', id: 'app-up', name: 'Dr Turtle' });
+    expect(created[0]).toMatchObject({
+      name: 'Dr Turtle', source: 'imported', entryFile: 'drturtle.html',
+      fileKinds: { 'drturtle.html': 'text', 'drturtle.wasm': 'binary', 'peerd.json': 'text' },
+    });
+    const stored = opfs.roots.get('peerd-apps/app-up')!;
+    expect([...stored.get('drturtle.wasm')!]).toEqual([...WASM]);
+    expect(stored.get('peerd.json')).toEqual(manifest);
+    expect(opfs.roots.has(`peerd-app-uploads/${UPLOAD}`)).toBe(false);
+    expect(audits).toEqual([{ type: 'artifact_imported', details: { kind: 'app', id: 'app-up', name: 'Dr Turtle' } }]);
+  });
+
+  test('a build without file upload refuses before reading the staging folder', async () => {
+    let reads = 0;
+    const { r } = await setup(game, {
+      APP_FILE_UPLOAD_ENABLED: false,
+      opfsHelpers: () => ({ list: async () => { reads += 1; return []; } }),
+    });
+    expect(await r['apps/import-files']({ uploadId: UPLOAD, name: 'x' }))
+      .toEqual({ ok: false, error: 'app-file-upload-unavailable' });
+    expect(reads).toBe(0);
+  });
+
+  test('a locked vault, a bad upload id and a missing name refuse before any read', async () => {
+    const locked = await setup(game, { vault: { isLocked: () => true } });
+    expect(await locked.r['apps/import-files']({ uploadId: UPLOAD, name: 'x' }))
+      .toEqual({ ok: false, error: 'vault-locked' });
+    const { r, opfs } = await setup(game);
+    for (const uploadId of ['../peerd-apps', '', 42, `${UPLOAD}/x`]) {
+      expect(await r['apps/import-files']({ uploadId, name: 'x' }))
+        .toEqual({ ok: false, error: 'uploadId-required' });
+    }
+    expect(await r['apps/import-files']({ uploadId: UPLOAD, name: ' ' }))
+      .toEqual({ ok: false, error: 'name-required' });
+    expect(opfs.roots.has(`peerd-app-uploads/${UPLOAD}`)).toBe(true);
+  });
+
+  test('the App client caps still apply, and a refusal still removes the staging folder', async () => {
+    const many = Object.fromEntries(Array.from({ length: 256 }, (_, index) => [`f${index}.txt`, encode('x')]));
+    const { r, opfs, created } = await setup({ ...game, ...many });
+    const reply = await r['apps/import-files']({ uploadId: UPLOAD, name: 'Too many' });
+    expect(reply).toEqual({ ok: false, error: 'App has too many files: 259 > 256' });
+    expect(created).toEqual([]);
+    expect(opfs.roots.has(`peerd-app-uploads/${UPLOAD}`)).toBe(false);
+  });
+
+  test('an empty or missing staging folder is a known refusal', async () => {
+    const { r } = await setup({});
+    expect(await r['apps/import-files']({ uploadId: UPLOAD, name: 'x' }))
+      .toEqual({ ok: false, error: 'upload-not-found' });
+  });
+});

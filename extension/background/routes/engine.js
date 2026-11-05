@@ -40,7 +40,7 @@ export const makeEngineRoutes = (deps) => {
     vault, auditLog, pushState, browser, vmHttpFetch,
     appRegistry, vmRegistry, jsRegistry, podRegistry, podTabTracker, appClient, appTabTracker,
     appQuiescence,
-    opfsHelpers, NOTEBOOK_OPFS_ROOT, IMAGE_PIN_STORAGE_KEY,
+    opfsHelpers, NOTEBOOK_OPFS_ROOT, APP_UPLOAD_OPFS_ROOT, APP_FILE_UPLOAD_ENABLED, IMAGE_PIN_STORAGE_KEY,
     artifactEngine,
     ArtifactTooLargeError, EnvelopeFormatError, EnvelopeIntegrityError,
     settingsStore, DWEB_ENABLED, applyWebExtract, withDwebPublication, withAppLifecycle,
@@ -921,6 +921,39 @@ export const makeEngineRoutes = (deps) => {
       auditLog.append({ type: 'artifact_imported', details: { kind, id: result.id, name } }).catch(() => {});
       pushState();
       return result;
+    },
+
+    // why staged in OPFS: Home writes the prepared files to a private folder
+    // and sends only its id, because one message cannot carry a game near the
+    // App cap. The App client applies every App path, size and manifest rule.
+    'apps/import-files': async ({ uploadId, name } = {}) => {
+      if (!APP_FILE_UPLOAD_ENABLED) return { ok: false, error: 'app-file-upload-unavailable' };
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
+      if (typeof uploadId !== 'string' || !/^[0-9a-f-]{36}$/.test(uploadId)) {
+        return { ok: false, error: 'uploadId-required' };
+      }
+      if (typeof name !== 'string' || !name.trim()) return { ok: false, error: 'name-required' };
+      const staged = opfsHelpers([APP_UPLOAD_OPFS_ROOT, uploadId]);
+      try {
+        /** @type {Record<string, Uint8Array>} */
+        const files = Object.create(null);
+        for (const { path } of await staged.list()) {
+          const relative = path.replace(/^\/+/, '');
+          files[relative] = await staged.readBytes(relative);
+        }
+        if (!Object.keys(files).length) return { ok: false, error: 'upload-not-found' };
+        let record;
+        try {
+          record = await appClient.create({ name, files, source: 'imported' });
+        } catch (e) {
+          return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+        }
+        auditLog.append({ type: 'artifact_imported', details: { kind: 'app', id: record.id, name: record.name } }).catch(() => {});
+        pushState();
+        return { ok: true, kind: 'app', id: record.id, name: record.name };
+      } finally {
+        await staged.nuke().catch(() => {});
+      }
     },
   };
 };

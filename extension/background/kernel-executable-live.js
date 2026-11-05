@@ -1,6 +1,7 @@
 // @ts-check
 
 import {
+  APP_UPLOAD_OPFS_ROOT,
   ArtifactTooLargeError,
   createAppRegistry,
   createNotebookRegistry,
@@ -17,6 +18,7 @@ import {
 } from '/peerd-engine/background.js';
 import { makeWebFetch, matchesDenylist } from '/peerd-egress/background.js';
 import { applyFetchExtract } from '/shared/fetch-extract.js';
+import { APP_FILE_UPLOAD_ENABLED } from '/shared/channel-config.js';
 import { bytesToBase64 } from '/shared/cold-util.js';
 import { normalizeApiOrigin } from '/shared/api-origin.js';
 import { needsWebWriteConfirm } from '/peerd-engine/authority.js';
@@ -193,6 +195,8 @@ export const createKernelEngineLive = async (deps) => {
       beforeMutation: () => deps.canWrite('opfs-workspaces'),
     }),
     NOTEBOOK_OPFS_ROOT,
+    APP_UPLOAD_OPFS_ROOT,
+    APP_FILE_UPLOAD_ENABLED,
     IMAGE_PIN_STORAGE_KEY,
     artifactEngine,
     ArtifactTooLargeError,

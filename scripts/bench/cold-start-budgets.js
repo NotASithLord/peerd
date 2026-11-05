@@ -146,11 +146,12 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 // is on (312 source bytes). No module. Exact, no reserve.
 // Combined first-tab custody and Discover declaration/read routes: measured
 // source and packaged closures, with no reserve or readiness changes.
+// The Library add-from-files route grows existing leaves and adds no module.
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 409, graphBytes: 4_112_060 }),
-  target: Object.freeze({ modules: 412, graphBytes: 4_203_423 }),
+  shared: Object.freeze({ modules: 409, graphBytes: 4_114_978 }),
+  target: Object.freeze({ modules: 412, graphBytes: 4_206_341 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_563 }),
@@ -159,10 +160,10 @@ export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
 });
 export const FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Exact shared authority closure including synchronous session revocation.
-  modules: 91, graphBytes: 690_992, entryBytes: 239, directImports: 3,
+  modules: 91, graphBytes: 691_010, entryBytes: 239, directImports: 3,
 });
 export const PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  modules: 93, graphBytes: 698_623, entryBytes: 250, directImports: 2,
+  modules: 93, graphBytes: 698_641, entryBytes: 250, directImports: 2,
 });
 
 // The offscreen entry is a broker/supervisor, not a feature host. Its former
@@ -195,7 +196,8 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // without reserve; Lab requests retain their narrow payload validators.
   // The opt-in first tab owns windows.onCreated in one small module. Exact.
   // It also knows a reopened window by its tabs. Same module. Exact.
-  kernel: Object.freeze({ modules: 409, graphBytes: 4_112_060, entryBytes: 200, directImports: 2 }),
+  // The Library add-from-files route and its preview flag: no module. Exact.
+  kernel: Object.freeze({ modules: 409, graphBytes: 4_114_978, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -208,8 +210,9 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // a module or execution owner. These are the exact measured source bytes.
   // Mithril's unused network API is removed from the single canonical asset;
   // ratchet both shells down to their measured closure rather than retain slack.
-  sidepanel: Object.freeze({ modules: 11, graphBytes: 133_394, entryBytes: 396, directImports: 1 }),
-  home: Object.freeze({ modules: 11, graphBytes: 133_562, entryBytes: 564, directImports: 1 }),
+  // The Library add-from-files route name adds 21 bytes to both shells. Exact.
+  sidepanel: Object.freeze({ modules: 11, graphBytes: 133_415, entryBytes: 396, directImports: 1 }),
+  home: Object.freeze({ modules: 11, graphBytes: 133_583, entryBytes: 564, directImports: 1 }),
 });
 
 // Cold-start is an observed user-visible outcome, not a bundle-size contest.
@@ -228,14 +231,15 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // Pin the measured pacing/consent/revocation closure with no reserve.
     // The first tab owner (background/kernel-first-tab.js) joins it. Exact.
     // Its reopened-window rows add 1,700 packaged bytes and no module. Exact.
+    // The Library add-from-files route adds 1,607 packaged bytes, no module.
     serviceWorker: Object.freeze({
-      modules: 405, graphBytes: 2_112_434, entryBytes: 173,
+      modules: 405, graphBytes: 2_114_041, entryBytes: 173,
       inputSha256: 'a92fe66eab988f0dd4274f793bde7685b281429cd1540119be4550d785efd8de',
     }),
     // One shared read-only authority schema/provenance validator rejects
     // corrupt or partial state before cold human controls become actionable.
-    sidepanel: Object.freeze({ modules: 11, graphBytes: 124_645, entryBytes: 396 }),
-    home: Object.freeze({ modules: 11, graphBytes: 124_813, entryBytes: 564 }),
+    sidepanel: Object.freeze({ modules: 11, graphBytes: 124_666, entryBytes: 396 }),
+    home: Object.freeze({ modules: 11, graphBytes: 124_834, entryBytes: 564 }),
     // The feature-lease supervisor owns only broker/lifecycle code; controller,
     // repository, model, job and dweb owners remain fixed lazy entries. The
     // stamped build identity replaces runtime.getManifest, which Chrome does
@@ -246,9 +250,10 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     offscreen: Object.freeze({ modules: 7, graphBytes: 22_016, entryBytes: 13_293 }),
   }),
   firefox: Object.freeze({
-    serviceWorker: Object.freeze({ modules: 91, graphBytes: 434_684, entryBytes: 210 }),
-    sidepanel: Object.freeze({ modules: 11, graphBytes: 129_133, entryBytes: 396 }),
-    home: Object.freeze({ modules: 11, graphBytes: 129_301, entryBytes: 564 }),
+    // The preview-only add-from-files flag adds 18 generated policy bytes.
+    serviceWorker: Object.freeze({ modules: 91, graphBytes: 434_702, entryBytes: 210 }),
+    sidepanel: Object.freeze({ modules: 11, graphBytes: 129_154, entryBytes: 396 }),
+    home: Object.freeze({ modules: 11, graphBytes: 129_322, entryBytes: 564 }),
   }),
 });
 
@@ -267,20 +272,22 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
       // module and no module. Remeasured with no reserve.
       // The first tab owner joins it as one module. Exact.
       // Its reopened-window rows and the restart notice add 1,877 bytes. Exact.
+      // The Library add-from-files route adds 1,606 bytes and no module. Exact.
       serviceWorker: Object.freeze({
-        modules: 412, graphBytes: 2_227_735, entryBytes: 207,
+        modules: 412, graphBytes: 2_229_341, entryBytes: 207,
         inputSha256: '44fb39a6e1e4ebb9e57381dc4d77cbc0f34e2dfb4d6e917b59b22cabbafcb8f6',
       }),
-      sidepanel: Object.freeze({ modules: 11, graphBytes: 124_645, entryBytes: 396 }),
-      home: Object.freeze({ modules: 11, graphBytes: 124_813, entryBytes: 564 }),
+      sidepanel: Object.freeze({ modules: 11, graphBytes: 124_666, entryBytes: 396 }),
+      home: Object.freeze({ modules: 11, graphBytes: 124_834, entryBytes: 564 }),
       offscreen: Object.freeze({ modules: 7, graphBytes: 22_098, entryBytes: 13_293 }),
     }),
     // Firefox has no dweb host yet, but Preview still carries its distinct
     // generated channel policy bytes.
     firefox: Object.freeze({
-      serviceWorker: Object.freeze({ modules: 93, graphBytes: 440_107, entryBytes: 81 }),
-      sidepanel: Object.freeze({ modules: 11, graphBytes: 129_133, entryBytes: 396 }),
-      home: Object.freeze({ modules: 11, graphBytes: 129_301, entryBytes: 564 }),
+      // The add-from-files flag adds 18 generated policy bytes. Exact.
+      serviceWorker: Object.freeze({ modules: 93, graphBytes: 440_125, entryBytes: 81 }),
+      sidepanel: Object.freeze({ modules: 11, graphBytes: 129_154, entryBytes: 396 }),
+      home: Object.freeze({ modules: 11, graphBytes: 129_322, entryBytes: 564 }),
     }),
   }),
 });
