@@ -81,6 +81,18 @@ export const createRepositoryToolAuthority = ({ binding, ctx, signal, shared = {
     }
   };
 
+  // why: a Pod holding files from an App another person published keeps its
+  // Git remotes off until the user allows them again in the Pod tab.
+  const refuseOutsidePod = async () => {
+    if (kind !== 'pod') return;
+    if (typeof ctx?.podRegistry?.get !== 'function') throw mismatch();
+    const record = await ctx.podRegistry.get(id);
+    if (!record?.outsideFiles) return;
+    throw Object.assign(new Error('This Pod has files from an App made by someone else. Git remotes are off until the user allows them again in the Pod tab.'), {
+      outcomeKnown: true, retryable: false,
+    });
+  };
+
   const readRemote = async () => {
     const ref = requireRepository();
     if (!['turn.repository.read-remote'].includes(binding.operation)) throw mismatch();
@@ -213,6 +225,7 @@ export const createRepositoryToolAuthority = ({ binding, ctx, signal, shared = {
         ? normalizeGitRemote(args.url)
         : shared.remoteRead ? shared.remote : null;
       if (!candidate || target !== candidate.url) throw mismatch();
+      await refuseOutsidePod();
       if (typeof ctx?.confirm !== 'function') return false;
       const answer = await ctx.confirm({
         tool: binding.operation, kind: `git_${op}`,
@@ -233,12 +246,16 @@ export const createRepositoryToolAuthority = ({ binding, ctx, signal, shared = {
     link: (/** @type {string} */ url) => {
       if (binding.operation !== 'turn.repository.link') throw mismatch();
       consumeRemoteApproval('link', url, undefined);
-      return coordinateMutation(() => repositories.setRemote(requireRepository(), { url }));
+      return coordinateMutation(async () => {
+        await refuseOutsidePod();
+        return repositories.setRemote(requireRepository(), { url });
+      });
     },
     fetch: (/** @type {string} */ target) => {
       if (binding.operation !== 'turn.repository.fetch') throw mismatch();
       const approvedRemote = consumeRemoteApproval('fetch', target, undefined);
       return coordinateMutation(async () => {
+        await refuseOutsidePod();
         const live = await repositories.getRemote(requireRepository());
         if (!sameRemote(live, approvedRemote)) throw new Error(
           'Git remote changed while authorization was pending; review and retry',
@@ -255,6 +272,7 @@ export const createRepositoryToolAuthority = ({ binding, ctx, signal, shared = {
       }
       const approvedRemote = consumeRemoteApproval('push', target, branch);
       return coordinateMutation(async () => {
+        await refuseOutsidePod();
         const live = await repositories.getRemote(requireRepository());
         if (!sameRemote(live, approvedRemote)) throw new Error(
           'Git remote changed while authorization was pending; review and retry',

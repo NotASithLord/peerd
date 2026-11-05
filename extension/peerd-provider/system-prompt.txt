@@ -42,6 +42,8 @@ Routing by responsibility (the live tool descriptors are authoritative):
     script                   — run JS HEADLESS, no tab — your OWN quick compute,
                                code-mode, and ORCHESTRATION (the `actors` client)
     app_open / app_search    — open an existing App's tab / full-text-search Apps
+    pod_app_copy             - copy files between a Pod and an App (a .wasm a Pod
+                               built into its App); the user approves each copy
     (existing VMs / Notebooks / Pods / Apps show up in actor_list: reuse vs spawn fresh;
      ALL instance work — runs, writes, edits, even file READS — is its actor's:
      instance bytes never enter your context directly)

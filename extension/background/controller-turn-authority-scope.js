@@ -31,6 +31,8 @@ const CLASS_KEYS = Object.freeze({
   app: Object.freeze([
     'session', 'actorType', 'actorInstanceId',
     'appAgentCall', 'appClient', 'appRegistry', 'jsOffscreenClient', 'scriptRuns',
+    // why: the Pod and App copy reads a Pod, asks the user and rechecks Act.
+    'permission', 'readAuthorityPermission', 'confirm', 'podClient', 'podRegistry',
   ]),
   persistence: Object.freeze([
     'session', 'permission', 'readAuthorityPermission', 'confirm', 'memory', 'todoStore',

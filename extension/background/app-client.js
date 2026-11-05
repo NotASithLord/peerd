@@ -653,6 +653,39 @@ export const createAppClient = ({
   };
 
   /**
+   * Write several exact byte buffers as one App transaction. The manifest,
+   * the entry file and runtime data are refused inside the lane, so a
+   * concurrent entry change cannot slip a protected path through.
+   * @param {{ appId: string, files: Array<{ path: string, bytes: Uint8Array }>,
+   *   signal?: AbortSignal, reload?: boolean }} args */
+  const writeFiles = async ({ appId, files, signal, reload = true }) => {
+    const id = await resolveId({ appId });
+    const result = await withMutation(id, async () => {
+      const rec = await registry.get(id);
+      if (!rec) throw new Error(`app not found: ${id}`);
+      const replacements = files.map(({ path, bytes }) => {
+        validateAppPath(path);
+        if (path === 'peerd.json' || path === rec.entryFile || APP_DATA_PATH_RE.test(path)) {
+          throw new AppFileContentError(`this copy cannot replace ${path}`);
+        }
+        return { path, ...normalizeFileContent(path, bytes) };
+      });
+      const rollbackBytes = await writeReplacements(guardedOpfsForApp(id), replacements, signal);
+      const fileKinds = { ...(rec.fileKinds ?? {}) };
+      for (const { path, kind } of replacements) fileKinds[path] = kind;
+      try {
+        const updated = await registry.update(id, { fileKinds });
+        if (!updated) throw new Error(`app not found after write: ${id}`);
+      } catch (error) {
+        return rollbackMutation(error, rollbackBytes, id, rec);
+      }
+      return replacements.map(({ path, size, kind }) => ({ path, bytes: size, kind }));
+    });
+    if (reload) await tracker.reloadTab(id).catch(() => {});
+    return result;
+  };
+
+  /**
    * Compare and write under the App/repository transaction lane.
    * @param {{appId?:string,path:string,content:string,sessionId?:string,
    *   expectedExists:boolean,expectedContent:string,signal?:AbortSignal,reload?:boolean}} args
@@ -1067,7 +1100,7 @@ export const createAppClient = ({
   return {
     resolveId,
     create, createFromGit, update,
-    writeFile, compareAndWriteFile, readFile, readFileBytes, replaceFiles, listFiles, deleteFile,
+    writeFile, writeFiles, compareAndWriteFile, readFile, readFileBytes, replaceFiles, listFiles, deleteFile,
     replaceVersionedFilesUnlocked,
     snapshotFiles, snapshotFilesBase64,
     open,

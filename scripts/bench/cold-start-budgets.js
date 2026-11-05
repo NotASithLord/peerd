@@ -146,11 +146,13 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 // source and packaged closures, with no reserve or readiness changes.
 // Pod readiness and destroy custody change existing modules only.
 // Source and package values use exact measurements, with no reserve.
+// The Pod and App file copy adds one exact App operation, byte-safe Pod file
+// routes and the outside-files mark to existing modules. No module. Exact.
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 409, graphBytes: 4_105_163 }),
-  target: Object.freeze({ modules: 412, graphBytes: 4_196_526 }),
+  shared: Object.freeze({ modules: 409, graphBytes: 4_126_222 }),
+  target: Object.freeze({ modules: 412, graphBytes: 4_217_585 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_563 }),
@@ -159,10 +161,10 @@ export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
 });
 export const FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Exact shared authority closure including synchronous session revocation.
-  modules: 91, graphBytes: 682_143, entryBytes: 239, directImports: 3,
+  modules: 91, graphBytes: 682_167, entryBytes: 239, directImports: 3,
 });
 export const PREVIEW_FIREFOX_KERNEL_SOURCE_CONTRACT = Object.freeze({
-  modules: 93, graphBytes: 689_774, entryBytes: 250, directImports: 2,
+  modules: 93, graphBytes: 689_798, entryBytes: 250, directImports: 2,
 });
 
 // The offscreen entry is a broker/supervisor, not a feature host. Its former
@@ -195,7 +197,8 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // without reserve; Lab requests retain their narrow payload validators.
   // The opt-in first tab owns windows.onCreated in one small module. Exact.
   // It also knows a reopened window by its tabs. Same module. Exact.
-  kernel: Object.freeze({ modules: 409, graphBytes: 4_105_163, entryBytes: 200, directImports: 2 }),
+  // The Pod and App file copy grows existing leaves only. Exact.
+  kernel: Object.freeze({ modules: 409, graphBytes: 4_126_222, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -228,8 +231,9 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // Pin the measured pacing/consent/revocation closure with no reserve.
     // The first tab owner (background/kernel-first-tab.js) joins it. Exact.
     // Its reopened-window rows add 1,700 packaged bytes and no module. Exact.
+    // The Pod and App file copy adds packaged bytes and no module. Exact.
     serviceWorker: Object.freeze({
-      modules: 405, graphBytes: 2_106_382, entryBytes: 173,
+      modules: 405, graphBytes: 2_118_323, entryBytes: 173,
       inputSha256: 'a92fe66eab988f0dd4274f793bde7685b281429cd1540119be4550d785efd8de',
     }),
     // One shared read-only authority schema/provenance validator rejects
@@ -246,7 +250,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     offscreen: Object.freeze({ modules: 7, graphBytes: 22_035, entryBytes: 13_293 }),
   }),
   firefox: Object.freeze({
-    serviceWorker: Object.freeze({ modules: 91, graphBytes: 428_497, entryBytes: 210 }),
+    serviceWorker: Object.freeze({ modules: 91, graphBytes: 428_521, entryBytes: 210 }),
     sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
     home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
   }),
@@ -267,8 +271,9 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
       // module and no module. Remeasured with no reserve.
       // The first tab owner joins it as one module. Exact.
       // Its reopened-window rows and the restart notice add 1,877 bytes. Exact.
+      // The Pod and App file copy adds packaged bytes and no module. Exact.
       serviceWorker: Object.freeze({
-        modules: 412, graphBytes: 2_221_683, entryBytes: 207,
+        modules: 412, graphBytes: 2_233_624, entryBytes: 207,
         inputSha256: '44fb39a6e1e4ebb9e57381dc4d77cbc0f34e2dfb4d6e917b59b22cabbafcb8f6',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),
@@ -278,7 +283,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
     // Firefox has no dweb host yet, but Preview still carries its distinct
     // generated channel policy bytes.
     firefox: Object.freeze({
-      serviceWorker: Object.freeze({ modules: 93, graphBytes: 433_920, entryBytes: 81 }),
+      serviceWorker: Object.freeze({ modules: 93, graphBytes: 433_944, entryBytes: 81 }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
     }),

@@ -19,6 +19,9 @@ export const POD_OPFS_ROOT = 'peerd-pods';
  * @property {number} createdAt
  * @property {number} lastUsedAt
  * @property {string} [actorSessionId]
+ * @property {{publisher:string,appId:string,appName:string,markedAt:number}|null} [outsideFiles]
+ *   set when files arrived from an App another person published; web and Git
+ *   remotes stay off until the user clears it
  */
 
 /**
@@ -43,6 +46,16 @@ export const createPodRegistry = (deps) => createRegistry({
       next.ownerSessionId = patch.ownerSessionId;
     }
     if (typeof patch.lastUsedAt === 'number') next.lastUsedAt = patch.lastUsedAt;
+    if (patch.outsideFiles === null) next.outsideFiles = null;
+    else if (patch.outsideFiles && typeof patch.outsideFiles === 'object') {
+      const mark = patch.outsideFiles;
+      next.outsideFiles = {
+        publisher: String(mark.publisher ?? '').slice(0, 512),
+        appId: String(mark.appId ?? '').slice(0, 128),
+        appName: String(mark.appName ?? '').slice(0, 128),
+        markedAt: Number.isFinite(mark.markedAt) ? mark.markedAt : Date.now(),
+      };
+    }
   },
   touchOnSetDefault: true,
 }, deps);
