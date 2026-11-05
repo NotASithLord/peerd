@@ -6,6 +6,8 @@ import {
   isBinaryAppFile,
   isBinaryAssetPath,
   isLosslessUtf8Text,
+  MAX_APP_FILES,
+  MAX_APP_TOTAL_BYTES,
   opfsHelpers,
   buildAppManifest,
   parseAppManifest,
@@ -17,8 +19,7 @@ export { appReleaseDescriptorMatches } from '/shared/app-dweb-identity.js';
 export const APP_TAB_GROUP_TITLE = 'peerd';
 
 // why: Enforce storage limits at the OPFS boundary for every caller.
-export const MAX_APP_TOTAL_BYTES = 50_000_000;
-export const MAX_APP_FILES = 256;
+export { MAX_APP_FILES, MAX_APP_TOTAL_BYTES };
 const MAX_APP_PATH_CHARS = 512;
 
 export class AppFileContentError extends Error {

@@ -6,13 +6,14 @@ const MAX_AGENT_NAME = 80;
 const MAX_AGENT_INSTRUCTIONS = 12_000;
 
 /** Build the checked-in declaration shared by local creation and Git import. */
-/** @param {{entry:string,dwapp?:boolean}} fields */
-export const buildAppManifest = ({ entry, dwapp = false }) => ({
+/** @param {{entry:string,dwapp?:boolean,runtime?:{schema:number,target:string,requires:string[]}}} fields */
+export const buildAppManifest = ({ entry, dwapp = false, runtime }) => ({
   schema: 1,
   kind: dwapp ? 'dwapp' : 'app',
   entry,
   agent: { kind: 'bound-app', profile: 'developer', surface: 'code' },
   capabilities: dwapp ? ['dweb'] : [],
+  ...(runtime ? { runtime } : {}),
 });
 
 /** @param {string} text */

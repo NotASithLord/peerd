@@ -131,6 +131,33 @@ describe('kernel engine route owners', () => {
     });
   });
 
+  test('adding a game from files is admission-gated and fences an uncertain App create', async () => {
+    const upload = { uploadId: '0f1e2d3c-4b5a-4968-8776-655443322110', name: 'Game' };
+    const staged = () => ({
+      list: async () => [{ path: '/index.html', size: 3 }],
+      readBytes: async () => new TextEncoder().encode('<p>'),
+      write: async () => {}, nuke: async () => {},
+    });
+    const over = { opfsHelpers: staged, APP_UPLOAD_OPFS_ROOT: 'peerd-app-uploads', APP_FILE_UPLOAD_ENABLED: true };
+    const checked: string[] = [];
+    const refused = makeKernelArtifactRoutes(deps({
+      ...over, isAllowed: (route: string) => { checked.push(route); return false; },
+    }));
+    expect(await refused['apps/import-files'](upload, {}))
+      .toEqual({ ok: false, error: 'artifact-route-unauthorized', outcomeKnown: true });
+    expect(checked).toEqual(['apps/import-files']);
+    const routes = makeKernelArtifactRoutes(deps(over));
+    expect(await routes['apps/import-files'](upload, {}))
+      .toMatchObject({ ok: true, kind: 'app', id: 'app-new' });
+    const lost = makeKernelArtifactRoutes(deps({
+      ...over,
+      appClient: { create: async () => { throw new Error('commit reply lost'); } },
+    }));
+    expect(await lost['apps/import-files'](upload, {})).toMatchObject({
+      ok: false, code: 'artifact-import-outcome-unknown', outcomeKnown: false,
+    });
+  });
+
   test('artifact write refusal is known and app deletion loss cannot be replayed blindly', async () => {
     const refused = makeKernelArtifactRoutes(deps({
       canWrite: () => { throw new Error('profile is read-only'); },
