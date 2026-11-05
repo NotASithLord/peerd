@@ -433,6 +433,7 @@ describe('App file server', () => {
     const { fetch } = installFileServer({ 'game/x.data': 'nested', 'x.data': 'root', 'shared.data': 'shared' }, 'game/index.html');
     expect(await (await fetch('x.data')).text()).toBe('nested');
     expect(await (await fetch('shared.data')).text()).toBe('shared');
+    expect(await (await fetch('/x.data')).text()).toBe('root');
   });
 
   test('XMLHttpRequest arraybuffer follows the event order Emscripten loaders read', async () => {
@@ -513,12 +514,12 @@ describe('App file server', () => {
     expect(request instanceof NativeRequest).toBe(true);
   });
 
-  test('abort stops a pending App file read', async () => {
-    const { XHR } = installFileServer({ 'x.data': [1, 2] });
+  test('abort or a new open stops a pending App file read', async () => {
+    const { XHR } = installFileServer({ 'x.data': [1, 2], 'y.data': 'y' });
     const request = new XHR();
     const events: string[] = [];
     request.onabort = () => events.push('abort');
-    request.onload = () => events.push('load');
+    request.onload = () => events.push(`load:${request.responseText}`);
     request.open('GET', 'x.data');
     request.send();
     request.abort();
@@ -526,6 +527,12 @@ describe('App file server', () => {
     expect(events).toEqual(['abort']);
     expect(request.readyState).toBe(0);
     expect(request.status).toBe(0);
+    request.open('GET', 'x.data');
+    request.send();
+    request.open('GET', 'y.data');
+    request.send();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(events).toEqual(['abort', 'load:y']);
   });
 });
 

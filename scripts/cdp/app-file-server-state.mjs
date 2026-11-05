@@ -63,7 +63,7 @@ export const APP_FILE_SERVER_STATE = {
       kind: 'app', name: 'File server game', files: {
         'index.html': '<!doctype html><html><head><title>Game</title></head><body><canvas></canvas><script src=loader.js></script></body></html>',
         'loader.js': loaderSource(probeUrl),
-        'notes.txt': '﻿hi',
+        'notes.txt': '\uFEFFhi',
         'game.wasm': { base64: GAME_WASM },
         'game.data': { base64: GAME_DATA },
       },

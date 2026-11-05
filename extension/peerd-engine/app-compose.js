@@ -126,9 +126,9 @@ export function serveAppFiles(scope, entry, types, handoff) {
     let pathname;
     try { pathname = decodeURIComponent(url.pathname); }
     catch { return { url: url.href, path: null }; }
-    const relative = pathname.startsWith(runnerDir)
-      ? pathname.slice(runnerDir.length) : pathname.slice(1);
-    for (const path of [entryDir + relative, relative]) {
+    const nearEntry = pathname.startsWith(runnerDir);
+    const relative = nearEntry ? pathname.slice(runnerDir.length) : pathname.slice(1);
+    for (const path of nearEntry ? [entryDir + relative, relative] : [relative]) {
       if (Object.hasOwn(files, path)) return { url: url.href, path };
     }
     return { url: url.href, path: null };
@@ -189,6 +189,7 @@ export function serveAppFiles(scope, entry, types, handoff) {
   class AppFileRequest extends NativeRequest {
     /** @param {unknown[]} args */
     open(...args) {
+      clearTimeout(requests.get(this)?.timer);
       requests.delete(this);
       const found = resolve(args[1]);
       if (!found) return Reflect.apply(NativeRequest.prototype.open, this, args);
