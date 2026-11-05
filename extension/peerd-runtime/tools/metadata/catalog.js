@@ -1403,6 +1403,58 @@ export const TOOL_METADATA_RECORDS = {
       "kind": "none"
     }
   },
+  "pod_app_copy": {
+    "name": "pod_app_copy",
+    "primitive": "app",
+    "description": "Copy files between a Pod and an existing App. You name the Pod, the App and the paths; the bytes never pass through you. pod_to_app puts Pod output, such as a built .wasm, into the App. app_to_pod puts App files into the Pod to edit or rebuild them. `to` defaults to `from`. Pod paths are workspace paths as pod_read takes them; App paths are relative. The user approves each copy after seeing every file's size and SHA-256. pod_to_app cannot replace peerd.json, the entry file or data/*.json. After app_to_pod from an App someone else published, the Pod refuses web fetch and Git remotes until the user allows them again. Max 64 files.",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "direction": {
+          "type": "string",
+          "enum": [
+            "pod_to_app",
+            "app_to_pod"
+          ]
+        },
+        "podId": {
+          "type": "string"
+        },
+        "appId": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from"
+            ]
+          }
+        }
+      },
+      "required": [
+        "direction",
+        "podId",
+        "appId",
+        "files"
+      ]
+    },
+    "sideEffect": "write",
+    "retryClass": "E",
+    "originRule": {
+      "kind": "none"
+    }
+  },
   "app_code": {
     "name": "app_code",
     "primitive": "app",
