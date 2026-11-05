@@ -928,13 +928,13 @@ export const makeEngineRoutes = (deps) => {
     // App cap. The App client applies every App path, size and manifest rule.
     'apps/import-files': async ({ uploadId, name } = {}) => {
       if (!APP_FILE_UPLOAD_ENABLED) return { ok: false, error: 'app-file-upload-unavailable' };
-      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof uploadId !== 'string' || !/^[0-9a-f-]{36}$/.test(uploadId)) {
         return { ok: false, error: 'uploadId-required' };
       }
-      if (typeof name !== 'string' || !name.trim()) return { ok: false, error: 'name-required' };
       const staged = opfsHelpers([APP_UPLOAD_OPFS_ROOT, uploadId]);
       try {
+        if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
+        if (typeof name !== 'string' || !name.trim()) return { ok: false, error: 'name-required' };
         /** @type {Record<string, Uint8Array>} */
         const files = Object.create(null);
         for (const { path } of await staged.list()) {

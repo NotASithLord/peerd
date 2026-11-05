@@ -637,7 +637,7 @@ export const InputBar = {
         }
         const kind = classifyAttachment({ name: f.name, mediaType: f.type, size: f.size });
         if (kind === 'unsupported' && APP_FILE_UPLOAD_ENABLED && isGameBuildFile(f.name)) {
-          ui.attachError = `"${f.name}": chat cannot open game files. To add a game, open Library and choose Add from files.`;
+          ui.attachError = `"${f.name}": chat cannot open .zip or .wasm files. To add a game, open Library and choose Add from files.`;
           continue;
         }
         if (kind === 'unsupported') {

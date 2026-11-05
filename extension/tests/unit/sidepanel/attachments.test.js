@@ -125,7 +125,7 @@ describe('sidepanel.attachments', () => {
         Object.defineProperty(input, 'files', { configurable: true, value: [new File(['x'], name, { type })] });
         input.dispatchEvent(new Event('change', { bubbles: true }));
         await until(() => root.querySelector('.attach-error')?.textContent?.includes(name));
-        expect(need(root, '.attach-error').textContent).toBe(`"${name}": chat cannot open game files. To add a game, open Library and choose Add from files.`);
+        expect(need(root, '.attach-error').textContent).toBe(`"${name}": chat cannot open .zip or .wasm files. To add a game, open Library and choose Add from files.`);
         expect(root.querySelector('.attach-chip')).toBeFalsy();
       }
       Object.defineProperty(input, 'files', { configurable: true, value: [new File(['x'], 'tool.exe', { type: 'application/x-msdownload' })] });
