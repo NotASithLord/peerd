@@ -1391,6 +1391,8 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
   };
   /** @type {Map<string,Promise<string|null>>} */
   const appActorTails = new Map();
+  /** @type {Map<string,string>} */
+  const retiringAppWriters = new Map();
   const retireStale = async (/** @type {string|null|undefined} */ actorSessionId) => {
     if (!actorSessionId) return;
     live.shared.turnSlots.stop(actorSessionId);
@@ -1476,7 +1478,7 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         const durable = await live.shared.sessions.findActorSession({
           parentSessionId: ownerSessionId, instanceId: appId, actorType: 'app',
         });
-        if (!durable) break;
+        if (!durable || retiringAppWriters.has(durable)) break;
         actor = await live.shared.sessions.get(durable).catch(() => null);
         if (appActorSessionMatches(actor, expected)) {
           actorSessionId = durable;
@@ -1503,14 +1505,28 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
       if (appActorTails.get(key) === operation) appActorTails.delete(key);
     });
   };
-  const retireAppActors = async (/** @type {string} */ appId) => {
+  const retireAppActors = async (/** @type {string} */ appId,
+    /** @type {string|undefined} */ writerSessionId = undefined) => {
     await bindingReady;
     const retirements = [];
     for (const [key, actorSessionId] of appActorBindings.entries()) {
       const gap = key.indexOf('\0');
       if (gap < 0 || key.slice(gap + 1) !== appId) continue;
       appActorBindings.drop(key.slice(0, gap), appId);
-      retirements.push(retireStale(actorSessionId));
+      // why: stopping the writer here, or on the reload's re-attach, aborts its
+      // own open write. Retire it after its turn; the attach mints a new one.
+      if (actorSessionId === writerSessionId) {
+        retiringAppWriters.set(actorSessionId, appId);
+        live.shared.turnSlots.runWhenIdle(actorSessionId, () => {
+          void retireStale(actorSessionId).finally(() => retiringAppWriters.delete(actorSessionId));
+          live.shared.turnSlots.advanceQueue(actorSessionId);
+        });
+      } else retirements.push(retireStale(actorSessionId));
+    }
+    for (const [actorSessionId, retiringAppId] of retiringAppWriters) {
+      if (retiringAppId === appId && actorSessionId !== writerSessionId) {
+        retirements.push(retireStale(actorSessionId));
+      }
     }
     await persistAppActors();
     await Promise.all(retirements);
