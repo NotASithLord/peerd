@@ -363,9 +363,12 @@ describe('App file server', () => {
     expect(script).toContain('"pages/\\u003c/script>.html"');
   });
 
-  test('takes the runner handoff and removes it before App code can see it', () => {
+  test('takes the runner handoff and removes it before App code can see it', async () => {
     const { scope } = installFileServer({ 'x.wasm': [0, 97, 115, 109] });
     expect(APP_FILES_HANDOFF in scope).toBe(false);
+    const runner = await Bun.file('./extension/engine-tabs/app-tab/runner.html').text();
+    expect(runner).toContain(`Object.defineProperty(window, '${APP_FILES_HANDOFF}'`);
+    expect(runner).toContain(`delete window.${APP_FILES_HANDOFF};`);
   });
 
   test('fetch serves App files by relative, absolute, Request, and query URLs', async () => {
