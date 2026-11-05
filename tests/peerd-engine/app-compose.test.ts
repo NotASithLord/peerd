@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { APP_FILES_HANDOFF, composeApp, stripMetaRefresh } from '../../extension/peerd-engine/app-compose.js';
+import { APP_FILE_MISSING_EVENT, APP_FILES_HANDOFF, composeApp, stripMetaRefresh } from '../../extension/peerd-engine/app-compose.js';
 
 const FILE_SERVER_RE = /^<script data-peerd-file-server>[\s\S]*?<\/script>/;
 // The App markup after the file server that composeApp always puts first.
@@ -153,59 +153,23 @@ describe('composeApp', () => {
     expect(out).not.toContain('./styles/main.css');
   });
 
-  // Workers: an opaque-origin sandbox can only load a Worker from a same-origin
-  // blob: URL, so composeApp embeds the referenced worker source + a shim that
-  // turns `new Worker('worker.js')` into a blob: worker at runtime.
-  test('inlines a bare new Worker(\'worker.js\') reference + shim', () => {
+  // why: the file server starts workers from blob: URLs at runtime, so no
+  // worker source needs to enter the document as markup.
+  test('leaves worker sources out of the composed document', () => {
     const files = {
-      'index.html': '<head></head><body><script>const w = new Worker("worker.js");</script></body>',
-      'worker.js': 'self.onmessage = () => self.postMessage(42);',
+      'index.html': '<head></head><body><script>new Worker("w.js")</script></body>',
+      'w.js': 'const s = "</script><script>steal()</script>";',
     };
     const out = composeApp(files);
-    expect(out).toContain('data-peerd-worker-shim');
-    expect(out).toContain('self.postMessage(42)');     // worker source embedded
-    expect(out).toContain('self.Worker=W');            // Worker is overridden
-    // shim is injected at <head> start, before the app script runs it
-    expect(out.indexOf('data-peerd-worker-shim')).toBeLessThan(out.indexOf('new Worker'));
+    expect(out).not.toContain('steal()');
+    expect(out).not.toContain('data-peerd-worker-shim');
   });
 
-  test('resolves ./-relative and nested worker specs', () => {
-    const files = {
-      'index.html': '<head></head><script>new Worker("./jobs/calc.js")</script>',
-      'jobs/calc.js': 'JOB_SRC',
-    };
-    const out = composeApp(files);
-    expect(out).toContain('data-peerd-worker-shim');
-    expect(out).toContain('JOB_SRC');
-  });
-
-  test('no worker ref → no shim (zero cost)', () => {
-    const files = { 'index.html': '<head></head><script>const x = 1;</script>' };
-    expect(composeApp(files)).not.toContain('data-peerd-worker-shim');
-  });
-
-  test('new Worker pointing at a non-bundled path is left alone (no shim)', () => {
-    const files = { 'index.html': '<head></head><script>new Worker("missing.js")</script>' };
-    expect(composeApp(files)).not.toContain('data-peerd-worker-shim');
-  });
-
-  test('escapes </script> in worker source so it cannot break out', () => {
-    const files = {
-      'index.html': '<head></head><script>new Worker("w.js")</script>',
-      'w.js': 'const s = "</script>";',
-    };
-    const out = composeApp(files);
-    // the raw closing tag must NOT appear inside the embedded source
-    expect(out).not.toContain('"</script>"');
-    expect(out).toContain('\\u003c/script>');
-  });
-
-  test('runtime data cannot become an entry, script, style, or worker source', () => {
+  test('runtime data cannot become an entry, script, or style source', () => {
     const payload = JSON.stringify('</script><script>globalThis.pwned=1</script>');
     for (const html of [
       '<script src="data/state.json"></script>',
       '<link rel="stylesheet" href="data/state.json">',
-      '<script>new Worker("data/state.json")</script>',
     ]) {
       expect(() => composeApp({ 'index.html': html, 'data/state.json': payload }))
         .toThrow('app runtime data cannot be a composed source');
@@ -218,7 +182,6 @@ describe('composeApp', () => {
     for (const html of [
       '<script src="../DATA/State.JSON"></script>',
       '<link rel="stylesheet" href="../DATA/State.JSON">',
-      '<script>new Worker("../DATA/State.JSON")</script>',
     ]) {
       expect(() => composeApp({
         'pages/index.html': html, 'DATA/State.JSON': '{}',
@@ -231,38 +194,6 @@ describe('composeApp', () => {
     const files = { 'index.html': html, 'main.js': 'globalThis.ready=true;' };
     expect(composeApp({ ...files, 'data/state.json': '{"count":1}' }))
       .toBe(composeApp(files));
-  });
-
-  // Execute the injected shim against mocked Worker/Blob/URL to prove the
-  // runtime rewrite — a known spec becomes a blob: worker, anything else passes
-  // straight through. Guards against a regression in the shim source string.
-  test('the injected shim rewrites a known spec to a blob: worker at runtime', () => {
-    const out = composeApp({
-      'index.html': '<head></head><script>new Worker("worker.js")</script>',
-      'worker.js': 'WORKER_BODY',
-    });
-    const shim = /data-peerd-worker-shim>([\s\S]*?)<\/script>/.exec(out)?.[1];
-    expect(shim).toBeTruthy();
-
-    const blobs: any[] = [];
-    const calls: any[] = [];
-    const mockSelf: any = { Worker: function (u: string, o: any) { calls.push({ u, o }); } };
-    const MockBlob: any = function (this: any, parts: any[], opts: any) {
-      this.parts = parts; this.opts = opts; blobs.push(this);
-    };
-    const mockURL: any = { createObjectURL: (b: any) => `blob:mock/${blobs.indexOf(b)}` };
-
-    // eslint-disable-next-line no-new-func
-    new Function('self', 'URL', 'Blob', shim as string)(mockSelf, mockURL, MockBlob);
-
-    new mockSelf.Worker('worker.js');
-    expect(calls).toHaveLength(1);
-    expect(calls[0].u).toBe('blob:mock/0');            // rewritten to a blob URL
-    expect(blobs[0].parts[0]).toBe('WORKER_BODY');     // blob carries the source
-    expect(blobs[0].opts.type).toBe('application/javascript');
-
-    new mockSelf.Worker('https://cdn/other.js');       // unknown spec
-    expect(calls[1].u).toBe('https://cdn/other.js');   // passes straight through
   });
 });
 
@@ -317,7 +248,8 @@ const bytesOf = (value: string | number[]) => (
   typeof value === 'string' ? new TextEncoder().encode(value) : Uint8Array.from(value)).buffer;
 
 // Run the exact script that composeApp writes into the App document against a
-// stand-in Window, the same way the runner's document.write runs it.
+// stand-in Window, the same way the runner's document.write runs it. The DOM
+// classes are made per call, because the file server patches their prototypes.
 const installFileServer = (files: Record<string, string | number[]>, entry = 'index.html') => {
   const html = composeApp({ [entry]: '<!doctype html><title>Game</title>' }, entry);
   const script = /<script data-peerd-file-server>([\s\S]*?)<\/script>/.exec(html)?.[1] ?? '';
@@ -326,19 +258,60 @@ const installFileServer = (files: Record<string, string | number[]>, entry = 'in
     nativeCalls.push(args);
     return Promise.reject(new TypeError('Failed to fetch'));
   };
+  const events: string[] = [];
+  const blobs = new Map<string, Blob>();
+  const revoked = new Set<string>();
+  class URLStandIn extends URL {
+    static override createObjectURL(blob: Blob) {
+      const url = `blob:chrome-extension://peerdtest/${blobs.size}`;
+      blobs.set(url, blob);
+      return url;
+    }
+    static override revokeObjectURL(url: string) { revoked.add(url); }
+  }
+  class ElementStandIn {
+    attributes: Record<string, unknown> = {};
+    setAttribute(name: string, value: unknown) { this.attributes[name] = value; }
+  }
+  class ScriptStandIn extends ElementStandIn {
+    #src: unknown = '';
+    get src() { return this.#src; }
+    set src(value: unknown) { this.#src = value; }
+  }
+  class WorkerStandIn {
+    constructor(readonly url: unknown, readonly options?: unknown) {}
+  }
+  class WorkletStandIn {
+    calls: unknown[][] = [];
+    addModule(...args: unknown[]) {
+      this.calls.push(args);
+      return Promise.resolve();
+    }
+  }
+  class AudioWorkletStandIn extends WorkletStandIn {}
   const scope: Record<string, unknown> = {
     location: { href: RUNNER_URL },
     fetch: nativeFetch,
     XMLHttpRequest: NativeRequest,
     ProgressEvent: ProgressStandIn,
-    Blob, DOMException, Event, Request, Response, TextDecoder, URL,
+    Blob, DOMException, Event, Request, Response, TextDecoder, URL: URLStandIn,
+    dispatchEvent: (event: Event) => events.push(event.type) > 0,
+    Element: ElementStandIn,
+    HTMLScriptElement: ScriptStandIn,
+    Worker: WorkerStandIn,
+    AudioWorklet: AudioWorkletStandIn,
     [APP_FILES_HANDOFF]: Object.fromEntries(Object.entries(files).map(([path, value]) => [path, bytesOf(value)])),
   };
   // eslint-disable-next-line no-new-func
   new Function('self', script)(scope);
   const fetch = scope.fetch as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   const XHR = scope.XMLHttpRequest as typeof NativeRequest;
-  return { html, script, scope, fetch, XHR, nativeFetch, nativeCalls };
+  const Script = scope.HTMLScriptElement as typeof ScriptStandIn;
+  const AppWorker = scope.Worker as typeof WorkerStandIn;
+  return {
+    html, script, scope, fetch, XHR, nativeFetch, nativeCalls, events, blobs, revoked,
+    Script, AppWorker, NativeWorker: WorkerStandIn, AudioWorklet: AudioWorkletStandIn, Worklet: WorkletStandIn,
+  };
 };
 
 const settle = (request: EventTarget) => new Promise((resolve) => {
@@ -369,6 +342,7 @@ describe('App file server', () => {
     const runner = await Bun.file('./extension/engine-tabs/app-tab/runner.html').text();
     expect(runner).toContain(`Object.defineProperty(window, '${APP_FILES_HANDOFF}'`);
     expect(runner).toContain(`delete window.${APP_FILES_HANDOFF};`);
+    expect(runner).toContain(`window.addEventListener('${APP_FILE_MISSING_EVENT}'`);
   });
 
   test('fetch serves App files by relative, absolute, Request, and query URLs', async () => {
@@ -533,6 +507,80 @@ describe('App file server', () => {
     request.send();
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(events).toEqual(['abort', 'load:y']);
+  });
+
+  test('a script src set by property or setAttribute loads the App file from a blob: URL', async () => {
+    const { Script, blobs, events } = installFileServer({ 'game.js': 'globalThis.game = 1;' });
+    const byProperty = new Script();
+    byProperty.src = 'game.js';
+    const url = String(byProperty.src);
+    expect(url).toStartWith('blob:');
+    expect(await blobs.get(url)?.text()).toBe('globalThis.game = 1;');
+    expect(blobs.get(url)?.type).toStartWith('text/javascript');
+    const byAttribute = new Script();
+    byAttribute.setAttribute('SRC', './game.js');
+    byAttribute.setAttribute('type', 'game.js');
+    expect(byAttribute.attributes).toEqual({ SRC: url, type: 'game.js' });
+    const remote = new Script();
+    remote.src = 'https://cdn.example/game.js';
+    expect(remote.src).toBe('https://cdn.example/game.js');
+    remote.setAttribute('src', url);
+    expect(remote.attributes.src).toBe(url);
+    expect(blobs.size).toBe(1);
+    expect(events).toEqual([]);
+  });
+
+  test('a Worker named by a variable or a URL starts from the App file', async () => {
+    const { AppWorker, NativeWorker, blobs } = installFileServer({ 'worker.js': 'onmessage = () => postMessage(42);', 'jobs/calc.js': 'calc' });
+    const name = ['work', 'er.js'].join('');
+    const fromString = new AppWorker(name, { type: 'module' });
+    expect(fromString).toBeInstanceOf(NativeWorker);
+    expect(String(fromString.url)).toStartWith('blob:');
+    expect(await blobs.get(String(fromString.url))?.text()).toBe('onmessage = () => postMessage(42);');
+    expect(fromString.options).toEqual({ type: 'module' });
+    const fromUrl = new AppWorker(new URL('jobs/calc.js', RUNNER_URL));
+    expect(await blobs.get(String(fromUrl.url))?.text()).toBe('calc');
+    const inline = 'blob:chrome-extension://peerdtest/made-by-the-app';
+    expect(new AppWorker(inline).url).toBe(inline);
+  });
+
+  test('AudioWorklet addModule loads the App file; other worklets keep the native call', async () => {
+    const { AudioWorklet, Worklet, blobs } = installFileServer({ 'audio/processor.js': 'registerProcessor("p", class {});' });
+    const audio = new AudioWorklet();
+    await audio.addModule('audio/processor.js', { credentials: 'omit' });
+    const [url, options] = audio.calls[0] ?? [];
+    expect(await blobs.get(String(url))?.text()).toBe('registerProcessor("p", class {});');
+    expect(options).toEqual({ credentials: 'omit' });
+    const paint = new Worklet();
+    await paint.addModule('audio/processor.js');
+    expect(paint.calls).toEqual([['audio/processor.js']]);
+  });
+
+  test('a missing App file gets a revoked blob: URL, never a packaged extension path', () => {
+    const { Script, AppWorker, AudioWorklet, revoked, events } = installFileServer({ 'game.js': 'x' });
+    const script = new Script();
+    script.src = '/background/vault-kernel.js';
+    const missingUrl = String(script.src);
+    expect(missingUrl).toStartWith('blob:');
+    expect(revoked.has(missingUrl)).toBe(true);
+    expect(new AppWorker('data/state.json').url).toBe(missingUrl);
+    const audio = new AudioWorklet();
+    audio.addModule('../../manifest.json');
+    expect(audio.calls[0]?.[0]).toBe(missingUrl);
+    expect(events).toEqual(Array(3).fill(APP_FILE_MISSING_EVENT));
+  });
+
+  test('a fetch or XHR 404 fires the missing-file event; App files and other URLs do not', async () => {
+    const { fetch, XHR, events } = installFileServer({ 'x.wasm': [0] });
+    await fetch('x.wasm');
+    await fetch('https://evil.example/x.wasm').catch(() => {});
+    expect(events).toEqual([]);
+    await fetch('missing.data');
+    const request = new XHR();
+    request.open('GET', 'missing.pck');
+    request.send();
+    await settle(request);
+    expect(events).toEqual([APP_FILE_MISSING_EVENT, APP_FILE_MISSING_EVENT]);
   });
 });
 

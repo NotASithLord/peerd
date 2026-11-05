@@ -22,6 +22,6 @@ describe('App full screen', () => {
     const html = await Bun.file('./extension/engine-tabs/app-tab/index.html').text();
     // why the root: the consent bar and notices sit beside the frame, not in it.
     expect(host).toContain('target: document.documentElement');
-    expect(html).toContain('<iframe id="app-frame" title="peerd app" sandbox="allow-scripts allow-modals allow-pointer-lock"></iframe>');
+    expect(html).toContain('<iframe id="app-frame" title="peerd app" sandbox="allow-scripts allow-modals allow-pointer-lock" allow="gamepad"></iframe>');
   });
 });

@@ -22,6 +22,7 @@ import { createDwebBridgeLifecycle } from './dweb-bridge-lifecycle.js';
 import { showConsentBar } from './consent-bar.js';
 import { mountFullScreen } from './full-screen.js';
 import { makeAppActorAttachRecovery } from './actor-attach-recovery.js';
+import { appProblemNotice } from './app-problem.js';
 import { mapError } from '/sidepanel/error-display.js';
 
 const uiRuntime = makeUiRuntimeClient({ browser });
@@ -73,8 +74,8 @@ const fail = (msg, { retryActor = false } = {}) => {
 /** @type {HTMLElement | null} */
 let noticeReturnFocus = null;
 
-/** @param {string} text @param {{ persistent?: boolean }} [options] */
-const showNotice = (text, { persistent = false } = {}) => {
+/** @param {string} text @param {{ persistent?: boolean, details?: string }} [options] */
+const showNotice = (text, { persistent = false, details = '' } = {}) => {
   let notice = document.getElementById('app-security-notice');
   const noticeHadFocus = Boolean(notice?.contains(document.activeElement));
   if (!noticeHadFocus && document.activeElement instanceof HTMLElement) {
@@ -96,6 +97,15 @@ const showNotice = (text, { persistent = false } = {}) => {
   const message = document.createElement('span');
   message.style.cssText = 'flex:1;min-width:0;overflow-wrap:anywhere';
   message.textContent = text;
+  if (details) {
+    const more = document.createElement('details');
+    more.style.cssText = 'margin-top:4px;color:#bbb';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Technical details';
+    summary.style.cursor = 'pointer';
+    more.append(summary, details);
+    message.append(more);
+  }
   const close = document.createElement('button');
   close.type = 'button';
   close.textContent = 'Dismiss';
@@ -730,11 +740,9 @@ window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
     }
     return;
   }
-  if (e.data?.type === 'app-policy-blocked' && runnerPhase === 'delivered') {
-    const directive = typeof e.data.directive === 'string'
-      ? e.data.directive.replace(/[^a-z-]/gi, '').slice(0, 40)
-      : 'resource';
-    showNotice(`Blocked ${directive || 'resource'}: Apps are offline. Bundle dependencies and assets.`);
+  if ((e.data?.type === 'app-policy-blocked' || e.data?.type === 'app-problem') && runnerPhase === 'delivered') {
+    const notice = appProblemNotice(e.data);
+    if (notice) showNotice(notice.text, { details: notice.details });
     return;
   }
   if (e.data?.type === 'app-link' && runnerPhase === 'delivered') {
