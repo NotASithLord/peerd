@@ -125,6 +125,7 @@ describe('kernel executable owner', () => {
       ['pod/web-fetch', 'pod'], ['sw/web-fetch', 'webFetch'],
       ['sw/web-fetch-abort', 'webFetch'], ['export/artifact', 'artifactExport'],
       ['import/inspect', 'options'], ['import/apply', 'options'], ['apps/delete', 'home'],
+      ['apps/import-files', 'home'],
       ['app/actor-chat', 'app'], ['actors/call', 'relay'],
       ['site-fetch/call', 'relay'], ['script/model-call', 'relay'],
       ['script-run/abort', 'relay'], ['a2a/call', 'relay'],

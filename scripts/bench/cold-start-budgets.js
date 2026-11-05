@@ -144,11 +144,12 @@ export const COLD_SOURCE_TARGETS = Object.freeze({
 // is on (312 source bytes). No module. Exact, no reserve.
 // Combined first-tab custody and Discover declaration/read routes: measured
 // source and packaged closures, with no reserve or readiness changes.
+// The Library add-from-files route grows existing leaves and adds no module.
 export const PREVIEW_KERNEL_SOURCE_CONTRACT = Object.freeze({
   // Chrome's authored graph is the same complete closure that Bun packages;
   // import() is not counted as a lazy boundary in an MV3 service worker.
-  shared: Object.freeze({ modules: 409, graphBytes: 4_104_517 }),
-  target: Object.freeze({ modules: 412, graphBytes: 4_195_880 }),
+  shared: Object.freeze({ modules: 409, graphBytes: 4_107_205 }),
+  target: Object.freeze({ modules: 412, graphBytes: 4_198_568 }),
   // Preview-exclusive update, dweb custody and contributor consent remain
   // fixed authority. This is the exact achieved preview-only closure.
   exclusive: Object.freeze({ modules: 4, graphBytes: 91_563 }),
@@ -193,7 +194,8 @@ export const COLD_SOURCE_RATCHETS = Object.freeze({
   // without reserve; Lab requests retain their narrow payload validators.
   // The opt-in first tab owns windows.onCreated in one small module. Exact.
   // It also knows a reopened window by its tabs. Same module. Exact.
-  kernel: Object.freeze({ modules: 409, graphBytes: 4_104_517, entryBytes: 200, directImports: 2 }),
+  // The Library add-from-files route and its preview flag: no module. Exact.
+  kernel: Object.freeze({ modules: 409, graphBytes: 4_107_205, entryBytes: 200, directImports: 2 }),
   // The 8,235-byte shared schema/provenance validator rejects partial or
   // corrupt authority state before first-install actions become clickable.
   // Both shells share the exact module; the increase is reviewed integrity
@@ -226,8 +228,9 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // Pin the measured pacing/consent/revocation closure with no reserve.
     // The first tab owner (background/kernel-first-tab.js) joins it. Exact.
     // Its reopened-window rows add 1,700 packaged bytes and no module. Exact.
+    // The Library add-from-files route adds 1,607 packaged bytes, no module.
     serviceWorker: Object.freeze({
-      modules: 405, graphBytes: 2_105_846, entryBytes: 173,
+      modules: 405, graphBytes: 2_107_453, entryBytes: 173,
       inputSha256: 'a92fe66eab988f0dd4274f793bde7685b281429cd1540119be4550d785efd8de',
     }),
     // One shared read-only authority schema/provenance validator rejects
@@ -244,7 +247,8 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     offscreen: Object.freeze({ modules: 7, graphBytes: 22_035, entryBytes: 13_293 }),
   }),
   firefox: Object.freeze({
-    serviceWorker: Object.freeze({ modules: 91, graphBytes: 428_483, entryBytes: 210 }),
+    // The preview-only add-from-files flag adds 18 generated policy bytes.
+    serviceWorker: Object.freeze({ modules: 91, graphBytes: 428_501, entryBytes: 210 }),
     sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
     home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
   }),
@@ -265,8 +269,9 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
       // module and no module. Remeasured with no reserve.
       // The first tab owner joins it as one module. Exact.
       // Its reopened-window rows and the restart notice add 1,877 bytes. Exact.
+      // The Library add-from-files route adds 1,606 bytes and no module. Exact.
       serviceWorker: Object.freeze({
-        modules: 412, graphBytes: 2_221_147, entryBytes: 207,
+        modules: 412, graphBytes: 2_222_753, entryBytes: 207,
         inputSha256: '44fb39a6e1e4ebb9e57381dc4d77cbc0f34e2dfb4d6e917b59b22cabbafcb8f6',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),
@@ -276,7 +281,8 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
     // Firefox has no dweb host yet, but Preview still carries its distinct
     // generated channel policy bytes.
     firefox: Object.freeze({
-      serviceWorker: Object.freeze({ modules: 93, graphBytes: 433_906, entryBytes: 81 }),
+      // The add-from-files flag adds 18 generated policy bytes. Exact.
+      serviceWorker: Object.freeze({ modules: 93, graphBytes: 433_924, entryBytes: 81 }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
     }),

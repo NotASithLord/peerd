@@ -77,10 +77,14 @@ const centralDirectoryAt = (view, eocd) => {
  * here — that is per-entry and lazy, because a .docx carries dozens of parts
  * (fonts, images, theme XML) of which a text conversion reads two or three.
  *
+ * Strict mode is for archives that become stored files: a truncated directory
+ * or a repeated name is an error, because the index would silently drop files.
+ *
  * @param {Uint8Array} bytes
+ * @param {{ strict?: boolean }} [options]
  * @returns {Map<string, ZipEntry>}
  */
-export const readZipIndex = (bytes) => {
+export const readZipIndex = (bytes, { strict = false } = {}) => {
   if (!bytes || bytes.length < 22) throw new ZipError('file too small to be a ZIP archive');
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const { count, offset } = centralDirectoryAt(view, findEocd(view));
@@ -94,6 +98,7 @@ export const readZipIndex = (bytes) => {
       // A truncated or lied-about directory: keep what we already indexed
       // rather than failing the whole read. A .docx missing its last font
       // part still converts perfectly.
+      if (strict) throw new ZipError('ZIP central directory is truncated');
       break;
     }
     const flags = view.getUint16(p + 8, true);
@@ -108,6 +113,7 @@ export const readZipIndex = (bytes) => {
     // Bit 0 = encrypted. Refuse loudly: a password-protected document is a
     // "you need the password" answer, not a parse failure.
     if (flags & 0x1) throw new ZipError(`encrypted archive member: ${name}`);
+    if (strict && entries.has(name)) throw new ZipError(`duplicate archive member: ${name}`);
     entries.set(name, { name, compression, compressedSize, size, offset: localOffset });
     p += 46 + nameLen + extraLen + commentLen;
   }
@@ -122,9 +128,10 @@ export const readZipIndex = (bytes) => {
  *
  * @param {Uint8Array} bytes   the whole archive
  * @param {ZipEntry} entry
+ * @param {number} [maxBytes]  output ceiling; a caller passes its remaining budget
  * @returns {Promise<Uint8Array>}
  */
-export const readZipEntry = async (bytes, entry) => {
+export const readZipEntry = async (bytes, entry, maxBytes = MAX_ENTRY_BYTES) => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (entry.offset + 30 > bytes.length || view.getUint32(entry.offset, true) !== SIG_LOCAL) {
     throw new ZipError(`bad local header for ${entry.name}`);
@@ -136,7 +143,12 @@ export const readZipEntry = async (bytes, entry) => {
   const start = entry.offset + 30 + nameLen + extraLen;
   const raw = bytes.subarray(start, start + entry.compressedSize);
 
-  if (entry.compression === 0) return raw;
+  if (entry.compression === 0) {
+    if (raw.length > maxBytes) {
+      throw new ZipError(`archive member ${entry.name} is larger than the ${maxBytes}-byte limit`);
+    }
+    return raw;
+  }
   if (entry.compression !== 8) {
     throw new ZipError(`unsupported compression method ${entry.compression} for ${entry.name}`);
   }
@@ -148,8 +160,8 @@ export const readZipEntry = async (bytes, entry) => {
   // stream is also read incrementally and aborted the moment it exceeds the cap.
   // why not trust the fetch-side MAX_BYTES: that bounds the COMPRESSED input,
   // which is exactly what a bomb keeps small.
-  if (entry.size > MAX_ENTRY_BYTES) {
-    throw new ZipError(`archive member ${entry.name} declares ${entry.size} bytes (limit ${MAX_ENTRY_BYTES})`);
+  if (entry.size > maxBytes) {
+    throw new ZipError(`archive member ${entry.name} declares ${entry.size} bytes (limit ${maxBytes})`);
   }
   // 'deflate-raw' — a ZIP member is a bare DEFLATE stream with no zlib header.
   // why the cast: TS types BlobPart's view as ArrayBuffer-backed, while a
@@ -171,8 +183,8 @@ export const readZipEntry = async (bytes, entry) => {
       const { done, value } = await reader.read();
       if (done) break;
       total += value.length;
-      if (total > MAX_ENTRY_BYTES) {
-        throw new ZipError(`archive member ${entry.name} inflates past the ${MAX_ENTRY_BYTES}-byte limit`);
+      if (total > maxBytes) {
+        throw new ZipError(`archive member ${entry.name} inflates past the ${maxBytes}-byte limit`);
       }
       chunks.push(value);
     }

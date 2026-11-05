@@ -8,8 +8,9 @@ export { createNotebookRegistry, NOTEBOOK_OPFS_ROOT, NOTEBOOK_TAB_PATH } from '.
 export { createPodRegistry, POD_TAB_PATH } from './pod-registry.js';
 export { createAppRegistry, APP_TAB_PATH } from './app-registry.js';
 export {
-  inferAppFileKind, isBinaryAppFile,
-  isBinaryAssetPath, isLosslessUtf8Text, MAX_MODEL_APP_FILE_BYTES,
+  APP_UPLOAD_OPFS_ROOT, inferAppFileKind, isBinaryAppFile,
+  isBinaryAssetPath, isLosslessUtf8Text, MAX_APP_FILES, MAX_APP_TOTAL_BYTES,
+  MAX_MODEL_APP_FILE_BYTES,
 } from './app-assets.js';
 export { opfsHelpers } from './opfs.js';
 export { IMAGE_PIN_STORAGE_KEY } from './vm-image-contract.js';

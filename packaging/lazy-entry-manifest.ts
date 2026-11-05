@@ -52,6 +52,8 @@ export const PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES = Object.freeze([
   'offscreen/artifact-host.js',
   'offscreen/artifact-worker.js',
   'peerd-engine/artifact.js',
+  // The Library's Add from files loads its file rules only after a pick.
+  'peerd-engine/app-upload.js',
   'offscreen/local-model.js',
   'peerd-runtime/offscreen.js',
   'peerd-runtime/voice/transcriber-picker.js',

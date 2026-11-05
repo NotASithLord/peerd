@@ -18,7 +18,7 @@ describe('kernel executable runtime', () => {
     const factories = {
       makeKernelPodRoutes: routes(['pod/cancel-io', 'pod/get-meta', 'pod/git', 'pod/web-fetch']),
       makeKernelWebFetchRoutes: routes(['sw/web-fetch', 'sw/web-fetch-abort']),
-      makeKernelArtifactRoutes: routes(['export/artifact', 'import/inspect', 'import/apply']),
+      makeKernelArtifactRoutes: routes(['export/artifact', 'import/inspect', 'import/apply', 'apps/import-files']),
       makeKernelAppDeleteRoutes: routes(['apps/delete']),
       makeKernelAppActorChatRoutes: (deps: any) => ({
         'app/actor-chat': (message: any, sender: any) => ({
@@ -75,7 +75,7 @@ describe('kernel executable runtime', () => {
       factories: {
         makeKernelPodRoutes: routes(['pod/cancel-io', 'pod/get-meta', 'pod/git', 'pod/web-fetch']),
         makeKernelWebFetchRoutes: routes(['sw/web-fetch', 'sw/web-fetch-abort']),
-        makeKernelArtifactRoutes: routes(['export/artifact', 'import/inspect', 'import/apply']),
+        makeKernelArtifactRoutes: routes(['export/artifact', 'import/inspect', 'import/apply', 'apps/import-files']),
         makeKernelAppDeleteRoutes: routes(['apps/delete']),
         makeKernelAppActorChatRoutes: () => ({ 'app/actor-chat': () => ({ ok: true }) }),
         makeKernelTransferRoutes: ({ privateTransferAuthorization }: any) =>

@@ -2,6 +2,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';
 import { LibrarySection } from '/home/library-section.js';
+import { opfsHelpers } from '/peerd-engine/opfs.js';
 
 // Two apps, one favorited, distinct updatedAt so sort order is stable.
 const FIXTURE = [
@@ -63,9 +64,18 @@ const focusSettles = async (landed, budgetMs = 2000) => {
 const focusedAction = (action) => () =>
   document.activeElement?.getAttribute('data-library-action') === action;
 
+/** @param {() => boolean} done @param {number} [budgetMs] */
+const until = async (done, budgetMs = 4000) => {
+  const deadline = performance.now() + budgetMs;
+  while (!done() && performance.now() < deadline) {
+    await new Promise((resolve) => { setTimeout(resolve, 16); });
+    m.redraw.sync();
+  }
+};
+
 /**
  * @param {FakeSend} send
- * @param {{ dweb?: boolean }} [attrs]
+ * @param {{ dweb?: boolean, upload?: boolean }} [attrs]
  */
 const mountView = async (send, attrs = {}) => {
   const root = document.createElement('div');
@@ -156,6 +166,60 @@ describe('home.library', () => {
         name: 'Shared Notes',
       });
       expect(root.textContent).toContain('opened it with its bound actor');
+    } finally { unmount(); }
+  });
+
+  it('adds a game from a picked folder: plain review, staged bytes, one small message, then open', async () => {
+    const send = makeSend({
+      'apps/import-files': (msg) => ({ ok: true, kind: 'app', id: 'game-app', name: msg.name }),
+      'apps/open': () => ({ ok: true }),
+    });
+    const { root, unmount } = await mountView(send, { upload: true });
+    let uploadId = '';
+    try {
+      clickText(root, 'button', 'Add from files');
+      await flush();
+      const wasm = Uint8Array.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+      const picked = new DataTransfer();
+      picked.items.add(new File(['<title>Turtle Run</title><script src="https://cdn.example.com/x.js"></script>'], 'index.html'));
+      picked.items.add(new File([wasm], 'game.wasm'));
+      picked.items.add(new File(['x'], '.DS_Store'));
+      const folder = need(root, 'input[aria-label="Game folder"]', HTMLInputElement);
+      folder.files = picked.files;
+      folder.dispatchEvent(new Event('change'));
+      await until(() => !!root.querySelector('.library-upload-review'));
+      const review = need(root, '.library-upload-review');
+      expect(review.textContent).toContain('Turtle Run');
+      expect(review.textContent).toContain('Runs offline in its own tab.');
+      expect(review.textContent).toContain('These files came from your computer.');
+      expect(review.textContent).toContain('loads code from the internet (cdn.example.com)');
+      expect(review.textContent.includes('Comes with peerd')).toBe(false);
+      const details = need(root, '.library-upload-details', HTMLDetailsElement);
+      expect(details.open).toBe(false);
+      expect(details.textContent).toContain('WebAssembly');
+      expect(details.textContent).toContain('.DS_Store left out');
+      clickText(root, 'button', 'Add to Library');
+      await until(() => send.calls.some((call) => call.type === 'apps/open'));
+      const add = send.calls.find((call) => call.type === 'apps/import-files');
+      uploadId = add?.uploadId ?? '';
+      expect(add).toEqual({ type: 'apps/import-files', uploadId, name: 'Turtle Run' });
+      const staged = opfsHelpers(['peerd-app-uploads', uploadId]);
+      expect((await staged.list()).map((file) => file.path).sort()).toEqual(['/game.wasm', '/index.html', '/peerd.json']);
+      expect([...await staged.readBytes('game.wasm')]).toEqual([...wasm]);
+      expect(JSON.parse(await staged.read('peerd.json')).runtime).toEqual({ schema: 1, target: 'browser-app', requires: ['wasm-core'] });
+      expect(send.calls.find((call) => call.type === 'apps/open')).toEqual({ type: 'apps/open', appId: 'game-app' });
+      expect(root.textContent).toContain('Added Turtle Run to your Library and opened it.');
+    } finally {
+      if (uploadId) await opfsHelpers(['peerd-app-uploads', uploadId]).nuke();
+      unmount();
+    }
+  });
+
+  it('offers Add from files only where the package allows it', async () => {
+    const { root, unmount } = await mountView(makeSend());
+    try {
+      expect(byText(root, 'button', 'Add from files')).toBeFalsy();
+      expect(byText(root, 'button', 'Import Git')).toBeTruthy();
     } finally { unmount(); }
   });
 

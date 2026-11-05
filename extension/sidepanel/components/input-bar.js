@@ -34,8 +34,9 @@
 import m from '/vendor/mithril/mithril.js';
 import {
   MicButton, activeTrigger, classifyAttachment, ATTACHMENT_CAPS, MAX_ATTACHMENTS_PER_MESSAGE,
-  DOC_MEDIA_TYPES, IMAGE_MEDIA_TYPES, formatBytes,
+  DOC_MEDIA_TYPES, IMAGE_MEDIA_TYPES, formatBytes, isGameBuildFile,
 } from '/peerd-runtime/ui.js';
+import { APP_FILE_UPLOAD_ENABLED } from '/shared/channel-config.js';
 import { CommandPalette, visibleCandidates, PALETTE_OPTION_ID } from './command-palette.js';
 import { CostChip } from './cost-meter.js';
 import { settleUiEffect } from '/shared/ui-effects.js';
@@ -635,6 +636,10 @@ export const InputBar = {
           break;
         }
         const kind = classifyAttachment({ name: f.name, mediaType: f.type, size: f.size });
+        if (kind === 'unsupported' && APP_FILE_UPLOAD_ENABLED && isGameBuildFile(f.name)) {
+          ui.attachError = `"${f.name}": chat cannot open .zip or .wasm files. To add a game, open Library and choose Add from files.`;
+          continue;
+        }
         if (kind === 'unsupported') {
           ui.attachError = `"${f.name}": unsupported type — images (PNG/JPEG/GIF/WebP), PDF, `
             + 'Word/Excel/PowerPoint/OpenDocument, RTF, EPUB, or text files.';

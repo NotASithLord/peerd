@@ -116,6 +116,25 @@ describe('sidepanel.attachments', () => {
     } finally { unmount(); }
   });
 
+  it('sends a game build to Library > Add from files instead of a flat refusal', async () => {
+    const send = async () => ({ ok: true });
+    const { root, unmount } = await mountInputBar(baseState(), send);
+    try {
+      const input = need(root, 'input.attach-input', HTMLInputElement);
+      for (const [name, type] of [['game.zip', 'application/zip'], ['game.wasm', 'application/wasm']]) {
+        Object.defineProperty(input, 'files', { configurable: true, value: [new File(['x'], name, { type })] });
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        await until(() => root.querySelector('.attach-error')?.textContent?.includes(name));
+        expect(need(root, '.attach-error').textContent).toBe(`"${name}": chat cannot open .zip or .wasm files. To add a game, open Library and choose Add from files.`);
+        expect(root.querySelector('.attach-chip')).toBeFalsy();
+      }
+      Object.defineProperty(input, 'files', { configurable: true, value: [new File(['x'], 'tool.exe', { type: 'application/x-msdownload' })] });
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await until(() => root.querySelector('.attach-error')?.textContent?.includes('tool.exe'));
+      expect(need(root, '.attach-error').textContent).toContain('unsupported type');
+    } finally { unmount(); }
+  });
+
   it('refuses an office file before staging when document conversion is unavailable', async () => {
     const send = async () => ({ ok: true });
     const state = {

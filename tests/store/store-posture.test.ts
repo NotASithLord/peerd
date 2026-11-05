@@ -150,6 +150,13 @@ describe('store feature flags', () => {
       .toContain('export const REMOTE_MODULE_IMPORTS_ENABLED = true');
   });
 
+  test('store and web hide adding games from files while both preview builds offer it', () => {
+    expect(genChannelConfigSource('store')).toContain('export const APP_FILE_UPLOAD_ENABLED = false');
+    expect(genChannelConfigSource('web')).toContain('export const APP_FILE_UPLOAD_ENABLED = false');
+    expect(genChannelConfigSource('preview', 'chrome')).toContain('export const APP_FILE_UPLOAD_ENABLED = true');
+    expect(genChannelConfigSource('preview', 'firefox')).toContain('export const APP_FILE_UPLOAD_ENABLED = true');
+  });
+
   test('Firefox preview disables unavailable dweb facilities and keeps remote modules', () => {
     const source = genChannelConfigSource('preview', 'firefox');
     expect(source).toContain('export const DWEB_ENABLED = false');
