@@ -24,6 +24,7 @@ const failureFrom = (/** @type {any} */ result, /** @type {string} */ fallback) 
  * @param {(request:{streamId:string})=>Promise<any>} [deps.readLocalGeneration]
  * @param {(request:{streamId:string})=>Promise<any>} [deps.cancelLocalGeneration]
  * @param {(request:{providerId:string,modelId:string})=>Promise<any>} [deps.readModelContext]
+ * @param {number} [deps.drainMs]
  */
 export const createActorModelEgress = ({
   openInference, readInferenceChunk, cancelInference,
@@ -31,6 +32,7 @@ export const createActorModelEgress = ({
   readModelContext = async () => ({
     ok: false, code: 'actor-model-context-unavailable', outcomeKnown: true,
   }),
+  drainMs = 5_000,
 }) => {
   const checked = async (/** @type {Promise<any>} */ pending, /** @type {string} */ fallback) => {
     const result = await pending;
@@ -38,8 +40,31 @@ export const createActorModelEgress = ({
     return result.value;
   };
 
+  // why: provider parsers stop at their terminal event ([DONE], message_stop) and
+  // only release the body, but the SW frees the run's one inference slot at network
+  // EOF. Drain the previous body before the next open so a fast tool step does not
+  // meet "another inference is active". Never cancel it: its pending read would then
+  // fail as model-egress-aborted and fail the run. The bound keeps a provider that
+  // never sends EOF from hanging the turn; the open then meets the SW busy refusal.
+  /** @type {ReadableStream<Uint8Array>|null} */
+  let previousBody = null;
+  const drainPrevious = async () => {
+    const body = previousBody;
+    previousBody = null;
+    if (!body || body.locked) return;
+    const reader = body.getReader();
+    /** @type {ReturnType<typeof setTimeout>|undefined} */
+    let timer;
+    await Promise.race([
+      (async () => { for (;;) if ((await reader.read()).done) return; })().catch(() => {}),
+      new Promise((resolve) => { timer = setTimeout(resolve, drainMs); }),
+    ]);
+    clearTimeout(timer);
+  };
+
   return Object.freeze({
     openInference: async (/** @type {any} */ request) => {
+      await drainPrevious();
       const opened = await checked(openInference({
         providerId: request.providerId,
         modelId: request.modelId,
@@ -84,6 +109,7 @@ export const createActorModelEgress = ({
         cancel: close,
       }) : null;
       if (!body) request.signal?.removeEventListener('abort', abort);
+      previousBody = body;
       return new Response(body, {
         status: Number(opened.status),
         statusText: typeof opened.statusText === 'string' ? opened.statusText : '',
