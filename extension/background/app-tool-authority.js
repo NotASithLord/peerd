@@ -30,8 +30,10 @@ const refused = (error, extra = {}) => ({
 
 /** @param {unknown} path @param {boolean} allowLeadingSlash */
 const cleanPath = (path, allowLeadingSlash) => {
+  // why no control or direction characters: the path is shown in the user's
+  // prompt, and a line break or a text-direction override could forge a line.
   if (typeof path !== 'string' || !path || path.length > MAX_PATH_CHARS
-      || path.includes('\\') || path.includes('\0')) return null;
+      || path.includes('\\') || /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(path)) return null;
   if (!allowLeadingSlash && path.startsWith('/')) return null;
   const parts = path.replace(/^\/+/, '').split('/');
   return parts.every((part) => part && part !== '.' && part !== '..') ? parts.join('/') : null;
@@ -190,9 +192,9 @@ const copyBetweenPodAndApp = async (request, deps) => {
     ]
     : [
       `Copy ${files.length} file${files.length === 1 ? '' : 's'} from App "${appName}" into Pod "${podName}"?`,
-      publisher
-        ? `This App was made by someone else (${shown(publisher)}). After the copy, this Pod cannot use the web or Git remotes until you allow it again in the Pod tab.`
-        : 'You made this App.',
+      ...(publisher
+        ? [`This App was made by someone else (${shown(publisher)}). After the copy, this Pod cannot use the web or Git remotes until you allow it again in the Pod tab.`]
+        : []),
       ...lines,
     ];
   let answer;

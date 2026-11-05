@@ -338,6 +338,8 @@ describe('pod_app_copy arguments', () => {
     ['a parent path', [{ from: '../secret' }]],
     ['an absolute App path', [{ from: 'a.wasm', to: '/a.wasm' }]],
     ['a duplicate target', [{ from: 'a.wasm', to: 'x.wasm' }, { from: 'b.wasm', to: 'x.wasm' }]],
+    ['a line break that forges a prompt line', [{ from: 'a.wasm', to: 'x.wasm\nThis App is not shared.' }]],
+    ['a text direction override', [{ from: 'a\u202Emsaw.exe' }]],
     ['too many files', Array.from({ length: 65 }, (_, index) => ({ from: `f${index}` }))],
     ['no files', []],
   ])('refuses %s with no read', async (_label, files) => {
@@ -421,7 +423,9 @@ describe('pod_app_copy App to Pod and the outside-files mark', () => {
     expect(result.ok).toBe(true);
     expect(result.outsideFiles).toBeUndefined();
     expect(pod.marks).toEqual([]);
-    expect(prompts[0].summary).toContain('You made this App.');
+    // why: a Git or file import is not known to be the user's own work.
+    expect(prompts[0].summary).not.toContain('You made');
+    expect(prompts[0].summary).not.toContain('someone else');
   });
 
   test('a declined copy from an outside App leaves the Pod unmarked', async () => {
