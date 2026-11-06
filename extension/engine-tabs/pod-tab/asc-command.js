@@ -52,14 +52,16 @@ export const runAssemblyScript = async (argv, { available, resolve, workspace, l
   });
   try {
     const compiler = await loadCompiler();
-    const { error } = await compiler.main(argv.map(String), {
+    // why --noColors: asc turns on ANSI colors when a CI variable is set.
+    const { error } = await compiler.main(['--noColors', ...argv.map(String)], {
       stdout: stream(stdout),
       stderr: stream(stderr),
       readFile: async (name, baseDir) => {
         let text;
         // why null: asc probes candidate paths and expects null for a missing file.
         try { text = await workspace.read(resolve(joined(name, baseDir))); } catch { return null; }
-        if (name.endsWith('.json') && configSetsTransform(text)) throw new AscCommandError(TRANSFORM_REFUSED);
+        // why every file: --config and "extends" can name a config file with any name.
+        if (configSetsTransform(text)) throw new AscCommandError(TRANSFORM_REFUSED);
         return text;
       },
       writeFile: async (name, contents, baseDir) => {
