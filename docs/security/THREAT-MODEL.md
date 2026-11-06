@@ -336,8 +336,8 @@ descriptor behind them is wrapper-built (stdin bytes, size-capped output collect
 in-memory file table from the call) — no network channel exists for the seal to even
 block. The App runs
 at an opaque origin (the manifest sandbox omits `allow-same-origin` and
-`allow-top-navigation`) with all `chrome.*` stripped, and its inlined worker source is
-escaped against a `</script>` breakout. Its sandbox CSP denies connections and remote
+`allow-top-navigation`) with all `chrome.*` stripped, and no worker source is written
+into its document. Its sandbox CSP denies connections and remote
 resources, while a verified tab-scoped browser rule independently blocks remote
 HTTP(S) and WebSocket requests. App admission fails closed if that rule cannot be
 installed and read back. Inside the App realm, a file server answers the App's fetch
@@ -345,8 +345,19 @@ and XMLHttpRequest reads of its own files with synthetic responses. It builds th
 from bytes the runner already holds, opens no connection, and never asks the parent
 for a file. It answers every other path at the extension origin with a 404, so a
 loader cannot read packaged extension files through it. Every other URL goes to the
-native call, which the unchanged CSP denies. The file server is a convenience for
-game loaders, not a boundary: the CSP and the browser rule stay the boundary.
+native call, which the unchanged CSP denies. The same server gives a script src, a
+Worker URL, or an AudioWorklet module URL for an App file a blob: URL of that file.
+For any other path at the extension origin, these wrapped calls get a revoked blob: URL,
+so the load fails. App code can still load packaged extension files through calls the
+server does not wrap, such as `import()`, because the sandbox CSP does not stop loads of
+the extension's own files. Those files run in the opaque realm without `chrome.*`.
+When the App asks for a file it does not have, the server fires an in-realm event.
+The runner also watches for an uncaught SecurityError or an error that names
+SharedArrayBuffer. For each, the runner posts only a fixed problem name to the App tab,
+never the path or other App text. The file server is a convenience for
+game loaders, not a boundary: the CSP and the browser rule stay the network boundary.
+The App frame's `allow` attribute names only `gamepad`, which reads controller input.
+The in-browser red-team test pins the exact `sandbox` and `allow` values.
 The WebVM's only network path is an HTTP bridge
 that refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth
 field, and confirms body-bearing verbs. If a resolved Notebook or Script graph
@@ -358,6 +369,7 @@ Code: `engine-tabs/notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
 `engine-tabs/notebook-tab/notebook-tab.js`, `offscreen/job-runner.js`,
 `peerd-runtime/tools/defs/js-notebook.js`, `peerd-runtime/tools/defs/script.js`,
 `peerd-engine/app-compose.js` (`serveAppFiles`), `engine-tabs/app-tab/runner.html`,
+`engine-tabs/app-tab/index.html` (`#app-frame`),
 `peerd-engine/vm-net/http-bridge.js`,
 `peerd-engine/module-resolver.js`, `peerd-egress/denylist/dnr-rules.js`,
 `background/kernel-turn-authority-adapter.js` (`attachAppTabActor`), and the manifest sandbox CSP.

@@ -17,11 +17,8 @@ describe('App full screen', () => {
     expect(handleAction(null)).toBe(null);
   });
 
-  test('the page root goes full screen, and the App frame gets no full-screen permission', async () => {
+  test('the page root goes full screen', async () => {
     const host = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
-    const html = await Bun.file('./extension/engine-tabs/app-tab/index.html').text();
-    // why the root: the consent bar and notices sit beside the frame, not in it.
     expect(host).toContain('target: document.documentElement');
-    expect(html).toContain('<iframe id="app-frame" title="peerd app" sandbox="allow-scripts allow-modals allow-pointer-lock"></iframe>');
   });
 });
