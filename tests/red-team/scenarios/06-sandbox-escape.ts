@@ -37,6 +37,11 @@ import { formatEvalResult } from '../../../extension/peerd-runtime/tools/defs/js
 import { makeEngineRoutes } from '../../../extension/background/routes/engine.js';
 import { parseAppManifest } from '../../../extension/peerd-engine/app-manifest.js';
 import { podGitRemoteOperation } from '../../../extension/peerd-engine/pod-shell.js';
+import { runAssemblyScript, type AssemblyScriptCompiler } from '../../../extension/engine-tabs/pod-tab/asc-command.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // A mock worker global shaped like a real DedicatedWorkerGlobalScope: raw
 // constructors as own props, fetch/importScripts/caches on the prototype.
@@ -83,7 +88,7 @@ export const scenario: Scenario = {
   title: 'Sandbox escape (Notebook/Pod workers, App iframe, WebVM)',
   adversary: 'malicious sandboxed code',
   asset: 'the host origin, the network, and other sandbox instances',
-  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; OPFS mutation is checked before any root handle is opened; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe or observe a targeted actor job; a Pod holding files from an App another person published reaches no web or Git remote; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
+  claim: 'Across all three sandbox kinds, confinement holds: the Notebook realm exposes only the audited fetch bridge (raw channels throw, native fetch unrecoverable, bridge un-unseatable) and no same-origin durable store; the Cache API and IndexedDB both throw, so the sealed extension-origin worker cannot reach the `peerd` database; OPFS mutation is checked before any root handle is opened; a remote module restricts its whole run to compute only and all remote-controlled output is fenced; an App cannot break out of its iframe or observe a targeted actor job; a Pod holding files from an App another person published reaches no web or Git remote; the Pod compiler loads no transform JavaScript; and the WebVM HTTP bridge refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth field, and confirms body-bearing verbs.',
   threatModelRef: 'INV-6',
   tier: 'unit',
   async run() {
@@ -370,6 +375,51 @@ export const scenario: Scenario = {
         : leaked('reach the web or a Git remote from a Pod holding another person\'s App files', `egress=${egress}`));
     }
 
+    // A Pod's asc command compiles files that may come from another person.
+    // A transform is JavaScript that the compiler would load and run, so a
+    // flag or a config file that names one is refused before it loads.
+    {
+      const scratch = mkdtempSync(join(tmpdir(), 'peerd-asc-transform-'));
+      const flag = '__peerdAscTransformRan';
+      const transformPath = join(scratch, 'transform.mjs');
+      writeFileSync(transformPath, `globalThis.${flag} = true; export default class {};\n`);
+      // why a variable: tsc must not type-walk the 15 MB vendored compiler.
+      const ascPath: string = fileURLToPath(new URL('../../../extension/vendor/assemblyscript/asc.js', import.meta.url));
+      const source = 'export function step(x: f32): f32 { return x + 2; }';
+      try {
+        const config = JSON.stringify({ options: { transform: [transformPath] } });
+        for (const [label, argv, configPath] of [
+          ['a --transform flag', ['src/game.ts', '--transform', transformPath], null],
+          ['an asconfig.json transform', ['src/game.ts'], '/asconfig.json'],
+          ['a config file with another name', ['src/game.ts', '--config', 'build.conf'], '/build.conf'],
+        ] as const) {
+          const writes: string[] = [];
+          const result = await runAssemblyScript([...argv, '-o', 'build/game.wasm'], {
+            available: true,
+            resolve: (path) => `/${path.replace(/^\/+/, '')}`,
+            workspace: {
+              read: async (path) => {
+                if (path === '/src/game.ts') return source;
+                if (path === configPath) return config;
+                throw new Error(`NotFoundError: ${path}`);
+              },
+              write: async (path) => { writes.push(path); },
+              listDir: async () => [],
+            },
+            loadCompiler: () => import(ascPath) as Promise<AssemblyScriptCompiler>,
+          });
+          const ran = (globalThis as Record<string, unknown>)[flag] === true;
+          probes.push(!ran && result.exitCode !== 0 && writes.length === 0
+            && result.stderr.includes('transforms run JavaScript')
+            ? blocked(`run JavaScript in the Pod compiler through ${label}`, 'asc refuses the transform before the compiler loads it')
+            : leaked(`run JavaScript in the Pod compiler through ${label}`, `ran=${ran} exit=${result.exitCode} ${result.stderr.slice(0, 160)}`));
+        }
+      } finally {
+        delete (globalThis as Record<string, unknown>)[flag];
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    }
+
     const result = summarize(probes, [
       'applyRealmSeal Notebook profile (raw channels, OPFS root, extension APIs, native deletion, bridge pin)',
       'applyRealmSeal Pod profile (no ambient fetch/raw OPFS/extension API namespaces)',
@@ -381,6 +431,7 @@ export const scenario: Scenario = {
       'makeOffscreenActorChannelClient (exact-client channel transfer)',
       'normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)',
       'makeEngineRoutes pod/web-fetch + pod/git (outside-files mark)',
+      'runAssemblyScript (Pod asc refuses compiler transforms)',
     ]);
     // The pure seal runs here; the real-worker-realm proof (and the a2a run's
     // egress + delegation refusals) is exercised in the in-browser suite:
@@ -393,6 +444,7 @@ export const scenario: Scenario = {
       'tests/peerd-runtime/tools/remote-import-policy.test.ts (remote output fence)',
       'tests/peerd-engine/single-module-linker.test.ts (seal-first graph with no child loads)',
       'tests/background/pod-app-copy.test.ts (outside-files mark set before the first copied write)',
+      'tests/engine-tabs/pod-tab/asc-command.test.ts (asc flags, workspace binding, exact output, transform refusal)',
       'extension/tests/unit/red-team/sandbox-escape.test.js (in-browser red-team framing)',
       'scripts/cdp/states.mjs actor-builds-app (live App raw-network capture)',
       'scripts/firefox/run-runtime-tests.mjs (opaque worker host, string-compilation refusal, cancellable compiler and fetch, local and remote graph parity)',

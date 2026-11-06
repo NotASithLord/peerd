@@ -64,6 +64,7 @@ export const WEB_PRUNE_WITHIN = [
   'vendor/tesseract',
   'vendor/simple-icons',
   'vendor/transformers',
+  'vendor/assemblyscript',
 ] as const;
 
 // Web-specific file swaps: extension-relative path -> committed template in
