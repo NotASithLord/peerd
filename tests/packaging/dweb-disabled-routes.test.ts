@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
-  copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -11,12 +11,12 @@ import { makeDwebSelfRoutes as makeDisabledDwebSelfRoutes } from '../../packagin
 import {
   DWEB_ROUTES_DISABLED_TEMPLATE, DWEB_SELF_ROUTES_DISABLED_TEMPLATE,
   STORE_ACTOR_WORKER_TEMPLATE, STORE_LOADER_TEMPLATE,
-  STORE_OPTIONS_APP_TEMPLATE, STORE_SEMANTIC_HOST_TEMPLATE,
+  STORE_OPTIONS_APP_TEMPLATE, STORE_SEMANTIC_HOST_TEMPLATE, EXTENSION_DIR, readVersion,
 } from '../../packaging/lib.ts';
-import { applyDwebDisabledTemplates } from '../../packaging/package.ts';
+import { applyDwebDisabledTemplates, packageArtifact } from '../../packaging/package.ts';
 import { minifyColdArtifactModules } from '../../packaging/minify-artifact-js.ts';
 import {
-  dwebDisabledTemplateFailures, storeContributorBoundaryFailures, storePreviewOnlyFailures,
+  dwebDisabledTemplateFailures, storeContributorBoundaryFailures, verifyStoreArtifact,
 } from '../../packaging/verify-store-artifact.ts';
 
 const temporaryRoots: string[] = [];
@@ -192,15 +192,15 @@ describe('dweb-disabled route factories', () => {
     ]);
   });
 
-  test('artifact verifier rejects the Preview-only Pod compiler in a Store artifact', () => {
-    const root = temporaryRoot();
-    write(root, 'engine-tabs/pod-tab/asc-command.js', 'export const runAssemblyScript = () => {};\n');
-    expect(storePreviewOnlyFailures(root)).toEqual([]);
-    write(root, 'vendor/assemblyscript/binaryen/index.js', '// leaked\n');
-    expect(storePreviewOnlyFailures(root)).toEqual([
-      'vendor/assemblyscript present in store artifact',
-    ]);
-  });
+  test('artifact verifier rejects the Preview-only Pod compiler in a Store artifact', async () => {
+    const artifact = await packageArtifact({
+      channel: 'store', browser: 'chrome', version: readVersion(), artifactRoot: temporaryRoot(), sign: false, minify: false,
+    });
+    const staging = join(dirname(artifact), 'staging/store-chrome');
+    cpSync(join(EXTENSION_DIR, 'vendor/assemblyscript'), join(staging, 'vendor/assemblyscript'), { recursive: true });
+    expect(Bun.spawnSync(['zip', '-qr', artifact, 'vendor/assemblyscript'], { cwd: staging }).exitCode).toBe(0);
+    await expect(verifyStoreArtifact(artifact)).rejects.toThrow('store artifact verification failed (1 findings)');
+  }, 120_000);
 
   test('minification preserves disabled bytes exactly without exempting Preview Chrome authored routes', async () => {
     const makeGraph = (): string => {
