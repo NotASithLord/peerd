@@ -13222,6 +13222,9 @@ Promise.resolve().then(async () => {
           `/^Anthropic/.test(document.querySelector('.model-picker-select')?.selectedOptions?.[0]?.textContent || '')`),
         { budgetMs: 8_000, pollMs: 60 });
 
+        for (const type of ['rawKeyDown', 'keyUp']) {
+          await ctx.page.send('Input.dispatchKeyEvent', { type, key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+        }
         const controls = await evalIn(ctx.page, `(() => {
           const row = document.querySelector('.chat-mode-row');
           const plan = document.querySelector('.planact-mode');
