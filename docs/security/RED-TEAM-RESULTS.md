@@ -9,7 +9,7 @@
 
 _Generated from the current checkout by the command above._
 
-14 of 15 scenarios fully held; 1 partial with a named platform residual. 233 of 233 individual scoped hostile probes blocked.
+14 of 15 scenarios fully held; 1 partial with a named platform residual. 234 of 234 individual scoped hostile probes blocked.
 
 | # | Attack | Adversary | Asset | Invariant | Result |
 |---|--------|-----------|-------|-----------|--------|
@@ -187,6 +187,7 @@ _Generated from the current checkout by the command above._
 | reach the web or a Git remote from a Pod holding another person's App files | blocked | the outside-files mark refuses curl and every Git remote before egress |
 | run JavaScript in the Pod compiler through a --transform flag | blocked | asc refuses the transform before the compiler loads it |
 | run JavaScript in the Pod compiler through an asconfig.json transform | blocked | asc refuses the transform before the compiler loads it |
+| run JavaScript in the Pod compiler through a config file with another name | blocked | asc refuses the transform before the compiler loads it |
 
 ## 07-ssrf-private-network: Private-network / metadata SSRF
 
