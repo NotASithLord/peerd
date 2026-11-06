@@ -179,7 +179,7 @@ _Generated from the current checkout by the command above._
 | embed </script> in an App worker source to break out of the document | blocked | worker sources never enter the document; the file server starts them from blob: URLs |
 | read packaged extension files through the App file server | blocked | /manifest.json and ../../background/vault-kernel.js get a 404 in the App realm; the native fetch never ran |
 | turn the App file server into a network or parent-file channel | blocked | a remote URL reaches only the native fetch the CSP refuses; a missing file is a local 404 and an in-realm event, with no parent request |
-| run a packaged extension script through a dynamic script, Worker, or worklet URL | blocked | every packaged path becomes a revoked blob: URL that fails to load; the parent gets no request |
+| make the App file server pass a packaged extension path to a script, Worker, or worklet load | blocked | the wrapped calls turn every packaged path into a revoked blob: URL that fails to load; the parent gets no request |
 | meta-refresh the App frame to an attacker URL | blocked | meta http-equiv=refresh stripped from the app HTML |
 | open raw HTTP(S), WebSocket, beacon, or WebTransport egress from an App tab | blocked | the exact tab-scoped browser network rule covers every Chrome request type |
 | observe an actor job from a first-party engine tab | blocked | the targeted offer carries no job; only its exact generation-bound lease |

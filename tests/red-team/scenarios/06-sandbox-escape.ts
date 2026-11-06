@@ -288,7 +288,8 @@ export const scenario: Scenario = {
           `native=${JSON.stringify(nativeCalls)} missing=${missingStatus} parentPosts=${parentPosts.length}`));
 
       // A script src, Worker, or audio worklet URL for a packaged extension
-      // file must reach the browser only as a revoked blob: URL.
+      // file must reach the browser only as a revoked blob: URL. why the
+      // narrow title: App code can still call the unwrapped natives (INV-6).
       const script = new (appWindow.HTMLScriptElement as typeof AppScript)();
       script.src = '/background/vault-kernel.js';
       script.setAttribute('src', '../../manifest.json');
@@ -298,9 +299,9 @@ export const scenario: Scenario = {
         && nativeLoads.every((url) => typeof url === 'string' && revokedUrls.has(url))
         && parentPosts.length === 0;
       probes.push(onlyRevoked
-        ? blocked('run a packaged extension script through a dynamic script, Worker, or worklet URL',
-          'every packaged path becomes a revoked blob: URL that fails to load; the parent gets no request')
-        : leaked('run a packaged extension script through a dynamic script, Worker, or worklet URL',
+        ? blocked('make the App file server pass a packaged extension path to a script, Worker, or worklet load',
+          'the wrapped calls turn every packaged path into a revoked blob: URL that fails to load; the parent gets no request')
+        : leaked('make the App file server pass a packaged extension path to a script, Worker, or worklet load',
           `loads=${JSON.stringify(nativeLoads)} parentPosts=${parentPosts.length}`));
 
       const refreshed = stripMetaRefresh('<head><meta content="0;url=//evil.example" http-equiv=refresh></head>');

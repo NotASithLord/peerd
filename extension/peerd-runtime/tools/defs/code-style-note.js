@@ -17,10 +17,10 @@ export const CODE_STYLE_NOTE = [
   '</code-style>',
 ].join('\n');
 
-// App-runtime gotcha, NOT style: the sandboxed opaque-origin iframe serves only
-// fetch and XHR reads of App files, so cross-file ES modules don't resolve and
-// a Worker can't load by path (the App file server starts `new Worker(path)` from
-// a blob: URL of the file). The agent
+// App-runtime gotcha, NOT style: the sandboxed opaque-origin iframe has no real
+// App files at its URL, so cross-file ES modules don't resolve, and a Worker
+// loads by path only because the App file server starts it from a blob: URL of
+// the file. The agent
 // burned several turns hand-rolling workers before this was written down. Lives
 // HERE (with the other create-time notes) so it has ONE source: the app arm
 // discloses it in its result (flag-OFF), and the App ACTOR — the agent that

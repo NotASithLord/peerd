@@ -9,8 +9,8 @@
 const PROBLEMS = {
   'missing-file': {
     text: 'This App asked for a file that it does not have, so part of it may not work. '
-      + 'If it does not start, import it again with all of its files.',
-    details: 'A request for an App file got 404 Not Found.',
+      + 'If it does not start, ask peerd to fix it, or import it again with all of its files.',
+    details: 'The App asked for a path that is not one of its files. The load failed like a 404 Not Found.',
   },
   feature: {
     text: 'This App tried to use a browser feature that Apps do not allow, such as saving in the browser. '
