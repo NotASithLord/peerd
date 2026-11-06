@@ -1,10 +1,14 @@
 import { describe, test, expect } from 'bun:test';
-import { composeApp, stripMetaRefresh } from '../../extension/peerd-engine/app-compose.js';
+import { APP_FILES_HANDOFF, composeApp, stripMetaRefresh } from '../../extension/peerd-engine/app-compose.js';
+
+const FILE_SERVER_RE = /^<script data-peerd-file-server>[\s\S]*?<\/script>/;
+// The App markup after the file server that composeApp always puts first.
+const appMarkup = (html: string) => html.replace(FILE_SERVER_RE, '');
 
 describe('composeApp', () => {
   test('returns entry unchanged if no relative refs', () => {
     const files = { 'index.html': '<p>hello</p>' };
-    expect(composeApp(files)).toBe('<p>hello</p>');
+    expect(appMarkup(composeApp(files))).toBe('<p>hello</p>');
   });
 
   test('inlines <link rel="stylesheet" href="./style.css">', () => {
@@ -42,6 +46,17 @@ describe('composeApp', () => {
     expect(out).not.toContain('href="style.css"');
     expect(out).toContain('<style');
     expect(out).toContain('body { color: red; }');
+  });
+
+  test('inlines an unquoted <script src=game.js async></script>', () => {
+    const files = {
+      'index.html': '<body><script src=game.js async></script><script src=https://cdn.example/x.js></script></body>',
+      'game.js': 'globalThis.game = 1;',
+    };
+    const out = composeApp(files);
+    expect(out).toContain('<script async data-from="game.js">globalThis.game = 1;</script>');
+    expect(out).not.toContain('src=game.js');
+    expect(out).toContain('<script src=https://cdn.example/x.js></script>');
   });
 
   test('inlines a BARE <script src="script.js"></script>', () => {
@@ -94,7 +109,7 @@ describe('composeApp', () => {
       'index.html': '<link rel="stylesheet" href="./missing.css">',
     };
     const out = composeApp(files);
-    expect(out).toBe('<link rel="stylesheet" href="./missing.css">');
+    expect(appMarkup(out)).toBe('<link rel="stylesheet" href="./missing.css">');
   });
 
   test('leaves absolute / CDN URLs alone', () => {
@@ -248,6 +263,274 @@ describe('composeApp', () => {
 
     new mockSelf.Worker('https://cdn/other.js');       // unknown spec
     expect(calls[1].u).toBe('https://cdn/other.js');   // passes straight through
+  });
+});
+
+// A stand-in for the browser XMLHttpRequest. Bun has none. It records the
+// calls that reach it and runs on<type> handlers the way the browser does.
+class NativeRequest extends EventTarget {
+  calls: unknown[][] = [];
+  onreadystatechange: ((event: Event) => void) | null = null;
+  onloadstart: ((event: Event) => void) | null = null;
+  onprogress: ((event: Event) => void) | null = null;
+  onload: ((event: Event) => void) | null = null;
+  onloadend: ((event: Event) => void) | null = null;
+  onabort: ((event: Event) => void) | null = null;
+  responseType: XMLHttpRequestResponseType = '';
+  get readyState() { return -1; }
+  get status() { return -1; }
+  get statusText() { return 'native'; }
+  get response(): unknown { return 'native'; }
+  get responseText() { return 'native'; }
+  get responseURL() { return 'native'; }
+  get responseXML() { return null; }
+  open(...args: unknown[]) { this.calls.push(['open', ...args]); }
+  send(...args: unknown[]) { this.calls.push(['send', ...args]); }
+  abort() { this.calls.push(['abort']); }
+  setRequestHeader(...args: unknown[]) { this.calls.push(['setRequestHeader', ...args]); }
+  getResponseHeader(name: string): string | null { return `native:${name}`; }
+  getAllResponseHeaders() { return 'native'; }
+  override dispatchEvent(event: Event) {
+    const handler = (this as unknown as Record<string, unknown>)[`on${event.type}`];
+    const result = super.dispatchEvent(event);
+    if (typeof handler === 'function') handler.call(this, event);
+    return result;
+  }
+}
+
+class ProgressStandIn extends Event {
+  readonly lengthComputable: boolean;
+  readonly loaded: number;
+  readonly total: number;
+  constructor(type: string, init: ProgressEventInit = {}) {
+    super(type);
+    this.lengthComputable = init.lengthComputable ?? false;
+    this.loaded = init.loaded ?? 0;
+    this.total = init.total ?? 0;
+  }
+}
+
+const RUNNER_URL = 'chrome-extension://peerdtest/engine-tabs/app-tab/runner.html#4';
+const bytesOf = (value: string | number[]) => (
+  typeof value === 'string' ? new TextEncoder().encode(value) : Uint8Array.from(value)).buffer;
+
+// Run the exact script that composeApp writes into the App document against a
+// stand-in Window, the same way the runner's document.write runs it.
+const installFileServer = (files: Record<string, string | number[]>, entry = 'index.html') => {
+  const html = composeApp({ [entry]: '<!doctype html><title>Game</title>' }, entry);
+  const script = /<script data-peerd-file-server>([\s\S]*?)<\/script>/.exec(html)?.[1] ?? '';
+  const nativeCalls: unknown[][] = [];
+  const nativeFetch = (...args: unknown[]) => {
+    nativeCalls.push(args);
+    return Promise.reject(new TypeError('Failed to fetch'));
+  };
+  const scope: Record<string, unknown> = {
+    location: { href: RUNNER_URL },
+    fetch: nativeFetch,
+    XMLHttpRequest: NativeRequest,
+    ProgressEvent: ProgressStandIn,
+    Blob, DOMException, Event, Request, Response, TextDecoder, URL,
+    [APP_FILES_HANDOFF]: Object.fromEntries(Object.entries(files).map(([path, value]) => [path, bytesOf(value)])),
+  };
+  // eslint-disable-next-line no-new-func
+  new Function('self', script)(scope);
+  const fetch = scope.fetch as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  const XHR = scope.XMLHttpRequest as typeof NativeRequest;
+  return { html, script, scope, fetch, XHR, nativeFetch, nativeCalls };
+};
+
+const settle = (request: EventTarget) => new Promise((resolve) => {
+  request.addEventListener('loadend', resolve, { once: true });
+});
+
+describe('App file server', () => {
+  test('runs before any App script and keeps a compact doctype in standards mode', () => {
+    const html = composeApp({
+      'index.html': '<!doctypehtml><html lang=en><head><script>globalThis.first = 1;</script></head></html>',
+    });
+    expect(html.startsWith('<!doctypehtml><script data-peerd-file-server>')).toBe(true);
+    expect(html.indexOf('data-peerd-file-server')).toBeLessThan(html.indexOf('globalThis.first'));
+    const headless = composeApp({ 'index.html': '<!-- a --><!DOCTYPE html><title>T</title>' });
+    expect(headless.startsWith('<!-- a --><!DOCTYPE html><script data-peerd-file-server>')).toBe(true);
+  });
+
+  test('the injected script cannot end early and never talks to the parent', () => {
+    const { script } = installFileServer({}, 'pages/<\/script>.html');
+    expect(script).not.toContain('</');
+    expect(script).not.toContain('postMessage');
+    expect(script).toContain('"pages/\\u003c/script>.html"');
+  });
+
+  test('takes the runner handoff and removes it before App code can see it', async () => {
+    const { scope } = installFileServer({ 'x.wasm': [0, 97, 115, 109] });
+    expect(APP_FILES_HANDOFF in scope).toBe(false);
+    const runner = await Bun.file('./extension/engine-tabs/app-tab/runner.html').text();
+    expect(runner).toContain(`Object.defineProperty(window, '${APP_FILES_HANDOFF}'`);
+    expect(runner).toContain(`delete window.${APP_FILES_HANDOFF};`);
+  });
+
+  test('fetch serves App files by relative, absolute, Request, and query URLs', async () => {
+    const wasm = [0, 97, 115, 109, 1, 0, 0, 0];
+    const original = [0xef, 0xbb, 0xbf, 0x61, 0xff, 0x62];
+    const { fetch, nativeCalls } = installFileServer({ 'x.wasm': wasm, 'assets/level.json': '{"level":1}', 'game.js': original });
+    for (const input of [
+      'x.wasm', './x.wasm', '/x.wasm', 'x.wasm?v=3#top',
+      'chrome-extension://peerdtest/engine-tabs/app-tab/x.wasm',
+      new URL('chrome-extension://peerdtest/engine-tabs/app-tab/x.wasm'),
+      new Request('chrome-extension://peerdtest/engine-tabs/app-tab/x.wasm'),
+    ]) {
+      const response = await fetch(input);
+      expect(response.status).toBe(200);
+      expect(response.ok).toBe(true);
+      expect(response.headers.get('content-type')).toBe('application/wasm');
+      expect(response.headers.get('content-length')).toBe(String(wasm.length));
+      expect([...new Uint8Array(await response.arrayBuffer())]).toEqual(wasm);
+    }
+    const json = await fetch('assets/level.json');
+    expect(json.headers.get('content-type')).toBe('application/json');
+    expect(await json.json()).toEqual({ level: 1 });
+    const script = await fetch('game.js');
+    expect(script.headers.get('content-type')).toBe('text/javascript');
+    expect([...new Uint8Array(await script.arrayBuffer())]).toEqual(original);
+    expect(nativeCalls).toEqual([]);
+  });
+
+  test('a path at the extension origin that is not an App file gets a 404, never the native fetch', async () => {
+    const { fetch, nativeCalls } = installFileServer({ 'x.wasm': [0] });
+    for (const input of [
+      '/manifest.json', '../../background/vault-kernel.js', 'runner.html', 'missing.data',
+      'chrome-extension://peerdtest/background/vault-kernel.js', '%E0%A4%A.wasm',
+    ]) {
+      const response = await fetch(input);
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe('');
+    }
+    expect(nativeCalls).toEqual([]);
+  });
+
+  test('every other URL reaches the native fetch with the same arguments', async () => {
+    const { fetch, nativeCalls } = installFileServer({ 'x.wasm': [0] });
+    const init = { method: 'POST', body: 'probe' };
+    for (const input of [
+      'https://evil.example/x.wasm', 'blob:chrome-extension://peerdtest/1', 'data:text/plain,x',
+      'chrome-extension://another/x.wasm',
+    ]) {
+      await expect(fetch(input, init)).rejects.toThrow('Failed to fetch');
+    }
+    expect(nativeCalls).toEqual([
+      ['https://evil.example/x.wasm', init], ['blob:chrome-extension://peerdtest/1', init],
+      ['data:text/plain,x', init], ['chrome-extension://another/x.wasm', init],
+    ]);
+  });
+
+  test('a nested entry resolves sibling files first, then App-root files', async () => {
+    const { fetch } = installFileServer({ 'game/x.data': 'nested', 'x.data': 'root', 'shared.data': 'shared' }, 'game/index.html');
+    expect(await (await fetch('x.data')).text()).toBe('nested');
+    expect(await (await fetch('shared.data')).text()).toBe('shared');
+    expect(await (await fetch('/x.data')).text()).toBe('root');
+  });
+
+  test('XMLHttpRequest arraybuffer follows the event order Emscripten loaders read', async () => {
+    const data = [1, 2, 3, 4, 5];
+    const { XHR, nativeCalls } = installFileServer({ 'x.data': data });
+    const request = new XHR();
+    const events: string[] = [];
+    request.onreadystatechange = () => events.push(`state:${request.readyState}`);
+    request.onloadstart = () => events.push('loadstart');
+    request.onprogress = (event) => {
+      const progress = event as ProgressEvent;
+      events.push(`progress:${progress.loaded}/${progress.total}:${progress.lengthComputable}`);
+    };
+    request.onload = () => events.push(`load:${request.status}`);
+    request.onloadend = () => events.push('loadend');
+    request.open('GET', 'x.data', true);
+    request.responseType = 'arraybuffer';
+    request.send(null);
+    expect(request.readyState).toBe(1);
+    await settle(request);
+    expect(events).toEqual([
+      'state:1', 'loadstart', 'state:2', 'state:3', 'progress:5/5:true', 'state:4', 'load:200', 'loadend',
+    ]);
+    expect(request.status).toBe(200);
+    expect(request.statusText).toBe('OK');
+    expect(request.responseURL).toBe('chrome-extension://peerdtest/engine-tabs/app-tab/x.data');
+    expect(request.getResponseHeader('Content-Length')).toBe('5');
+    expect(request.getResponseHeader('content-type')).toBe('application/octet-stream');
+    expect(request.getAllResponseHeaders()).toBe('content-length: 5\r\ncontent-type: application/octet-stream\r\n');
+    const response = request.response as ArrayBuffer;
+    expect([...new Uint8Array(response)]).toEqual(data);
+    expect(request.response).toBe(response);
+    new Uint8Array(response)[0] = 9;
+    const again = new XHR();
+    again.open('GET', 'x.data');
+    again.responseType = 'arraybuffer';
+    again.send();
+    await settle(again);
+    expect([...new Uint8Array(again.response as ArrayBuffer)]).toEqual(data);
+    expect(nativeCalls).toEqual([]);
+  });
+
+  test('XMLHttpRequest supports text, json, and blob, and answers a missing file with 404', async () => {
+    const { XHR } = installFileServer({ 'level.json': '{"level":2}' });
+    const read = async (type: XMLHttpRequestResponseType, path = 'level.json') => {
+      const request = new XHR();
+      request.open('GET', path);
+      request.responseType = type;
+      request.send();
+      await settle(request);
+      return request;
+    };
+    expect((await read('')).responseText).toBe('{"level":2}');
+    expect((await read('text')).response).toBe('{"level":2}');
+    expect((await read('json')).response).toEqual({ level: 2 });
+    const blob = (await read('blob')).response as Blob;
+    expect(blob.type).toStartWith('application/json');
+    expect(await blob.text()).toBe('{"level":2}');
+    const binary = await read('arraybuffer');
+    expect(() => binary.responseText).toThrow('invalid state');
+    const missing = await read('arraybuffer', '/manifest.json');
+    expect(missing.status).toBe(404);
+    expect(missing.response).toBe(null);
+    expect(missing.getResponseHeader('content-type')).toBe(null);
+  });
+
+  test('XMLHttpRequest for any other URL stays the native request', () => {
+    const { XHR } = installFileServer({ 'x.data': [1] });
+    const request = new XHR();
+    request.open('POST', 'https://evil.example/x');
+    request.setRequestHeader('X-Probe', '1');
+    request.send('probe');
+    expect(request.calls).toEqual([
+      ['open', 'POST', 'https://evil.example/x'], ['setRequestHeader', 'X-Probe', '1'], ['send', 'probe'],
+    ]);
+    expect(request.readyState).toBe(-1);
+    expect(request.response).toBe('native');
+    expect(request instanceof NativeRequest).toBe(true);
+  });
+
+  test('abort or a new open stops a pending App file read', async () => {
+    const { XHR } = installFileServer({ 'x.data': [1, 2], 'y.data': 'y' });
+    for (const point of [2, 3, 4, 'pending', 'loadstart', 'progress']) for (const reopen of [false, true]) {
+      const request = new XHR();
+      const events: string[] = [];
+      const interrupt = () => {
+        request.onreadystatechange = null;
+        if (reopen) {
+          request.open('GET', 'y.data');
+          request.send();
+        } else request.abort();
+      };
+      for (const type of ['abort', 'load', 'loadend']) request.addEventListener(type, () => events.push(`${type}:${request.responseText}`));
+      request.open('GET', 'x.data');
+      if (typeof point === 'number') request.onreadystatechange = () => { if (request.readyState === point) interrupt(); };
+      else if (point !== 'pending') request.addEventListener(point, interrupt, { once: true });
+      request.send();
+      if (point === 'pending') interrupt();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const aborted = point === 4 ? [] : ['abort:', 'loadend:'];
+      expect(events).toEqual(reopen ? ['load:y', 'loadend:y'] : aborted);
+      expect([request.readyState, request.status]).toEqual(reopen ? [4, 200] : [0, 0]);
+    }
   });
 });
 

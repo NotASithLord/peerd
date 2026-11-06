@@ -340,7 +340,14 @@ at an opaque origin (the manifest sandbox omits `allow-same-origin` and
 escaped against a `</script>` breakout. Its sandbox CSP denies connections and remote
 resources, while a verified tab-scoped browser rule independently blocks remote
 HTTP(S) and WebSocket requests. App admission fails closed if that rule cannot be
-installed and read back. The WebVM's only network path is an HTTP bridge
+installed and read back. Inside the App realm, a file server answers the App's fetch
+and XMLHttpRequest reads of its own files with synthetic responses. It builds them
+from bytes the runner already holds, opens no connection, and never asks the parent
+for a file. It answers every other path at the extension origin with a 404, so a
+loader cannot read packaged extension files through it. Every other URL goes to the
+native call, which the unchanged CSP denies. The file server is a convenience for
+game loaders, not a boundary: the CSP and the browser rule stay the boundary.
+The WebVM's only network path is an HTTP bridge
 that refuses non-http(s) schemes, scrubs CRLF header injection, drops any smuggled auth
 field, and confirms body-bearing verbs. If a resolved Notebook or Script graph
 includes remote code, the entire run uses the compute-only profile. The worker
@@ -350,7 +357,8 @@ Code: `engine-tabs/notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
 `engine-tabs/notebook-tab/worker-source.js`,
 `engine-tabs/notebook-tab/notebook-tab.js`, `offscreen/job-runner.js`,
 `peerd-runtime/tools/defs/js-notebook.js`, `peerd-runtime/tools/defs/script.js`,
-`peerd-engine/app-compose.js`, `peerd-engine/vm-net/http-bridge.js`,
+`peerd-engine/app-compose.js` (`serveAppFiles`), `engine-tabs/app-tab/runner.html`,
+`peerd-engine/vm-net/http-bridge.js`,
 `peerd-engine/module-resolver.js`, `peerd-egress/denylist/dnr-rules.js`,
 `background/kernel-turn-authority-adapter.js` (`attachAppTabActor`), and the manifest sandbox CSP.
 Red-team: scenario 06,
