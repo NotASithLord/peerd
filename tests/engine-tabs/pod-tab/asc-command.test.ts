@@ -158,18 +158,21 @@ describe('Pod asc command', () => {
     }
   });
 
-  test('refuses a config file that sets a transform, at the top level or in a target', async () => {
-    for (const config of [
-      { options: { transform: ['./transform.js'] } },
-      { targets: { release: { transform: './transform.js' } } },
-    ]) {
-      const pod = memoryPod({ '/src/game.ts': GAME, '/asconfig.json': JSON.stringify(config) });
-      const result = await runAssemblyScript(['src/game.ts', '-o', 'build/game.wasm'], {
+  test('refuses a config file that sets a transform, at the top level, in a target, or under any name', async () => {
+    const transform = JSON.stringify({ options: { transform: ['./transform.js'] } });
+    for (const [flags, files, configPath] of [
+      [[], { '/asconfig.json': transform }, '/asconfig.json'],
+      [[], { '/asconfig.json': JSON.stringify({ targets: { release: { transform: './transform.js' } } }) }, '/asconfig.json'],
+      [['--config', 'build.conf'], { '/build.conf': transform }, '/build.conf'],
+      [[], { '/asconfig.json': '{"extends":"./base"}', '/base': transform }, '/base'],
+    ] as const) {
+      const pod = memoryPod({ '/src/game.ts': GAME, ...files });
+      const result = await runAssemblyScript(['src/game.ts', ...flags, '-o', 'build/game.wasm'], {
         available: true, resolve: pod.resolve, workspace: pod.workspace, loadCompiler,
       });
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain('asc: transforms run JavaScript, so a Pod does not allow them');
-      expect(pod.reads).toContain('/asconfig.json');
+      expect(pod.reads).toContain(configPath);
       expect(pod.writes).toEqual([]);
     }
     const pod = memoryPod({ '/src/game.ts': GAME, '/asconfig.json': '{"options":{"runtime":"stub"}}' });

@@ -387,9 +387,11 @@ export const scenario: Scenario = {
       const ascPath: string = fileURLToPath(new URL('../../../extension/vendor/assemblyscript/asc.js', import.meta.url));
       const source = 'export function step(x: f32): f32 { return x + 2; }';
       try {
-        for (const [label, argv, config] of [
+        const config = JSON.stringify({ options: { transform: [transformPath] } });
+        for (const [label, argv, configPath] of [
           ['a --transform flag', ['src/game.ts', '--transform', transformPath], null],
-          ['an asconfig.json transform', ['src/game.ts'], JSON.stringify({ options: { transform: [transformPath] } })],
+          ['an asconfig.json transform', ['src/game.ts'], '/asconfig.json'],
+          ['a config file with another name', ['src/game.ts', '--config', 'build.conf'], '/build.conf'],
         ] as const) {
           const writes: string[] = [];
           const result = await runAssemblyScript([...argv, '-o', 'build/game.wasm'], {
@@ -398,7 +400,7 @@ export const scenario: Scenario = {
             workspace: {
               read: async (path) => {
                 if (path === '/src/game.ts') return source;
-                if (path === '/asconfig.json' && config) return config;
+                if (path === configPath) return config;
                 throw new Error(`NotFoundError: ${path}`);
               },
               write: async (path) => { writes.push(path); },
