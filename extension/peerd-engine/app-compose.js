@@ -170,6 +170,7 @@ export function serveAppFiles(scope, entry, types, handoff, missingEvent) {
   const enter = (target, request, state) => {
     request.state = state;
     target.dispatchEvent(new Event('readystatechange'));
+    return requests.get(target) === request && request.state === state;
   };
   /** @param {FileRequest} request @param {XMLHttpRequestResponseType} type */
   const body = (request, type) => {
@@ -214,14 +215,15 @@ export function serveAppFiles(scope, entry, types, handoff, missingEvent) {
       const size = request.path === null ? 0 : files[request.path].byteLength;
       const finish = () => {
         request.status = request.path === null ? 404 : 200;
-        enter(this, request, 2);
-        enter(this, request, 3);
+        if (!enter(this, request, 2) || !enter(this, request, 3)) return;
         progress(this, 'progress', size);
-        enter(this, request, 4);
+        if (requests.get(this) !== request || request.state !== 3) return;
+        if (!enter(this, request, 4)) return;
         progress(this, 'load', size);
         progress(this, 'loadend', size);
       };
       progress(this, 'loadstart', 0);
+      if (requests.get(this) !== request || request.state !== 1) return;
       if (request.async) request.timer = setTimeout(finish, 0);
       else finish();
     }

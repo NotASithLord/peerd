@@ -560,10 +560,9 @@ describe('App storage binary contract', () => {
   });
 });
 
-/** @returns {Promise<any>} */
-const runDirectRunner = () => new Promise((resolve, reject) => {
+/** @param {HTMLIFrameElement} iframe @returns {Promise<Record<string, unknown>>} */
+const runDirectRunner = (iframe) => new Promise((resolve, reject) => {
   /** @type {string[]} */ let runtimeFeatures = [];
-  const iframe = document.createElement('iframe');
   iframe.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px';
   /** @type {MessagePort | null} */
   let runnerPort = null;
@@ -584,6 +583,7 @@ const runDirectRunner = () => new Promise((resolve, reject) => {
       const instantiated = await WebAssembly.instantiate(wasm);
       parent.postMessage({
         type: 'runner-binary-result',
+        gamepad: Array.isArray(navigator.getGamepads()), fullscreen: document.fullscreenEnabled,
         bytes: Array.from(bytes),
         has: window.peerd.assets.has('empty.wasm'),
         missing: window.peerd.assets.bytes('missing.bin'),
@@ -688,8 +688,13 @@ const runDirectData = () => new Promise((resolve, reject) => {
 });
 
 describe('App runner binary assets', () => {
-  it('exposes transferred bytes and instantiates valid WASM', async () => {
-    const result = await runDirectRunner();
+  it('permits gamepads and WASM in the opaque App frame without full screen', async () => {
+    // eslint-disable-next-line no-restricted-globals
+    const html = await (await fetch('/engine-tabs/app-tab/index.html')).text();
+    const frame = /** @type {HTMLIFrameElement} */ (new DOMParser().parseFromString(html, 'text/html').getElementById('app-frame'));
+    expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-modals allow-pointer-lock');
+    const result = await runDirectRunner(frame);
+    expect([result.gamepad, result.fullscreen]).toEqual([true, false]);
     expect(result.bytes).toEqual(BINARY_TRIPWIRE);
     expect(result.has).toBe(true);
     expect(result.missing).toBe(null);

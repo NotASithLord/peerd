@@ -207,9 +207,7 @@ class NativeRequest extends EventTarget {
   onload: ((event: Event) => void) | null = null;
   onloadend: ((event: Event) => void) | null = null;
   onabort: ((event: Event) => void) | null = null;
-  #responseType: XMLHttpRequestResponseType = '';
-  get responseType() { return this.#responseType; }
-  set responseType(value: XMLHttpRequestResponseType) { this.#responseType = value; }
+  responseType: XMLHttpRequestResponseType = '';
   get readyState() { return -1; }
   get status() { return -1; }
   get statusText() { return 'native'; }
@@ -347,7 +345,8 @@ describe('App file server', () => {
 
   test('fetch serves App files by relative, absolute, Request, and query URLs', async () => {
     const wasm = [0, 97, 115, 109, 1, 0, 0, 0];
-    const { fetch, nativeCalls } = installFileServer({ 'x.wasm': wasm, 'assets/level.json': '{"level":1}' });
+    const original = [0xef, 0xbb, 0xbf, 0x61, 0xff, 0x62];
+    const { fetch, nativeCalls } = installFileServer({ 'x.wasm': wasm, 'assets/level.json': '{"level":1}', 'game.js': original });
     for (const input of [
       'x.wasm', './x.wasm', '/x.wasm', 'x.wasm?v=3#top',
       'chrome-extension://peerdtest/engine-tabs/app-tab/x.wasm',
@@ -364,6 +363,9 @@ describe('App file server', () => {
     const json = await fetch('assets/level.json');
     expect(json.headers.get('content-type')).toBe('application/json');
     expect(await json.json()).toEqual({ level: 1 });
+    const script = await fetch('game.js');
+    expect(script.headers.get('content-type')).toBe('text/javascript');
+    expect([...new Uint8Array(await script.arrayBuffer())]).toEqual(original);
     expect(nativeCalls).toEqual([]);
   });
 
@@ -393,14 +395,6 @@ describe('App file server', () => {
       ['https://evil.example/x.wasm', init], ['blob:chrome-extension://peerdtest/1', init],
       ['data:text/plain,x', init], ['chrome-extension://another/x.wasm', init],
     ]);
-  });
-
-  test('serves the original bytes of text files, including a BOM and invalid UTF-8', async () => {
-    const original = [0xef, 0xbb, 0xbf, 0x61, 0xff, 0x62];
-    const { fetch } = installFileServer({ 'game.js': original });
-    const response = await fetch('game.js');
-    expect(response.headers.get('content-type')).toBe('text/javascript');
-    expect([...new Uint8Array(await response.arrayBuffer())]).toEqual(original);
   });
 
   test('a nested entry resolves sibling files first, then App-root files', async () => {
@@ -490,23 +484,27 @@ describe('App file server', () => {
 
   test('abort or a new open stops a pending App file read', async () => {
     const { XHR } = installFileServer({ 'x.data': [1, 2], 'y.data': 'y' });
-    const request = new XHR();
-    const events: string[] = [];
-    request.onabort = () => events.push('abort');
-    request.onload = () => events.push(`load:${request.responseText}`);
-    request.open('GET', 'x.data');
-    request.send();
-    request.abort();
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(events).toEqual(['abort']);
-    expect(request.readyState).toBe(0);
-    expect(request.status).toBe(0);
-    request.open('GET', 'x.data');
-    request.send();
-    request.open('GET', 'y.data');
-    request.send();
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(events).toEqual(['abort', 'load:y']);
+    for (const point of [2, 3, 4, 'pending', 'loadstart', 'progress']) for (const reopen of [false, true]) {
+      const request = new XHR();
+      const events: string[] = [];
+      const interrupt = () => {
+        request.onreadystatechange = null;
+        if (reopen) {
+          request.open('GET', 'y.data');
+          request.send();
+        } else request.abort();
+      };
+      for (const type of ['abort', 'load', 'loadend']) request.addEventListener(type, () => events.push(`${type}:${request.responseText}`));
+      request.open('GET', 'x.data');
+      if (typeof point === 'number') request.onreadystatechange = () => { if (request.readyState === point) interrupt(); };
+      else if (point !== 'pending') request.addEventListener(point, interrupt, { once: true });
+      request.send();
+      if (point === 'pending') interrupt();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const aborted = point === 4 ? [] : ['abort:', 'loadend:'];
+      expect(events).toEqual(reopen ? ['load:y', 'loadend:y'] : aborted);
+      expect([request.readyState, request.status]).toEqual(reopen ? [4, 200] : [0, 0]);
+    }
   });
 
   test('a script src set by property or setAttribute loads the App file from a blob: URL', async () => {

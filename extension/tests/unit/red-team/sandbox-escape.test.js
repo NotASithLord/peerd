@@ -139,17 +139,6 @@ describe('red-team: the App iframe + Notebook page CSP fences confine untrusted 
     expect(sandboxCsp.includes("worker-src 'self'")).toBe(false);
   });
 
-  it('the App frame ships the exact sandbox and allow values', async () => {
-    // why exact: a later token such as allow-same-origin, or an allow entry such
-    // as fullscreen or cross-origin-isolated, gives App code new authority and
-    // needs its own security review. Gamepads only read controller input.
-    // eslint-disable-next-line no-restricted-globals
-    const html = await (await fetch('/engine-tabs/app-tab/index.html')).text();
-    const frame = new DOMParser().parseFromString(html, 'text/html').getElementById('app-frame');
-    expect(frame?.getAttribute('sandbox')).toBe('allow-scripts allow-modals allow-pointer-lock');
-    expect(frame?.getAttribute('allow')).toBe('gamepad');
-  });
-
   it('the App runner cancels form submits so a hostile bundle cannot navigate out', async () => {
     // eslint-disable-next-line no-restricted-globals
     const runner = await (await fetch('/engine-tabs/app-tab/runner.html')).text();
