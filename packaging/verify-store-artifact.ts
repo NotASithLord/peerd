@@ -14,6 +14,7 @@
 //   a. no path in the zip is under peerd-distributed/
 //   b. shared/dweb-loader.js and both cold dweb route factories are
 //      byte-identical to their committed disabled templates
+//   b2. preview-only directories (the Pod compiler) are absent
 //   c. NO file in the artifact contains the string "peerd-distributed"
 //   d. manifest sanity: name "peerd", no update_url, no key
 //   e. identifier sweep: identifiers that appear ONLY in dweb
@@ -63,6 +64,9 @@ const DWEB_ABSENT_TARGETS = Object.freeze([
 const STORE_CONTRIBUTOR_FREE_TARGETS = Object.freeze([
   'offscreen/actor-worker-runtime.js',
 ]);
+const STORE_PREVIEW_ONLY_DIRS = Object.freeze([
+  'vendor/assemblyscript',
+]);
 
 /** Byte-for-byte package boundary shared by the verifier and focused tests. */
 export const dwebDisabledTemplateFailures = (artifactRoot: string): string[] => {
@@ -96,6 +100,11 @@ export const storeContributorBoundaryFailures = (artifactRoot: string): string[]
   }
   return failures;
 };
+
+/** Preview-only directories, such as the Pod compiler, ship no file in Store. */
+export const storePreviewOnlyFailures = (artifactRoot: string): string[] =>
+  STORE_PREVIEW_ONLY_DIRS.filter((relativePath) => existsSync(join(artifactRoot, relativePath)))
+    .map((relativePath) => `${relativePath} present in store artifact`);
 
 /** Execute the exact staged resolver graph without teaching Bun that browser
  * root imports are host filesystem roots. The plugin is build-scoped because
@@ -180,6 +189,7 @@ export const verifyStoreArtifact = async (
     // byte for byte. Route keys remain present so stale callers fail typed.
     failures.push(...dwebDisabledTemplateFailures(tmp));
     failures.push(...storeContributorBoundaryFailures(tmp));
+    failures.push(...storePreviewOnlyFailures(tmp));
 
     // c. no file may contain the module's name at all
     for (const f of files) {

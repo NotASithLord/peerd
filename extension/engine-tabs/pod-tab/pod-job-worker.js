@@ -10,9 +10,15 @@ import { podFetch } from './pod-realm-seal.js'; // MUST remain the first import
 // eslint-disable-next-line no-restricted-imports
 import { executePodShell, matchPodGrep } from '../../peerd-engine/pod-shell.js';
 import { demoModule, runWasiWorkspace } from '../notebook-tab/notebook-wasi.js';
+import { BROWSER, CHANNEL } from '../../shared/build-config.js';
+import { runAssemblyScript } from './asc-command.js';
 
 const OUTPUT_CAP = 512 * 1024;
 const PIPELINE_CAP = 16 * 1024 * 1024;
+// why a computed URL: the compiler loads only when `asc` runs, and only the
+// Chrome Preview package ships it (packaging/package.ts PRUNE_PREVIEW_CHROME).
+const ASC_URL = new URL('../../vendor/assemblyscript/asc.js', import.meta.url).href;
+const ASC_AVAILABLE = CHANNEL === 'preview' && BROWSER === 'chrome';
 /** @type {Map<number,{resolve:(value:any)=>void,reject:(error:Error)=>void}>} */
 const pending = new Map();
 let requestSequence = 0;
@@ -151,6 +157,7 @@ const runCommand = async ({ argv, stdin, cwd, env }) => {
     '    guest files: /workspace; use absolute paths with WASI Preview 1',
     '  wasmer-demo        test Wasmer; no network, Node, EdgeJS, or eval',
     '  install-tool name file.wasm; installed tools run by name',
+    ...(ASC_AVAILABLE ? ['  asc file.ts -o file.wasm  AssemblyScript compiler; no transforms'] : []),
     '  git <init|status|add|commit|log|branch|checkout|clone|fetch|push|remote>',
     '  curl <https-url>    audited, brokered HTTPS',
     '  jobs | kill <id>    inspect/cancel Pod jobs',
@@ -332,6 +339,24 @@ const runCommand = async ({ argv, stdin, cwd, env }) => {
         stdoutTruncated: result.stdoutTruncated, stderrTruncated: result.stderrTruncated,
       };
     } catch (error) { return { stdout: '', stderr: `wasi: ${/** @type {{message?:string}} */ (error)?.message ?? String(error)}\n`, exitCode: 1 }; }
+  }
+  if (command === 'asc') {
+    // why the lock: the compile reads its sources and writes its output as one workspace transaction.
+    if (ASC_AVAILABLE) await hostCall('workspace-lock');
+    try {
+      return await runAssemblyScript(args, {
+        available: ASC_AVAILABLE,
+        resolve: (path) => resolvePodPath(path, cwd),
+        workspace: {
+          read: (path) => /** @type {Promise<string>} */ (fs.read(path)),
+          write: (path, content) => fs.write(path, content),
+          listDir: (path) => /** @type {Promise<Array<{name:string,kind:string}>>} */ (fs.listDir(path)),
+        },
+        loadCompiler: () => import(ASC_URL),
+      });
+    } finally {
+      if (ASC_AVAILABLE) await hostCall('workspace-unlock').catch(() => {});
+    }
   }
   if (command === 'install-tool') {
     const [name, source] = args;

@@ -84,8 +84,11 @@ const PRUNE_DWEB = [
   'offscreen/dweb-base.js', 'offscreen/dweb-custody-host.js',
   'offscreen/dweb-self.js', 'offscreen/dweb-transfer-host.js',
 ];
+// why the compiler: the Pod AssemblyScript compiler waits for the Store policy
+// on locally executed code, and AMO refuses its 13.5 MB binaryen.js file.
 const PRUNE_PREVIEW_CHROME = [
   'background/kernel-preview-addon.js', 'background/vault-kernel-preview.js',
+  'vendor/assemblyscript',
 ];
 
 // Reproducible artifacts: two builds of the same tree must produce

@@ -115,6 +115,8 @@ const main = async () => {
   const blobModuleWorkerProbe = await probeBlobModuleWorker();
   const javascript = await runTerminal("js -e 'console.log(6 * 7)'");
   const wasi = await runTerminal('wasi-demo');
+  // why: Firefox packages do not ship the compiler.
+  const asc = await runTerminal('asc src/a.ts -o build/a.wasm');
   const denied = await runTerminal('curl http://127.0.0.1:9/private');
   const input = /** @type {HTMLInputElement} */ (document.getElementById('terminal-input'));
   input.value = 'sleep 3 &';
@@ -134,6 +136,7 @@ const main = async () => {
     blobModuleWorkerRejected: blobModuleWorkerProbe?.ok === false,
     javascriptPolicy: javascript.includes('Peerd disables dynamic blob Workers') && javascript.includes('exit 1'),
     wasi: wasi.includes('hello from wasi') && wasi.includes('exit 0'),
+    ascStoreRefusal: asc.includes('only in the Preview build') && asc.includes('exit 127'),
     egressDenial: denied.includes('private_network') && denied.includes('exit 1'),
     concurrentJobs: !!sleepingJob && jobs.includes('\trunning\tjobs'),
     cancellation: cancelled.includes('exit 0'),
@@ -143,7 +146,7 @@ const main = async () => {
   sessionStorage.setItem(stageKey, 'reopen');
   sessionStorage.setItem(`${stageKey}-first`, JSON.stringify({
     browser: navigator.userAgent, bootMs, checks,
-    details: { shell, blobModuleWorkerProbe, javascript, wasi, denied, jobs, cancelled, isolated, saved },
+    details: { shell, blobModuleWorkerProbe, javascript, wasi, asc, denied, jobs, cancelled, isolated, saved },
   }));
   location.reload();
 };
