@@ -74,6 +74,12 @@ const loaderSource = (probe) => `(async () => {
     ];
     await audio.close();
     report.gamepad = [document.featurePolicy?.allowsFeature('gamepad'), Array.isArray(Array.from(navigator.getGamepads()))];
+    localStorage.setItem('best', 7);
+    localStorage.level = 2;
+    sessionStorage.setItem('run', 1);
+    report.storage = [localStorage.getItem('best'), localStorage.level, Object.keys(localStorage).length,
+      sessionStorage.length, typeof caches, 'caches' in window,
+      (() => { try { indexedDB.open('save'); return 'opened'; } catch (error) { return error.name; } })()];
     report.packaged = [
       (await fetch('/manifest.json')).status,
       (await fetch('../../background/vault-kernel.js')).status,
@@ -99,7 +105,7 @@ export const APP_FILE_SERVER_STATE = {
     sse: callIndex === 0 ? sseToolCall('sandbox_create', {
       kind: 'app', name: 'File server game', files: {
         'index.html': '<!doctype html><html><head><title>Game</title></head><body><canvas></canvas>'
-          + "<script>localStorage.getItem('best');</script><script>new SharedArrayBuffer(8);</script>"
+          + '<script>document.cookie;</script><script>new SharedArrayBuffer(8);</script>'
           + '<script src=loader.js></script></body></html>',
         'loader.js': loaderSource(probeUrl),
         'dynamic.js': 'globalThis.dynamicLoads = (globalThis.dynamicLoads ?? 0) + 1;',
@@ -195,6 +201,9 @@ export const APP_FILE_SERVER_STATE = {
         JSON.stringify(report?.worklet) === '[true,"AbortError"]', JSON.stringify(report?.worklet));
       rec.check('the App frame allows gamepads', JSON.stringify(report?.gamepad) === '[true,true]',
         JSON.stringify(report?.gamepad));
+      rec.check('localStorage and sessionStorage hold values in page memory, caches is absent, and indexedDB refuses open()',
+        JSON.stringify(report?.storage) === JSON.stringify(['7', '2', 2, 1, 'undefined', false, 'SecurityError']),
+        JSON.stringify(report?.storage));
       const expectedNotices = [
         { type: 'app-problem', problem: 'missing-file' },
         { type: 'app-problem', problem: 'feature' },

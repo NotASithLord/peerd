@@ -354,6 +354,11 @@ it ships, but `peerd.data` can rewrite it with no new consent, so it never loads
 script, a Worker, or a worklet. App code can still load packaged extension files through calls the
 server does not wrap, such as `import()`, because the sandbox CSP does not stop loads of
 the extension's own files. Those files run in the opaque realm without `chrome.*`.
+The same document-start script gives the App a `localStorage` and a `sessionStorage`
+that hold values in page memory until the App closes, and removes `caches`. A read of
+the real properties throws in the opaque frame, and game engines stop on that. The
+stand-ins never read real browser storage and send nothing to the parent, so nothing is
+saved. `indexedDB` stays native and refuses `open()`.
 When the App asks for a file it does not have, the server fires an in-realm event.
 The runner also watches for an uncaught SecurityError or an error that names
 SharedArrayBuffer. For each, the runner posts only a fixed problem name to the App tab,
@@ -371,7 +376,7 @@ Code: `engine-tabs/notebook-tab/notebook-neutralizers.js` (`applyRealmSeal`),
 `engine-tabs/notebook-tab/worker-source.js`,
 `engine-tabs/notebook-tab/notebook-tab.js`, `offscreen/job-runner.js`,
 `peerd-runtime/tools/defs/js-notebook.js`, `peerd-runtime/tools/defs/script.js`,
-`peerd-engine/app-compose.js` (`serveAppFiles`), `engine-tabs/app-tab/runner.html`,
+`peerd-engine/app-compose.js` (`serveAppFiles`, `keepAppStorageInMemory`), `engine-tabs/app-tab/runner.html`,
 `engine-tabs/app-tab/index.html` (`#app-frame`),
 `peerd-engine/vm-net/http-bridge.js`,
 `peerd-engine/module-resolver.js`, `peerd-egress/denylist/dnr-rules.js`,

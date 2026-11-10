@@ -287,7 +287,12 @@ const installFileServer = (files: Record<string, string | number[]>, entry = 'in
     }
   }
   class AudioWorkletStandIn extends WorkletStandIn {}
+  class StorageStandIn {}
+  const nativeIndexedDb = { open: () => { throw new DOMException('denied', 'SecurityError'); } };
+  const realStorageReads: string[] = [];
   const scope: Record<string, unknown> = {
+    Storage: StorageStandIn,
+    indexedDB: nativeIndexedDb,
     location: { href: RUNNER_URL },
     fetch: nativeFetch,
     XMLHttpRequest: NativeRequest,
@@ -300,6 +305,17 @@ const installFileServer = (files: Record<string, string | number[]>, entry = 'in
     AudioWorklet: AudioWorkletStandIn,
     [APP_FILES_HANDOFF]: Object.fromEntries(Object.entries(files).map(([path, value]) => [path, bytesOf(value)])),
   };
+  // In the opaque App frame, a read of each of these properties throws.
+  for (const name of ['localStorage', 'sessionStorage', 'caches']) {
+    Object.defineProperty(scope, name, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        realStorageReads.push(name);
+        throw new DOMException('The document is sandboxed.', 'SecurityError');
+      },
+    });
+  }
   // eslint-disable-next-line no-new-func
   new Function('self', script)(scope);
   const fetch = scope.fetch as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -309,6 +325,7 @@ const installFileServer = (files: Record<string, string | number[]>, entry = 'in
   return {
     html, script, scope, fetch, XHR, nativeFetch, nativeCalls, events, blobs, revoked,
     Script, AppWorker, NativeWorker: WorkerStandIn, AudioWorklet: AudioWorkletStandIn, Worklet: WorkletStandIn,
+    Storage: StorageStandIn, nativeIndexedDb, realStorageReads,
   };
 };
 
@@ -607,6 +624,67 @@ describe('App file server', () => {
     request.send();
     await settle(request);
     expect(events).toEqual([APP_FILE_MISSING_EVENT, APP_FILE_MISSING_EVENT]);
+  });
+});
+
+// Engines read these properties with no try/catch: Twine, Unity 6, GDevelop,
+// PixiJS and RPG Maker stop on the SecurityError that the opaque frame throws.
+describe('App storage', () => {
+  type KeyedStorage = Storage & Record<string, unknown>;
+
+  test('localStorage and sessionStorage hold strings in page memory and never read the real objects', () => {
+    const { scope, Storage, realStorageReads } = installFileServer({});
+    const local = scope.localStorage as KeyedStorage;
+    const session = scope.sessionStorage as KeyedStorage;
+    expect(local).toBeInstanceOf(Storage);
+    expect(scope.localStorage).toBe(local);
+    expect(session).not.toBe(local);
+    expect([local.length, local.getItem('best'), local.key(0)]).toEqual([0, null, null]);
+    local.setItem('best', 7 as unknown as string);
+    local.setItem('name', 'Ada');
+    expect([local.length, local.getItem('best'), local.key(0), local.key(1), local.key(2)])
+      .toEqual([2, '7', 'best', 'name', null]);
+    expect(session.length).toBe(0);
+    local.removeItem('best');
+    expect([local.length, local.getItem('best')]).toEqual([1, null]);
+    local.clear();
+    expect(local.length).toBe(0);
+    expect(realStorageReads).toEqual([]);
+  });
+
+  test('a key reads and writes as a property, the way Kaboom and GameMaker use it', () => {
+    const local = installFileServer({}).scope.localStorage as KeyedStorage;
+    local.level = 3;
+    local['hp'] = '12';
+    expect([local.getItem('level'), local.hp, local.missing, 'level' in local, 'missing' in local])
+      .toEqual(['3', '12', undefined, true, false]);
+    expect(Object.keys(local)).toEqual(['level', 'hp']);
+    expect(JSON.stringify(local)).toBe('{"level":"3","hp":"12"}');
+    expect(Object.hasOwn(local, 'hp')).toBe(true);
+    expect(delete local.level).toBe(true);
+    expect(local.length).toBe(1);
+    // A stored key never hides a method or length.
+    local.setItem('getItem', 'x');
+    (local as Record<string, unknown>).length = 9;
+    expect([typeof local.getItem, local.getItem('getItem'), local.getItem('length'), local.length])
+      .toEqual(['function', 'x', '9', 3]);
+  });
+
+  test('nothing is kept: each App document starts with empty storage', () => {
+    const first = installFileServer({}).scope.localStorage as Storage;
+    first.setItem('save', 'slot 1');
+    const second = installFileServer({}).scope;
+    expect((second.localStorage as Storage).getItem('save')).toBe(null);
+    expect((second.sessionStorage as Storage).length).toBe(0);
+  });
+
+  test('caches is absent, and indexedDB stays the native object that refuses open()', () => {
+    const { scope, nativeIndexedDb, realStorageReads } = installFileServer({});
+    expect('caches' in scope).toBe(false);
+    expect(scope.caches).toBe(undefined);
+    expect(scope.indexedDB).toBe(nativeIndexedDb);
+    expect(() => (scope.indexedDB as IDBFactory).open('save')).toThrow('denied');
+    expect(realStorageReads).toEqual([]);
   });
 });
 

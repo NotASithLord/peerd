@@ -52,6 +52,8 @@ export const APP_RUNTIME_NOTE = [
   'It can write only data/<key>.json in this App working tree, so Git history can',
   'checkpoint it. Debounce writes; Git push and dweb share include those files.',
   'fetch of data/<key>.json returns the file as it was when the App opened.',
+  'localStorage and sessionStorage work, but only in memory: they are empty each time',
+  'the App opens. IndexedDB, the Cache API and cookies are not available.',
   'Prefer native HTML/CSS/JS. Mithril remains available as ./mithril.js when keyed',
   'lists, reusable components, or app-wide redraws justify it. Live web/API work',
   'belongs to the web actor;',

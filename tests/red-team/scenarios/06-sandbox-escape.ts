@@ -250,8 +250,13 @@ export const scenario: Scenario = {
       class AppScript extends AppElement { set src(value: unknown) { nativeLoads.push(value); } }
       class AppWorker { constructor(url: unknown) { nativeLoads.push(url); } }
       class AppAudioWorklet { addModule(url: unknown) { nativeLoads.push(url); } }
+      const realStorageCalls: string[] = [];
+      const realStorage = new Proxy({}, {
+        get: (_target, name) => { realStorageCalls.push(String(name)); return () => null; },
+      });
       const appWindow: Record<string, unknown> = {
         location: { href: 'chrome-extension://red-team/engine-tabs/app-tab/runner.html#1' },
+        localStorage: realStorage, sessionStorage: realStorage, caches: realStorage,
         fetch: (input: unknown) => {
           nativeCalls.push(String(input));
           return Promise.reject(new TypeError('refused by connect-src'));
@@ -321,6 +326,20 @@ export const scenario: Scenario = {
           'fetch reads data/save.json, and the wrapped loaders get only a revoked blob: URL for it')
         : leaked('load rewritable App data as a script, Worker, or worklet through the App file server',
           `status=${dataStatus} loads=${JSON.stringify(nativeLoads.slice(dataLoads))}`));
+
+      // The App gets storage objects that do not throw. They must hold
+      // values in page memory only, even where real storage would answer.
+      const memoryStorage = appWindow.localStorage as Storage;
+      memoryStorage.setItem('save', 'slot 1');
+      (appWindow.sessionStorage as Storage).setItem('save', 'slot 2');
+      const memoryOnly = memoryStorage !== realStorage && appWindow.sessionStorage !== realStorage
+        && memoryStorage.getItem('save') === 'slot 1' && !('caches' in appWindow)
+        && realStorageCalls.length === 0 && parentPosts.length === 0;
+      probes.push(memoryOnly
+        ? blocked('reach real browser storage or the parent through the App storage objects',
+          'localStorage and sessionStorage keep values in page memory, caches is gone, and the real objects and the parent get no call')
+        : leaked('reach real browser storage or the parent through the App storage objects',
+          `realCalls=${JSON.stringify(realStorageCalls)} parentPosts=${parentPosts.length}`));
 
       const refreshed = stripMetaRefresh('<head><meta content="0;url=//evil.example" http-equiv=refresh></head>');
       const noRefresh = !/http-equiv\s*=\s*["']?refresh/i.test(refreshed);
@@ -421,6 +440,7 @@ export const scenario: Scenario = {
       'buildWorkerSource + formatEvalResult (remote graph capability collapse + output fence)',
       'composeApp + stripMetaRefresh (App iframe breakout/navigation defense)',
       'serveAppFiles (App file server: extension-origin 404s, revoked script/Worker/worklet URLs for packaged paths and for runtime data, no new network or parent channel)',
+      'keepAppStorageInMemory (App localStorage and sessionStorage in page memory, no real storage and no parent channel)',
       'buildAppEgressBlockRule (tab-scoped HTTP(S)/WebSocket network floor)',
       'makeOffscreenActorChannelClient (exact-client channel transfer)',
       'normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)',

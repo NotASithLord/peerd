@@ -362,6 +362,53 @@ export function serveAppFiles(scope, entry, types, handoff, missingEvent, dataPa
   }
 }
 
+/**
+ * Give the App a localStorage and a sessionStorage that hold values in page
+ * memory, and remove window.caches.
+ * why: In the opaque App frame a read of these three properties throws
+ * SecurityError, and game engines read them with no try/catch. The stand-ins
+ * never touch real browser storage or the parent, and nothing is saved: the
+ * values go when the App closes. Without caches, an engine takes the path it
+ * has for a page with no Cache API, which is also what a Worker of this frame
+ * gets. indexedDB stays native: its read does not throw, and open() throws the
+ * SecurityError that engines already handle. composeApp serializes this
+ * function into the App document, so it must not use anything outside its body.
+ *
+ * @param {Window & typeof globalThis} scope
+ */
+export function keepAppStorageInMemory(scope) {
+  'use strict';
+  const memoryStorage = () => {
+    /** @type {Map<string, string>} */
+    const items = new Map();
+    /** @type {Record<string, (...args: unknown[]) => unknown>} */
+    const methods = {
+      getItem: (key) => items.get(String(key)) ?? null,
+      setItem: (key, value) => { items.set(String(key), String(value)); },
+      removeItem: (key) => { items.delete(String(key)); },
+      clear: () => items.clear(),
+      key: (index) => [...items.keys()][Number(index)] ?? null,
+    };
+    // why a Proxy: engines also read and write keys as properties (storage[key]).
+    const storage = new Proxy(Object.create(scope.Storage?.prototype ?? Object.prototype), {
+      get: (target, name) => (typeof name !== 'string' ? Reflect.get(target, name)
+        : name === 'length' ? items.size
+          : Object.hasOwn(methods, name) ? methods[name]
+            : name in target ? Reflect.get(target, name) : items.get(name)),
+      set: (_target, name, value) => { items.set(String(name), String(value)); return true; },
+      has: (target, name) => name in target || items.has(/** @type {string} */ (name)),
+      deleteProperty: (_target, name) => items.delete(/** @type {string} */ (name)) || true,
+      ownKeys: () => [...items.keys()],
+      getOwnPropertyDescriptor: (_target, name) => (typeof name === 'string' && items.has(name)
+        ? { value: items.get(name), writable: true, enumerable: true, configurable: true } : undefined),
+    });
+    return { configurable: true, enumerable: true, get: () => storage };
+  };
+  Object.defineProperty(scope, 'localStorage', memoryStorage());
+  Object.defineProperty(scope, 'sessionStorage', memoryStorage());
+  Reflect.deleteProperty(scope, 'caches');
+}
+
 /** @param {string} entry */
 const appFileServerScript = (entry) => {
   // Escape every '<' so no argument can end the script early.
@@ -370,6 +417,7 @@ const appFileServerScript = (entry) => {
   return '<script data-peerd-file-server>'
     + `(${serveAppFiles})(self,${literal(entry)},${literal(APP_FILE_TYPES)},${literal(APP_FILES_HANDOFF)},`
     + `${literal(APP_FILE_MISSING_EVENT)},${APP_DATA_PATH_RE});`
+    + `(${keepAppStorageInMemory})(self);`
     + '</script>';
 };
 
