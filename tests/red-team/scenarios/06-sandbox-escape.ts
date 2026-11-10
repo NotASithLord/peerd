@@ -263,7 +263,10 @@ export const scenario: Scenario = {
         Blob, DOMException, Event, Request, Response, TextDecoder, URL: AppURL,
         dispatchEvent: (event: Event) => realmEvents.push(event.type) > 0,
         Element: AppElement, HTMLScriptElement: AppScript, Worker: AppWorker, AudioWorklet: AppAudioWorklet,
-        [APP_FILES_HANDOFF]: { 'game.wasm': new Uint8Array([0, 97, 115, 109]).buffer },
+        [APP_FILES_HANDOFF]: {
+          'game.wasm': new Uint8Array([0, 97, 115, 109]).buffer,
+          'data/save.json': new TextEncoder().encode('"postMessage(1)"').buffer,
+        },
       };
       // eslint-disable-next-line no-new-func
       new Function('self', serverScript)(appWindow);
@@ -303,6 +306,21 @@ export const scenario: Scenario = {
           'the wrapped calls turn every packaged path into a revoked blob: URL that fails to load; the parent gets no request')
         : leaked('make the App file server pass a packaged extension path to a script, Worker, or worklet load',
           `loads=${JSON.stringify(nativeLoads)} parentPosts=${parentPosts.length}`));
+
+      // peerd.data can rewrite data/<key>.json with no new consent. The App
+      // can read that file by URL, but a code loader must not get it.
+      const dataStatus = (await appFetch('data/save.json')).status;
+      const dataLoads = nativeLoads.length;
+      new (appWindow.HTMLScriptElement as typeof AppScript)().src = 'data/save.json';
+      new (appWindow.Worker as typeof AppWorker)('./data/save.json');
+      new (appWindow.AudioWorklet as typeof AppAudioWorklet)().addModule('data/save.json');
+      const dataNeverCode = dataStatus === 200 && nativeLoads.length === dataLoads + 3
+        && nativeLoads.slice(dataLoads).every((url) => typeof url === 'string' && revokedUrls.has(url));
+      probes.push(dataNeverCode
+        ? blocked('load rewritable App data as a script, Worker, or worklet through the App file server',
+          'fetch reads data/save.json, and the wrapped loaders get only a revoked blob: URL for it')
+        : leaked('load rewritable App data as a script, Worker, or worklet through the App file server',
+          `status=${dataStatus} loads=${JSON.stringify(nativeLoads.slice(dataLoads))}`));
 
       const refreshed = stripMetaRefresh('<head><meta content="0;url=//evil.example" http-equiv=refresh></head>');
       const noRefresh = !/http-equiv\s*=\s*["']?refresh/i.test(refreshed);
@@ -402,7 +420,7 @@ export const scenario: Scenario = {
       'opfsHelpers (host-side mutation posture before root access)',
       'buildWorkerSource + formatEvalResult (remote graph capability collapse + output fence)',
       'composeApp + stripMetaRefresh (App iframe breakout/navigation defense)',
-      'serveAppFiles (App file server: extension-origin 404s and revoked script/Worker/worklet URLs, no new network or parent channel)',
+      'serveAppFiles (App file server: extension-origin 404s, revoked script/Worker/worklet URLs for packaged paths and for runtime data, no new network or parent channel)',
       'buildAppEgressBlockRule (tab-scoped HTTP(S)/WebSocket network floor)',
       'makeOffscreenActorChannelClient (exact-client channel transfer)',
       'normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)',

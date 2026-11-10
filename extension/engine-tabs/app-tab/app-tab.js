@@ -347,6 +347,8 @@ const readForRender = async () => {
       const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
       JSON.parse(text);
       textFiles[path] = text;
+      // why: A game ships its own data/<name>.json files and reads them by URL.
+      textBytes[path] = bytes.buffer;
       continue;
     }
     if (isBinaryAppFile(path, bytes, appMeta?.fileKinds?.[path])) {

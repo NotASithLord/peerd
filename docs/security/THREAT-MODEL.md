@@ -348,7 +348,10 @@ loader cannot read packaged extension files through it. Every other URL goes to 
 native call, which the unchanged CSP denies. The same server gives a script src, a
 Worker URL, or an AudioWorklet module URL for an App file a blob: URL of that file.
 For any other path at the extension origin, these wrapped calls get a revoked blob: URL,
-so the load fails. App code can still load packaged extension files through calls the
+so the load fails. A runtime data path (`data/<key>.json`) gets the same revoked URL.
+The App can read that file with fetch or XMLHttpRequest, as a game reads the data files
+it ships, but `peerd.data` can rewrite it with no new consent, so it never loads as a
+script, a Worker, or a worklet. App code can still load packaged extension files through calls the
 server does not wrap, such as `import()`, because the sandbox CSP does not stop loads of
 the extension's own files. Those files run in the opaque realm without `chrome.*`.
 When the App asks for a file it does not have, the server fires an in-realm event.

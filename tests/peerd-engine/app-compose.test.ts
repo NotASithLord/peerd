@@ -568,6 +568,34 @@ describe('App file server', () => {
     expect(events).toEqual(Array(3).fill(APP_FILE_MISSING_EVENT));
   });
 
+  test('fetch and XHR read an App data path, and it never loads as a script, Worker, or worklet', async () => {
+    const { fetch, XHR, Script, AppWorker, AudioWorklet, blobs, revoked, events } = installFileServer({
+      'data/Actors.json': '[null,{"id":1}]', 'data/plugins.js': 'globalThis.plugins = 1;',
+    });
+    const response = await fetch('data/Actors.json');
+    expect([response.status, response.headers.get('content-type')]).toEqual([200, 'application/json']);
+    expect(await response.json()).toEqual([null, { id: 1 }]);
+    const request = new XHR();
+    request.open('GET', './data/Actors.json');
+    request.send();
+    await settle(request);
+    expect([request.status, request.responseText]).toEqual([200, '[null,{"id":1}]']);
+    expect(events).toEqual([]);
+    const script = new Script();
+    script.src = 'data/Actors.json';
+    const missingUrl = String(script.src);
+    expect(revoked.has(missingUrl)).toBe(true);
+    expect(new AppWorker(new URL('data/Actors.json', RUNNER_URL)).url).toBe(missingUrl);
+    const audio = new AudioWorklet();
+    audio.addModule('./data/Actors.json');
+    expect(audio.calls[0]?.[0]).toBe(missingUrl);
+    expect(events).toEqual(Array(3).fill(APP_FILE_MISSING_EVENT));
+    // Only data/<key>.json is App data. Other files under data/ stay code.
+    const plugins = new Script();
+    plugins.src = 'data/plugins.js';
+    expect(await blobs.get(String(plugins.src))?.text()).toBe('globalThis.plugins = 1;');
+  });
+
   test('a fetch or XHR 404 fires the missing-file event; App files and other URLs do not', async () => {
     const { fetch, XHR, events } = installFileServer({ 'x.wasm': [0] });
     await fetch('x.wasm');

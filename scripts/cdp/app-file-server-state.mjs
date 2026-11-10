@@ -63,6 +63,9 @@ const loaderSource = (probe) => `(async () => {
       await ask(new Worker(new URL('worker.js', location.href))),
       await ask(new Worker('missing-worker.js')),
     ];
+    const levels = await fetch('data/levels.json');
+    report.shipped = [levels.status, levels.headers.get('content-type'), await levels.text(),
+      await ask(new Worker('data/levels.json'))];
     const audio = new AudioContext();
     await audio.audioWorklet.addModule('processor.js');
     report.worklet = [
@@ -103,6 +106,7 @@ export const APP_FILE_SERVER_STATE = {
         'worker.js': 'onmessage = (event) => postMessage(event.data * 2);',
         'processor.js': "registerProcessor('peerd-e2e', class extends AudioWorkletProcessor { process() { return true; } });",
         'notes.txt': '\uFEFFhi',
+        'data/levels.json': '{"levels":[1,2]}',
         'game.wasm': { base64: GAME_WASM },
         'game.data': { base64: GAME_DATA },
       },
@@ -184,6 +188,9 @@ export const APP_FILE_SERVER_STATE = {
         JSON.stringify(report?.scripts) === '["load","load","error",2]', JSON.stringify(report?.scripts));
       rec.check('a Worker named by a variable or a URL runs the App file, and a missing one fails',
         JSON.stringify(report?.workers) === '[42,42,"error"]', JSON.stringify(report?.workers));
+      rec.check('a shipped data/<name>.json file reads by URL, and never runs as a Worker',
+        JSON.stringify(report?.shipped) === JSON.stringify([200, 'application/json', '{"levels":[1,2]}', 'error']),
+        JSON.stringify(report?.shipped));
       rec.check('an audio worklet loads the App file, and a missing one fails',
         JSON.stringify(report?.worklet) === '[true,"AbortError"]', JSON.stringify(report?.worklet));
       rec.check('the App frame allows gamepads', JSON.stringify(report?.gamepad) === '[true,true]',

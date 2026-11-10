@@ -94,8 +94,9 @@ const APP_FILE_TYPES = {
  * @param {Record<string, string>} types
  * @param {string} handoff
  * @param {string} missingEvent
+ * @param {RegExp} dataPath
  */
-export function serveAppFiles(scope, entry, types, handoff, missingEvent) {
+export function serveAppFiles(scope, entry, types, handoff, missingEvent, dataPath) {
   'use strict';
   /** @type {Record<string, ArrayBuffer>} */
   const files = Object.create(null);
@@ -297,7 +298,9 @@ export function serveAppFiles(scope, entry, types, handoff, missingEvent) {
   // why: Loaders also add scripts, start workers, and load audio worklets by
   // URL, and the browser loads those itself. Give it a blob: URL of the App
   // file. A missing file gets a revoked blob: URL, so the load fails the way a
-  // 404 does and never reads a packaged extension file.
+  // 404 does and never reads a packaged extension file. An App data path gets
+  // the same answer: fetch and XHR can read it, but peerd.data can rewrite it
+  // with no new consent, so it never loads as code.
   /** @type {Record<string, string>} */
   const blobUrls = Object.create(null);
   let missingUrl = '';
@@ -306,7 +309,7 @@ export function serveAppFiles(scope, entry, types, handoff, missingEvent) {
     const found = resolve(input);
     if (!found) return input;
     const { path } = found;
-    if (path === null) {
+    if (path === null || dataPath.test(path)) {
       missing();
       if (!missingUrl) {
         missingUrl = URL.createObjectURL(new Blob());
@@ -366,7 +369,7 @@ const appFileServerScript = (entry) => {
   const literal = (value) => JSON.stringify(value).replace(/</g, '\\u003c');
   return '<script data-peerd-file-server>'
     + `(${serveAppFiles})(self,${literal(entry)},${literal(APP_FILE_TYPES)},${literal(APP_FILES_HANDOFF)},`
-    + `${literal(APP_FILE_MISSING_EVENT)});`
+    + `${literal(APP_FILE_MISSING_EVENT)},${APP_DATA_PATH_RE});`
     + '</script>';
 };
 
