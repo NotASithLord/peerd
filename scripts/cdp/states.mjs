@@ -21,7 +21,7 @@
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSocket } from 'node:dgram';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8147,6 +8147,115 @@ export const STATES = [
         metrics: NARROW_PANEL_METRICS,
         revealPanel: true,
       });
+    },
+  },
+
+  // --- visual (WIDE): Library "Add from files" review, then the real add ----
+  // A folder on disk goes through the real file input (CDP sets the folder),
+  // the page rules, the OPFS staging folder and the Home-gated add route. The
+  // pictures show the plain review; the checks prove the stored bytes.
+  {
+    name: 'home-library-upload', kind: 'visual', phase: 'post-unlock',
+    responder: () => ({ sse: sseText('noted') }),
+    async run(ctx, rec) {
+      await chooseFixtureNetwork(ctx, false);
+      const folder = await mkdtemp(join(tmpdir(), 'peerd-upload-'));
+      const game = join(folder, 'turtle-run');
+      const wasm = Uint8Array.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x2a]);
+      await mkdir(join(game, '.git'), { recursive: true });
+      await writeFile(join(game, 'index.html'), '<!doctype html><title>Turtle Run</title><canvas></canvas>'
+        + '<script src="https://cdn.example.com/save.js"></script><script src="game.js"></script>');
+      await writeFile(join(game, 'game.js'), 'globalThis.started = true;');
+      await writeFile(join(game, 'game.wasm'), wasm);
+      await writeFile(join(game, '.git', 'config'), '[core]');
+      const page = await openWidePage(ctx, 'home/home.html#library', { ready: '.home-shell' });
+      let appId = null;
+      try {
+        const listed = await waitFor(() => evalIn(page, `!!document.querySelector('.library-search')
+          || document.body.innerText.includes('No apps yet')`), { budgetMs: 15_000, pollMs: 80 });
+        rec.check('the Library route renders', !!listed);
+        const offered = await evalIn(page, `!![...document.querySelectorAll('button')].find((b) => b.textContent === 'Add from files')`);
+        if (process.env.PEERD_VISUAL_BASE_RENDER === '1' && !offered) {
+          rec.check('Merge-base Library predates Add from files', true);
+          return;
+        }
+        rec.check('the preview Library offers Add from files', offered === true);
+        await evalIn(page, `[...document.querySelectorAll('button')].find((b) => b.textContent === 'Add from files').click()`);
+        await waitFor(() => evalIn(page, `!!document.querySelector('input[aria-label="Game folder"]')`), { budgetMs: 5_000, pollMs: 50 });
+        const { root } = await page.send('DOM.getDocument', { depth: -1 });
+        const { nodeId } = await page.send('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[aria-label="Game folder"]' });
+        await page.send('DOM.setFileInputFiles', { nodeId, files: [game] });
+        const review = await waitFor(() => evalIn(page, `document.querySelector('.library-upload-review')?.innerText ?? null`),
+          { budgetMs: 15_000, pollMs: 80 });
+        rec.check('the review names the game, says it runs offline, and says where the files came from',
+          !!review && review.includes('Turtle Run') && review.includes('Runs offline in its own tab.')
+            && review.includes('These files came from your computer.'), review);
+        rec.check('the review warns about code from the internet in one plain sentence',
+          !!review?.includes('This game loads code from the internet (cdn.example.com).'), review);
+        rec.check('technical facts stay behind Technical details',
+          await evalIn(page, `document.querySelector('.library-upload-details')?.open === false`));
+        const pinGrid = () => evalIn(page, `(() => {
+          for (const meta of document.querySelectorAll('.library-meta')) {
+            if (meta.firstChild?.nodeType === 3) meta.firstChild.nodeValue = 'just now';
+          }
+        })()`);
+        await rec.visualPage('home-library-upload-review', page, { beforeShot: pinGrid });
+        await evalIn(page, `document.querySelector('.library-upload-details').open = true`);
+        const details = await evalIn(page, `document.querySelector('.library-upload-details').innerText`);
+        rec.check('Technical details list the start page, WebAssembly and the left-out .git file',
+          details.includes('index.html') && details.includes('WebAssembly') && details.includes('.git/config left out'), details);
+        await rec.visualPage('home-library-upload-details', page, { beforeShot: pinGrid });
+        const before = new Set(((await rpc(page, { type: 'apps/list' }))?.apps ?? []).map((app) => app.id));
+        await evalIn(page, `[...document.querySelectorAll('button')].find((b) => b.textContent === 'Add to Library').click()`);
+        // why the catalog: the add opens the App tab, and a background headless
+        // tab gets no animation frames until it is in front again.
+        const created = await waitFor(async () => ((await rpc(page, { type: 'apps/list' }))?.apps ?? [])
+          .find((app) => !before.has(app.id)) ?? null, { budgetMs: 30_000, pollMs: 100 });
+        appId = created?.id ?? null;
+        rec.check('one click adds the game as an imported App named from its title',
+          created?.name === 'Turtle Run' && created?.source === 'imported', JSON.stringify(created));
+        const stored = appId ? await evalIn(page, `(async () => {
+          const { opfsHelpers } = await import('/peerd-engine/opfs.js');
+          const files = opfsHelpers(['peerd-apps', ${JSON.stringify(appId)}]);
+          const read = async (path) => {
+            for (let attempt = 0; ; attempt += 1) {
+              try { return [...await files.readBytes(path)]; }
+              catch (error) { if (attempt > 40) throw error; await new Promise((r) => setTimeout(r, 100)); }
+            }
+          };
+          return {
+            wasm: await read('game.wasm'),
+            manifest: JSON.parse(new TextDecoder().decode(new Uint8Array(await read('peerd.json')))),
+            git: await files.readBytes('.git/config').then(() => true, () => false),
+          };
+        })()`, true) : null;
+        // why wait: the catalog row appears before the route removes the staging folder.
+        const staging = await waitFor(() => evalIn(page, `import('/peerd-engine/opfs.js')
+          .then(({ opfsHelpers }) => opfsHelpers(['peerd-app-uploads']).list())
+          .then((files) => files.length === 0 ? 'empty' : null)`, true), { budgetMs: 20_000, pollMs: 100 });
+        if (stored) stored.staging = staging;
+        rec.check('the App keeps the exact WebAssembly bytes and declares wasm-core',
+          JSON.stringify(stored?.wasm) === JSON.stringify([...wasm])
+            && JSON.stringify(stored?.manifest?.runtime) === JSON.stringify({ schema: 1, target: 'browser-app', requires: ['wasm-core'] }),
+          JSON.stringify(stored));
+        rec.check('the picked .git folder stays out and the staging folder is gone',
+          stored?.git === false && stored?.staging === 'empty', JSON.stringify(stored));
+        const appTab = await waitFor(async () => (await (await fetch(`http://127.0.0.1:${ctx.port}/json`)).json())
+          .find((target) => target.url.includes('engine-tabs/app-tab') && target.url.includes(appId ?? '-')) ?? null,
+        { budgetMs: 15_000, pollMs: 100 });
+        rec.check('the add opens the new App in its own tab', !!appTab);
+        await page.send('Page.bringToFront');
+        const notice = await waitFor(() => evalIn(page, `document.querySelector('.library-notice')?.textContent ?? null`),
+          { budgetMs: 10_000, pollMs: 80 });
+        rec.check('Home says the game was added and opened', notice === 'Added Turtle Run to your Library and opened it.', notice);
+      } finally {
+        for (const target of await (await fetch(`http://127.0.0.1:${ctx.port}/json`)).json().catch(() => [])) {
+          if (target.url.includes('engine-tabs/app-tab')) await fetch(`http://127.0.0.1:${ctx.port}/json/close/${target.id}`).catch(() => {});
+        }
+        if (appId) await rpc(page, { type: 'apps/delete', appId }).catch(() => {});
+        try { page.close(); } catch { /* */ }
+        await rm(folder, { recursive: true, force: true });
+      }
     },
   },
 

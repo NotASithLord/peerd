@@ -55,7 +55,7 @@ export const KERNEL_EXECUTABLE_SEMANTIC_ROUTE_NAMES = Object.freeze([
   ...KERNEL_POD_ROUTE_NAMES,
   ...KERNEL_WEB_FETCH_ROUTE_NAMES,
   ...KERNEL_ARTIFACT_READ_ROUTE_NAMES,
-  ...'import/apply apps/delete app/actor-chat'.split(' '),
+  ...'import/apply apps/import-files apps/delete app/actor-chat'.split(' '),
   ...KERNEL_RELAY_ROUTE_NAMES,
 ]);
 

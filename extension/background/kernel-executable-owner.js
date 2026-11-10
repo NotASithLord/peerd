@@ -78,7 +78,9 @@ export const makeKernelExecutableAdmission = (gates) => (
   if (route === 'import/inspect' || route === 'import/apply') {
     return gates.options?.(sender, message) === true;
   }
-  if (route === 'apps/delete') return gates.home?.(sender, message) === true;
+  if (route === 'apps/delete' || route === 'apps/import-files') {
+    return gates.home?.(sender, message) === true;
+  }
   if (route === 'app/actor-chat') return gates.app?.(sender, message) === true;
   if (RELAY_ROUTES.has(route)) return gates.relay?.(sender, message) === true;
   if (ENGINE_ATTACH_ROUTES.has(route)) return gates.engine?.(route, sender, message) === true;

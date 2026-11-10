@@ -330,3 +330,11 @@ describe('prepareUserAttachmentsWithDocs', () => {
     expect(out.text).toContain('converted body');
   });
 });
+
+describe('isGameBuildFile', () => {
+  test('names a .zip or .wasm game build, whatever the case, and nothing else', async () => {
+    const { isGameBuildFile } = await import('../../../extension/peerd-runtime/loop/attachments.js');
+    expect(['game.zip', 'GAME.ZIP', 'build/index.wasm'].map(isGameBuildFile)).toEqual([true, true, true]);
+    expect(['notes.txt', 'zip', 'book.epub', 'wasm.png'].map(isGameBuildFile)).toEqual([false, false, false, false]);
+  });
+});

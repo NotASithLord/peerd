@@ -36,9 +36,10 @@ const richUiEntries = {
 // Bound the reviewed graphs with the game workflow copy. The shared
 // ui.js surfaces are first-paint contracts; Settings-only features stay outside.
 // Home includes the reviewed read-only onboarding readiness projection.
+// Home also carries the Library add-from-files review. Measured, no reserve.
 const RICH_UI_GRAPH_CEILINGS = {
-  sidepanel: { modules: 62, graphBytes: 658_955 },
-  home: { modules: 69, graphBytes: 812_551 },
+  sidepanel: { modules: 62, graphBytes: 659_642 },
+  home: { modules: 69, graphBytes: 822_367 },
 } as const;
 
 const nativeKernelEntry = 'background/vault-kernel-chrome.js';
