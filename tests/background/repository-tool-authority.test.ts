@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { createRepositoryToolAuthority } from '../../extension/background/repository-tool-authority.js';
 import { createAppQuiescence } from '../../extension/background/app-quiescence.js';
 import { createAppDwebAuthority } from '../../extension/background/app-dweb-authority.js';
+import { createRepositoryService } from '../../extension/peerd-engine/repository.js';
 
 const signal = new AbortController().signal;
 
@@ -334,6 +335,7 @@ describe('Pod destroy custody', () => {
   const destroyHarness = (records: Map<string, any>) => {
     const order: string[] = [];
     const shared: any = {};
+    const repositoryService = createRepositoryService();
     const ctx = {
       podRegistry: {
         get: async (id: string) => records.get(id) ?? null,
@@ -341,17 +343,17 @@ describe('Pod destroy custody', () => {
       },
       podTabTracker: { closeTab: async (id: string) => { order.push(`close:${id}`); } },
       repositories: {
-        coordinate: async (_ref: unknown, operation: () => Promise<unknown>) => {
+        coordinate: (ref: { kind: string; id: string }, operation: () => Promise<unknown>) => repositoryService.coordinate(ref, async () => {
           order.push('lock');
           return operation();
-        },
+        }),
         destroy: async (ref: any) => { order.push(`git:${ref.id}`); },
       },
     };
     const authority = (operation: string) => createRepositoryToolAuthority({
       binding: { operation, args: { podId: 'pod-1' } }, ctx, signal, shared,
     });
-    return { order, read: authority('turn.repository.read-pod'), destroy: authority('turn.repository.destroy-pod') };
+    return { order, repositoryService, read: authority('turn.repository.read-pod'), destroy: authority('turn.repository.destroy-pod') };
   };
 
   test('an inspected, unpinned Pod is destroyed inside its repository lane', async () => {
@@ -376,6 +378,24 @@ describe('Pod destroy custody', () => {
     await read.readPod('pod-1');
     records.delete('pod-1');
     await expect(destroy.destroyPod('pod-1')).rejects.toThrow('repository authority mismatch');
+    expect(order).toEqual(['lock']);
+  });
+
+  test.each(['pinned', 'removed'])('a Pod %s while destroy waits for its lane is not destroyed', async (change) => {
+    const records = new Map<string, { name: string; pinned?: boolean }>([['pod-1', { name: 'Work' }]]);
+    const { order, read, destroy, repositoryService } = destroyHarness(records);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const prior = repositoryService.coordinate({ kind: 'pod', id: 'pod-1' }, () => held);
+    await read.readPod('pod-1');
+    const pending = destroy.destroyPod('pod-1');
+    await repositoryService.coordinate({ kind: 'pod', id: 'other' }, async () => {});
+    expect(order).toEqual([]);
+    if (change === 'pinned') records.set('pod-1', { name: 'Work', pinned: true });
+    else records.delete('pod-1');
+    release();
+    await prior;
+    await expect(pending).rejects.toThrow('repository authority mismatch');
     expect(order).toEqual(['lock']);
   });
 

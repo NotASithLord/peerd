@@ -403,6 +403,7 @@ let homeSurfaceGate = Promise.resolve();
 let actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
 let actorAppProbeUrl = '';
 let actorAppStunPort = 0;
+let podFirstCommand = { mainCalls: 0, actorCalls: 0, podId: null, result: '' };
 
 const toolResultsIn = (postData) => {
   try {
@@ -12720,6 +12721,62 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
       rec.check('it did NOT enter the background turn driver or fail isolation', isolation.backgroundRefused === false && isolation.isolationFailed === false);
       rec.check('the web reply round-tripped up through the actor into the final answer', (out.bubbles || []).includes('FINAL-VIA-ACTOR'));
       rec.check('the turn settles idle', out.busy === false);
+    },
+  },
+
+  {
+    name: 'pod-first-command', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = request?.postData ?? '';
+      if (body.includes('kind: bound; type: pod')) {
+        if (podFirstCommand.actorCalls++ === 0) {
+          return { sse: sseToolCall('pod_exec', { command: "printf 'pod-ready-proof\\n'" }) };
+        }
+        podFirstCommand.result = toolResultsIn(body).at(-1) ?? '';
+        return { sse: sseText('POD-FIRST-COMMAND-DONE') };
+      }
+      if (podFirstCommand.mainCalls++ === 0) {
+        return { sse: sseToolCall('sandbox_create', { kind: 'pod', name: 'First command', persistent: false }) };
+      }
+      if (!podFirstCommand.podId) {
+        podFirstCommand.podId = body.match(/pod-[a-z0-9]+-[a-z0-9]+/)?.[0] ?? null;
+        if (podFirstCommand.podId) {
+          return { sse: sseToolCall('message_actor', {
+            to: podFirstCommand.podId, message: 'Run the first local shell command and report its result.',
+          }) };
+        }
+      }
+      return { sse: sseText('POD-FIRST-COMMAND-FINAL') };
+    },
+    async run(ctx, rec) {
+      podFirstCommand = { mainCalls: 0, actorCalls: 0, podId: null, result: '' };
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
+      try {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create a new Pod and run its first shell command.' });
+        rec.check('the first Pod request is accepted', sent?.ok === true, JSON.stringify(sent));
+        const finished = await waitFor(async () => podFirstCommand.result && !(await probe(ctx)).busy,
+          { budgetMs: 45_000, pollMs: 100 });
+        rec.check('the new Pod returns its first command result', !!finished, podFirstCommand.result);
+        let job = null;
+        try {
+          const fenced = podFirstCommand.result.match(/<untrusted_web_content\b[^>]*>\n([\s\S]*?)\n<\/untrusted_web_content>/);
+          if (fenced) job = JSON.parse(fenced[1]);
+        } catch { /* A missing or invalid job must fail the output check. */ }
+        rec.check('the first command completes with its real output',
+          job?.exitCode === 0 && job?.state === 'completed'
+            && job?.stdout === 'pod-ready-proof\n', podFirstCommand.result);
+        const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+        rec.check('the first command crosses the production tool relay', entries.some((entry) =>
+          entry.type === 'tool_executed' && entry.details?.tool === 'pod_exec'));
+        await rec.shot('first-command');
+      } finally {
+        await rpc(ctx.page, { type: 'agent/stop' }).catch(() => {});
+        if (podFirstCommand.podId) await evalIn(ctx.page, `(async () => {
+          const tabs = await chrome.tabs.query({});
+          const url = chrome.runtime.getURL('engine-tabs/pod-tab/index.html') + '#' + ${JSON.stringify(podFirstCommand.podId)};
+          await chrome.tabs.remove(tabs.filter((tab) => tab.url === url).map((tab) => tab.id));
+        })()`, true).catch(() => {});
+      }
     },
   },
 
