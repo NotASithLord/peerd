@@ -32,7 +32,7 @@ describe('App problem notice', () => {
 
   test('code that did not load gets a reason that stays, and no other notice stays', () => {
     const notice = appProblemNotice({ type: 'app-problem', problem: 'modules' });
-    expect(notice?.text).toBe('This App splits its code into module files that Apps cannot load yet, so it may not start. '
+    expect(notice?.text).toBe('This App splits its code into module files that Apps cannot load yet, so it may not work. '
       + 'Ask peerd to fix it, or get a single-file version from its maker.');
     expect(notice?.stays).toBe(true);
     for (const problem of ['missing-file', 'feature', 'threads']) {
@@ -78,36 +78,38 @@ describe('App problem notice', () => {
 describe('App problem notices of one load', () => {
   const problem = (name: string) => ({ type: 'app-problem', problem: name });
   const blocked = (directive: string) => ({ type: 'app-policy-blocked', directive });
+  const text = (data: unknown) => appProblemNotice(data)?.text;
 
-  test('each notice shows one time, however often the App posts it', () => {
-    const notices = appProblemNotices();
-    const shown: (string | undefined)[] = [];
-    for (let round = 0; round < 50; round += 1) {
+  test('a notice shows at most one time in 6 seconds, however often the App posts it', () => {
+    let time = 0;
+    const notices = appProblemNotices(() => time);
+    const shown: string[] = [];
+    for (time = 0; time < 12_000; time += 10) {
       for (const data of [problem('missing-file'), blocked('connect-src'), blocked('img-src'), problem('feature'), problem('nope')]) {
         const notice = notices.next(data);
-        if (notice) shown.push(notice.text);
+        if (notice) shown.push(`${time} ${notice.text}`);
       }
     }
-    expect(shown).toEqual([problem('missing-file'), blocked('connect-src'), problem('feature')]
-      .map((data) => appProblemNotice(data)?.text));
-    expect(notices.stopped).toBe(false);
+    const texts = [problem('missing-file'), blocked('connect-src'), problem('feature')].map(text);
+    expect(shown).toEqual([0, 6000].flatMap((at) => texts.map((each) => `${at} ${each}`)));
   });
 
-  test('the reason that the App may not start replaces an earlier notice and then stays alone', () => {
-    const notices = appProblemNotices();
-    expect(notices.next(blocked('style-src-elem'))?.stays).toBe(undefined);
+  test('a later sandbox block gets its notice again, also after the reason that stays', () => {
+    let time = 0;
+    const notices = appProblemNotices(() => time);
+    expect(notices.next(blocked('img-src'))?.text).toBe(text(blocked('img-src')));
     expect(notices.next(problem('modules'))?.stays).toBe(true);
-    expect(notices.stopped).toBe(true);
-    for (const data of [problem('feature'), problem('missing-file'), problem('threads'), blocked('connect-src'), problem('modules')]) {
-      expect(notices.next(data)).toBe(null);
-    }
+    time = 5999;
+    expect(notices.next(blocked('connect-src'))).toBe(null);
+    time = 9000;
+    expect(notices.next(blocked('connect-src'))?.text).toBe(text(blocked('img-src')));
+    expect(notices.next(problem('feature'))?.text).toContain('browser feature');
   });
 
-  test('the next load of the App starts a new set', () => {
-    const first = appProblemNotices();
-    first.next(problem('modules'));
-    const second = appProblemNotices();
-    expect(second.stopped).toBe(false);
-    expect(second.next(problem('feature'))?.text).toContain('browser feature');
+  test('the reason that stays shows one time for a load', () => {
+    let time = 0;
+    const notices = appProblemNotices(() => time);
+    expect(notices.next(problem('modules'))?.stays).toBe(true);
+    for (time = 1; time < 100_000; time += 5000) expect(notices.next(problem('modules'))).toBe(null);
   });
 });

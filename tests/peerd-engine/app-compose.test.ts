@@ -61,6 +61,22 @@ describe('composeApp', () => {
     expect(out).toContain('<script src=https://cdn.example/x.js></script>');
   });
 
+  // GameMaker and other exports add a cache-busting query to a file they ship.
+  test('inlines a script and a style named with a ?query or a #hash', () => {
+    const files = {
+      'index.html': '<link rel="stylesheet" href="css/game.css?v=7"><script src="html5game/game.js?cachebust=1995823255"></script>'
+        + '<script src="./boot.js#top"></script><script src="missing.js?v=1"></script>',
+      'css/game.css': 'canvas { width: 100%; }',
+      'html5game/game.js': 'globalThis.game = 1;',
+      'boot.js': 'globalThis.boot = 1;',
+    };
+    expect(appMarkup(composeApp(files))).toBe('<style data-from="css/game.css">canvas { width: 100%; }</style>'
+      + '<script data-from="html5game/game.js">globalThis.game = 1;</script>'
+      + '<script data-from="boot.js">globalThis.boot = 1;</script><script src="missing.js?v=1"></script>');
+    expect(() => composeApp({ 'index.html': '<script src="data/save.json?v=1"></script>', 'data/save.json': '1' }))
+      .toThrow('app runtime data cannot be a composed source: data/save.json');
+  });
+
   test('inlines a BARE <script src="script.js"></script>', () => {
     const files = {
       'index.html': `<body><script src="script.js"></script></body>`,
@@ -643,8 +659,8 @@ describe('App file server', () => {
   });
 });
 
-// Engines read these properties with no try/catch: Twine, Unity 6, GDevelop,
-// PixiJS and RPG Maker stop on the SecurityError that the opaque frame throws.
+// Engines read these properties with no try/catch: Twine, Unity 6, PixiJS
+// and RPG Maker stop on the SecurityError that the opaque frame throws.
 describe('App storage', () => {
   type KeyedStorage = Storage & Record<string, unknown>;
 
@@ -684,6 +700,51 @@ describe('App storage', () => {
     (local as Record<string, unknown>).length = 9;
     expect([typeof local.getItem, local.getItem('getItem'), local.getItem('length'), local.length])
       .toEqual(['function', 'x', '9', 3]);
+  });
+
+  test('the Storage prototype holds the methods, so a library can call or patch them there', () => {
+    const { scope, Storage } = installFileServer({});
+    const local = scope.localStorage as KeyedStorage;
+    const proto = Storage.prototype as unknown as globalThis.Storage;
+    proto.setItem.call(local, 'k', 'v');
+    expect([proto.getItem.call(local, 'k'), Object.getOwnPropertyDescriptor(proto, 'length')?.get?.call(local)])
+      .toEqual(['v', 1]);
+    proto.removeItem.call(local, 'k');
+    expect(local.length).toBe(0);
+    expect(() => proto.getItem.call({}, 'k')).toThrow(TypeError);
+    const seen: string[] = [];
+    const { setItem } = proto;
+    proto.setItem = function patched(key: string, value: string) { seen.push(key); setItem.call(this, key, value); };
+    local.setItem('patched', '1');
+    expect([seen, local.getItem('patched')]).toEqual([['patched'], '1']);
+  });
+
+  test('a write over the quota throws QuotaExceededError and keeps the old values', () => {
+    const { scope } = installFileServer({});
+    const local = scope.localStorage as KeyedStorage;
+    local.setItem('small', 'kept');
+    const quotaError = (write: () => void) => {
+      try { write(); return 'stored'; } catch (error) { return (error as DOMException).name; }
+    };
+    expect(quotaError(() => local.setItem('big', 'x'.repeat(6 * 1024 * 1024)))).toBe('QuotaExceededError');
+    expect(quotaError(() => { local.big = 'x'.repeat(6 * 1024 * 1024); })).toBe('QuotaExceededError');
+    expect(quotaError(() => local.setItem('fits', 'x'.repeat(4 * 1024 * 1024)))).toBe('stored');
+    expect(quotaError(() => local.setItem('more', 'x'.repeat(2 * 1024 * 1024)))).toBe('QuotaExceededError');
+    expect(quotaError(() => local.setItem('fits', 'x'.repeat(5 * 1024 * 1024 - 13)))).toBe('stored');
+    expect([local.length, local.getItem('small'), local.getItem('big'), local.getItem('more')])
+      .toEqual([2, 'kept', null, null]);
+    // The other storage has its own quota.
+    expect(quotaError(() => (scope.sessionStorage as Storage).setItem('fits', 'x'.repeat(4 * 1024 * 1024)))).toBe('stored');
+  });
+
+  test('key() takes its index as the real Storage does, and defineProperty stores a key', () => {
+    const local = installFileServer({}).scope.localStorage as KeyedStorage;
+    local.setItem('a', '1');
+    local.setItem('b', '2');
+    expect([NaN, undefined, 1.7, 4294967296, -1, 2].map((index) => local.key(index as number)))
+      .toEqual(['a', 'a', 'b', 'a', null, null]);
+    Object.defineProperty(local, 'c', { value: 3 });
+    expect([local.c, local.getItem('c'), local.length]).toEqual(['3', '3', 3]);
   });
 
   test('nothing is kept: each App document starts with empty storage', () => {

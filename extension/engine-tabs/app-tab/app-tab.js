@@ -74,16 +74,16 @@ const fail = (msg, { retryActor = false } = {}) => {
 /** @type {HTMLElement | null} */
 let noticeReturnFocus = null;
 
-/** @param {string} text @param {{ persistent?: boolean, details?: string }} [options] */
-const showNotice = (text, { persistent = false, details = '' } = {}) => {
-  let notice = document.getElementById('app-security-notice');
+/** @param {string} text @param {{ persistent?: boolean, details?: string, id?: string }} [options] */
+const showNotice = (text, { persistent = false, details = '', id = 'app-security-notice' } = {}) => {
+  let notice = document.getElementById(id);
   const noticeHadFocus = Boolean(notice?.contains(document.activeElement));
   if (!noticeHadFocus && document.activeElement instanceof HTMLElement) {
     noticeReturnFocus = document.activeElement;
   }
   if (!notice) {
     notice = document.createElement('div');
-    notice.id = 'app-security-notice';
+    notice.id = id;
     notice.setAttribute('role', 'status');
     notice.setAttribute('aria-live', 'polite');
     notice.style.cssText = [
@@ -433,6 +433,7 @@ let runnerStarted = false;
 // bridge we just attached on runner-ready). One-shot per delivery.
 let expectingBodyLoad = false;
 let linkPromptOpen = false;
+const PROBLEM_NOTICE_ID = 'app-problem-notice';
 let problemNotices = appProblemNotices();
 let runnerGeneration = 0;
 let agentCallSequence = 0;
@@ -484,9 +485,6 @@ const tryDeliver = () => {
   try { assertAppRuntime(pendingRuntime, runnerFeatures); }
   catch (error) { fail(/** @type {Error} */ (error).message); return; }
   expectingBodyLoad = true;
-  // why: The reason that the last load did not start says nothing about this one.
-  if (problemNotices.stopped) document.getElementById('app-security-notice')?.remove();
-  problemNotices = appProblemNotices();
   // why: sandbox flags are fixed for the active document. Removing script
   // permission here leaves the already-loaded trusted runner able to execute
   // the App, while every later data:, blob:, or URL navigation enters a realm
@@ -547,6 +545,10 @@ const suspendRunnerForEdit = async () => {
   runnerPhase = 'suspended';
   runnerStarted = false;
   expectingBodyLoad = false;
+  // why: The reasons of this load end with it. A load that the App starts by a
+  // navigation of its own frame does not come here, so it gets no new set.
+  document.getElementById(PROBLEM_NOTICE_ID)?.remove();
+  problemNotices = appProblemNotices();
   await dwebBridgeLifecycle.dispose();
   // Replacing the document is the only way to stop a late async handler from
   // the prior generation; hiding the iframe would leave it running.
@@ -748,7 +750,12 @@ window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
   }
   if ((e.data?.type === 'app-policy-blocked' || e.data?.type === 'app-problem') && runnerPhase === 'delivered') {
     const notice = problemNotices.next(e.data);
-    if (notice) showNotice(notice.text, { details: notice.details, persistent: notice.stays });
+    // why its own element: no other notice replaces or closes the reason that stays.
+    if (notice) {
+      showNotice(notice.text, {
+        details: notice.details, persistent: notice.stays, id: notice.stays ? PROBLEM_NOTICE_ID : undefined,
+      });
+    }
     return;
   }
   if (e.data?.type === 'app-link' && runnerPhase === 'delivered') {

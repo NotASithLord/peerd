@@ -24,7 +24,7 @@ const PROBLEMS = {
     details: 'SharedArrayBuffer is not available, because the App is not cross-origin isolated.',
   },
   modules: {
-    text: 'This App splits its code into module files that Apps cannot load yet, so it may not start. '
+    text: 'This App splits its code into module files that Apps cannot load yet, so it may not work. '
       + 'Ask peerd to fix it, or get a single-file version from its maker.',
     details: 'A module import or a module Worker asked for a file by URL, and the load failed. '
       + 'App files have no URL inside the sandbox. Classic scripts and one self-contained module do load.',
@@ -59,25 +59,27 @@ export const appProblemNotice = (data) => {
   return null;
 };
 
+// The App tab shows a notice that does not stay for this long.
+const NOTICE_MS = 6000;
+
 /**
- * The notices of one App load. Each notice shows one time. A notice that
- * stays is the reason the App may not start, so no later notice replaces it.
+ * The notices of one App load. A notice that stays shows one time. Each other
+ * notice shows at most one time in NOTICE_MS, so a later problem still gets
+ * its notice.
  * why: App code can post these messages without limit.
+ * @param {() => number} [now]
  */
-export const appProblemNotices = () => {
-  /** @type {Set<string>} */
-  const shown = new Set();
-  let stopped = false;
+export const appProblemNotices = (now = Date.now) => {
+  /** @type {Map<string, number>} */
+  const shownAt = new Map();
   return {
     /** @param {unknown} data - a message from the App frame @returns {AppProblemNotice | null} */
     next(data) {
       const notice = appProblemNotice(data);
-      if (!notice || stopped || shown.has(notice.text)) return null;
-      shown.add(notice.text);
-      stopped = notice.stays === true;
+      const last = notice ? shownAt.get(notice.text) : undefined;
+      if (!notice || (last !== undefined && (notice.stays || now() - last < NOTICE_MS))) return null;
+      shownAt.set(notice.text, now());
       return notice;
     },
-    /** True when this load showed a notice that stays. */
-    get stopped() { return stopped; },
   };
 };

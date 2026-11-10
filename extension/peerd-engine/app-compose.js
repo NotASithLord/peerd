@@ -388,30 +388,54 @@ export function serveAppFiles(scope, entry, types, handoff, missingEvent, dataPa
  */
 export function keepAppStorageInMemory(scope) {
   'use strict';
+  // A real Storage holds about this many UTF-16 units of keys and values.
+  const QUOTA = 5 * 1024 * 1024;
+  /** @type {WeakMap<object, Map<string, string>>} */
+  const held = new WeakMap();
+  /** @param {object} storage */
+  const itemsOf = (storage) => {
+    const items = held.get(storage);
+    if (!items) throw new TypeError('Illegal invocation');
+    return items;
+  };
+  /** @param {Map<string, string>} items @param {string} key @param {string} value */
+  const store = (items, key, value) => {
+    let size = key.length + value.length;
+    for (const [name, text] of items) if (name !== key) size += name.length + text.length;
+    if (size > QUOTA) throw new scope.DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    items.set(key, value);
+  };
+  // why on the prototype: a library can call Storage.prototype.setItem.call(storage, ...)
+  // or patch it. No real Storage exists in this frame, so only the stand-ins use these.
+  const proto = scope.Storage?.prototype ?? {};
+  Object.defineProperties(proto, Object.getOwnPropertyDescriptors({
+    get length() { return itemsOf(this).size; },
+    /** @param {unknown} index */
+    key(index) { return [...itemsOf(this).keys()][Number(index) >>> 0] ?? null; },
+    /** @param {unknown} key */
+    getItem(key) { return itemsOf(this).get(String(key)) ?? null; },
+    /** @param {unknown} key @param {unknown} value */
+    setItem(key, value) { store(itemsOf(this), String(key), String(value)); },
+    /** @param {unknown} key */
+    removeItem(key) { itemsOf(this).delete(String(key)); },
+    clear() { itemsOf(this).clear(); },
+  }));
   const memoryStorage = () => {
     /** @type {Map<string, string>} */
     const items = new Map();
-    /** @type {Record<string, (...args: unknown[]) => unknown>} */
-    const methods = {
-      getItem: (key) => items.get(String(key)) ?? null,
-      setItem: (key, value) => { items.set(String(key), String(value)); },
-      removeItem: (key) => { items.delete(String(key)); },
-      clear: () => items.clear(),
-      key: (index) => [...items.keys()][Number(index)] ?? null,
-    };
     // why a Proxy: engines also read and write keys as properties (storage[key]).
-    const storage = new Proxy(Object.create(scope.Storage?.prototype ?? Object.prototype), {
-      get: (target, name) => (typeof name !== 'string' ? Reflect.get(target, name)
-        : name === 'length' ? items.size
-          : Object.hasOwn(methods, name) ? methods[name]
-            : name in target ? Reflect.get(target, name) : items.get(name)),
-      set: (_target, name, value) => { items.set(String(name), String(value)); return true; },
+    const storage = new Proxy(Object.create(proto), {
+      get: (target, name, receiver) => (typeof name === 'string' && !(name in target)
+        ? items.get(name) : Reflect.get(target, name, receiver)),
+      set: (_target, name, value) => { store(items, String(name), String(value)); return true; },
+      defineProperty: (_target, name, { value }) => { store(items, String(name), String(value)); return true; },
       has: (target, name) => name in target || items.has(/** @type {string} */ (name)),
       deleteProperty: (_target, name) => items.delete(/** @type {string} */ (name)) || true,
       ownKeys: () => [...items.keys()],
       getOwnPropertyDescriptor: (_target, name) => (typeof name === 'string' && items.has(name)
         ? { value: items.get(name), writable: true, enumerable: true, configurable: true } : undefined),
     });
+    held.set(storage, items);
     return { configurable: true, enumerable: true, get: () => storage };
   };
   Object.defineProperty(scope, 'localStorage', memoryStorage());
@@ -466,8 +490,9 @@ const resolveRel = (basePath, relPath) => {
   const baseDir = basePath.includes('/')
     ? basePath.slice(0, basePath.lastIndexOf('/'))
     : '';
+  // why: A ?query or a #hash is not part of the file name (game.js?v=3).
   const parts = (baseDir ? baseDir.split('/') : []).concat(
-    relPath.split('/').filter((p) => p !== '.'),
+    relPath.replace(/[?#].*$/, '').split('/').filter((p) => p !== '.'),
   );
   const resolved = [];
   for (const p of parts) {

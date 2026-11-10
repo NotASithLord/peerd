@@ -324,7 +324,7 @@ export const scenario: Scenario = {
         && nativeLoads.slice(dataLoads).every((url) => typeof url === 'string' && revokedUrls.has(url));
       probes.push(dataNeverCode
         ? blocked('load rewritable App data as a script, Worker, or worklet through the App file server',
-          'fetch reads data/save.json, and the wrapped loaders get only a revoked blob: URL for it')
+          'fetch reads data/save.json, and the file server gives a script, Worker, or worklet load a revoked blob: URL for it; an App can still run its own data another way, as before')
         : leaked('load rewritable App data as a script, Worker, or worklet through the App file server',
           `status=${dataStatus} loads=${JSON.stringify(nativeLoads.slice(dataLoads))}`));
 
@@ -343,21 +343,24 @@ export const scenario: Scenario = {
           `realCalls=${JSON.stringify(realStorageCalls)} parentPosts=${parentPosts.length}`));
 
       // App code can post the runner's notice messages itself. The App tab
-      // must build each notice from fixed text and show it one time for a load.
+      // must build each notice from fixed text and limit how often it shows.
       const hostile = '<a href="https://evil.example">Your vault is locked. Type your passphrase here</a>';
-      const appNotices = appProblemNotices();
+      let noticeTime = 0;
+      const appNotices = appProblemNotices(() => noticeTime);
       const shownNotices = Array.from({ length: 200 }, (_unused, index) => appNotices.next({
         type: index % 5 === 4 ? 'app-policy-blocked' : 'app-problem',
         problem: ['feature', 'missing-file', 'threads', hostile][index % 4],
         directive: hostile, text: hostile, details: hostile, stays: true,
       })).filter((notice) => notice !== null);
+      const stays = appNotices.next({ type: 'app-problem', problem: 'modules' })?.stays === true;
+      noticeTime = 6000;
       const noticesHeld = shownNotices.length === 4
         && !/evil|vault|passphrase|href|</.test(JSON.stringify(shownNotices))
-        && appNotices.next({ type: 'app-problem', problem: 'modules' })?.stays === true
-        && appNotices.next({ type: 'app-problem', problem: 'feature' }) === null;
+        && stays && appNotices.next({ type: 'app-problem', problem: 'modules' }) === null
+        && appNotices.next({ type: 'app-policy-blocked', directive: 'img-src' }) !== null;
       probes.push(noticesHeld
         ? blocked('put App text into an App tab notice, or repeat a notice without limit',
-          '200 forged messages gave 4 notices of fixed text; after the notice that stays, the load shows no other')
+          '200 forged messages gave 4 notices of fixed text; the same notice shows at most one time in 6 seconds, and the notice that stays one time for a load')
         : leaked('put App text into an App tab notice, or repeat a notice without limit',
           `shown=${JSON.stringify(shownNotices).slice(0, 300)}`));
 
@@ -461,7 +464,7 @@ export const scenario: Scenario = {
       'composeApp + stripMetaRefresh (App iframe breakout/navigation defense)',
       'serveAppFiles (App file server: extension-origin 404s, revoked script/Worker/worklet URLs for packaged paths and for runtime data, no new network or parent channel)',
       'keepAppStorageInMemory (App localStorage and sessionStorage in page memory, no real storage and no parent channel)',
-      'appProblemNotices (App tab notices: fixed text, one time for a load)',
+      'appProblemNotices (App tab notices: fixed text, at most one time in 6 seconds)',
       'buildAppEgressBlockRule (tab-scoped HTTP(S)/WebSocket network floor)',
       'makeOffscreenActorChannelClient (exact-client channel transfer)',
       'normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)',

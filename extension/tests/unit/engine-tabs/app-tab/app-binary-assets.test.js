@@ -749,6 +749,26 @@ describe('App runner failed code', () => {
   });
 });
 
+describe('App runner storage', () => {
+  it('holds values in page memory, with the methods on the Storage prototype of the frame', async () => {
+    const { composeApp } = await import('/peerd-engine/app-compose.js');
+    const [report] = await runDirectProblems(composeApp({ 'index.html': `<script>
+      const read = (run) => { try { return run(); } catch (error) { return error.name; } };
+      localStorage.setItem('a', 1);
+      localStorage.b = 2;
+      Storage.prototype.setItem.call(sessionStorage, 'c', 3);
+      parent.postMessage({ type: 'app-problem', problem: JSON.stringify([
+        String(localStorage), localStorage instanceof Storage, localStorage.a, localStorage.getItem('b'),
+        localStorage.length, Object.keys(localStorage), sessionStorage.c, sessionStorage.length, localStorage.key(NaN),
+        read(() => localStorage.setItem('big', 'x'.repeat(6 * 1024 * 1024))), localStorage.length, 'caches' in self,
+      ]) }, '*');
+      parent.postMessage({ type: 'runner-problems-done' }, '*');
+    <\/script>` }));
+    expect(JSON.parse(report)).toEqual(['[object Storage]', true, '1', '2', 2, ['a', 'b'], '3', 1, 'a',
+      'QuotaExceededError', 2, false]);
+  });
+});
+
 describe('App runner binary assets', () => {
   it('permits gamepads and WASM in the opaque App frame without full screen', async () => {
     // eslint-disable-next-line no-restricted-globals

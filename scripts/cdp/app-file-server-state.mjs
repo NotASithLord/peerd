@@ -102,6 +102,8 @@ const loaderSource = (probe) => `(async () => {
       script.onerror = () => resolve('error');
       document.head.append(script);
     });
+    // A notice that does not stay must not replace or close that reason.
+    parent.postMessage({ type: 'app-link', href: 'mailto:someone@example.com' }, '*');
   } catch (error) {
     report.error = String(error);
   }
@@ -229,15 +231,21 @@ export const APP_FILE_SERVER_STATE = {
           && notices.every((notice) => !/connect-src|Blocked |Bundle /.test(notice.text)),
         JSON.stringify(notices));
       const stays = appProblemNotice({ type: 'app-problem', problem: 'modules' })?.text;
+      const reason = () => evalIn(page, `(() => {
+        const [notice, other] = ['app-problem-notice', 'app-security-notice'].map((id) => document.getElementById(id));
+        return {
+          text: notice?.querySelector('span')?.firstChild?.textContent, timer: notice?.dataset.timer,
+          other: other?.querySelector('span')?.firstChild?.textContent, mode: document.body.className,
+        };
+      })()`).catch(() => null);
+      const link = 'Only confirmed HTTP(S) links can leave an App.';
       const last = await waitFor(async () => {
-        const shown = await evalIn(page, `(() => {
-          const notice = document.getElementById('app-security-notice');
-          return notice ? { text: notice.querySelector('span')?.firstChild?.textContent, timer: notice.dataset.timer } : null;
-        })()`).catch(() => null);
-        return shown?.text === stays ? shown : null;
-      }, { budgetMs: 10_000, pollMs: 100 });
-      rec.check('a module import that failed gets a reason that stays in the App tab',
-        report?.module === 'error' && last?.timer === '', JSON.stringify({ module: report?.module, last }));
+        const shown = await reason();
+        return shown?.text === stays && shown.other === link ? shown : null;
+      }, { budgetMs: 10_000, pollMs: 100 }) ?? await reason();
+      rec.check('a module import that failed gets a reason that stays in the App tab, and a later notice does not replace it',
+        report?.module === 'error' && last?.text === stays && last.timer === '' && last.other === link,
+        JSON.stringify({ module: report?.module, last }));
       rec.check('packaged extension files get a 404 through the file server',
         JSON.stringify(report?.packaged) === '[404,404]', JSON.stringify(report?.packaged));
       rec.check('remote fetch and XHR still fail and make zero connections',
@@ -246,6 +254,21 @@ export const APP_FILE_SERVER_STATE = {
         JSON.stringify({ fetch: report?.remoteFetch, xhr: report?.remoteXhr, hits: probeHits,
           connections: probeConnections,
           policies: await evalIn(page, 'globalThis.__fileServerPolicies ?? []').catch(() => null) }));
+      // Last, because Edit ends this load of the App.
+      await evalIn(page, `document.getElementById('mode-toggle').click()`);
+      const edited = await waitFor(async () => {
+        const shown = await reason();
+        return shown?.mode.includes('mode-edit') && !!(await evalIn(page,
+          `!!document.querySelector('#editor-panel:not([hidden]) .cm-content')`).catch(() => false)) ? shown : null;
+      }, { budgetMs: 10_000, pollMs: 100 }) ?? await reason();
+      await evalIn(page, `document.getElementById('mode-toggle').click()`);
+      const again = await waitFor(async () => {
+        const shown = await reason();
+        return shown?.mode.includes('mode-render') && shown.text === stays ? shown : null;
+      }, { budgetMs: 20_000, pollMs: 100 }) ?? await reason();
+      rec.check('Edit ends the reason of the old load, and the next load shows its own',
+        edited?.mode.includes('mode-edit') && edited.text === undefined && again?.text === stays && again.timer === '',
+        JSON.stringify({ edited, again }));
     } finally {
       try { page?.close(); } catch { /* already closed */ }
       // why: later Library captures must not list this fixture. Only Home may delete an App.

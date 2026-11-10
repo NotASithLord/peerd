@@ -250,7 +250,8 @@
             return;
           }
           // The file server already reported a blob: URL, and the policy
-          // listener a remote URL. This is a path that composeApp left in place.
+          // listener a remote URL. This is a tag that composeApp left in place,
+          // because the App does not have the file.
           const url = new URL(src, location.href);
           if (url.protocol === location.protocol && url.host === location.host) reportProblem('missing-file');
         } catch (_e) { /* an App-made element stays App data */ }
