@@ -36,6 +36,7 @@ const OPERATION_LABELS = Object.freeze({
   'turn.app.delete': 'Delete an App',
   'turn.app.write-file': 'Write an App file',
   'turn.app.delete-file': 'Delete an App file',
+  'turn.app.copy-pod-files': 'Copy files between a Pod and an App',
   'turn.app.act': 'Perform an App action',
   'turn.app.run-code': 'Run code against an App',
   'turn.memory.write': 'Update durable memory',

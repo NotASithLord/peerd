@@ -2474,6 +2474,17 @@ export const makeOffscreenActorClient = ({
       return runDomainEffect(entry, 'app/write-file', () =>
         entry.authority.writeFile(msg.appId, msg.path, msg.content), HOST_EFFECT_OUTCOME.appMutation);
     },
+    'app/copy-pod-files': async (
+      /** @type {Record<string,unknown>} */ msg = {}, /** @type {unknown} */ sender = undefined,
+      /** @type {Parameters<typeof grantFor>[2]} */ boundGrant = null,
+    ) => {
+      const grant = grantFor(msg, sender, boundGrant);
+      const entry = await appEntry(grant, msg, ['direction', 'podId', 'appId', 'files']);
+      if (!entry) return { ok: false, error: 'app/copy-pod-files: authority mismatch', outcomeKnown: true };
+      return runDomainEffect(entry, 'app/copy-pod-files', () =>
+        entry.authority.copyPodFiles(msg.direction, msg.podId, msg.appId, msg.files),
+      HOST_EFFECT_OUTCOME.partialMutation);
+    },
     'app/read-file': async (
       /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
       /** @type {any} */ boundGrant = null,

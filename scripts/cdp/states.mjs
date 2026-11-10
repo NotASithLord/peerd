@@ -21,6 +21,7 @@
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSocket } from 'node:dgram';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -403,6 +404,21 @@ let homeSurfaceGate = Promise.resolve();
 let actorAppState = { spawned: 0, childCalls: 0, appCalls: 0, appId: null };
 let actorAppProbeUrl = '';
 let actorAppStunPort = 0;
+let podFirstCommand = { mainCalls: 0, actorCalls: 0, podId: null, result: '' };
+let podAppCopy = { phase: 'setup', mainCalls: 0, appId: null, podId: null, copyResult: '', backResult: '' };
+// add(i32, i32) -> i32 plus a custom section that is not valid UTF-8, so any
+// text round trip on the way from the Pod to the App would change the bytes.
+const POD_APP_COPY_WASM_B64 = 'AGFzbQEAAAABBwFgAn9/AX8DAgEABwcBA2FkZAAACgkBBwAgACABagsABQF4/4D+';
+const POD_APP_COPY_HTML = `<!doctype html><title>Copy adder</title><p id="out">waiting</p><script>
+(async () => {
+  const bytes = peerd.assets.bytes('add.wasm');
+  if (!bytes) return;
+  const { instance } = await WebAssembly.instantiate(bytes);
+  const sum = instance.exports.add(2, 40);
+  document.getElementById('out').textContent = 'sum ' + sum;
+  await peerd.data.set('result', { sum, size: bytes.byteLength });
+})().catch((error) => { document.getElementById('out').textContent = 'error ' + error.message; });
+<\/script>`;
 
 const toolResultsIn = (postData) => {
   try {
@@ -12720,6 +12736,252 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
       rec.check('it did NOT enter the background turn driver or fail isolation', isolation.backgroundRefused === false && isolation.isolationFailed === false);
       rec.check('the web reply round-tripped up through the actor into the final answer', (out.bubbles || []).includes('FINAL-VIA-ACTOR'));
       rec.check('the turn settles idle', out.busy === false);
+    },
+  },
+
+  {
+    name: 'pod-first-command', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = request?.postData ?? '';
+      if (body.includes('kind: bound; type: pod')) {
+        if (podFirstCommand.actorCalls++ === 0) {
+          return { sse: sseToolCall('pod_exec', { command: "printf 'pod-ready-proof\\n'" }) };
+        }
+        podFirstCommand.result = toolResultsIn(body).at(-1) ?? '';
+        return { sse: sseText('POD-FIRST-COMMAND-DONE') };
+      }
+      if (podFirstCommand.mainCalls++ === 0) {
+        return { sse: sseToolCall('sandbox_create', { kind: 'pod', name: 'First command', persistent: false }) };
+      }
+      if (!podFirstCommand.podId) {
+        podFirstCommand.podId = body.match(/pod-[a-z0-9]+-[a-z0-9]+/)?.[0] ?? null;
+        if (podFirstCommand.podId) {
+          return { sse: sseToolCall('message_actor', {
+            to: podFirstCommand.podId, message: 'Run the first local shell command and report its result.',
+          }) };
+        }
+      }
+      return { sse: sseText('POD-FIRST-COMMAND-FINAL') };
+    },
+    async run(ctx, rec) {
+      podFirstCommand = { mainCalls: 0, actorCalls: 0, podId: null, result: '' };
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
+      try {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create a new Pod and run its first shell command.' });
+        rec.check('the first Pod request is accepted', sent?.ok === true, JSON.stringify(sent));
+        const finished = await waitFor(async () => podFirstCommand.result && !(await probe(ctx)).busy,
+          { budgetMs: 45_000, pollMs: 100 });
+        rec.check('the new Pod returns its first command result', !!finished, podFirstCommand.result);
+        let job = null;
+        try {
+          const fenced = podFirstCommand.result.match(/<untrusted_web_content\b[^>]*>\n([\s\S]*?)\n<\/untrusted_web_content>/);
+          if (fenced) job = JSON.parse(fenced[1]);
+        } catch { /* A missing or invalid job must fail the output check. */ }
+        rec.check('the first command completes with its real output',
+          job?.exitCode === 0 && job?.state === 'completed'
+            && job?.stdout === 'pod-ready-proof\n', podFirstCommand.result);
+        const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+        rec.check('the first command crosses the production tool relay', entries.some((entry) =>
+          entry.type === 'tool_executed' && entry.details?.tool === 'pod_exec'));
+        await rec.shot('first-command');
+      } finally {
+        await rpc(ctx.page, { type: 'agent/stop' }).catch(() => {});
+        if (podFirstCommand.podId) await evalIn(ctx.page, `(async () => {
+          const tabs = await chrome.tabs.query({});
+          const url = chrome.runtime.getURL('engine-tabs/pod-tab/index.html') + '#' + ${JSON.stringify(podFirstCommand.podId)};
+          await chrome.tabs.remove(tabs.filter((tab) => tab.url === url).map((tab) => tab.id));
+        })()`, true).catch(() => {});
+      }
+    },
+  },
+
+  // A Pod output reaches an existing App byte for byte through the host copy:
+  // the user approves exact sizes and hashes, and the App then runs the module.
+  {
+    name: 'pod-app-copy-binary', kind: 'functional', phase: 'post-unlock',
+    responder: (_callIndex, request) => {
+      const body = request?.postData ?? '';
+      const last = toolResultsIn(body).at(-1) ?? '';
+      podAppCopy.mainCalls += 1;
+      if (podAppCopy.phase === 'setup') {
+        if (!podAppCopy.appId && podAppCopy.mainCalls === 1) {
+          return { sse: sseToolCall('sandbox_create', { kind: 'app', name: 'Copy adder', files: { 'index.html': POD_APP_COPY_HTML } }) };
+        }
+        podAppCopy.appId ??= last.match(/\bapp-[a-z0-9]+-[a-z0-9]+\b/)?.[0] ?? null;
+        if (podAppCopy.appId && !podAppCopy.podId && !/\bpod-[a-z0-9]+-[a-z0-9]+\b/.test(last)) {
+          return { sse: sseToolCall('sandbox_create', { kind: 'pod', name: 'Copy builder', persistent: false }) };
+        }
+        podAppCopy.podId ??= last.match(/\bpod-[a-z0-9]+-[a-z0-9]+\b/)?.[0] ?? null;
+        return { sse: sseText('POD-APP-COPY-SETUP-DONE') };
+      }
+      if (podAppCopy.phase === 'back') {
+        if (!podAppCopy.backResult && !last.includes('app_to_pod') && !last.includes('declined')) {
+          return { sse: sseToolCall('pod_app_copy', {
+            direction: 'app_to_pod', podId: podAppCopy.podId, appId: podAppCopy.appId,
+            files: [{ from: 'add.wasm', to: 'from-app/add.wasm' }],
+          }) };
+        }
+        podAppCopy.backResult = last;
+        return { sse: sseText('POD-APP-COPY-BACK-DONE') };
+      }
+      if (!podAppCopy.copyResult && !last.includes('"direction"') && !last.includes('declined')) {
+        return { sse: sseToolCall('pod_app_copy', {
+          direction: 'pod_to_app', podId: podAppCopy.podId, appId: podAppCopy.appId,
+          files: [{ from: 'build/add.wasm', to: 'add.wasm' }],
+        }) };
+      }
+      podAppCopy.copyResult = last;
+      return { sse: sseText('POD-APP-COPY-DONE') };
+    },
+    async run(ctx, rec) {
+      podAppCopy = { phase: 'setup', mainCalls: 0, appId: null, podId: null, copyResult: '', backResult: '' };
+      const wasm = Buffer.from(POD_APP_COPY_WASM_B64, 'base64');
+      const sha256 = createHash('sha256').update(wasm).digest('hex');
+      const priorAuditIds = new Set((await auditEntries(ctx)).map((entry) => entry.id));
+      let podPage;
+      try {
+        const sent = await rpc(ctx.page, { type: 'agent/send', text: 'Create the Copy adder App and the Copy builder Pod.' });
+        rec.check('the setup request is accepted', sent?.ok === true, JSON.stringify(sent));
+        const ready = await waitFor(async () => podAppCopy.appId && podAppCopy.podId && !(await probe(ctx)).busy,
+          { budgetMs: 60_000, pollMs: 100 });
+        rec.check('the App and the Pod exist', !!ready, JSON.stringify(podAppCopy));
+        const podCall = (message) => evalIn(ctx.swConn, `(async () => {
+          const tabs = await chrome.tabs.query({});
+          const tab = tabs.find((item) => item.url?.endsWith(${JSON.stringify(`#${podAppCopy.podId}`)}));
+          if (!tab?.id) return { ok: false, error: 'Pod tab missing' };
+          return chrome.tabs.sendMessage(tab.id, ${JSON.stringify({ ...message, podId: podAppCopy.podId })});
+        })()`, true);
+        const podReady = await waitFor(async () => (await podCall({ type: 'pod/list-files' }))?.ok === true,
+          { budgetMs: 30_000, pollMs: 200 });
+        rec.check('the Pod tab answers', !!podReady);
+        const written = await podCall({ type: 'pod/write-file', path: 'build/add.wasm', contentBase64: POD_APP_COPY_WASM_B64 });
+        rec.check('a binary file is written into the Pod as base64', written?.ok === true, JSON.stringify(written));
+        const readBack = await podCall({ type: 'pod/read-bytes', path: 'build/add.wasm' });
+        rec.check('the Pod reads the same bytes back', readBack?.ok === true
+          && readBack.base64 === POD_APP_COPY_WASM_B64 && readBack.size === wasm.length, JSON.stringify(readBack));
+
+        podAppCopy.phase = 'copy';
+        const copySent = await rpc(ctx.page, { type: 'agent/send', text: 'Copy the built adder into the App.' });
+        rec.check('the copy request is accepted', copySent?.ok === true, JSON.stringify(copySent));
+        const prompt = await waitFor(() => evalIn(ctx.page, `(() => {
+          const modal = document.querySelector('.confirm-modal');
+          const summary = modal?.querySelector('.confirm-summary')?.textContent ?? '';
+          if (!summary.includes('build/add.wasm')) return null;
+          return { summary, buttons: [...modal.querySelectorAll('button')].map((button) => button.textContent.trim()) };
+        })()`), { budgetMs: 30_000, pollMs: 80 });
+        rec.check('one confirmation shows the path, size, hash and target App', !!prompt
+          && prompt.summary.includes('into App "Copy adder"')
+          && prompt.summary.includes('This App is not shared.')
+          && prompt.summary.includes(`build/add.wasm to add.wasm: ${wasm.length} B, SHA-256 ${sha256.slice(0, 12)}`),
+        JSON.stringify(prompt));
+        rec.check('the copy confirmation offers no standing grant', !!prompt
+          && !prompt.buttons.some((label) => label.startsWith('Allow all')), JSON.stringify(prompt?.buttons));
+        await rec.shot('confirm');
+        const approved = await evalIn(ctx.page, `(() => {
+          const button = [...document.querySelectorAll('.confirm-modal button')]
+            .find((candidate) => candidate.textContent.trim() === 'Allow once');
+          button?.click();
+          return !!button;
+        })()`);
+        rec.check('the user approves the copy', approved === true);
+        const settled = await waitFor(async () => podAppCopy.copyResult && !(await probe(ctx)).busy,
+          { budgetMs: 30_000, pollMs: 100 });
+        rec.check('the copy returns hashes and no bytes', !!settled
+          && podAppCopy.copyResult.includes(sha256) && !podAppCopy.copyResult.includes(POD_APP_COPY_WASM_B64),
+        podAppCopy.copyResult.slice(0, 800));
+        const appBytes = await evalIn(ctx.page, `(async () => {
+          const { opfsHelpers } = await import('/peerd-engine/opfs.js');
+          const bytes = await opfsHelpers(['peerd-apps', ${JSON.stringify(podAppCopy.appId)}]).readBytes('add.wasm');
+          let text = '';
+          for (const byte of bytes) text += String.fromCharCode(byte);
+          return btoa(text);
+        })()`, true);
+        rec.check('the App file has the exact Pod bytes', appBytes === POD_APP_COPY_WASM_B64, String(appBytes));
+        const result = await waitFor(() => evalIn(ctx.page, `(async () => {
+          const { opfsHelpers } = await import('/peerd-engine/opfs.js');
+          return opfsHelpers(['peerd-apps', ${JSON.stringify(podAppCopy.appId)}]).read('data/result.json').catch(() => null);
+        })()`, true), { budgetMs: 20_000, pollMs: 200 });
+        let parsed = null;
+        try { parsed = JSON.parse(result); } catch { /* checked below */ }
+        rec.check('the App runs the copied module', parsed?.sum === 42 && parsed?.size === wasm.length, String(result));
+        const entries = (await auditEntries(ctx)).filter((entry) => !priorAuditIds.has(entry.id));
+        rec.check('the copy crossed its exact authority operation', entries.some((entry) =>
+          entry.type === 'authority_effect' && entry.details?.operation === 'turn.app.copy-pod-files'),
+        JSON.stringify(entries.map((entry) => entry.details?.operation ?? entry.type)));
+
+        // The reverse copy stages the App's file in the Pod. A local App
+        // makes no claim about who wrote it and leaves the Pod unmarked.
+        podAppCopy.phase = 'back';
+        const backSent = await rpc(ctx.page, { type: 'agent/send', text: 'Copy the adder back into the Pod.' });
+        rec.check('the App to Pod request is accepted', backSent?.ok === true, JSON.stringify(backSent));
+        const backPrompt = await waitFor(() => evalIn(ctx.page, `(() => {
+          const summary = document.querySelector('.confirm-modal .confirm-summary')?.textContent ?? '';
+          return summary.includes('from-app/add.wasm') ? summary : null;
+        })()`), { budgetMs: 30_000, pollMs: 80 });
+        rec.check('the App to Pod confirmation names the Pod and the exact hash, with no authorship claim', !!backPrompt
+          && backPrompt.includes('into Pod "Copy builder"')
+          && backPrompt.includes(`add.wasm to from-app/add.wasm: ${wasm.length} B, SHA-256 ${sha256.slice(0, 12)}`)
+          && !backPrompt.includes('You made') && !backPrompt.includes('someone else'), String(backPrompt));
+        const backApproved = await evalIn(ctx.page, `(() => {
+          const button = [...document.querySelectorAll('.confirm-modal button')]
+            .find((candidate) => candidate.textContent.trim() === 'Allow once');
+          button?.click();
+          return !!button;
+        })()`);
+        rec.check('the user approves the App to Pod copy', backApproved === true);
+        const backSettled = await waitFor(async () => podAppCopy.backResult && !(await probe(ctx)).busy,
+          { budgetMs: 30_000, pollMs: 100 });
+        rec.check('the App to Pod copy returns the hash and no mark', !!backSettled
+          && podAppCopy.backResult.includes(sha256) && !podAppCopy.backResult.includes('someone else published'),
+        podAppCopy.backResult.slice(0, 800));
+        const podBytes = await podCall({ type: 'pod/read-bytes', path: 'from-app/add.wasm' });
+        rec.check('the Pod file has the exact App bytes', podBytes?.ok === true
+          && podBytes.base64 === POD_APP_COPY_WASM_B64, JSON.stringify(podBytes));
+
+        // The Pod tab renders the outside-files notice the host sends after a
+        // copy from another person's App, and its button clears the mark.
+        const podTarget = await waitFor(async () => (await fetch(`http://127.0.0.1:${ctx.port}/json/list`)
+          .then((reply) => reply.json())).find((target) => target.type === 'page'
+            && target.url.endsWith(`#${podAppCopy.podId}`)) ?? null, { budgetMs: 10_000, pollMs: 100 });
+        if (!podTarget) throw new Error('The Pod tab is not attachable');
+        podPage = await attach(podTarget.webSocketDebuggerUrl);
+        await podPage.send('Runtime.enable');
+        await podPage.send('Page.enable');
+        await podPage.send('Page.bringToFront');
+        await podPage.send('Emulation.setDeviceMetricsOverride', { width: 900, height: 620, deviceScaleFactor: 1, mobile: false });
+        rec.check('the copy from a local App left the Pod notice hidden', await evalIn(podPage,
+          `document.getElementById('pod-outside-files').hidden === true`) === true);
+        const marked = await podCall({ type: 'pod/outside-files', mark: {
+          publisher: 'did:key:z6MkExamplePublisher', appId: podAppCopy.appId, appName: 'Copy adder', markedAt: 1,
+        } });
+        const notice = await waitFor(() => evalIn(podPage, `(() => {
+          const node = document.getElementById('pod-outside-files');
+          return node && !node.hidden ? {
+            text: node.querySelector('p').textContent,
+            detail: document.getElementById('pod-outside-files-detail').textContent,
+            detailsOpen: node.querySelector('details').open,
+          } : null;
+        })()`), { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the Pod tab shows a plain notice with the publisher behind Technical details', marked?.ok === true
+          && notice?.text === 'Web access is off in this Pod. It has files from an App made by someone else.'
+          && notice.detailsOpen === false && notice.detail.includes('did:key:z6MkExamplePublisher'),
+        JSON.stringify(notice));
+        await rec.shotPage('pod-outside-files', podPage);
+        await evalIn(podPage, `document.getElementById('pod-outside-files-clear').click()`);
+        const cleared = await waitFor(() => evalIn(podPage, `document.getElementById('pod-outside-files').hidden
+          && document.getElementById('terminal-output').textContent.includes('Web access and Git remotes are back on in this Pod.')`),
+        { budgetMs: 5_000, pollMs: 50 });
+        rec.check('the notice button clears the mark through the Pod tab route', !!cleared);
+      } finally {
+        await podPage?.close();
+        await rpc(ctx.page, { type: 'agent/stop' }).catch(() => {});
+        const ids = [podAppCopy.podId, podAppCopy.appId].filter(Boolean);
+        if (ids.length) await evalIn(ctx.page, `(async () => {
+          const ids = ${JSON.stringify(ids)};
+          const tabs = await chrome.tabs.query({});
+          await chrome.tabs.remove(tabs.filter((tab) => ids.some((id) => tab.url?.includes('#' + id))).map((tab) => tab.id));
+        })()`, true).catch(() => {});
+      }
     },
   },
 

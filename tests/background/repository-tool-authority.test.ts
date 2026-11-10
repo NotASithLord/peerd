@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { createRepositoryToolAuthority } from '../../extension/background/repository-tool-authority.js';
 import { createAppQuiescence } from '../../extension/background/app-quiescence.js';
 import { createAppDwebAuthority } from '../../extension/background/app-dweb-authority.js';
+import { createRepositoryService } from '../../extension/peerd-engine/repository.js';
 
 const signal = new AbortController().signal;
 
@@ -10,6 +11,41 @@ const repositoryContext = (repositories: any, extra: any = {}) => ({
 });
 
 describe('repository tool authority', () => {
+  test('a Pod holding outside files refuses Git remote prompts and operations', async () => {
+    let asked = false;
+    let remoteCalls = 0;
+    const outsideFiles = { publisher: 'did:key:z6MkPeer', appId: 'app-9', appName: 'Game', markedAt: 1 };
+    const repositories = {
+      coordinate: async (_ref: unknown, operation: () => Promise<unknown>) => operation(),
+      getRemote: async () => ({ url: 'https://github.com/a/b.git', host: 'github.com' }),
+      setRemote: async () => { remoteCalls += 1; },
+      fetch: async () => { remoteCalls += 1; },
+    };
+    const ctx = repositoryContext(repositories, {
+      actorType: 'pod', actorInstanceId: 'pod-1',
+      podRegistry: { get: async () => ({ id: 'pod-1', outsideFiles }) },
+      confirm: async () => { asked = true; return 'yes_once'; },
+    });
+    const confirm = createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.confirm-remote', args: { url: 'https://github.com/a/b.git' } },
+      ctx, signal,
+    });
+    await expect(confirm.confirmRemote('link', 'https://github.com/a/b.git', undefined))
+      .rejects.toThrow('Git remotes are off');
+    expect(asked).toBe(false);
+    const shared: Record<string, unknown> = {
+      repositoryRemoteApproval: {
+        op: 'fetch', target: 'https://github.com/a/b.git', branch: undefined,
+        remote: { url: 'https://github.com/a/b.git', host: 'github.com' },
+      },
+    };
+    const fetchAuthority = createRepositoryToolAuthority({
+      binding: { operation: 'turn.repository.fetch', args: {} }, ctx, signal, shared,
+    });
+    await expect(fetchAuthority.fetch('https://github.com/a/b.git')).rejects.toThrow('Git remotes are off');
+    expect(remoteCalls).toBe(0);
+  });
+
   test.each([false, true])('App branch rotates consent without a live editor (persistence fails: %s)', async (fails) => {
     const order: string[] = [];
     const dwebAuthority = createAppDwebAuthority({
@@ -334,6 +370,7 @@ describe('Pod destroy custody', () => {
   const destroyHarness = (records: Map<string, any>) => {
     const order: string[] = [];
     const shared: any = {};
+    const repositoryService = createRepositoryService();
     const ctx = {
       podRegistry: {
         get: async (id: string) => records.get(id) ?? null,
@@ -341,17 +378,17 @@ describe('Pod destroy custody', () => {
       },
       podTabTracker: { closeTab: async (id: string) => { order.push(`close:${id}`); } },
       repositories: {
-        coordinate: async (_ref: unknown, operation: () => Promise<unknown>) => {
+        coordinate: (ref: { kind: string; id: string }, operation: () => Promise<unknown>) => repositoryService.coordinate(ref, async () => {
           order.push('lock');
           return operation();
-        },
+        }),
         destroy: async (ref: any) => { order.push(`git:${ref.id}`); },
       },
     };
     const authority = (operation: string) => createRepositoryToolAuthority({
       binding: { operation, args: { podId: 'pod-1' } }, ctx, signal, shared,
     });
-    return { order, read: authority('turn.repository.read-pod'), destroy: authority('turn.repository.destroy-pod') };
+    return { order, repositoryService, read: authority('turn.repository.read-pod'), destroy: authority('turn.repository.destroy-pod') };
   };
 
   test('an inspected, unpinned Pod is destroyed inside its repository lane', async () => {
@@ -376,6 +413,24 @@ describe('Pod destroy custody', () => {
     await read.readPod('pod-1');
     records.delete('pod-1');
     await expect(destroy.destroyPod('pod-1')).rejects.toThrow('repository authority mismatch');
+    expect(order).toEqual(['lock']);
+  });
+
+  test.each(['pinned', 'removed'])('a Pod %s while destroy waits for its lane is not destroyed', async (change) => {
+    const records = new Map<string, { name: string; pinned?: boolean }>([['pod-1', { name: 'Work' }]]);
+    const { order, read, destroy, repositoryService } = destroyHarness(records);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const prior = repositoryService.coordinate({ kind: 'pod', id: 'pod-1' }, () => held);
+    await read.readPod('pod-1');
+    const pending = destroy.destroyPod('pod-1');
+    await repositoryService.coordinate({ kind: 'pod', id: 'other' }, async () => {});
+    expect(order).toEqual([]);
+    if (change === 'pinned') records.set('pod-1', { name: 'Work', pinned: true });
+    else records.delete('pod-1');
+    release();
+    await prior;
+    await expect(pending).rejects.toThrow('repository authority mismatch');
     expect(order).toEqual(['lock']);
   });
 

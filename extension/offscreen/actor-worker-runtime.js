@@ -347,6 +347,7 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
       || m.type === 'app-read-file-response'
       || m.type === 'app-list-files-response'
       || m.type === 'app-delete-file-response'
+      || m.type === 'app-copy-pod-files-response'
       || m.type === 'app-observe-response'
       || m.type === 'app-act-response'
       || m.type === 'app-run-code-response'
@@ -960,6 +961,12 @@ self.addEventListener('message', async (/** @type {MessageEvent} */ ev) => {
               /** @type {string|undefined} */ appId, /** @type {string} */ path,
             ) => authorityValue(actorToolRequest(
               'app-delete-file-request', { ...effectBinding(), appId, path },
+            )),
+            copyPodFiles: (
+              /** @type {string} */ direction, /** @type {string} */ podId,
+              /** @type {string} */ appId, /** @type {unknown} */ files,
+            ) => authorityValue(actorToolRequest(
+              'app-copy-pod-files-request', { ...effectBinding(), direction, podId, appId, files },
             )),
             observeRuntime: () => authorityValue(actorToolRequest(
               'app-observe-request', effectBinding(),
