@@ -25,6 +25,7 @@ import { applyNotebookRealmSeal } from '../../../extension/engine-tabs/notebook-
 import { resolveRelativePath } from '../../../extension/peerd-engine/module-resolver.js';
 import { opfsHelpers } from '../../../extension/peerd-engine/opfs.js';
 import { APP_FILE_MISSING_EVENT, APP_FILES_HANDOFF, composeApp, stripMetaRefresh } from '../../../extension/peerd-engine/app-compose.js';
+import { appProblemNotices } from '../../../extension/engine-tabs/app-tab/app-problem.js';
 import { normalizeRequest, needsWebWriteConfirm } from '../../../extension/peerd-engine/vm-net/http-bridge.js';
 import {
   buildAppEgressBlockRule,
@@ -341,6 +342,25 @@ export const scenario: Scenario = {
         : leaked('reach real browser storage or the parent through the App storage objects',
           `realCalls=${JSON.stringify(realStorageCalls)} parentPosts=${parentPosts.length}`));
 
+      // App code can post the runner's notice messages itself. The App tab
+      // must build each notice from fixed text and show it one time for a load.
+      const hostile = '<a href="https://evil.example">Your vault is locked. Type your passphrase here</a>';
+      const appNotices = appProblemNotices();
+      const shownNotices = Array.from({ length: 200 }, (_unused, index) => appNotices.next({
+        type: index % 5 === 4 ? 'app-policy-blocked' : 'app-problem',
+        problem: ['feature', 'missing-file', 'threads', hostile][index % 4],
+        directive: hostile, text: hostile, details: hostile, stays: true,
+      })).filter((notice) => notice !== null);
+      const noticesHeld = shownNotices.length === 4
+        && !/evil|vault|passphrase|href|</.test(JSON.stringify(shownNotices))
+        && appNotices.next({ type: 'app-problem', problem: 'modules' })?.stays === true
+        && appNotices.next({ type: 'app-problem', problem: 'feature' }) === null;
+      probes.push(noticesHeld
+        ? blocked('put App text into an App tab notice, or repeat a notice without limit',
+          '200 forged messages gave 4 notices of fixed text; after the notice that stays, the load shows no other')
+        : leaked('put App text into an App tab notice, or repeat a notice without limit',
+          `shown=${JSON.stringify(shownNotices).slice(0, 300)}`));
+
       const refreshed = stripMetaRefresh('<head><meta content="0;url=//evil.example" http-equiv=refresh></head>');
       const noRefresh = !/http-equiv\s*=\s*["']?refresh/i.test(refreshed);
       probes.push(noRefresh
@@ -441,6 +461,7 @@ export const scenario: Scenario = {
       'composeApp + stripMetaRefresh (App iframe breakout/navigation defense)',
       'serveAppFiles (App file server: extension-origin 404s, revoked script/Worker/worklet URLs for packaged paths and for runtime data, no new network or parent channel)',
       'keepAppStorageInMemory (App localStorage and sessionStorage in page memory, no real storage and no parent channel)',
+      'appProblemNotices (App tab notices: fixed text, one time for a load)',
       'buildAppEgressBlockRule (tab-scoped HTTP(S)/WebSocket network floor)',
       'makeOffscreenActorChannelClient (exact-client channel transfer)',
       'normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)',

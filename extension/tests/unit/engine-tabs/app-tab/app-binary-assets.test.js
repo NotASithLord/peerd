@@ -687,6 +687,68 @@ const runDirectData = () => new Promise((resolve, reject) => {
   document.body.appendChild(iframe);
 });
 
+/** @param {string} html @returns {Promise<string[]>} */
+const runDirectProblems = (html) => new Promise((resolve, reject) => {
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px';
+  /** @type {string[]} */
+  const problems = [];
+  /** @type {MessagePort | null} */
+  let runnerPort = null;
+  const cleanup = () => {
+    clearTimeout(timer);
+    runnerPort?.close();
+    window.removeEventListener('message', onMessage);
+    iframe.remove();
+  };
+  const timer = setTimeout(() => {
+    cleanup();
+    reject(new Error(`runner problem handshake timed out after ${JSON.stringify(problems)}`));
+  }, 8000);
+  /** @param {MessageEvent} event */
+  const onMessage = (event) => {
+    if (event.source !== iframe.contentWindow) return;
+    if (event.data?.type === 'app-problem') problems.push(event.data.problem);
+    else if (event.data?.type === 'runner-problems-done') {
+      cleanup();
+      resolve(problems);
+    }
+  };
+  window.addEventListener('message', onMessage);
+  iframe.addEventListener('load', () => {
+    const channel = new MessageChannel();
+    runnerPort = channel.port1;
+    runnerPort.addEventListener('message', (event) => {
+      if (event.data?.type !== 'runner-ready') return;
+      runnerPort?.postMessage({ type: 'app-body', html, entry: 'index.html', assets: {} });
+    });
+    runnerPort.start();
+    iframe.contentWindow?.postMessage({ type: 'runner-init' }, '*', [channel.port2]);
+  }, { once: true });
+  iframe.src = '/engine-tabs/app-tab/runner.html';
+  document.body.appendChild(iframe);
+});
+
+describe('App runner failed code', () => {
+  it('names a script that did not load and a module import that failed, and not an image', async () => {
+    expect(await runDirectProblems(`<img src="no-such-image.png"><script src="no-such-script.js?v=1"><\/script>
+      <script type="module">import './no-such-module.js';<\/script>
+      <script>addEventListener('load', () => parent.postMessage({ type: 'runner-problems-done' }, '*'));<\/script>`))
+      .toEqual(['missing-file', 'modules']);
+  });
+
+  it('names a dynamic import that failed, and not an ordinary App error', async () => {
+    expect(await runDirectProblems(`<script>
+      addEventListener('unhandledrejection', (event) => {
+        if (event.reason instanceof TypeError) setTimeout(() => parent.postMessage({ type: 'runner-problems-done' }, '*'));
+      });
+      Promise.reject(new Error('an ordinary rejection'));
+      import('./no-such-chunk.js');
+      throw new Error('an ordinary error');
+    <\/script>`)).toEqual(['modules']);
+  });
+});
+
 describe('App runner binary assets', () => {
   it('permits gamepads and WASM in the opaque App frame without full screen', async () => {
     // eslint-disable-next-line no-restricted-globals

@@ -360,9 +360,14 @@ the real properties throws in the opaque frame, and game engines stop on that. T
 stand-ins never read real browser storage and send nothing to the parent, so nothing is
 saved. `indexedDB` stays native and refuses `open()`.
 When the App asks for a file it does not have, the server fires an in-realm event.
-The runner also watches for an uncaught SecurityError or an error that names
-SharedArrayBuffer. For each, the runner posts only a fixed problem name to the App tab,
-never the path or other App text. The file server is a convenience for
+The runner also watches for an uncaught SecurityError, an error that names
+SharedArrayBuffer, and App code that the browser did not load: a script element whose
+load failed, a module import that failed, or a module Worker that did not start. For
+each, the runner posts only a fixed problem name to the App tab, never the path or other
+App text. App code can post the same messages, so the App tab builds every notice from
+fixed text and shows each notice one time for a load of the App. The notice for code
+that did not load stays until the user closes it, and no later notice of that load
+replaces it. The file server is a convenience for
 game loaders, not a boundary: the CSP and the browser rule stay the network boundary.
 The App frame's `allow` attribute names only `gamepad`, which reads controller input.
 The in-browser red-team test pins the exact `sandbox` and `allow` values.

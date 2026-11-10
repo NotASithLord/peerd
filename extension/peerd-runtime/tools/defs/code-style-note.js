@@ -29,7 +29,7 @@ export const APP_RUNTIME_NOTE = [
   '<app-runtime>',
   'The App runs in a sandboxed, opaque-origin iframe. Your page scripts CANNOT use',
   "cross-file ES modules: import/export BETWEEN your files won't resolve and the app",
-  'silently fails to start. Put your JS in classic <script> tags (multiple tags share ONE',
+  'fails to start. Put your JS in classic <script> tags (multiple tags share ONE',
   'global scope — define in one, use in the next) OR a single self-contained',
   '<script type="module"> with no relative imports. Same for CSS: inline <style> or',
   'tag-relative <link href="./x.css"> (peerd inlines those).',

@@ -93,6 +93,15 @@ const loaderSource = (probe) => `(async () => {
       request.onerror = () => resolve('error');
       request.send();
     });
+    // Last, because the notice for code that did not load stays in place.
+    report.module = await new Promise((resolve) => {
+      const script = document.createElement('script');
+      script.type = 'module';
+      script.textContent = "import './dynamic.js';";
+      script.onload = () => resolve('load');
+      script.onerror = () => resolve('error');
+      document.head.append(script);
+    });
   } catch (error) {
     report.error = String(error);
   }
@@ -219,6 +228,16 @@ export const APP_FILE_SERVER_STATE = {
           && notice.summary === 'Technical details'))
           && notices.every((notice) => !/connect-src|Blocked |Bundle /.test(notice.text)),
         JSON.stringify(notices));
+      const stays = appProblemNotice({ type: 'app-problem', problem: 'modules' })?.text;
+      const last = await waitFor(async () => {
+        const shown = await evalIn(page, `(() => {
+          const notice = document.getElementById('app-security-notice');
+          return notice ? { text: notice.querySelector('span')?.firstChild?.textContent, timer: notice.dataset.timer } : null;
+        })()`).catch(() => null);
+        return shown?.text === stays ? shown : null;
+      }, { budgetMs: 10_000, pollMs: 100 });
+      rec.check('a module import that failed gets a reason that stays in the App tab',
+        report?.module === 'error' && last?.timer === '', JSON.stringify({ module: report?.module, last }));
       rec.check('packaged extension files get a 404 through the file server',
         JSON.stringify(report?.packaged) === '[404,404]', JSON.stringify(report?.packaged));
       rec.check('remote fetch and XHR still fail and make zero connections',

@@ -22,7 +22,7 @@ import { createDwebBridgeLifecycle } from './dweb-bridge-lifecycle.js';
 import { showConsentBar } from './consent-bar.js';
 import { mountFullScreen } from './full-screen.js';
 import { makeAppActorAttachRecovery } from './actor-attach-recovery.js';
-import { appProblemNotice } from './app-problem.js';
+import { appProblemNotices } from './app-problem.js';
 import { mapError } from '/sidepanel/error-display.js';
 
 const uiRuntime = makeUiRuntimeClient({ browser });
@@ -433,6 +433,7 @@ let runnerStarted = false;
 // bridge we just attached on runner-ready). One-shot per delivery.
 let expectingBodyLoad = false;
 let linkPromptOpen = false;
+let problemNotices = appProblemNotices();
 let runnerGeneration = 0;
 let agentCallSequence = 0;
 /** @type {Map<string, { resolve: (value: unknown) => void, timer: ReturnType<typeof setTimeout>, op: 'observe'|'act' }>} */
@@ -483,6 +484,9 @@ const tryDeliver = () => {
   try { assertAppRuntime(pendingRuntime, runnerFeatures); }
   catch (error) { fail(/** @type {Error} */ (error).message); return; }
   expectingBodyLoad = true;
+  // why: The reason that the last load did not start says nothing about this one.
+  if (problemNotices.stopped) document.getElementById('app-security-notice')?.remove();
+  problemNotices = appProblemNotices();
   // why: sandbox flags are fixed for the active document. Removing script
   // permission here leaves the already-loaded trusted runner able to execute
   // the App, while every later data:, blob:, or URL navigation enters a realm
@@ -743,8 +747,8 @@ window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
     return;
   }
   if ((e.data?.type === 'app-policy-blocked' || e.data?.type === 'app-problem') && runnerPhase === 'delivered') {
-    const notice = appProblemNotice(e.data);
-    if (notice) showNotice(notice.text, { details: notice.details });
+    const notice = problemNotices.next(e.data);
+    if (notice) showNotice(notice.text, { details: notice.details, persistent: notice.stays });
     return;
   }
   if (e.data?.type === 'app-link' && runnerPhase === 'delivered') {

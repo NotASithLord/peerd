@@ -65,6 +65,8 @@ export const APP_FILES_HANDOFF = '__peerdAppFiles';
 // The file server fires this Window event when the App asks for a file it does
 // not have. The runner reports it to the App tab without the path.
 export const APP_FILE_MISSING_EVENT = 'peerd-app-file-missing';
+// The file server fires this Window event when a module Worker does not start.
+export const APP_MODULE_FAILED_EVENT = 'peerd-app-module-failed';
 
 const APP_FILE_TYPES = {
   html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript',
@@ -95,8 +97,9 @@ const APP_FILE_TYPES = {
  * @param {string} handoff
  * @param {string} missingEvent
  * @param {RegExp} dataPath
+ * @param {string} moduleFailedEvent
  */
-export function serveAppFiles(scope, entry, types, handoff, missingEvent, dataPath) {
+export function serveAppFiles(scope, entry, types, handoff, missingEvent, dataPath, moduleFailedEvent) {
   'use strict';
   /** @type {Record<string, ArrayBuffer>} */
   const files = Object.create(null);
@@ -346,6 +349,13 @@ export function serveAppFiles(scope, entry, types, handoff, missingEvent, dataPa
       /** @param {string | URL} url @param {WorkerOptions} [options] */
       constructor(url, options) {
         super(/** @type {string} */ (appUrl(url)), options);
+        // why: A module Worker does not start in the App frame. The only sign
+        // is an error event with no message, and only the App can see it.
+        if (options?.type === 'module') {
+          this.addEventListener('error', (event) => {
+            if (!event.message) scope.dispatchEvent(new Event(moduleFailedEvent));
+          });
+        }
       }
     };
   }
@@ -416,7 +426,7 @@ const appFileServerScript = (entry) => {
   const literal = (value) => JSON.stringify(value).replace(/</g, '\\u003c');
   return '<script data-peerd-file-server>'
     + `(${serveAppFiles})(self,${literal(entry)},${literal(APP_FILE_TYPES)},${literal(APP_FILES_HANDOFF)},`
-    + `${literal(APP_FILE_MISSING_EVENT)},${APP_DATA_PATH_RE});`
+    + `${literal(APP_FILE_MISSING_EVENT)},${APP_DATA_PATH_RE},${literal(APP_MODULE_FAILED_EVENT)});`
     + `(${keepAppStorageInMemory})(self);`
     + '</script>';
 };

@@ -1,5 +1,7 @@
 import { describe, test, expect } from 'bun:test';
-import { APP_FILE_MISSING_EVENT, APP_FILES_HANDOFF, composeApp, stripMetaRefresh } from '../../extension/peerd-engine/app-compose.js';
+import {
+  APP_FILE_MISSING_EVENT, APP_FILES_HANDOFF, APP_MODULE_FAILED_EVENT, composeApp, stripMetaRefresh,
+} from '../../extension/peerd-engine/app-compose.js';
 
 const FILE_SERVER_RE = /^<script data-peerd-file-server>[\s\S]*?<\/script>/;
 // The App markup after the file server that composeApp always puts first.
@@ -276,8 +278,8 @@ const installFileServer = (files: Record<string, string | number[]>, entry = 'in
     get src() { return this.#src; }
     set src(value: unknown) { this.#src = value; }
   }
-  class WorkerStandIn {
-    constructor(readonly url: unknown, readonly options?: unknown) {}
+  class WorkerStandIn extends EventTarget {
+    constructor(readonly url: unknown, readonly options?: unknown) { super(); }
   }
   class WorkletStandIn {
     calls: unknown[][] = [];
@@ -358,6 +360,7 @@ describe('App file server', () => {
     expect(runner).toContain(`Object.defineProperty(window, '${APP_FILES_HANDOFF}'`);
     expect(runner).toContain(`delete window.${APP_FILES_HANDOFF};`);
     expect(runner).toContain(`window.addEventListener('${APP_FILE_MISSING_EVENT}'`);
+    expect(runner).toContain(`window.addEventListener('${APP_MODULE_FAILED_EVENT}'`);
   });
 
   test('fetch serves App files by relative, absolute, Request, and query URLs', async () => {
@@ -557,6 +560,19 @@ describe('App file server', () => {
     expect(await blobs.get(String(fromUrl.url))?.text()).toBe('calc');
     const inline = 'blob:chrome-extension://peerdtest/made-by-the-app';
     expect(new AppWorker(inline).url).toBe(inline);
+  });
+
+  test('a module Worker that does not start fires the module event; other Worker errors do not', () => {
+    const { AppWorker, events } = installFileServer({ 'worker.js': 'postMessage(1);' });
+    const failed = (worker: EventTarget, message?: string) => worker.dispatchEvent(
+      Object.assign(new Event('error'), message === undefined ? {} : { message }));
+    failed(new AppWorker('worker.js'));
+    failed(new AppWorker('worker.js', { type: 'classic' }));
+    failed(new AppWorker('worker.js', { type: 'module' }), 'Uncaught Error: thrown by the worker');
+    expect(events).toEqual([]);
+    failed(new AppWorker('worker.js', { type: 'module' }));
+    failed(new AppWorker('blob:chrome-extension://peerdtest/made-by-the-app', { type: 'module' }));
+    expect(events).toEqual([APP_MODULE_FAILED_EVENT, APP_MODULE_FAILED_EVENT]);
   });
 
   test('AudioWorklet addModule loads the App file; other worklets keep the native call', async () => {
