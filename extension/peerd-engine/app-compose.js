@@ -34,7 +34,7 @@ export const composeApp = (files, entry = 'index.html') => {
     if (!hrefMatch) return full;
     const href = hrefMatch[2];
     if (!isRelativeAndKnown(href, files, entry)) return full;
-    const path = resolveRel(entry, href);
+    const path = resolveRel(entry, href, files);
     assertStaticSource(path);
     visited.add(path);
     return `<style data-from="${escapeAttr(path)}">${files[path]}</style>`;
@@ -43,11 +43,12 @@ export const composeApp = (files, entry = 'index.html') => {
   // Inline <script src="./..."></script>  → <script>…</script>
   // Capture the closing tag too so we don't leave a dangling </script>.
   // why: Minified exports often leave the src value unquoted (src=game.js).
-  const SCRIPT_RE = /<script\b([^>]*?)\bsrc\s*=\s*(?:(['"])([^'"]+)\2|([^\s'"<>=`]+))([^>]*?)>(\s*)<\/script>/gi;
+  // A ?query or a #hash of such a value can hold a "=" (src=game.js?v=1).
+  const SCRIPT_RE = /<script\b([^>]*?)\bsrc\s*=\s*(?:(['"])([^'"]+)\2|([^\s'"<>=`?#]+(?:[?#][^\s'"<>`]*)?))([^>]*?)>(\s*)<\/script>/gi;
   composed = composed.replace(SCRIPT_RE, (full, beforeSrc, _q, quotedSrc, bareSrc, afterSrc) => {
     const src = quotedSrc ?? bareSrc;
     if (!isRelativeAndKnown(src, files, entry)) return full;
-    const path = resolveRel(entry, src);
+    const path = resolveRel(entry, src, files);
     assertStaticSource(path);
     visited.add(path);
     // Preserve type="module" etc. if present.
@@ -303,7 +304,9 @@ export function serveAppFiles(scope, entry, types, handoff, missingEvent, dataPa
   // file. A missing file gets a revoked blob: URL, so the load fails the way a
   // 404 does and never reads a packaged extension file. An App data path gets
   // the same answer: fetch and XHR can read it, but peerd.data can rewrite it
-  // with no new consent, so it never loads as code.
+  // with no new consent, so these calls do not give it to a code loader. This
+  // guards against a mistake and is not a boundary: App code can still run its
+  // own data, for example with eval or a blob: URL.
   /** @type {Record<string, string>} */
   const blobUrls = Object.create(null);
   let missingUrl = '';
@@ -427,13 +430,28 @@ export function keepAppStorageInMemory(scope) {
     const storage = new Proxy(Object.create(proto), {
       get: (target, name, receiver) => (typeof name === 'string' && !(name in target)
         ? items.get(name) : Reflect.get(target, name, receiver)),
-      set: (_target, name, value) => { store(items, String(name), String(value)); return true; },
-      defineProperty: (_target, name, { value }) => { store(items, String(name), String(value)); return true; },
+      // why the target for a Symbol: a real Storage keeps a Symbol key as a plain property.
+      set: (target, name, value, receiver) => {
+        if (typeof name === 'symbol') return Reflect.set(target, name, value, receiver);
+        store(items, name, String(value));
+        return true;
+      },
+      defineProperty: (target, name, descriptor) => {
+        if (typeof name === 'symbol') return Reflect.defineProperty(target, name, descriptor);
+        // A real Storage refuses a getter or a setter with a TypeError.
+        if (!('value' in descriptor || 'writable' in descriptor)) return false;
+        store(items, name, String(descriptor.value));
+        return true;
+      },
       has: (target, name) => name in target || items.has(/** @type {string} */ (name)),
-      deleteProperty: (_target, name) => items.delete(/** @type {string} */ (name)) || true,
-      ownKeys: () => [...items.keys()],
-      getOwnPropertyDescriptor: (_target, name) => (typeof name === 'string' && items.has(name)
-        ? { value: items.get(name), writable: true, enumerable: true, configurable: true } : undefined),
+      deleteProperty: (target, name) => (typeof name === 'symbol'
+        ? Reflect.deleteProperty(target, name) : items.delete(name) || true),
+      ownKeys: (target) => [...items.keys(), ...Reflect.ownKeys(target)],
+      getOwnPropertyDescriptor: (target, name) => {
+        if (typeof name === 'symbol') return Reflect.getOwnPropertyDescriptor(target, name);
+        return items.has(name)
+          ? { value: items.get(name), writable: true, enumerable: true, configurable: true } : undefined;
+      },
     });
     held.set(storage, items);
     return { configurable: true, enumerable: true, get: () => storage };
@@ -470,7 +488,7 @@ const injectAtDocumentStart = (html, snippet) => {
 // why: Accept only known bundle paths and resolve them from the actual entry.
 /** @param {string} ref @param {Record<string,string>} files @param {string} [entry] */
 const isRelativeAndKnown = (ref, files, entry = 'index.html') =>
-  isBundleRelative(ref) && resolveRel(entry, ref) in files;
+  isBundleRelative(ref) && resolveRel(entry, ref, files) in files;
 
 // Reject absolute and in-document references.
 /** @param {string} ref */
@@ -483,23 +501,29 @@ const isBundleRelative = (ref) =>
 /**
  * @param {string} basePath
  * @param {string} relPath
+ * @param {Record<string,string>} files
  */
-const resolveRel = (basePath, relPath) => {
+const resolveRel = (basePath, relPath, files) => {
   // basePath is the entry file (e.g. 'index.html' or 'pages/about.html')
   // relPath is './style.css' or '../shared/main.js'
   const baseDir = basePath.includes('/')
     ? basePath.slice(0, basePath.lastIndexOf('/'))
     : '';
-  // why: A ?query or a #hash is not part of the file name (game.js?v=3).
-  const parts = (baseDir ? baseDir.split('/') : []).concat(
-    relPath.replace(/[?#].*$/, '').split('/').filter((p) => p !== '.'),
-  );
-  const resolved = [];
-  for (const p of parts) {
-    if (p === '..') resolved.pop();
-    else if (p) resolved.push(p);
-  }
-  return resolved.join('/');
+  /** @param {string} ref */
+  const from = (ref) => {
+    const parts = (baseDir ? baseDir.split('/') : []).concat(ref.split('/').filter((p) => p !== '.'));
+    const resolved = [];
+    for (const p of parts) {
+      if (p === '..') resolved.pop();
+      else if (p) resolved.push(p);
+    }
+    return resolved.join('/');
+  };
+  const exact = from(relPath);
+  // why: A ?query or a #hash is not part of the file name (game.js?v=3),
+  // but an App file can have ? or # in its own name (c#.js).
+  const cut = relPath.search(/[?#]/);
+  return cut < 0 || exact in files ? exact : from(relPath.slice(0, cut));
 };
 
 /**

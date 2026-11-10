@@ -77,6 +77,22 @@ describe('composeApp', () => {
       .toThrow('app runtime data cannot be a composed source: data/save.json');
   });
 
+  // An App file can have ? or # in its own name. The exact name comes first.
+  test('inlines a file with ? or # in its name, and cuts a query with a line break or in an unquoted src', () => {
+    const files = {
+      'index.html': '<script src="lib/c#.js"></script><script src="what?.js"></script><script src="game.js?a\nb"></script>'
+        + '<script src=game.js?v=1&x=2 defer></script><link rel="stylesheet" href="a#b.css">',
+      'lib/c#.js': 'globalThis.sharp = 1;',
+      'what?.js': 'globalThis.what = 1;',
+      'game.js': 'globalThis.game = 1;',
+      'a#b.css': 'b { color: red; }',
+    };
+    expect(appMarkup(composeApp(files))).toBe('<script data-from="lib/c#.js">globalThis.sharp = 1;</script>'
+      + '<script data-from="what?.js">globalThis.what = 1;</script>'
+      + '<script data-from="game.js">globalThis.game = 1;</script>'
+      + '<script defer data-from="game.js">globalThis.game = 1;</script><style data-from="a#b.css">b { color: red; }</style>');
+  });
+
   test('inlines a BARE <script src="script.js"></script>', () => {
     const files = {
       'index.html': `<body><script src="script.js"></script></body>`,
@@ -726,6 +742,8 @@ describe('App storage', () => {
     const quotaError = (write: () => void) => {
       try { write(); return 'stored'; } catch (error) { return (error as DOMException).name; }
     };
+    // The key counts as the value does.
+    expect(quotaError(() => local.setItem('k'.repeat(5 * 1024 * 1024), 'v'))).toBe('QuotaExceededError');
     expect(quotaError(() => local.setItem('big', 'x'.repeat(6 * 1024 * 1024)))).toBe('QuotaExceededError');
     expect(quotaError(() => { local.big = 'x'.repeat(6 * 1024 * 1024); })).toBe('QuotaExceededError');
     expect(quotaError(() => local.setItem('fits', 'x'.repeat(4 * 1024 * 1024)))).toBe('stored');
@@ -745,6 +763,30 @@ describe('App storage', () => {
       .toEqual(['a', 'a', 'b', 'a', null, null]);
     Object.defineProperty(local, 'c', { value: 3 });
     expect([local.c, local.getItem('c'), local.length]).toEqual(['3', '3', 3]);
+  });
+
+  test('a Symbol key is a plain property and not an item', () => {
+    const local = installFileServer({}).scope.localStorage as KeyedStorage;
+    const bySymbol = local as unknown as Record<symbol, unknown>;
+    const tag = Symbol('tag');
+    const fixed = Symbol('fixed');
+    bySymbol[tag] = 1;
+    Object.defineProperty(local, fixed, { value: 2 });
+    expect([bySymbol[tag], bySymbol[fixed], tag in local, local.length, Object.keys(local)])
+      .toEqual([1, 2, true, 0, []]);
+    expect(Object.getOwnPropertySymbols(local)).toEqual([tag, fixed]);
+    expect(Object.getOwnPropertyDescriptor(local, fixed)?.configurable).toBe(false);
+    expect([delete bySymbol[tag], tag in local]).toEqual([true, false]);
+  });
+
+  test('defineProperty stores only a data descriptor', () => {
+    const local = installFileServer({}).scope.localStorage as KeyedStorage;
+    expect(() => Object.defineProperty(local, 'score', { get: () => 'x' })).toThrow(TypeError);
+    expect(() => Object.defineProperty(local, 'score', { set: () => {} })).toThrow(TypeError);
+    expect(() => Object.defineProperty(local, 'score', { enumerable: true })).toThrow(TypeError);
+    expect([local.getItem('score'), local.length]).toEqual([null, 0]);
+    Object.defineProperty(local, 'score', { value: 5, writable: true, enumerable: true, configurable: true });
+    expect([local.getItem('score'), local.length]).toEqual(['5', 1]);
   });
 
   test('nothing is kept: each App document starts with empty storage', () => {

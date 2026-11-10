@@ -17,7 +17,19 @@ let probeUrl = '';
 
 // The loader does what Emscripten glue does: it streams the module from a
 // relative fetch and reads the data package through XHR arraybuffer.
-const loaderSource = (probe) => `(async () => {
+const loaderSource = (probe) => `addEventListener('message', (event) => {
+  // The test asks the App to post a message again, or to reload its own frame.
+  const again = {
+    problem: { type: 'app-problem', problem: 'threads' },
+    link: { type: 'app-link', href: 'mailto:someone@example.com' },
+  }[event.data?.e2e];
+  if (again) {
+    parent.postMessage(again, '*');
+    parent.postMessage({ type: 'e2e-asked' }, '*');
+  }
+  if (event.data?.e2e === 'reload') location.reload();
+});
+(async () => {
   const report = {};
   try {
     const { instance } = await WebAssembly.instantiateStreaming(fetch('game.wasm'));
@@ -161,7 +173,17 @@ export const APP_FILE_SERVER_STATE = {
           globalThis.__fileServerReports = [];
           globalThis.__fileServerPolicies = [];
           globalThis.__fileServerNotices = [];
-          new MutationObserver(() => {
+          globalThis.__fileServerShows = [];
+          globalThis.__fileServerAsked = 0;
+          new MutationObserver((records) => {
+            // Each time the App tab shows a notice, it adds one span to the element.
+            for (const record of records) {
+              for (const node of record.addedNodes) {
+                if (record.target.id === 'app-security-notice' && node.localName === 'span') {
+                  globalThis.__fileServerShows.push(node.firstChild?.textContent);
+                }
+              }
+            }
             const notice = document.getElementById('app-security-notice');
             const text = notice?.querySelector('span')?.firstChild?.textContent;
             if (text && !globalThis.__fileServerNotices.some((seen) => seen.text === text)) {
@@ -174,6 +196,7 @@ export const APP_FILE_SERVER_STATE = {
             if (event.source !== document.getElementById('app-frame')?.contentWindow) return;
             if (event.data?.type === 'e2e-file-server') globalThis.__fileServerReports.push(event.data.report);
             if (event.data?.type === 'app-policy-blocked') globalThis.__fileServerPolicies.push(event.data.directive);
+            if (event.data?.type === 'e2e-asked') globalThis.__fileServerAsked += 1;
           });
         }
       ` });
@@ -254,6 +277,53 @@ export const APP_FILE_SERVER_STATE = {
         JSON.stringify({ fetch: report?.remoteFetch, xhr: report?.remoteXhr, hits: probeHits,
           connections: probeConnections,
           policies: await evalIn(page, 'globalThis.__fileServerPolicies ?? []').catch(() => null) }));
+      const tell = (what) => evalIn(page,
+        `document.getElementById('app-frame').contentWindow.postMessage({ e2e: ${JSON.stringify(what)} }, '*')`);
+      // The App posts one message, and the App tab has it before this returns.
+      const ask = async (what) => {
+        const asked = await evalIn(page, 'globalThis.__fileServerAsked');
+        await tell(what);
+        await waitFor(() => evalIn(page, `globalThis.__fileServerAsked > ${asked}`).catch(() => false),
+          { budgetMs: 5000, pollMs: 50 });
+      };
+      const focus = (selector) => evalIn(page, `document.querySelector(${JSON.stringify(selector)})?.focus()`);
+      const press = (selector) => evalIn(page, `document.querySelector(${JSON.stringify(selector)})?.click()`);
+      await focus('#mode-toggle');
+      await ask('link');
+      await focus('#app-problem-notice button');
+      await ask('link');
+      await press('#app-problem-notice button');
+      const focused = await evalIn(page, 'document.activeElement?.id || document.activeElement?.localName');
+      rec.check('Dismiss gives the focus back to the control that had it, also when a second notice came in between',
+        focused === 'mode-toggle' && (await reason())?.text === undefined, JSON.stringify(focused));
+      const threads = appProblemNotice({ type: 'app-problem', problem: 'threads' })?.text;
+      const shows = () => evalIn(page,
+        `globalThis.__fileServerShows.filter((text) => text === ${JSON.stringify(threads)}).length`);
+      const before = await shows();
+      const first = await waitFor(async () => {
+        await ask('problem');
+        const count = await shows();
+        return count > before ? count : null;
+      }, { budgetMs: 10_000, pollMs: 250 });
+      await ask('problem');
+      await ask('problem');
+      const onScreen = await shows();
+      await press('#app-security-notice button');
+      await ask('problem');
+      const dismissed = [await shows(), (await reason())?.other];
+      rec.check('the same App problem, posted again, keeps its one notice on screen, and does not come back at once after Dismiss',
+        first === before + 1 && onScreen === first && dismissed[0] === first && dismissed[1] === undefined,
+        JSON.stringify({ before, first, onScreen, dismissed }));
+      await tell('reload');
+      const second = await waitFor(() => evalIn(page, 'globalThis.__fileServerReports?.[1] ?? null')
+        .catch(() => null), { budgetMs: 40_000, pollMs: 100 });
+      const reloaded = await waitFor(async () => {
+        const shown = await reason();
+        return shown?.other === link ? shown : null;
+      }, { budgetMs: 10_000, pollMs: 100 }) ?? await reason();
+      rec.check('an App that reloads its own frame does not get the dismissed reason again',
+        second?.module === 'error' && reloaded?.other === link && reloaded.text === undefined,
+        JSON.stringify({ module: second?.module, error: second?.error, reloaded }));
       // Last, because Edit ends this load of the App.
       await evalIn(page, `document.getElementById('mode-toggle').click()`);
       const edited = await waitFor(async () => {

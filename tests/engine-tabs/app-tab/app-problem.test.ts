@@ -106,6 +106,30 @@ describe('App problem notices of one load', () => {
     expect(notices.next(problem('feature'))?.text).toContain('browser feature');
   });
 
+  test('a notice that is still on screen is kept when its problem comes again, and Dismiss ends that', () => {
+    let time = 0;
+    const notices = appProblemNotices(() => time);
+    const offline = text(blocked('img-src'));
+    expect(notices.next(blocked('img-src'))?.text).toBe(offline);
+    // The problem repeats each second. The App tab gives the text on screen and restarts the close timer.
+    for (time = 1000; time <= 20_000; time += 1000) {
+      expect(notices.next(blocked('connect-src'), offline)?.text).toBe(offline);
+    }
+    // The user closes the notice. The same text does not come back for 6 seconds.
+    time = 20_500;
+    expect(notices.next(blocked('img-src'), undefined)).toBe(null);
+    time = 25_999;
+    expect(notices.next(blocked('img-src'), null)).toBe(null);
+    time = 26_000;
+    expect(notices.next(blocked('img-src'))?.text).toBe(offline);
+    // Another notice on screen does not keep this one. The reason that stays still shows one time.
+    time = 27_000;
+    expect(notices.next(blocked('img-src'), 'Only confirmed HTTP(S) links can leave an App.')).toBe(null);
+    const stays = text(problem('modules'));
+    expect(notices.next(problem('modules'), stays)?.stays).toBe(true);
+    expect(notices.next(problem('modules'), stays)).toBe(null);
+  });
+
   test('the reason that stays shows one time for a load', () => {
     let time = 0;
     const notices = appProblemNotices(() => time);

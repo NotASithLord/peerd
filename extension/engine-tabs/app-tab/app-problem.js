@@ -65,7 +65,8 @@ const NOTICE_MS = 6000;
 /**
  * The notices of one App load. A notice that stays shows one time. Each other
  * notice shows at most one time in NOTICE_MS, so a later problem still gets
- * its notice.
+ * its notice. A notice that is still on screen when its problem comes again
+ * is kept: the App tab restarts its close timer, so it does not blink.
  * why: App code can post these messages without limit.
  * @param {() => number} [now]
  */
@@ -73,11 +74,17 @@ export const appProblemNotices = (now = Date.now) => {
   /** @type {Map<string, number>} */
   const shownAt = new Map();
   return {
-    /** @param {unknown} data - a message from the App frame @returns {AppProblemNotice | null} */
-    next(data) {
+    /**
+     * @param {unknown} data - a message from the App frame
+     * @param {string | null} [onScreen] - the text of the notice that shows now and does not stay
+     * @returns {AppProblemNotice | null}
+     */
+    next(data, onScreen) {
       const notice = appProblemNotice(data);
-      const last = notice ? shownAt.get(notice.text) : undefined;
-      if (!notice || (last !== undefined && (notice.stays || now() - last < NOTICE_MS))) return null;
+      if (!notice) return null;
+      const last = shownAt.get(notice.text);
+      const kept = !notice.stays && notice.text === onScreen;
+      if (!kept && last !== undefined && (notice.stays || now() - last < NOTICE_MS)) return null;
       shownAt.set(notice.text, now());
       return notice;
     },
