@@ -1,5 +1,7 @@
 import { describe, test, expect } from 'bun:test';
-import { APP_FILE_MISSING_EVENT, APP_FILES_HANDOFF, composeApp, stripMetaRefresh } from '../../extension/peerd-engine/app-compose.js';
+import {
+  APP_FILE_MISSING_EVENT, APP_FILES_HANDOFF, APP_MODULE_FAILED_EVENT, composeApp, stripMetaRefresh,
+} from '../../extension/peerd-engine/app-compose.js';
 
 const FILE_SERVER_RE = /^<script data-peerd-file-server>[\s\S]*?<\/script>/;
 // The App markup after the file server that composeApp always puts first.
@@ -57,6 +59,38 @@ describe('composeApp', () => {
     expect(out).toContain('<script async data-from="game.js">globalThis.game = 1;</script>');
     expect(out).not.toContain('src=game.js');
     expect(out).toContain('<script src=https://cdn.example/x.js></script>');
+  });
+
+  // GameMaker and other exports add a cache-busting query to a file they ship.
+  test('inlines a script and a style named with a ?query or a #hash', () => {
+    const files = {
+      'index.html': '<link rel="stylesheet" href="css/game.css?v=7"><script src="html5game/game.js?cachebust=1995823255"></script>'
+        + '<script src="./boot.js#top"></script><script src="missing.js?v=1"></script>',
+      'css/game.css': 'canvas { width: 100%; }',
+      'html5game/game.js': 'globalThis.game = 1;',
+      'boot.js': 'globalThis.boot = 1;',
+    };
+    expect(appMarkup(composeApp(files))).toBe('<style data-from="css/game.css">canvas { width: 100%; }</style>'
+      + '<script data-from="html5game/game.js">globalThis.game = 1;</script>'
+      + '<script data-from="boot.js">globalThis.boot = 1;</script><script src="missing.js?v=1"></script>');
+    expect(() => composeApp({ 'index.html': '<script src="data/save.json?v=1"></script>', 'data/save.json': '1' }))
+      .toThrow('app runtime data cannot be a composed source: data/save.json');
+  });
+
+  // An App file can have ? or # in its own name. The exact name comes first.
+  test('inlines a file with ? or # in its name, and cuts a query with a line break or in an unquoted src', () => {
+    const files = {
+      'index.html': '<script src="lib/c#.js"></script><script src="what?.js"></script><script src="game.js?a\nb"></script>'
+        + '<script src=game.js?v=1&x=2 defer></script><link rel="stylesheet" href="a#b.css"><script src="game.js?x/../what?.js"></script>',
+      'lib/c#.js': 'globalThis.sharp = 1;',
+      'what?.js': 'globalThis.what = 1;',
+      'game.js': 'globalThis.game = 1;',
+      'a#b.css': 'b { color: red; }',
+    };
+    expect(appMarkup(composeApp(files))).toBe('<script data-from="lib/c#.js">globalThis.sharp = 1;</script>'
+      + '<script data-from="what?.js">globalThis.what = 1;</script>'
+      + '<script data-from="game.js">globalThis.game = 1;</script>'
+      + '<script defer data-from="game.js">globalThis.game = 1;</script><style data-from="a#b.css">b { color: red; }</style><script data-from="game.js">globalThis.game = 1;</script>');
   });
 
   test('inlines a BARE <script src="script.js"></script>', () => {
@@ -276,8 +310,8 @@ const installFileServer = (files: Record<string, string | number[]>, entry = 'in
     get src() { return this.#src; }
     set src(value: unknown) { this.#src = value; }
   }
-  class WorkerStandIn {
-    constructor(readonly url: unknown, readonly options?: unknown) {}
+  class WorkerStandIn extends EventTarget {
+    constructor(readonly url: unknown, readonly options?: unknown) { super(); }
   }
   class WorkletStandIn {
     calls: unknown[][] = [];
@@ -287,7 +321,12 @@ const installFileServer = (files: Record<string, string | number[]>, entry = 'in
     }
   }
   class AudioWorkletStandIn extends WorkletStandIn {}
+  class StorageStandIn {}
+  const nativeIndexedDb = { open: () => { throw new DOMException('denied', 'SecurityError'); } };
+  const realStorageReads: string[] = [];
   const scope: Record<string, unknown> = {
+    Storage: StorageStandIn,
+    indexedDB: nativeIndexedDb,
     location: { href: RUNNER_URL },
     fetch: nativeFetch,
     XMLHttpRequest: NativeRequest,
@@ -300,6 +339,17 @@ const installFileServer = (files: Record<string, string | number[]>, entry = 'in
     AudioWorklet: AudioWorkletStandIn,
     [APP_FILES_HANDOFF]: Object.fromEntries(Object.entries(files).map(([path, value]) => [path, bytesOf(value)])),
   };
+  // In the opaque App frame, a read of each of these properties throws.
+  for (const name of ['localStorage', 'sessionStorage', 'caches']) {
+    Object.defineProperty(scope, name, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        realStorageReads.push(name);
+        throw new DOMException('The document is sandboxed.', 'SecurityError');
+      },
+    });
+  }
   // eslint-disable-next-line no-new-func
   new Function('self', script)(scope);
   const fetch = scope.fetch as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -309,6 +359,7 @@ const installFileServer = (files: Record<string, string | number[]>, entry = 'in
   return {
     html, script, scope, fetch, XHR, nativeFetch, nativeCalls, events, blobs, revoked,
     Script, AppWorker, NativeWorker: WorkerStandIn, AudioWorklet: AudioWorkletStandIn, Worklet: WorkletStandIn,
+    Storage: StorageStandIn, nativeIndexedDb, realStorageReads,
   };
 };
 
@@ -341,6 +392,7 @@ describe('App file server', () => {
     expect(runner).toContain(`Object.defineProperty(window, '${APP_FILES_HANDOFF}'`);
     expect(runner).toContain(`delete window.${APP_FILES_HANDOFF};`);
     expect(runner).toContain(`window.addEventListener('${APP_FILE_MISSING_EVENT}'`);
+    expect(runner).toContain(`window.addEventListener('${APP_MODULE_FAILED_EVENT}'`);
   });
 
   test('fetch serves App files by relative, absolute, Request, and query URLs', async () => {
@@ -542,6 +594,19 @@ describe('App file server', () => {
     expect(new AppWorker(inline).url).toBe(inline);
   });
 
+  test('a module Worker that does not start fires the module event; other Worker errors do not', () => {
+    const { AppWorker, events } = installFileServer({ 'worker.js': 'postMessage(1);' });
+    const failed = (worker: EventTarget, message?: string) => worker.dispatchEvent(
+      Object.assign(new Event('error'), message === undefined ? {} : { message }));
+    failed(new AppWorker('worker.js'));
+    failed(new AppWorker('worker.js', { type: 'classic' }));
+    failed(new AppWorker('worker.js', { type: 'module' }), 'Uncaught Error: thrown by the worker');
+    expect(events).toEqual([]);
+    failed(new AppWorker('worker.js', { type: 'module' }));
+    failed(new AppWorker('blob:chrome-extension://peerdtest/made-by-the-app', { type: 'module' }));
+    expect(events).toEqual([APP_MODULE_FAILED_EVENT, APP_MODULE_FAILED_EVENT]);
+  });
+
   test('AudioWorklet addModule loads the App file; other worklets keep the native call', async () => {
     const { AudioWorklet, Worklet, blobs } = installFileServer({ 'audio/processor.js': 'registerProcessor("p", class {});' });
     const audio = new AudioWorklet();
@@ -568,6 +633,34 @@ describe('App file server', () => {
     expect(events).toEqual(Array(3).fill(APP_FILE_MISSING_EVENT));
   });
 
+  test('fetch and XHR read an App data path, and it never loads as a script, Worker, or worklet', async () => {
+    const { fetch, XHR, Script, AppWorker, AudioWorklet, blobs, revoked, events } = installFileServer({
+      'data/Actors.json': '[null,{"id":1}]', 'data/plugins.js': 'globalThis.plugins = 1;',
+    });
+    const response = await fetch('data/Actors.json');
+    expect([response.status, response.headers.get('content-type')]).toEqual([200, 'application/json']);
+    expect(await response.json()).toEqual([null, { id: 1 }]);
+    const request = new XHR();
+    request.open('GET', './data/Actors.json');
+    request.send();
+    await settle(request);
+    expect([request.status, request.responseText]).toEqual([200, '[null,{"id":1}]']);
+    expect(events).toEqual([]);
+    const script = new Script();
+    script.src = 'data/Actors.json';
+    const missingUrl = String(script.src);
+    expect(revoked.has(missingUrl)).toBe(true);
+    expect(new AppWorker(new URL('data/Actors.json', RUNNER_URL)).url).toBe(missingUrl);
+    const audio = new AudioWorklet();
+    audio.addModule('./data/Actors.json');
+    expect(audio.calls[0]?.[0]).toBe(missingUrl);
+    expect(events).toEqual(Array(3).fill(APP_FILE_MISSING_EVENT));
+    // Only data/<key>.json is App data. Other files under data/ stay code.
+    const plugins = new Script();
+    plugins.src = 'data/plugins.js';
+    expect(await blobs.get(String(plugins.src))?.text()).toBe('globalThis.plugins = 1;');
+  });
+
   test('a fetch or XHR 404 fires the missing-file event; App files and other URLs do not', async () => {
     const { fetch, XHR, events } = installFileServer({ 'x.wasm': [0] });
     await fetch('x.wasm');
@@ -579,6 +672,138 @@ describe('App file server', () => {
     request.send();
     await settle(request);
     expect(events).toEqual([APP_FILE_MISSING_EVENT, APP_FILE_MISSING_EVENT]);
+  });
+});
+
+// Engines read these properties with no try/catch: Twine, Unity 6, PixiJS
+// and RPG Maker stop on the SecurityError that the opaque frame throws.
+describe('App storage', () => {
+  type KeyedStorage = Storage & Record<string, unknown>;
+
+  test('localStorage and sessionStorage hold strings in page memory and never read the real objects', () => {
+    const { scope, Storage, realStorageReads } = installFileServer({});
+    const local = scope.localStorage as KeyedStorage;
+    const session = scope.sessionStorage as KeyedStorage;
+    expect(local).toBeInstanceOf(Storage);
+    expect(scope.localStorage).toBe(local);
+    expect(session).not.toBe(local);
+    expect([local.length, local.getItem('best'), local.key(0)]).toEqual([0, null, null]);
+    local.setItem('best', 7 as unknown as string);
+    local.setItem('name', 'Ada');
+    expect([local.length, local.getItem('best'), local.key(0), local.key(1), local.key(2)])
+      .toEqual([2, '7', 'best', 'name', null]);
+    expect(session.length).toBe(0);
+    local.removeItem('best');
+    expect([local.length, local.getItem('best')]).toEqual([1, null]);
+    local.clear();
+    expect(local.length).toBe(0);
+    expect(realStorageReads).toEqual([]);
+  });
+
+  test('a key reads and writes as a property, the way Kaboom and GameMaker use it', () => {
+    const local = installFileServer({}).scope.localStorage as KeyedStorage;
+    local.level = 3;
+    local['hp'] = '12';
+    expect([local.getItem('level'), local.hp, local.missing, 'level' in local, 'missing' in local])
+      .toEqual(['3', '12', undefined, true, false]);
+    expect(Object.keys(local)).toEqual(['level', 'hp']);
+    expect(JSON.stringify(local)).toBe('{"level":"3","hp":"12"}');
+    expect(Object.hasOwn(local, 'hp')).toBe(true);
+    expect(delete local.level).toBe(true);
+    expect(local.length).toBe(1);
+    // A stored key never hides a method or length.
+    local.setItem('getItem', 'x');
+    (local as Record<string, unknown>).length = 9;
+    expect([typeof local.getItem, local.getItem('getItem'), local.getItem('length'), local.length])
+      .toEqual(['function', 'x', '9', 3]);
+  });
+
+  test('the Storage prototype holds the methods, so a library can call or patch them there', () => {
+    const { scope, Storage } = installFileServer({});
+    const local = scope.localStorage as KeyedStorage;
+    const proto = Storage.prototype as unknown as globalThis.Storage;
+    proto.setItem.call(local, 'k', 'v');
+    expect([proto.getItem.call(local, 'k'), Object.getOwnPropertyDescriptor(proto, 'length')?.get?.call(local)])
+      .toEqual(['v', 1]);
+    proto.removeItem.call(local, 'k');
+    expect(local.length).toBe(0);
+    expect(() => proto.getItem.call({}, 'k')).toThrow(TypeError);
+    const seen: string[] = [];
+    const { setItem } = proto;
+    proto.setItem = function patched(key: string, value: string) { seen.push(key); setItem.call(this, key, value); };
+    local.setItem('patched', '1');
+    expect([seen, local.getItem('patched')]).toEqual([['patched'], '1']);
+  });
+
+  test('a write over the quota throws QuotaExceededError and keeps the old values', () => {
+    const { scope } = installFileServer({});
+    const local = scope.localStorage as KeyedStorage;
+    local.setItem('small', 'kept');
+    const quotaError = (write: () => void) => {
+      try { write(); return 'stored'; } catch (error) { return (error as DOMException).name; }
+    };
+    // The key counts as the value does.
+    expect(quotaError(() => local.setItem('k'.repeat(5 * 1024 * 1024), 'v'))).toBe('QuotaExceededError');
+    expect(quotaError(() => local.setItem('big', 'x'.repeat(6 * 1024 * 1024)))).toBe('QuotaExceededError');
+    expect(quotaError(() => { local.big = 'x'.repeat(6 * 1024 * 1024); })).toBe('QuotaExceededError');
+    expect(quotaError(() => local.setItem('fits', 'x'.repeat(4 * 1024 * 1024)))).toBe('stored');
+    expect(quotaError(() => local.setItem('more', 'x'.repeat(2 * 1024 * 1024)))).toBe('QuotaExceededError');
+    expect(quotaError(() => local.setItem('fits', 'x'.repeat(5 * 1024 * 1024 - 13)))).toBe('stored');
+    expect([local.length, local.getItem('small'), local.getItem('big'), local.getItem('more')])
+      .toEqual([2, 'kept', null, null]);
+    // The other storage has its own quota.
+    expect(quotaError(() => (scope.sessionStorage as Storage).setItem('fits', 'x'.repeat(4 * 1024 * 1024)))).toBe('stored');
+  });
+
+  test('key() takes its index as the real Storage does, and defineProperty stores a key', () => {
+    const local = installFileServer({}).scope.localStorage as KeyedStorage;
+    local.setItem('a', '1');
+    local.setItem('b', '2');
+    expect([NaN, undefined, 1.7, 4294967296, -1, 2].map((index) => local.key(index as number)))
+      .toEqual(['a', 'a', 'b', 'a', null, null]);
+    Object.defineProperty(local, 'c', { value: 3 });
+    expect([local.c, local.getItem('c'), local.length]).toEqual(['3', '3', 3]);
+  });
+
+  test('a Symbol key is a plain property and not an item', () => {
+    const local = installFileServer({}).scope.localStorage as KeyedStorage;
+    const bySymbol = local as unknown as Record<symbol, unknown>;
+    const tag = Symbol('tag');
+    const fixed = Symbol('fixed');
+    bySymbol[tag] = 1;
+    Object.defineProperty(local, fixed, { value: 2 });
+    expect([bySymbol[tag], bySymbol[fixed], tag in local, local.length, Object.keys(local)])
+      .toEqual([1, 2, true, 0, []]);
+    expect(Object.getOwnPropertySymbols(local)).toEqual([tag, fixed]);
+    expect(Object.getOwnPropertyDescriptor(local, fixed)?.configurable).toBe(false);
+    expect([delete bySymbol[tag], tag in local]).toEqual([true, false]);
+  });
+
+  test('defineProperty stores only a data descriptor', () => {
+    const local = installFileServer({}).scope.localStorage as KeyedStorage;
+    expect(() => Object.defineProperty(local, 'score', { get: () => 'x' })).toThrow(TypeError);
+    expect(() => Object.defineProperty(local, 'score', { set: () => {} })).toThrow(TypeError);
+    expect(() => Object.defineProperty(local, 'score', { enumerable: true })).toThrow(TypeError);
+    expect([local.getItem('score'), local.length]).toEqual([null, 0]);
+    Object.defineProperty(local, 'score', { value: 5, writable: true, enumerable: true, configurable: true });
+    expect([local.getItem('score'), local.length]).toEqual(['5', 1]);
+  });
+
+  test('nothing is kept: each App document starts with empty storage', () => {
+    const first = installFileServer({}).scope.localStorage as Storage;
+    first.setItem('save', 'slot 1');
+    const second = installFileServer({}).scope;
+    expect((second.localStorage as Storage).getItem('save')).toBe(null);
+    expect((second.sessionStorage as Storage).length).toBe(0);
+  });
+
+  test('caches is absent, and indexedDB stays the native object that refuses open()', () => {
+    const { scope, nativeIndexedDb, realStorageReads } = installFileServer({});
+    expect('caches' in scope).toBe(false);
+    expect(scope.caches).toBe(undefined);
+    expect(scope.indexedDB).toBe(nativeIndexedDb);
+    expect(() => (scope.indexedDB as IDBFactory).open('save')).toThrow('denied');
+    expect(realStorageReads).toEqual([]);
   });
 });
 

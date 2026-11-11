@@ -22,7 +22,7 @@ import { createDwebBridgeLifecycle } from './dweb-bridge-lifecycle.js';
 import { showConsentBar } from './consent-bar.js';
 import { mountFullScreen } from './full-screen.js';
 import { makeAppActorAttachRecovery } from './actor-attach-recovery.js';
-import { appProblemNotice } from './app-problem.js';
+import { appProblemNotices } from './app-problem.js';
 import { mapError } from '/sidepanel/error-display.js';
 
 const uiRuntime = makeUiRuntimeClient({ browser });
@@ -73,17 +73,28 @@ const fail = (msg, { retryActor = false } = {}) => {
 
 /** @type {HTMLElement | null} */
 let noticeReturnFocus = null;
+const NOTICE_ID = 'app-security-notice';
 
-/** @param {string} text @param {{ persistent?: boolean, details?: string }} [options] */
-const showNotice = (text, { persistent = false, details = '' } = {}) => {
-  let notice = document.getElementById('app-security-notice');
+/** Close a notice after 6 seconds, or later while the keyboard focus is in it. @param {HTMLElement} notice */
+const closeNoticeLater = (notice) => {
+  clearTimeout(Number(notice.dataset.timer || 0));
+  notice.dataset.timer = String(setTimeout(() => {
+    if (notice.contains(document.activeElement)) closeNoticeLater(notice);
+    else notice.remove();
+  }, 6000));
+};
+
+/** @param {string} text @param {{ persistent?: boolean, details?: string, id?: string }} [options] */
+const showNotice = (text, { persistent = false, details = '', id = NOTICE_ID } = {}) => {
+  let notice = document.getElementById(id);
   const noticeHadFocus = Boolean(notice?.contains(document.activeElement));
-  if (!noticeHadFocus && document.activeElement instanceof HTMLElement) {
+  // why: Dismiss removes notice controls, but Retry save stays in the page.
+  if (document.activeElement instanceof HTMLElement && !document.activeElement.closest('#app-security-notice, #app-problem-notice')) {
     noticeReturnFocus = document.activeElement;
   }
   if (!notice) {
     notice = document.createElement('div');
-    notice.id = 'app-security-notice';
+    notice.id = id;
     notice.setAttribute('role', 'status');
     notice.setAttribute('aria-live', 'polite');
     notice.style.cssText = [
@@ -110,28 +121,21 @@ const showNotice = (text, { persistent = false, details = '' } = {}) => {
   close.type = 'button';
   close.textContent = 'Dismiss';
   close.style.cssText = 'border:1px solid #555;background:#111;color:#eee;border-radius:4px;padding:3px 7px;cursor:pointer';
-  /** @param {boolean} restoreFocus */
-  const dismiss = (restoreFocus) => {
+  const dismiss = () => {
     notice?.remove();
-    if (restoreFocus && noticeReturnFocus?.isConnected) noticeReturnFocus.focus({ preventScroll: true });
+    if (noticeReturnFocus?.isConnected) noticeReturnFocus.focus({ preventScroll: true });
   };
-  close.addEventListener('click', () => dismiss(true));
+  close.addEventListener('click', dismiss);
   notice.append(message, close);
   if (noticeHadFocus) close.focus({ preventScroll: true });
   notice.onkeydown = (event) => {
     if (event.key !== 'Escape') return;
     event.preventDefault();
-    dismiss(true);
+    dismiss();
   };
   clearTimeout(Number(notice.dataset.timer || 0));
-  const scheduleDismiss = () => {
-    notice.dataset.timer = String(setTimeout(() => {
-      if (notice?.contains(document.activeElement)) { scheduleDismiss(); return; }
-      dismiss(false);
-    }, 6000));
-  };
   notice.dataset.timer = '';
-  if (!persistent) scheduleDismiss();
+  if (!persistent) closeNoticeLater(notice);
 };
 
 /** @param {boolean} open */
@@ -347,6 +351,8 @@ const readForRender = async () => {
       const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
       JSON.parse(text);
       textFiles[path] = text;
+      // why: A game ships its own data/<name>.json files and reads them by URL.
+      textBytes[path] = bytes.buffer;
       continue;
     }
     if (isBinaryAppFile(path, bytes, appMeta?.fileKinds?.[path])) {
@@ -431,6 +437,8 @@ let runnerStarted = false;
 // bridge we just attached on runner-ready). One-shot per delivery.
 let expectingBodyLoad = false;
 let linkPromptOpen = false;
+const PROBLEM_NOTICE_ID = 'app-problem-notice';
+let problemNotices = appProblemNotices();
 let runnerGeneration = 0;
 let agentCallSequence = 0;
 /** @type {Map<string, { resolve: (value: unknown) => void, timer: ReturnType<typeof setTimeout>, op: 'observe'|'act' }>} */
@@ -541,6 +549,10 @@ const suspendRunnerForEdit = async () => {
   runnerPhase = 'suspended';
   runnerStarted = false;
   expectingBodyLoad = false;
+  // why: The reasons of this load end with it. A load that the App starts by a
+  // navigation of its own frame does not come here, so it gets no new set.
+  document.getElementById(PROBLEM_NOTICE_ID)?.remove();
+  problemNotices = appProblemNotices();
   await dwebBridgeLifecycle.dispose();
   // Replacing the document is the only way to stop a late async handler from
   // the prior generation; hiding the iframe would leave it running.
@@ -741,8 +753,17 @@ window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
     return;
   }
   if ((e.data?.type === 'app-policy-blocked' || e.data?.type === 'app-problem') && runnerPhase === 'delivered') {
-    const notice = appProblemNotice(e.data);
-    if (notice) showNotice(notice.text, { details: notice.details });
+    const shown = document.getElementById(NOTICE_ID);
+    const shownText = shown?.querySelector('span')?.firstChild?.textContent;
+    const notice = problemNotices.next(e.data, shownText);
+    // why only a new timer: the same notice is on screen, so it must not blink or be read out again.
+    if (shown && notice?.text === shownText) closeNoticeLater(shown);
+    // why its own element: no other notice replaces or closes the reason that stays.
+    else if (notice) {
+      showNotice(notice.text, {
+        details: notice.details, persistent: notice.stays, id: notice.stays ? PROBLEM_NOTICE_ID : undefined,
+      });
+    }
     return;
   }
   if (e.data?.type === 'app-link' && runnerPhase === 'delivered') {
