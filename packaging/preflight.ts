@@ -66,7 +66,7 @@ export const generatedFilesDifferFromHead = (
 };
 
 const main = async () => {
-  const args = parseArgs(process.argv.slice(2));
+  run('OSV exception scope and expiry', 'node', ['packaging/check-osv-exception.mjs']);
 
   // Drift check. gen:dev rewrites the generated files, so snapshot
   // their current bytes first: if they were already modified in the
@@ -147,7 +147,7 @@ const main = async () => {
     );
     process.exit(1);
   }
-  if (args.matrix === true) {
+  if (parseArgs(process.argv.slice(2)).matrix === true) {
     run('artifact matrix (store artifacts verified)', 'bun', ['packaging/package.ts', '--all', '--no-sign']);
     // Chrome-cost gate: boots every page of the real pruned build (both channels)
     // and fails on a blank page / missing same-origin resource. Needs Chrome for
