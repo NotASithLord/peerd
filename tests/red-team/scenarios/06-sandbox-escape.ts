@@ -355,15 +355,16 @@ export const scenario: Scenario = {
         directive: hostile, text: hostile, details: hostile, stays: true,
       })).filter((notice) => notice !== null);
       const stays = appNotices.next({ type: 'app-problem', problem: 'modules' })?.stays === true;
+      const kept = appNotices.next({ type: 'app-problem', problem: 'feature' }, shownNotices[0]?.text) === shownNotices[0];
       noticeTime = 6000;
-      const noticesHeld = shownNotices.length === 4
+      const noticesHeld = kept && shownNotices.length === 4
         && !/evil|vault|passphrase|href|</.test(JSON.stringify(shownNotices))
         && stays && appNotices.next({ type: 'app-problem', problem: 'modules' }) === null
         && appNotices.next({ type: 'app-policy-blocked', directive: 'img-src' }) !== null;
       probes.push(noticesHeld
-        ? blocked('put App text into a notice for an App problem or a sandbox block, or repeat such a notice without limit',
-          '200 forged messages gave 4 notices of fixed text; the same notice shows at most one time in 6 seconds, and the notice that stays one time for a load')
-        : leaked('put App text into a notice for an App problem or a sandbox block, or repeat such a notice without limit',
+        ? blocked('put App text into a notice for an App problem or a sandbox block, or create new notices without limit',
+          '200 forged messages gave 4 notices of fixed text; a new notice shows at most one time in 6 seconds; a notice on screen stays while its message repeats, until the user closes it; the module notice shows one time for a load')
+        : leaked('put App text into a notice for an App problem or a sandbox block, or create new notices without limit',
           `shown=${JSON.stringify(shownNotices).slice(0, 300)}`));
 
       const refreshed = stripMetaRefresh('<head><meta content="0;url=//evil.example" http-equiv=refresh></head>');
@@ -466,7 +467,7 @@ export const scenario: Scenario = {
       'composeApp + stripMetaRefresh (App iframe breakout/navigation defense)',
       'serveAppFiles (App file server: extension-origin 404s, revoked script/Worker/worklet URLs for packaged paths and for runtime data, no new network or parent channel)',
       'keepAppStorageInMemory (App localStorage and sessionStorage in page memory, no real storage and no parent channel)',
-      'appProblemNotices (notices for App problems and sandbox blocks: fixed text, at most one time in 6 seconds)',
+      'appProblemNotices (App problem and sandbox block notices: fixed text, new notices limited, repeated messages keep one notice on screen until Dismiss)',
       'buildAppEgressBlockRule (tab-scoped HTTP(S)/WebSocket network floor)',
       'makeOffscreenActorChannelClient (exact-client channel transfer)',
       'normalizeRequest + needsWebWriteConfirm (WebVM bridge scheme/CRLF/auth/confirm)',

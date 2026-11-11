@@ -88,8 +88,8 @@ const closeNoticeLater = (notice) => {
 const showNotice = (text, { persistent = false, details = '', id = NOTICE_ID } = {}) => {
   let notice = document.getElementById(id);
   const noticeHadFocus = Boolean(notice?.contains(document.activeElement));
-  // why not from the stack: a button of another notice is gone when that notice closes.
-  if (!noticeStack.contains(document.activeElement) && document.activeElement instanceof HTMLElement) {
+  // why: Dismiss removes notice controls, but Retry save stays in the page.
+  if (document.activeElement instanceof HTMLElement && !document.activeElement.closest('#app-security-notice, #app-problem-notice')) {
     noticeReturnFocus = document.activeElement;
   }
   if (!notice) {

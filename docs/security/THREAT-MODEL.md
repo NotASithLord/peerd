@@ -368,7 +368,8 @@ SharedArrayBuffer, and App code that the browser did not load: a script element 
 load failed, a module import that failed, or a module Worker that did not start. For
 each, the runner posts only a fixed problem name to the App tab, never the path or other
 App text. App code can post the same messages, so the App tab builds every notice from
-fixed text and shows the same notice at most one time in 6 seconds. The notice for a
+fixed text and shows a new notice at most one time in 6 seconds. A notice on screen
+stays while its message repeats, until the user closes it. The notice for a
 module that did not load has its own place and stays until the user closes it or edits
 the App. It shows one time for a load, and a reload that the App starts is not a new
 load. The notices help the user and are not a security signal: App code can post them,

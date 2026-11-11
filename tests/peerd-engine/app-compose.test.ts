@@ -81,7 +81,7 @@ describe('composeApp', () => {
   test('inlines a file with ? or # in its name, and cuts a query with a line break or in an unquoted src', () => {
     const files = {
       'index.html': '<script src="lib/c#.js"></script><script src="what?.js"></script><script src="game.js?a\nb"></script>'
-        + '<script src=game.js?v=1&x=2 defer></script><link rel="stylesheet" href="a#b.css">',
+        + '<script src=game.js?v=1&x=2 defer></script><link rel="stylesheet" href="a#b.css"><script src="game.js?x/../what?.js"></script>',
       'lib/c#.js': 'globalThis.sharp = 1;',
       'what?.js': 'globalThis.what = 1;',
       'game.js': 'globalThis.game = 1;',
@@ -90,7 +90,7 @@ describe('composeApp', () => {
     expect(appMarkup(composeApp(files))).toBe('<script data-from="lib/c#.js">globalThis.sharp = 1;</script>'
       + '<script data-from="what?.js">globalThis.what = 1;</script>'
       + '<script data-from="game.js">globalThis.game = 1;</script>'
-      + '<script defer data-from="game.js">globalThis.game = 1;</script><style data-from="a#b.css">b { color: red; }</style>');
+      + '<script defer data-from="game.js">globalThis.game = 1;</script><style data-from="a#b.css">b { color: red; }</style><script data-from="game.js">globalThis.game = 1;</script>');
   });
 
   test('inlines a BARE <script src="script.js"></script>', () => {

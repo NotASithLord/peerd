@@ -7,7 +7,7 @@ import { appProblemNotice } from '../../extension/engine-tabs/app-tab/app-proble
 import { attach, evalIn, openExtPage, rpc, sseText, sseToolCall, waitFor } from './e2e-harness.mjs';
 
 // A module that exports answer() and returns 42, and a small data package.
-const GAME_WASM = 'AGFzbQEAAAABBQFgAAF/AwIBAAcKAQZhbnN3ZXIAAAoGAQQAQSoL';
+export const GAME_WASM = 'AGFzbQEAAAABBQFgAAF/AwIBAAcKAQZhbnN3ZXIAAAoGAQQAQSoL';
 const GAME_DATA = 'AAEC+v8=';
 const GAME_DATA_BYTES = [0, 1, 2, 250, 255];
 // A BOM proves the server sends the stored bytes, not a decoded string.
@@ -173,22 +173,13 @@ export const APP_FILE_SERVER_STATE = {
           globalThis.__fileServerReports = [];
           globalThis.__fileServerPolicies = [];
           globalThis.__fileServerNotices = [];
-          globalThis.__fileServerShows = [];
           globalThis.__fileServerAsked = 0;
           new MutationObserver((records) => {
             // Each time the App tab shows a notice, it adds one span to the element.
-            for (const record of records) {
-              for (const node of record.addedNodes) {
-                if (record.target.id === 'app-security-notice' && node.localName === 'span') {
-                  globalThis.__fileServerShows.push(node.firstChild?.textContent);
-                }
-              }
-            }
-            const notice = document.getElementById('app-security-notice');
-            const text = notice?.querySelector('span')?.firstChild?.textContent;
-            if (text && !globalThis.__fileServerNotices.some((seen) => seen.text === text)) {
+            for (const node of records.filter((record) => record.target.id === 'app-security-notice')
+              .flatMap((record) => [...record.addedNodes]).filter((node) => node.localName === 'span')) {
               globalThis.__fileServerNotices.push({
-                text, summary: notice.querySelector('details summary')?.textContent ?? '',
+                text: node.firstChild?.textContent, summary: node.querySelector('summary')?.textContent ?? '',
               });
             }
           }).observe(document, { childList: true, subtree: true, characterData: true });
@@ -238,12 +229,9 @@ export const APP_FILE_SERVER_STATE = {
       rec.check('localStorage and sessionStorage hold values in page memory, caches is absent, and indexedDB refuses open()',
         JSON.stringify(report?.storage) === JSON.stringify(['7', '2', 2, 1, 'undefined', false, 'SecurityError']),
         JSON.stringify(report?.storage));
-      const expectedNotices = [
-        { type: 'app-problem', problem: 'missing-file' },
-        { type: 'app-problem', problem: 'feature' },
-        { type: 'app-problem', problem: 'threads' },
-        { type: 'app-policy-blocked', directive: 'connect-src' },
-      ].map((data) => appProblemNotice(data)?.text);
+      const expectedNotices = ['missing-file', 'feature', 'threads']
+        .map((problem) => appProblemNotice({ type: 'app-problem', problem })?.text)
+        .concat(appProblemNotice({ type: 'app-policy-blocked', directive: 'connect-src' })?.text);
       const notices = await waitFor(async () => {
         const seen = await evalIn(page, 'globalThis.__fileServerNotices ?? []').catch(() => []);
         return expectedNotices.every((text) => seen.some((notice) => notice.text === text)) ? seen : null;
@@ -297,22 +285,25 @@ export const APP_FILE_SERVER_STATE = {
       rec.check('Dismiss gives the focus back to the control that had it, also when a second notice came in between',
         focused === 'mode-toggle' && (await reason())?.text === undefined, JSON.stringify(focused));
       const threads = appProblemNotice({ type: 'app-problem', problem: 'threads' })?.text;
-      const shows = () => evalIn(page,
-        `globalThis.__fileServerShows.filter((text) => text === ${JSON.stringify(threads)}).length`);
+      const shows = async () => (await evalIn(page, 'globalThis.__fileServerNotices'))
+        .filter((notice) => notice.text === threads).length;
       const before = await shows();
       const first = await waitFor(async () => {
         await ask('problem');
-        const count = await shows();
-        return count > before ? count : null;
+        return await shows() > before;
       }, { budgetMs: 10_000, pollMs: 250 });
+      await evalIn(page, `globalThis.__fileServerRepeat = document.getElementById('app-security-notice')`);
+      await new Promise((resolve) => setTimeout(resolve, 4000));
       await ask('problem');
-      await ask('problem');
-      const onScreen = await shows();
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const onScreen = [await shows(), await evalIn(page,
+        `globalThis.__fileServerRepeat === document.getElementById('app-security-notice')`)];
       await press('#app-security-notice button');
       await ask('problem');
       const dismissed = [await shows(), (await reason())?.other];
       rec.check('the same App problem, posted again, keeps its one notice on screen, and does not come back at once after Dismiss',
-        first === before + 1 && onScreen === first && dismissed[0] === first && dismissed[1] === undefined,
+        first === true && onScreen[0] === before + 1 && onScreen[1] === true
+          && dismissed[0] === before + 1 && dismissed[1] === undefined,
         JSON.stringify({ before, first, onScreen, dismissed }));
       await tell('reload');
       const second = await waitFor(() => evalIn(page, 'globalThis.__fileServerReports?.[1] ?? null')

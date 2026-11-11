@@ -42,7 +42,7 @@ import { WEBVM_TERMINAL_STATE } from './webvm-terminal-state.mjs';
 import { WASMER_STATE } from './wasmer-state.mjs';
 import { STARTER_VISUAL_STATES, discoverSurface } from './starter-visuals.mjs';
 import { APP_RUNTIME_STATES } from './app-runtime-state.mjs';
-import { APP_FILE_SERVER_STATE } from './app-file-server-state.mjs';
+import { APP_FILE_SERVER_STATE, GAME_WASM } from './app-file-server-state.mjs';
 import { PERF_CHAT_NOTEBOOK_STATES } from './perf-chat-notebook-state.mjs';
 import { CHAT_ONBOARDING_STATES } from './chat-onboarding-state.mjs';
 import { HOME_SETTINGS_STATES } from './home-settings-state.mjs';
@@ -10917,6 +10917,7 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
       ? sseToolCall('sandbox_create', {
         kind: 'app', name: 'Editor recovery', files: {
           'index.html': '<!doctype html><title>Editor recovery</title><h1>Draft recovery</h1><script>peerd.data.set("first", {saved:true})</script>',
+          'game.wasm': { base64: GAME_WASM },
         },
       }) : sseText('EDITOR-RECOVERY-READY') }),
     async run(ctx, rec) {
@@ -11143,6 +11144,14 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
         if (baseRender) rec.observe('merge-base locked save guidance', lockNotice);
         else rec.check('the Save banner directs the user to unlock',
           lockNotice?.includes('Unlock it in the peerd panel, then retry.') && !lockNotice.includes('free browser storage'), lockNotice);
+        const retryFocus = await evalIn(page, `(() => {
+          document.getElementById('app-save-retry').focus();
+          document.querySelector('.pe-node[data-path="game.wasm"]').click();
+          document.querySelector('#app-security-notice button').focus();
+          document.querySelector('#app-security-notice button').click();
+          return document.activeElement?.id;
+        })()`);
+        rec.check('Dismiss returns focus to Retry after a real save failure', retryFocus === 'app-save-retry', retryFocus);
         await rec.visualPage('app-editor-locked-save', page);
         const beforeLockedChat = ctx.modelCallCount();
         const lockedChat = await chat('Keep this prompt while the vault is locked.');

@@ -506,9 +506,7 @@ const isBundleRelative = (ref) =>
 const resolveRel = (basePath, relPath, files) => {
   // basePath is the entry file (e.g. 'index.html' or 'pages/about.html')
   // relPath is './style.css' or '../shared/main.js'
-  const baseDir = basePath.includes('/')
-    ? basePath.slice(0, basePath.lastIndexOf('/'))
-    : '';
+  const baseDir = basePath.slice(0, basePath.lastIndexOf('/') + 1);
   /** @param {string} ref */
   const from = (ref) => {
     const parts = (baseDir ? baseDir.split('/') : []).concat(ref.split('/').filter((p) => p !== '.'));
@@ -519,11 +517,12 @@ const resolveRel = (basePath, relPath, files) => {
     }
     return resolved.join('/');
   };
-  const exact = from(relPath);
   // why: A ?query or a #hash is not part of the file name (game.js?v=3),
-  // but an App file can have ? or # in its own name (c#.js).
+  // but an App file can have ? or # in its own name (c#.js). A query cannot change the parent path.
   const cut = relPath.search(/[?#]/);
-  return cut < 0 || exact in files ? exact : from(relPath.slice(0, cut));
+  const path = from(cut < 0 ? relPath : relPath.slice(0, cut));
+  const exact = cut < 0 ? path : path + relPath.slice(cut);
+  return exact in files ? exact : path;
 };
 
 /**
