@@ -1,27 +1,15 @@
-# OSV scans build dependencies in bun.lock; the extension does not ship them.
-# The Firefox tool web-ext requires adbkit, which requires node-forge.
-# Desktop lint, signing, and tests do not use the affected Android bridge.
-# This exception remains restricted to the exact graph enforced by the guard.
-# Other advisories still fail the scan. Remove this exception when a fix is used.
-#
-# Exception approved by the repository owner on 2026-10-06 for this exact scope.
-# Renewed by the owner on 2026-10-26 for 14 days after re-triage: no patched
-# node-forge release; web-ext 10.8.0 still depends on adbkit 3.3.9. The reviewed
-# dependency versions, hashes, desktop-only scope and guards remain unchanged.
-# Reviewed only for web-ext 10.6.0 -> adbkit 3.3.9 -> node-forge 1.4.0.
-# Desktop lint/sign/test paths do not create adbkit's TCP-USB bridge.
-# Re-triage before changing these coordinates or enabling Android/bridge use.
-[[IgnoredVulns]]
-id = "GHSA-86w9-cpqp-85rv"
-ignoreUntil = 2026-11-09T00:00:00Z
-reason = "No upstream fix. Current web-ext desktop lint/sign/test commands do not invoke adbkit TCP-USB RSA authentication; reviewed for web-ext 10.6.0 / adbkit 3.3.9 / node-forge 1.4.0. Not a general node-forge safety claim."
-
-# Owner approved 2026-10-28 through November 11. Build tools only:
-# addons-linter merges bundled schemas and literal patches; lint input is not
-# a schema merge input. Custom schema injection and new consumers require review.
-# Exact coordinates/integrities and usage tripwires are enforced by
-# packaging/check-deepmerge-exception.mjs. No general deepmerge safety claim.
+# OSV scans build dependencies. The extension does not ship these packages.
+# Re-triaged on 2026-11-11. CVE-2026-93753 was rejected on 2026-11-02
+# because it does not describe a security vulnerability. The GitHub and OSV
+# advisory records still predate that rejection and report the finding.
+# https://github.com/CVEProject/cvelistV5/blob/main/cves/2026/93xxx/CVE-2026-93753.json
+# https://github.com/advisories/GHSA-gcqx-w48m-w2h4
+# Keep a short review date for this record discrepancy. This is not a general
+# deepmerge safety claim. The reviewed desktop tool path merges bundled schemas
+# and literal patches. Lint input is not a schema merge input.
+# Exact coordinates, integrities, and usage checks remain in
+# packaging/check-deepmerge-exception.mjs. New consumers require re-triage.
 [[IgnoredVulns]]
 id = "GHSA-gcqx-w48m-w2h4"
-ignoreUntil = 2026-11-11T00:00:00Z
-reason = "No upstream patch. Reviewed addons-linter 10.10.0 uses deepmerge 4.3.1 only for bundled schemas and literal schema patches in desktop web-ext tooling; not shipped runtime. Exact dependency graph and schema-only usage guarded; re-triage any scope change."
+ignoreUntil = 2026-11-25T00:00:00Z
+reason = "CVE-2026-93753 was rejected on 2026-11-02. GitHub/OSV still report the older advisory. Reviewed for addons-linter 10.10.0 / deepmerge 4.3.1 in desktop web-ext tools. Exact graph and schema-only usage checks apply. Re-triage by expiry or on any scope change."

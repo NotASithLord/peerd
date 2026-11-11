@@ -120,6 +120,7 @@
     "fast-uri": "3.1.9",
     "image-size": "2.0.4",
     "js-yaml": "4.3.2",
+    "minimatch@^10.0.0": "11.0.8",
     "shell-quote": "1.11.0"
   }
 }

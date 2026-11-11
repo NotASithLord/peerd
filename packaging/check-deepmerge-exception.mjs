@@ -1,11 +1,11 @@
-// Temporary owner-approved build-tool waiver. Do not extend to arbitrary merges.
+// why: the CVE is rejected, but the active GHSA still needs a scoped exception.
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 const EXPECTED = {"addons-linter": ["addons-linter@10.10.0", "sha512-1n5Xvn4DyHMsulchNDl4ucWnXXQhHwLif6eK80KjieI9KIK3xD+3OYXk5ZcA6a2J8y+Nrlvq9/vq6w7KOqT2MQ=="], "deepmerge": ["deepmerge@4.3.1", "sha512-3sUqbMEc77XqpdNO7FRyRog+eW3ph+GYCbj+rK+uYyRMuwsVy0rMiVtPn+QJlKFvWP/1PYpapqYn0Me2knFn+A=="], "web-ext": ["web-ext@10.6.0", "sha512-r1MfSwVy5wRQw3UgTUCw9CDViFIoDPri1Wq8qh/mRjC8T+K0TfuxKz68bzYTEP3rbAW6Wn8y7v/jXzBYd3LLGA=="]};
 export function checkDeepmergeException(root, now = Date.now()) {
   const id = 'GHSA-gcqx-w48m-w2h4';
-  const expiry = '2026-11-11T00:00:00Z';
+  const expiry = '2026-11-25T00:00:00Z';
   const config = readFileSync(join(root, 'osv-scanner.toml'), 'utf8');
   const entries = config.split('[[IgnoredVulns]]').slice(1).filter(entry => entry.includes(`id = "${id}"`));
   if (!entries.length && !config.includes(id)) return;
