@@ -7,14 +7,14 @@ import {utf8} from '../../extension/shared/bundle/bytes.js';
 import {sha256hex} from '../../extension/shared/bundle/chunk.js';
 import {buildEnvelope,signEnvelope} from '../../extension/peerd-distributed/transport/envelope.js';
 import {createSession,ADMISSION_READY} from '../../extension/peerd-distributed/transport/session.js';
-import {ROUTING_WITNESS,ROUTING_CONTROL} from '../../extension/peerd-distributed/transport/capabilities.js';
+import {ROUTING_WITNESS,ROUTE_HINTS,ROUTING_CONTROL} from '../../extension/peerd-distributed/transport/capabilities.js';
 import {createRoutingPathHolds} from '../../extension/peerd-distributed/transport/routing-path-holds.js';
 import {createRoutingRpc} from '../../extension/peerd-distributed/transport/routing-rpc.js';
 import {createRoutingPathSearch} from '../../extension/peerd-distributed/transport/routing-path-search.js';
 import {createRoutingWitnesses} from '../../extension/peerd-distributed/transport/routing-witness.js';
 import {NEIGHBOR_GRACE_MS} from '../../extension/peerd-distributed/transport/neighbor-policy.js';
 const until=async(check:()=>boolean)=>{for(let i=0;i<200&&!check();i++)await new Promise(r=>setTimeout(r,5));expect(check()).toBe(true);};
-const fixture=async(edges:number[][],count=6,onSend?:(from:number,to:number,env:any)=>Promise<void>)=>{
+const fixture=async(edges:number[][],count=6,onSend?:(from:number,to:number,env:any)=>Promise<void>,legacy:number[]=[])=>{
  const frames:Array<{from:number,to:number,env:any}>=[];
  const ids=await Promise.all(Array.from({length:count},()=>generateIdentity()));let offset=0;const now=()=>Date.now()+offset;
  const meshes=ids.map(identity=>createRoomMesh({identity,roomId:'rpc',budget:2,sparse:true,now}));
@@ -26,13 +26,13 @@ const fixture=async(edges:number[][],count=6,onSend?:(from:number,to:number,env:
     return original(env,options);
    };
   }
-  const sessions=await Promise.all([a,b].map((node,i)=>createSession({identity:ids[node],channel:pair[i],caps:[ROUTING_WITNESS]})));
+  const sessions=await Promise.all([a,b].map((node,i)=>createSession({identity:ids[node],channel:pair[i],caps:[ROUTING_WITNESS,...(legacy.includes(node)?[]:[ROUTE_HINTS])]})));
   for(const [i,node] of [a,b].entries())expect(meshes[node].addLink(pair[i],sessions[i].remoteDid,{caps:sessions[i].remoteCaps},{locallySelected:true})).toBe(true);offset++;
  }
  offset+=NEIGHBOR_GRACE_MS;
  const gates=meshes.map((mesh,i)=>createRoutingPathHolds({identity:ids[i],roomId:'rpc',holdRoutingLink:mesh.holdRoutingLink,now}));
  const rpcs=meshes.map((mesh,i)=>createRoutingRpc({identity:ids[i],roomId:'rpc',mesh,holds:gates[i],now}));
- const searches=rpcs.map((rpc,i)=>createRoutingPathSearch({selfDid:ids[i].did,readNeighbors:rpc.readNeighbors,now}));
+ const searches=rpcs.map((rpc,i)=>createRoutingPathSearch({selfDid:ids[i].did,readNeighbors:rpc.readNeighbors,readRouteNeighbors:rpc.readRouteNeighbors,now}));
  const witnesses=rpcs.map((rpc,i)=>createRoutingWitnesses({identity:ids[i],roomId:'rpc',acquireHop:rpc.acquireHop,now}));
  return {ids,meshes,rpcs,searches,witnesses,frames,now,advance:(ms:number)=>offset+=ms,
   close:()=>{searches.forEach(x=>x.close());witnesses.forEach(x=>x.close());rpcs.forEach(x=>x.close());gates.forEach(x=>x.close());meshes.forEach(x=>x.close());}};
@@ -73,7 +73,7 @@ test('existing route discovery traverses saturated signed carriers without chang
    expect(f.meshes.map(mesh=>mesh.peers().map(peer=>peer.did).sort())).toEqual(before);
    expect(f.meshes.every(mesh=>mesh.stats().totalDegree<=2)).toBe(true);
    expect(f.frames.some(frame=>frame.env.typ===10)).toBe(true);
-   expect(f.frames.filter(frame=>frame.env.typ===10).every(frame=>frame.env.body.op==='neighbors')).toBe(true);
+   expect(f.frames.filter(frame=>frame.env.typ===10).every(frame=>frame.env.body.op==='route-neighbors')).toBe(true);
   }finally{f.close();}
  }
 });
@@ -225,4 +225,31 @@ test('routing neighbor hints exclude a released path edge during its cooldown',a
   expect(neighbors).not.toContain(f.ids[2].did);
   expect(f.meshes[0].hasLink(f.ids[2].did)).toBe(true);
  }finally{f.close();}
+});
+
+test('immutable retrieval can discover a live route while rotation witnesses cool down',async()=>{
+ const f=await fixture([[0,1],[1,2],[2,0]]);try{
+  const witness=await f.witnesses[0].acquire({candidate:[f.ids[0].did,f.ids[3].did],cuts:[[f.ids[0].did,f.ids[1].did]],path:[0,2,1].map(i=>f.ids[i].did)});
+  witness.release();
+  expect(f.meshes[0].hasLink(f.ids[2].did)).toBe(true);
+  expect(await f.rpcs[0].readNeighbors([f.ids[0].did],new AbortController().signal)).not.toContain(f.ids[2].did);
+  expect(await f.searches[0].routeTo({target:f.ids[2].did})).toEqual([f.ids[0].did,f.ids[2].did]);
+  const path=[f.ids[0].did,f.ids[2].did],signal=new AbortController().signal;
+  expect(await f.rpcs[0].readNeighbors(path,signal)).not.toContain(f.ids[1].did);
+  expect(await f.rpcs[0].readRouteNeighbors(path,signal,()=>{throw new Error("unexpected fallback");})).toContain(f.ids[1].did);
+ }finally{f.close();}
+});
+
+test('read-only route hints fall back before an unadvertised legacy hop',async()=>{
+ for(const legacy of [[1],[2]]){
+  const f=await fixture([[0,1],[1,2],[2,3]],4,undefined,legacy);let charged=0;
+  try{
+   const path=[0,1,2].map(i=>f.ids[i].did);
+   expect(await f.rpcs[0].readRouteNeighbors(path,new AbortController().signal,()=>charged++)).toContain(f.ids[3].did);
+   expect(charged).toBe(legacy[0]===1?0:1);
+   const calls=f.frames.filter(frame=>frame.env.typ===ROUTING_CONTROL.ROUTE_CALL);
+   expect(calls.some(frame=>frame.to===legacy[0]&&frame.env.body.op==='route-neighbors')).toBe(false);
+   expect(calls.some(frame=>frame.env.body.op==='neighbors')).toBe(true);
+  }finally{f.close();}
+ }
 });

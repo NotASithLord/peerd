@@ -111,3 +111,17 @@ test('existing route discovery bounds cyclic exploration when the target is abse
   expect(new Set(f.queried.map(path=>path.at(-1))).size).toBe(f.queried.length);
  }finally{f.owner.close();}
 });
+
+test('legacy fallback consumes the shared route search query budget',async()=>{
+ const ids=await Promise.all(Array.from({length:20},()=>generateIdentity()));let requests=0;
+ const owner=createRoutingPathSearch({selfDid:ids[0].did,readNeighbors:async()=>{throw new Error('wrong reader');},
+  readRouteNeighbors:async(path,_signal,charge)=>{
+   requests++;
+   if(path.length>1){charge();requests++;}
+   return ids.slice(1,19).map(id=>id.did);
+  }});
+ try{
+  expect(await owner.routeTo({target:ids[19].did})).toBeNull();
+  expect(requests).toBe(MAX_ROUTING_PATH_QUERIES);
+ }finally{owner.close();}
+});

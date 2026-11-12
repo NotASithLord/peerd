@@ -21,13 +21,14 @@ export class RoutingPathSearchError extends Error {
  * new routing peers. A result is only a hint: signed path holds must still
  * revalidate every edge before any replacement can be authorized.
  * @param {{selfDid:string,readNeighbors:(path:readonly string[],signal:AbortSignal)=>Promise<unknown>,
+ * readRouteNeighbors?:(path:readonly string[],signal:AbortSignal,charge:()=>void)=>Promise<unknown>,
  * now?:()=>number,timers?:any}} options
  */
-export const createRoutingPathSearch=({selfDid,readNeighbors,now=Date.now,timers=globalThis})=>{
+export const createRoutingPathSearch=({selfDid,readNeighbors,readRouteNeighbors=readNeighbors,now=Date.now,timers=globalThis})=>{
   /** @type {Set<()=>void>} */const active=new Set();
   let closed=false;
-  /** @param {string} target @param {Set<string>} excluded @param {AbortSignal} [signal] */
-  const search=async(target,excluded,signal)=>{
+  /** @param {string} target @param {Set<string>} excluded @param {AbortSignal|undefined} signal @param {typeof readRouteNeighbors} reader */
+  const search=async(target,excluded,signal,reader)=>{
       if(closed || signal?.aborted || active.size>=MAX_ACTIVE_SEARCHES || !did(selfDid) || !did(target) || target===selfDid)throw new RoutingPathSearchError();
       const lifetime=new AbortController(),deadline=now()+SEARCH_DEADLINE_MS;
       const cancel=()=>{
@@ -37,11 +38,12 @@ export const createRoutingPathSearch=({selfDid,readNeighbors,now=Date.now,timers
       active.add(cancel);signal?.addEventListener('abort',cancel,{once:true});const timer=timers.setTimeout(cancel,SEARCH_DEADLINE_MS);
       /** @type {string[][]} */const frontier=[[selfDid]];
       const seen=new Set([selfDid]);let queries=0;
+      const charge=()=>{check();if(queries>=MAX_ROUTING_PATH_QUERIES)throw new RoutingPathSearchError();queries++;};
       try{
         while(frontier.length && queries<MAX_ROUTING_PATH_QUERIES){
           check();const path=/** @type {string[]} */ (frontier.shift());
           if(path.length>=MAX_ROUTING_PATH_NODES)continue;
-          queries++;
+          charge();
           /** @type {unknown} */let neighbors;
           let detach=()=>{};
           const aborted=new Promise((_,reject)=>{
@@ -50,7 +52,7 @@ export const createRoutingPathSearch=({selfDid,readNeighbors,now=Date.now,timers
             lifetime.signal.addEventListener('abort',fail,{once:true});
             if(lifetime.signal.aborted)fail();
           });
-          try{neighbors=await Promise.race([readNeighbors(Object.freeze([...path]),lifetime.signal),aborted]);}
+          try{neighbors=await Promise.race([reader(Object.freeze([...path]),lifetime.signal,charge),aborted]);}
           catch{check();continue;}
           finally{detach();}
           check();
@@ -77,7 +79,7 @@ export const createRoutingPathSearch=({selfDid,readNeighbors,now=Date.now,timers
         || !cuts.every(edge=>Array.isArray(edge)&&edge.length===2&&edge.every(did)&&edge[0]!==edge[1]))throw new RoutingPathSearchError();
       const excluded=new Set(cuts.map(edgeKey));
       if(excluded.size!==cuts.length || !excluded.has(edgeKey([selfDid,target])))throw new RoutingPathSearchError();
-      return search(target,excluded,signal);
+      return search(target,excluded,signal,readNeighbors);
     },
     /** Locate only a hint over existing carriers, with no replacement authority.
      * @param {{target:string,signal?:AbortSignal}} options */
@@ -85,7 +87,7 @@ export const createRoutingPathSearch=({selfDid,readNeighbors,now=Date.now,timers
       // why: a saturated intermediary can supply its authenticated roster over
       // the current path without opening a new direct connection to the reader.
       // Both entry points share the same active-search and traversal budgets.
-      return search(target,new Set(),signal);
+      return search(target,new Set(),signal,readRouteNeighbors);
     },
     close(){closed=true;for(const cancel of [...active])cancel();},
   });

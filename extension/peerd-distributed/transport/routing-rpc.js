@@ -21,7 +21,7 @@ const did=(/** @type {any} */ value)=>{if(typeof value!=='string'||value.length>
 export class RoutingRpcError extends Error {
   constructor(){super('routing path RPC unavailable');this.name='RoutingRpcError';}
 }
-/** @typedef {{did:string,signal:AbortSignal,maxFrameBytes:()=>number,send:(env:any,options?:{signal?:AbortSignal})=>Promise<void>}} Carrier */
+/** @typedef {{did:string,signal:AbortSignal,routeHints?:boolean,maxFrameBytes:()=>number,send:(env:any,options?:{signal?:AbortSignal})=>Promise<void>}} Carrier */
 /** @typedef {{release:()=>void,signal:AbortSignal,receipt:any}} Hop */
 /** @typedef {{value:any,release:()=>void,signal:AbortSignal}} Result */
 /** @typedef {{env:any,hash:string,index:number,previous:Carrier|null,next:Carrier|null,life:AbortController,
@@ -48,10 +48,10 @@ export const createRoutingRpc=({identity,roomId,mesh,holds,now=Date.now,timers=g
     &&exact(env.body,['room','path','op','payload'])&&env.body.room===roomId
     &&Array.isArray(env.body.path)&&env.body.path.length>=2&&env.body.path.length<=MAX_ROUTING_PATH_NODES
     &&env.body.path.every(did)&&new Set(env.body.path).size===env.body.path.length&&env.body.path[0]===env.from
-    &&(env.body.op==='neighbors'?env.body.payload===null:env.body.op==='hold'&&envelopeBytes(env.body.payload)<=8_192);
+    &&((env.body.op==='neighbors'||env.body.op==='route-neighbors')?env.body.payload===null:env.body.op==='hold'&&envelopeBytes(env.body.payload)<=8_192);
   const sweep=()=>{for(const [key,expiry] of seen)if(now()>=expiry)seen.delete(key);};
-  const neighbors=()=>{
-    const peers=mesh.peers().filter(peer=>mesh.routingCarrier(peer.did)&&holds.canSuggestEdge(peer.did)).map(peer=>peer.did).sort();
+  const neighbors=(witness=true)=>{
+    const peers=mesh.peers().filter(peer=>mesh.routingCarrier(peer.did)&&(!witness||holds.canSuggestEdge(peer.did))).map(peer=>peer.did).sort();
     const result=Array.from({length:Math.min(MAX_ROUTING_PATH_NEIGHBORS,peers.length)},(_,i)=>peers[(neighborCursor+i)%peers.length]);
     neighborCursor=peers.length?(neighborCursor+result.length)%peers.length:0;return result;
   };
@@ -102,10 +102,15 @@ export const createRoutingRpc=({identity,roomId,mesh,holds,now=Date.now,timers=g
       const pending=state.pendingCancel;state.pendingCancel=undefined;
       if(pending&&pending.env.body.requestHash===state.hash){dispose(state,true,pending.carrier,pending.env);return;}
       check(state);
-      if(state.next){await send(state.next,state.env,state.life.signal);check(state);return;}
+      if(state.next){
+        // why: stop at the last upgraded hop instead of sending an unknown
+        // operation into a legacy peer's timeout. The origin can use its
+        // legacy roster query, charged to the same search budget.
+        if(state.env.body.op==='route-neighbors'&&!state.next.routeHints)throw fail();
+        await send(state.next,state.env,state.life.signal);check(state);return;}
       const body=state.env.body;
       let payload;
-      if(body.op==='neighbors')payload=neighbors();
+      if(body.op==='neighbors'||body.op==='route-neighbors')payload=neighbors(body.op==='neighbors');
       else{
         const request=body.payload,path=request?.body?.path;
         if(request?.from!==state.env.from||!Array.isArray(path)||body.path.some((/** @type {string} */ peer,/** @type {number} */ i)=>path[i]!==peer))throw fail();
@@ -154,12 +159,12 @@ export const createRoutingRpc=({identity,roomId,mesh,holds,now=Date.now,timers=g
     state.replied=true;
     if(state.previous){void send(state.previous,structuredClone(env),state.life.signal).catch(()=>dispose(state));return;}
     const payload=structuredClone(body.payload);
-    if(state.env.body.op==='neighbors'&&(!Array.isArray(payload)||payload.length>MAX_ROUTING_PATH_NEIGHBORS||!payload.every(did))){dispose(state);return;}
+    if((state.env.body.op==='neighbors'||state.env.body.op==='route-neighbors')&&(!Array.isArray(payload)||payload.length>MAX_ROUTING_PATH_NEIGHBORS||!payload.every(did))){dispose(state);return;}
     if(state.env.body.op==='hold'&&envelopeBytes(payload)>1_024){dispose(state);return;}
     state.resolve?.({value:payload,signal:state.life.signal,release:()=>dispose(state)});state.reject=undefined;state.resolve=undefined;
   };
   const detach=mesh.onRoutingControl(receive);
-  /** @param {readonly string[]} path @param {'neighbors'|'hold'} op @param {any} payload @param {AbortSignal} signal */
+  /** @param {readonly string[]} path @param {'neighbors'|'route-neighbors'|'hold'} op @param {any} payload @param {AbortSignal} signal */
   const call=async(path,op,payload,signal)=>{
     if(closed||signal.aborted||originating>=2||!Array.isArray(path)||path.length<2||path.length>MAX_ROUTING_PATH_NODES
       ||!path.every(did)||path[0]!==identity.did||new Set(path).size!==path.length||(op==='hold'&&envelopeBytes(payload)>8_192))throw fail();originating++;
@@ -182,6 +187,24 @@ export const createRoutingRpc=({identity,roomId,mesh,holds,now=Date.now,timers=g
       if(closed||signal.aborted||path[0]!==identity.did)throw fail();
       if(path.length===1)return neighbors();
       const result=await call(path,'neighbors',null,signal);try{return result.value;}finally{result.release();}
+    },
+    /** Read-only hints never acquire holds or bypass replacement checks.
+     * @param {readonly string[]} path @param {AbortSignal} signal @param {()=>void} charge */
+    async readRouteNeighbors(path,signal,charge){
+      if(closed||signal.aborted||path[0]!==identity.did)throw fail();
+      if(path.length===1)return neighbors(false);
+      if(mesh.routingCarrier(path[1])?.routeHints){
+        try{
+          const result=await call(path,'route-neighbors',null,signal);
+          try{return result.value;}finally{result.release();}
+        }catch{
+          // A mixed-version path may end beyond the upgraded first hop.
+          // Fallback is another query, never free extra traversal work.
+          charge();
+        }
+      }
+      const result=await call(path,'neighbors',null,signal);
+      try{return result.value;}finally{result.release();}
     },
     /** @param {any} request @param {number} index @param {AbortSignal} signal */
     async acquireHop(request,index,signal){
