@@ -72,12 +72,17 @@ export const DEFAULT_PRICING = Object.freeze({
   // ---- OpenAI (direct api.openai.com — bare ids, no vendor prefix) ----
   // why bare ids: the direct adapter sends 'gpt-4o' etc., not 'openai/gpt-4o'
   // (that prefix is the OpenRouter gateway's namespacing). Only the ids with
-  // confident public pricing are listed; the newest flagships resolve to
-  // "estimate unavailable" (honest) until a user sets a pricing override —
+  // confident public pricing are listed; any other id resolves to
+  // "estimate unavailable" (honest) until a user sets a pricing override,
   // the documented escape hatch for prices that move between updates.
   'gpt-4o':      Object.freeze({ input: 2.5,  output: 10,  cacheRead: 1.25,  cacheWrite: 0 }),
   'gpt-4o-mini': Object.freeze({ input: 0.15, output: 0.6, cacheRead: 0.075, cacheWrite: 0 }),
   'o4-mini':     Object.freeze({ input: 1.1,  output: 4.4, cacheRead: 0.275, cacheWrite: 0 }),
+  // Source: developers.openai.com/api/docs/pricing (2026-11 snapshot, Standard
+  // tier, USD / 1M tokens). cacheRead is the published cached-input rate.
+  'gpt-5.1':     Object.freeze({ input: 1.25, output: 10,  cacheRead: 0.125, cacheWrite: 0 }),
+  'gpt-5':       Object.freeze({ input: 1.25, output: 10,  cacheRead: 0.125, cacheWrite: 0 }),
+  'gpt-5-mini':  Object.freeze({ input: 0.25, output: 2,   cacheRead: 0.025, cacheWrite: 0 }),
 
   // ---- Z.ai GLM (native adapter; bare model ids) ----
   // Source: docs.z.ai/guides/overview/pricing (2026-07 snapshot, USD / 1M tokens).

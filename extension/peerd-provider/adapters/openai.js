@@ -33,7 +33,7 @@ const CONNECT_TIMEOUT_MS = 45_000;
 export const DEFAULT_MODEL = 'gpt-5.1';
 // The web actor default — a fast, cheap model for the high-frequency
 // page-driving actor (same intent as the other adapters' runner default).
-export const DEFAULT_RUNNER_MODEL = 'gpt-5.1-mini';
+export const DEFAULT_RUNNER_MODEL = 'gpt-5-mini';
 
 const MAX_RATE_LIMIT_RETRIES = 3;
 const DEFAULT_BACKOFF_MS = 2000;
@@ -152,7 +152,6 @@ export const _computeBackoffMsForTests = computeBackoffMs;
 // reach simply drops out (never a 404 in the chat picker).
 export const OPENAI_POPULAR = Object.freeze([
   'gpt-5.1',
-  'gpt-5.1-mini',
   'gpt-5',
   'gpt-5-mini',
   'o4-mini',
