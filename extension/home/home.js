@@ -173,7 +173,7 @@ const focusActiveContent = () => {
     // why skip the first tab prompts: they sit first in the content, and a
     // view change must land in the view, not on a prompt's heading.
     const target = [...document.querySelectorAll('.home-content textarea, .home-content h1, .home-content h2')]
-      .find((element) => !element.closest('.first-tab-hint, .first-tab-offer'));
+      .find((element) => element.checkVisibility() && !element.closest('.first-tab-hint, .first-tab-offer'));
     if (!(target instanceof HTMLElement)) return;
     if (!target.matches('textarea, button, input, select, a[href]')) target.setAttribute('tabindex', '-1');
     target.focus();
@@ -863,18 +863,12 @@ const notifBanner = (n) => m('.notif-banner', [
   m('button.notif-banner-x', { 'aria-label': 'Dismiss', onclick: () => peerNotifications.dismiss(n.id) }, '×'),
 ]);
 
-/** @param {boolean} showDweb @param {boolean} holdNudges a first tab prompt shows */
-const content = (showDweb, holdNudges) => {
-  // Defensive: if a panel opened while the chat view was somehow still active, say
-  // where the chat went rather than render a second live chat (single-homed).
-  if (activeView === 'chat' && sidePanelOpen) {
-    return m('.home-chat', m('.peerd-net-empty', { style: 'margin:48px 16px;' },
-      'Chat is open in the side panel. Close the panel to bring it back here.'));
-  }
-  if (activeView === 'chat') {
+/** @param {boolean} showDweb @param {boolean} holdNudges @param {string|null} [view] */
+const content = (showDweb, holdNudges, view = activeView) => {
+  if (view === 'chat') {
     // ChatGPT-style: a recent-chats column on the left, the live chat on the
     // right. Collapsible — when hidden it's a thin strip with new-chat + expand.
-    return m('.home-chat-layout', [
+    return m('.home-chat-layout', { style: activeView === 'chat' ? '' : 'display:none' }, [
       chatListCollapsed
         ? m('.chat-list.is-collapsed', [
             m('button.chat-list-toggle', { title: 'Show chats', 'aria-label': 'Show chats', onclick: toggleChatList }, '»'),
@@ -899,21 +893,21 @@ const content = (showDweb, holdNudges) => {
       ]),
     ]);
   }
-  if (activeView === 'actors') return m(ActorsSection, {
+  if (view === 'actors') return m(ActorsSection, {
     send,
     onActiveActorCount: reportActorCount,
     onOpenSession: openActorSession,
     currentSessionId: currentState.session?.sessionId,
     chatOwnedBySidePanel: sidePanelOpen,
   });
-  if (activeView === 'library') return m(LibrarySection, { send, dweb: showDweb });
-  if (activeView === 'eval') {
+  if (view === 'library') return m(LibrarySection, { send, dweb: showDweb });
+  if (view === 'eval') {
     loadEvalSection();
     if (evalLoadState === 'ready' && EvalSection) return m(EvalSection, { send });
     return m('div', { style: 'padding:24px;color:var(--fg-muted)' },
       evalLoadState === 'unavailable' ? 'The Lab is not available in this build.' : 'Loading the Lab…');
   }
-  if (activeView === 'discover' && DWEB_ENABLED) {
+  if (view === 'discover' && DWEB_ENABLED) {
     if (!discoverFailed) loadDiscover();
     if (!DiscoverSection) return discoverFailed
       ? m('button', { onclick: loadDiscover }, 'Retry loading Discover')
@@ -923,8 +917,8 @@ const content = (showDweb, holdNudges) => {
       onOpenKey: () => { discoverOpenKey = null; }, onLibrary: () => navigateHome('library'),
     });
   }
-  if (activeView === 'contacts' && showDweb) return m(ContactsSection, { send });
-  if (activeView === 'network' && showDweb) return m(NetworkSection, { send });
+  if (view === 'contacts' && showDweb) return m(ContactsSection, { send });
+  if (view === 'network' && showDweb) return m(NetworkSection, { send });
   return null;
 };
 
@@ -1041,8 +1035,9 @@ const HomeApp = {
                 m('button.home-popout', { onclick: bringChatHome }, 'Bring it here ⇤'),
               ])
             : null,
-          // why hold the nudges: one first-run card at a time.
-          content(showDweb, hintShown || offerShown),
+          // why: keep drafts and files in this document until the panel owns chat.
+          !sidePanelOpen ? content(showDweb, hintShown || offerShown, 'chat') : null,
+          activeView !== 'chat' ? content(showDweb, hintShown || offerShown) : null,
         ]),
       ]),
       // The agent's permission prompt — broadcast to every open surface
