@@ -199,6 +199,8 @@ const appData = createAppDataClient({
   opfs,
   send: (message) => uiRuntime.send(/** @type {any} */ (message)),
 });
+/** @type {Set<Promise<void>>} */
+const pendingAppDataRequests = new Set();
 /** @type {{ name: string, entryFile: string, fileKinds: Record<string, 'text' | 'binary'>, dweb: any, agent: { kind: string, name?: string, instructions?: string, runtime?: string[] } } | null} */
 let appMeta = null;        // { name, entryFile }
 /** @type {Awaited<ReturnType<typeof createEditor>> | null} */
@@ -522,9 +524,9 @@ const suspendRunnerForEdit = async () => {
   runnerStarted = false;
   expectingBodyLoad = false;
   await dwebBridgeLifecycle.dispose();
-  // Replacing the document is the only way to stop a late async handler from
-  // the prior generation; hiding the iframe would leave it running.
   frame.src = 'about:blank';
+  // Wait for accepted writes before the editor reads file snapshots.
+  await Promise.allSettled([...pendingAppDataRequests]);
 };
 
 let poisonRecoveryScheduled = false;
@@ -651,19 +653,19 @@ window.addEventListener('message', (/** @type {MessageEvent} */ e) => {
     const id = typeof e.data.id === 'string' && e.data.id.length <= 100 ? e.data.id : null;
     const op = ['get', 'set', 'delete', 'list'].includes(e.data.op) ? e.data.op : null;
     if (!id || !op) return;
-    appData.request(op, e.data.key, e.data.json).then((/** @type {any} */ reply) => {
+    const pending = appData.request(op, e.data.key, e.data.json).then((reply) => {
       frame.contentWindow?.postMessage({
         peerd: 'app:data:result', id,
         ok: reply?.ok === true,
         ...(reply?.ok === true ? { value: reply.value }
           : { error: String(reply?.error || 'App data request failed').slice(0, 1_000) }),
       }, '*');
-    }).catch((error) => {
-      frame.contentWindow?.postMessage({
-        peerd: 'app:data:result', id, ok: false,
-        error: String(error?.message ?? error).slice(0, 1_000),
-      }, '*');
-    });
+    }).catch((error) => frame.contentWindow?.postMessage({
+      peerd: 'app:data:result', id, ok: false,
+      error: String(error?.message ?? error).slice(0, 1_000),
+    }, '*'));
+    pendingAppDataRequests.add(pending);
+    void pending.finally(() => pendingAppDataRequests.delete(pending));
     return;
   }
   if (e.data?.peerd === 'app:agent:open' && runnerPhase === 'delivered') {
@@ -858,9 +860,7 @@ const editMode = async () => {
   }
 
   if (!editorApi) {
-    // Refresh classification from bytes before the editor renders its tree.
-    // Unknown suffixes are safe because the read boundary, not the name,
-    // decides whether CodeMirror may open them.
+    // Classify file bytes before the editor opens its tree.
     await readForRender();
     editorApi = await createEditor({
       mountEl: editorMount,

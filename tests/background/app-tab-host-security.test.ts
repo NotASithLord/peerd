@@ -29,8 +29,7 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
       expect(lines.at(-1)).toContain(expected);
       expect(lines.at(-1)).not.toContain('SECRET-PROVIDER-TEXT');
       expect(lines.at(-1)?.match(/\p{Dash_Punctuation}/gu)?.every((value) => value === '-') ?? true).toBe(true);
-      expect(input.disabled).toBe(unknown);
-      expect(context.actorChatSend.disabled).toBe(unknown);
+      expect([input.disabled, context.actorChatSend.disabled]).toEqual([unknown, unknown]);
       if (unknown) { input.value = 'do not replay'; await run(); expect(calls).toBe(1); }
       else expect(input.value).toBe('keep this prompt');
     }
@@ -78,13 +77,11 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
 
     const host = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
     const view = host.slice(host.indexOf('// When leaving edit mode,'));
-    const flushAt = view.indexOf('await editorApi.flushSave?.()');
-    const retiredAt = view.indexOf('dwebBridgeLifecycle.isInvalidated()');
-    const reloadAt = view.indexOf('location.reload()');
-    expect(flushAt).toBeGreaterThanOrEqual(0);
-    expect(retiredAt).toBeGreaterThan(flushAt);
-    expect(reloadAt).toBeGreaterThan(retiredAt);
-    expect(view.indexOf('await actorAttachment.retry()')).toBeGreaterThan(reloadAt);
+    const order = [
+      'await editorApi.flushSave?.()', 'dwebBridgeLifecycle.isInvalidated()',
+      'location.reload()', 'await actorAttachment.retry()',
+    ].map((needle) => view.indexOf(needle));
+    expect(order.every((at, index) => at >= 0 && (index === 0 || at > order[index - 1]))).toBe(true);
   });
 
   test('concurrent bridge attach and detach share one lifecycle', async () => {
@@ -167,27 +164,23 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
     const authority = await Bun.file('./extension/background/app-dweb-authority.js').text();
     expect(tracker).toContain('const retireDwebTab = dwebAuthority.retire');
     expect(authority).toContain('await purgeOwners(appId, next)');
-    expect(worker).toContain('retireAppDweb(instanceId, tabId)');
-    expect(worker).toContain("engineLiveness.findByTab('app', tabId)");
-    expect(worker).toContain('retireAppDweb(entry.id, tabId)');
-    expect(worker).toContain("change?.discarded === true || typeof change?.url === 'string'");
-    expect(worker).toContain('await appRetirements.get(sender.tab.id)');
-    expect(worker).toContain('retireAppDocument(tabId, change.url, trackedAppId)');
-    expect(worker).toContain('await retireAppDweb(appId, tabId)');
-    expect(worker).toContain('await trackAppRetirement(tabId, () => retireAppDweb(appId, tabId))');
+    for (const expected of [
+      'retireAppDweb(instanceId, tabId)', "engineLiveness.findByTab('app', tabId)",
+      'retireAppDweb(entry.id, tabId)', "change?.discarded === true || typeof change?.url === 'string'",
+      'await appRetirements.get(sender.tab.id)', 'retireAppDocument(tabId, change.url, trackedAppId)',
+      'await retireAppDweb(appId, tabId)', 'await trackAppRetirement(tabId, () => retireAppDweb(appId, tabId))',
+    ]) expect(worker).toContain(expected);
   });
 
   test('the host binds owner from its URL, exposes retry, and never delivers owner to App launch data', async () => {
     const source = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
     const html = await Bun.file('./extension/engine-tabs/app-tab/index.html').text();
-    expect(source).toContain("const ownerSessionId = hashParams.get('owner')");
-    expect(source).toContain('makeAppActorAttachRecovery');
-    expect(source).toContain('request: (type) => uiRuntime.send({ type, appId, ownerSessionId })');
-    expect(source).toContain('await actorAttachment.start()');
-    expect(source).toContain('await actorAttachment.retry()');
-    expect(source).toContain("actorRetry.textContent = unknown ? 'Recheck actor' : 'Retry actor'");
-    expect(source).toContain('Recheck the exact attachment without reopening the App.');
-    expect(source).toContain('launch: launchParams');
+    for (const expected of [
+      "const ownerSessionId = hashParams.get('owner')", 'makeAppActorAttachRecovery',
+      'request: (type) => uiRuntime.send({ type, appId, ownerSessionId })', 'await actorAttachment.start()',
+      'await actorAttachment.retry()', "actorRetry.textContent = unknown ? 'Recheck actor' : 'Retry actor'",
+      'Recheck the exact attachment without reopening the App.', 'launch: launchParams',
+    ]) expect(source).toContain(expected);
     expect(source).not.toContain('launch: { ...launchParams, ownerSessionId }');
     expect(html).toContain('id="actor-retry"');
   });
@@ -196,10 +189,7 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
     const host = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
     const html = await Bun.file('./extension/engine-tabs/app-tab/index.html').text();
     const runner = await Bun.file('./extension/engine-tabs/app-tab/runner.html').text();
-    const attachIndex = host.indexOf('await actorAttachment.start()');
-    const directRouteIndex = host.indexOf("type: 'app/actor-chat'");
-    expect(attachIndex).toBeGreaterThan(-1);
-    expect(directRouteIndex).toBeGreaterThan(-1);
+    for (const expected of ['await actorAttachment.start()', "type: 'app/actor-chat'"]) expect(host).toContain(expected);
     expect(html).toContain('id="actor-chat-drawer"');
     expect(html).toContain('Direct conversation · scoped to this App');
     expect(host).toContain("message.textContent = text");
@@ -212,31 +202,38 @@ describe('App tab required-actor and runtime lifecycle contracts', () => {
     const agentApiStart = runner.indexOf('const agentApi = Object.freeze({');
     const peerdGlobalStart = runner.indexOf("Object.defineProperty(window, 'peerd'", agentApiStart);
     const agentApi = runner.slice(agentApiStart, peerdGlobalStart);
-    expect(agentApi).toContain('open()');
-    expect(agentApi).toContain('navigator.userActivation?.isActive');
-    expect(agentApi).toContain("{ peerd: 'app:agent:open' }");
-    expect(agentApi).toContain('expose(definition)');
+    expect(['open()', 'navigator.userActivation?.isActive', "{ peerd: 'app:agent:open' }", 'expose(definition)']
+      .every((expected) => agentApi.includes(expected))).toBe(true);
     expect(agentApi).not.toContain('request(');
     expect(agentApi).not.toContain('provider');
   });
 
-  test('edit mode replaces the runner and manifest runtime methods gate playtesting', async () => {
+  test('edit mode drains accepted App data before editor reads and gates playtesting', async () => {
     const source = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
-    expect(source).toContain("mode !== 'render' || runnerPhase !== 'delivered'");
-    expect(source).toContain("appMeta?.agent?.runtime?.includes('observe')");
-    expect(source).toContain("appMeta?.agent?.runtime?.includes('act')");
-    expect(source).toContain("frame.src = 'about:blank'");
-    expect(source).toContain("rejectAgentCalls('app_runtime_suspended_for_editing')");
-    expect(source).toContain('appMeta = null;');
+    const suspend = source.slice(source.indexOf('const suspendRunnerForEdit ='), source.indexOf('let poisonRecoveryScheduled'));
+    expect(source).toMatch(/if \(e.data\?\.peerd === 'app:data:request' && runnerPhase === 'delivered'[\s\S]*const pending = appData.request\([^\n]+\)\.then\([\s\S]*pendingAppDataRequests.add\(pending\);[\s\S]*pending.finally\(\(\) => pendingAppDataRequests.delete\(pending\)\)/);
+    expect(source.slice(source.indexOf('const editMode ='))).toMatch(/await suspendRunnerForEdit\(\);[\s\S]*await readForRender\(\);/);
+    const { promise, resolve } = Promise.withResolvers<void>();
+    let drained = false;
+    const context = { pendingAppDataRequests: new Set([promise]), runnerPhase: 'delivered', frame: { src: 'runner.html' },
+      rejectAgentCalls() {}, runnerWatchdog: null, runnerPort: null, pendingBody: null, pendingAssets: {},
+      runnerStarted: true, expectingBodyLoad: false, dwebBridgeLifecycle: { dispose() {} } };
+    const waiting = runInNewContext(`'use strict'; ${suspend}; suspendRunnerForEdit()`, context).then(() => { drained = true; });
+    await new Promise<void>((resume) => setImmediate(resume));
+    expect([drained, context.runnerPhase, context.frame.src]).toEqual([false, 'suspended', 'about:blank']);
+    resolve(); await waiting;
+    expect(drained).toBe(true);
+    for (const expected of [
+      "mode !== 'render' || runnerPhase !== 'delivered'", "appMeta?.agent?.runtime?.includes('observe')",
+      "appMeta?.agent?.runtime?.includes('act')", "rejectAgentCalls('app_runtime_suspended_for_editing')", 'appMeta = null;',
+    ]) expect(source).toContain(expected);
   });
 
   test('a timed-out runner generation poisons queued work and requests replacement', async () => {
     const runner = await Bun.file('./extension/engine-tabs/app-tab/runner.html').text();
     const host = await Bun.file('./extension/engine-tabs/app-tab/app-tab.js').text();
-    expect(runner).toContain('let agentRuntimePoisoned = false');
-    expect(runner).toContain('if (agentRuntimePoisoned)');
-    expect(runner).toContain('agentRuntimePoisoned = true');
-    expect(runner).toContain("poisoned: request.op === 'act' || error?.poisoned === true");
+    expect(['let agentRuntimePoisoned = false', 'if (agentRuntimePoisoned)', 'agentRuntimePoisoned = true',
+      "poisoned: request.op === 'act' || error?.poisoned === true"].every((expected) => runner.includes(expected))).toBe(true);
     expect(host).toContain('recoverPoisonedRunner()');
   });
 
