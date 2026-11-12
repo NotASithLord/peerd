@@ -235,7 +235,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     // add two modules; removing the per-kind and per-host duplicates they
     // replace shrinks the packaged graph. Exact, no reserve.
     serviceWorker: Object.freeze({
-      modules: 407, graphBytes: 2_102_086, entryBytes: 173,
+      modules: 407, graphBytes: 2_102_664, entryBytes: 173,
       inputSha256: 'f113146d338d1ddf501a41c6d71ad4e58dd6efee0686f62a0ac2d626863ed1cf',
     }),
     // One shared read-only authority schema/provenance validator rejects
@@ -252,7 +252,7 @@ export const COLD_GRAPH_RATCHETS = Object.freeze({
     offscreen: Object.freeze({ modules: 7, graphBytes: 22_035, entryBytes: 13_293 }),
   }),
   firefox: Object.freeze({
-    serviceWorker: Object.freeze({ modules: 91, graphBytes: 428_483, entryBytes: 210 }),
+    serviceWorker: Object.freeze({ modules: 91, graphBytes: 428_460, entryBytes: 210 }),
     sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
     home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
   }),
@@ -276,7 +276,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
       // The shared engine process contract and the Pod admission policy add
       // two modules and shrink the graph. Exact, no reserve.
       serviceWorker: Object.freeze({
-        modules: 414, graphBytes: 2_217_373, entryBytes: 207,
+        modules: 414, graphBytes: 2_217_965, entryBytes: 207,
         inputSha256: '1391c105eedbd822d96be20b790b8b600f03bf9737fadadbae6f60cb943ca639',
       }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 129_306, entryBytes: 396 }),
@@ -286,7 +286,7 @@ export const PACKAGE_COLD_GRAPH_RATCHETS = Object.freeze({
     // Firefox has no dweb host yet, but Preview still carries its distinct
     // generated channel policy bytes.
     firefox: Object.freeze({
-      serviceWorker: Object.freeze({ modules: 93, graphBytes: 433_906, entryBytes: 81 }),
+      serviceWorker: Object.freeze({ modules: 93, graphBytes: 433_883, entryBytes: 81 }),
       sidepanel: Object.freeze({ modules: 11, graphBytes: 133_794, entryBytes: 396 }),
       home: Object.freeze({ modules: 11, graphBytes: 133_962, entryBytes: 564 }),
     }),
