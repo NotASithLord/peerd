@@ -1,7 +1,9 @@
 // An Emscripten-shaped App reads its own files through the in-realm file
-// server, inside the real manifest sandbox. Run with:
-// bun run e2e:verify --only=app-file-server
+// server, inside the real manifest sandbox. It also loads scripts, workers and
+// an audio worklet by URL, and the App tab names each failure in plain words.
+// Run with: bun run e2e:verify --only=app-file-server
 import { createServer } from 'node:http';
+import { appProblemNotice } from '../../extension/engine-tabs/app-tab/app-problem.js';
 import { attach, evalIn, openExtPage, rpc, sseText, sseToolCall, waitFor } from './e2e-harness.mjs';
 
 // A module that exports answer() and returns 42, and a small data package.
@@ -37,6 +39,38 @@ const loaderSource = (probe) => `(async () => {
       request.send(null);
     });
     report.notes = Array.from(new Uint8Array(await (await fetch('notes.txt')).arrayBuffer()));
+    const loadScript = (set) => new Promise((resolve) => {
+      const script = document.createElement('script');
+      script.onload = () => resolve('load');
+      script.onerror = () => resolve('error');
+      set(script);
+      document.head.append(script);
+    });
+    report.scripts = [
+      await loadScript((script) => { script.src = 'dynamic.js'; }),
+      await loadScript((script) => script.setAttribute('src', './dynamic.js')),
+      await loadScript((script) => { script.src = 'missing.js'; }),
+      globalThis.dynamicLoads,
+    ];
+    const ask = (worker) => new Promise((resolve) => {
+      worker.onmessage = (event) => resolve(event.data);
+      worker.onerror = () => resolve('error');
+      worker.postMessage(21);
+    });
+    const workerName = ['work', 'er.js'].join('');
+    report.workers = [
+      await ask(new Worker(workerName)),
+      await ask(new Worker(new URL('worker.js', location.href))),
+      await ask(new Worker('missing-worker.js')),
+    ];
+    const audio = new AudioContext();
+    await audio.audioWorklet.addModule('processor.js');
+    report.worklet = [
+      new AudioWorkletNode(audio, 'peerd-e2e') instanceof AudioWorkletNode,
+      await audio.audioWorklet.addModule('missing-processor.js').then(() => 'loaded', (error) => error.name),
+    ];
+    await audio.close();
+    report.gamepad = [document.featurePolicy?.allowsFeature('gamepad'), Array.isArray(Array.from(navigator.getGamepads()))];
     report.packaged = [
       (await fetch('/manifest.json')).status,
       (await fetch('../../background/vault-kernel.js')).status,
@@ -61,8 +95,13 @@ export const APP_FILE_SERVER_STATE = {
   responder: (callIndex) => ({
     sse: callIndex === 0 ? sseToolCall('sandbox_create', {
       kind: 'app', name: 'File server game', files: {
-        'index.html': '<!doctype html><html><head><title>Game</title></head><body><canvas></canvas><script src=loader.js></script></body></html>',
+        'index.html': '<!doctype html><html><head><title>Game</title></head><body><canvas></canvas>'
+          + "<script>localStorage.getItem('best');</script><script>new SharedArrayBuffer(8);</script>"
+          + '<script src=loader.js></script></body></html>',
         'loader.js': loaderSource(probeUrl),
+        'dynamic.js': 'globalThis.dynamicLoads = (globalThis.dynamicLoads ?? 0) + 1;',
+        'worker.js': 'onmessage = (event) => postMessage(event.data * 2);',
+        'processor.js': "registerProcessor('peerd-e2e', class extends AudioWorkletProcessor { process() { return true; } });",
         'notes.txt': '\uFEFFhi',
         'game.wasm': { base64: GAME_WASM },
         'game.data': { base64: GAME_DATA },
@@ -100,6 +139,16 @@ export const APP_FILE_SERVER_STATE = {
         if (window === top) {
           globalThis.__fileServerReports = [];
           globalThis.__fileServerPolicies = [];
+          globalThis.__fileServerNotices = [];
+          new MutationObserver(() => {
+            const notice = document.getElementById('app-security-notice');
+            const text = notice?.querySelector('span')?.firstChild?.textContent;
+            if (text && !globalThis.__fileServerNotices.some((seen) => seen.text === text)) {
+              globalThis.__fileServerNotices.push({
+                text, summary: notice.querySelector('details summary')?.textContent ?? '',
+              });
+            }
+          }).observe(document, { childList: true, subtree: true, characterData: true });
           addEventListener('message', (event) => {
             if (event.source !== document.getElementById('app-frame')?.contentWindow) return;
             if (event.data?.type === 'e2e-file-server') globalThis.__fileServerReports.push(event.data.report);
@@ -131,6 +180,29 @@ export const APP_FILE_SERVER_STATE = {
         JSON.stringify(report?.data));
       rec.check('a text file arrives as its stored bytes', JSON.stringify(report?.notes) === JSON.stringify(NOTES_BYTES),
         JSON.stringify(report?.notes));
+      rec.check('a dynamic script loads an App file by src and setAttribute, and a missing one fails',
+        JSON.stringify(report?.scripts) === '["load","load","error",2]', JSON.stringify(report?.scripts));
+      rec.check('a Worker named by a variable or a URL runs the App file, and a missing one fails',
+        JSON.stringify(report?.workers) === '[42,42,"error"]', JSON.stringify(report?.workers));
+      rec.check('an audio worklet loads the App file, and a missing one fails',
+        JSON.stringify(report?.worklet) === '[true,"AbortError"]', JSON.stringify(report?.worklet));
+      rec.check('the App frame allows gamepads', JSON.stringify(report?.gamepad) === '[true,true]',
+        JSON.stringify(report?.gamepad));
+      const expectedNotices = [
+        { type: 'app-problem', problem: 'missing-file' },
+        { type: 'app-problem', problem: 'feature' },
+        { type: 'app-problem', problem: 'threads' },
+        { type: 'app-policy-blocked', directive: 'connect-src' },
+      ].map((data) => appProblemNotice(data)?.text);
+      const notices = await waitFor(async () => {
+        const seen = await evalIn(page, 'globalThis.__fileServerNotices ?? []').catch(() => []);
+        return expectedNotices.every((text) => seen.some((notice) => notice.text === text)) ? seen : null;
+      }, { budgetMs: 10_000, pollMs: 100 }) ?? await evalIn(page, 'globalThis.__fileServerNotices ?? []').catch(() => null);
+      rec.check('the App tab names a missing file, a refused feature, threads, and an offline block in plain words',
+        expectedNotices.every((text) => notices?.some((notice) => notice.text === text
+          && notice.summary === 'Technical details'))
+          && notices.every((notice) => !/connect-src|Blocked |Bundle /.test(notice.text)),
+        JSON.stringify(notices));
       rec.check('packaged extension files get a 404 through the file server',
         JSON.stringify(report?.packaged) === '[404,404]', JSON.stringify(report?.packaged));
       rec.check('remote fetch and XHR still fail and make zero connections',

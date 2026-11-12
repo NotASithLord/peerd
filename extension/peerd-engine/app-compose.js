@@ -56,15 +56,15 @@ export const composeApp = (files, entry = 'index.html') => {
     return `<script${attrStr} data-from="${escapeAttr(path)}">${files[path]}</script>`;
   });
 
-  // why: The opaque runner needs an inlined blob for each literal worker path.
-  composed = inlineWorkerFiles(composed, files, entry);
-
   return injectAtDocumentStart(composed, appFileServerScript(entry));
 };
 
 // The runner puts the bytes of every App file on this Window property just
 // before it writes the App document. The file server takes them and deletes it.
 export const APP_FILES_HANDOFF = '__peerdAppFiles';
+// The file server fires this Window event when the App asks for a file it does
+// not have. The runner reports it to the App tab without the path.
+export const APP_FILE_MISSING_EVENT = 'peerd-app-file-missing';
 
 const APP_FILE_TYPES = {
   html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript',
@@ -93,8 +93,9 @@ const APP_FILE_TYPES = {
  * @param {string} entry
  * @param {Record<string, string>} types
  * @param {string} handoff
+ * @param {string} missingEvent
  */
-export function serveAppFiles(scope, entry, types, handoff) {
+export function serveAppFiles(scope, entry, types, handoff, missingEvent) {
   'use strict';
   /** @type {Record<string, ArrayBuffer>} */
   const files = Object.create(null);
@@ -133,6 +134,7 @@ export function serveAppFiles(scope, entry, types, handoff) {
     }
     return { url: url.href, path: null };
   };
+  const missing = () => scope.dispatchEvent(new Event(missingEvent));
 
   const nativeFetch = scope.fetch;
   /** @param {[RequestInfo | URL, RequestInit?]} args @returns {Promise<Response>} */
@@ -140,6 +142,7 @@ export function serveAppFiles(scope, entry, types, handoff) {
     const found = resolve(args[0]);
     if (!found) return Reflect.apply(nativeFetch, scope, args);
     const { path } = found;
+    if (path === null) missing();
     return Promise.resolve(path === null
       ? new Response(null, { status: 404, statusText: 'Not Found' })
       : new Response(files[path], {
@@ -208,6 +211,7 @@ export function serveAppFiles(scope, entry, types, handoff) {
       if (!request) return Reflect.apply(NativeRequest.prototype.send, this, args);
       if (request.state !== 1 || request.sent) throw invalidState();
       request.sent = true;
+      if (request.path === null) missing();
       const size = request.path === null ? 0 : files[request.path].byteLength;
       const finish = () => {
         request.status = request.path === null ? 404 : 200;
@@ -289,6 +293,70 @@ export function serveAppFiles(scope, entry, types, handoff) {
     return body(request, target.responseType);
   });
   scope.XMLHttpRequest = AppFileRequest;
+
+  // why: Loaders also add scripts, start workers, and load audio worklets by
+  // URL, and the browser loads those itself. Give it a blob: URL of the App
+  // file. A missing file gets a revoked blob: URL, so the load fails the way a
+  // 404 does and never reads a packaged extension file.
+  /** @type {Record<string, string>} */
+  const blobUrls = Object.create(null);
+  let missingUrl = '';
+  /** @param {unknown} input @returns {unknown} */
+  const appUrl = (input) => {
+    const found = resolve(input);
+    if (!found) return input;
+    const { path } = found;
+    if (path === null) {
+      missing();
+      if (!missingUrl) {
+        missingUrl = URL.createObjectURL(new Blob());
+        URL.revokeObjectURL(missingUrl);
+      }
+      return missingUrl;
+    }
+    blobUrls[path] ??= URL.createObjectURL(new Blob([files[path]], { type: typeOf(path) }));
+    return blobUrls[path];
+  };
+  const script = scope.HTMLScriptElement?.prototype;
+  const src = script && Object.getOwnPropertyDescriptor(script, 'src');
+  if (script && src?.set) {
+    const nativeSet = src.set;
+    const { setAttribute } = scope.Element.prototype;
+    Object.defineProperty(script, 'src', {
+      ...src,
+      /** @param {unknown} value */
+      set(value) { nativeSet.call(this, appUrl(value)); },
+    });
+    Object.defineProperty(script, 'setAttribute', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      /** @param {string} name @param {unknown} value */
+      value(name, value) {
+        return Reflect.apply(setAttribute, this, [name, String(name).toLowerCase() === 'src' ? appUrl(value) : value]);
+      },
+    });
+  }
+  const NativeWorker = scope.Worker;
+  if (typeof NativeWorker === 'function') {
+    scope.Worker = class Worker extends NativeWorker {
+      /** @param {string | URL} url @param {WorkerOptions} [options] */
+      constructor(url, options) {
+        super(/** @type {string} */ (appUrl(url)), options);
+      }
+    };
+  }
+  const worklet = scope.AudioWorklet?.prototype;
+  if (worklet) {
+    const { addModule } = worklet;
+    Object.defineProperty(worklet, 'addModule', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      /** @param {string | URL} url @param {WorkletOptions} [options] */
+      value(url, options) { return Reflect.apply(addModule, this, [appUrl(url), options]); },
+    });
+  }
 }
 
 /** @param {string} entry */
@@ -297,7 +365,8 @@ const appFileServerScript = (entry) => {
   /** @param {unknown} value */
   const literal = (value) => JSON.stringify(value).replace(/</g, '\\u003c');
   return '<script data-peerd-file-server>'
-    + `(${serveAppFiles})(self,${literal(entry)},${literal(APP_FILE_TYPES)},${literal(APP_FILES_HANDOFF)});`
+    + `(${serveAppFiles})(self,${literal(entry)},${literal(APP_FILE_TYPES)},${literal(APP_FILES_HANDOFF)},`
+    + `${literal(APP_FILE_MISSING_EVENT)});`
     + '</script>';
 };
 
@@ -345,81 +414,6 @@ const resolveRel = (basePath, relPath) => {
     else if (p) resolved.push(p);
   }
   return resolved.join('/');
-};
-
-// `new Worker('x')` / `new SharedWorker("x")` — capture the spec string.
-const WORKER_REF_RE = /new\s+(?:Shared)?Worker\s*\(\s*(['"])([^'"]+)\1/g;
-
-// Resolve a Worker spec to a bundled file. Liberal on purpose: the agent
-// writes the spec bare ('worker.js') or relative ('./worker.js'); both should
-// find the file. Returns the matching key in `files`, or null.
-/**
- * @param {string} spec
- * @param {string} entry
- * @param {Record<string, string>} files
- * @returns {string | null}
- */
-const workerFilePath = (spec, entry, files) => {
-  for (const candidate of [spec, resolveRel(entry, spec), spec.replace(/^\.?\//, '')]) {
-    if (candidate in files) return candidate;
-  }
-  return null;
-};
-
-// Embed the source of every file referenced by `new Worker('literal')` and
-// inject a tiny shim that turns those specs into blob: workers at runtime.
-// No-op (returns input unchanged) when the app uses no resolvable workers.
-/**
- * @param {string} composed
- * @param {Record<string, string>} files
- * @param {string} entry
- */
-const inlineWorkerFiles = (composed, files, entry) => {
-  /** @type {Record<string, string>} */
-  const srcBySpec = Object.create(null);
-  WORKER_REF_RE.lastIndex = 0;
-  let m;
-  while ((m = WORKER_REF_RE.exec(composed))) {
-    const spec = m[2];
-    if (srcBySpec[spec] != null) continue;
-    const path = workerFilePath(spec, entry, files);
-    if (path) {
-      assertStaticSource(path);
-      srcBySpec[spec] = files[path];
-    }
-  }
-  if (Object.keys(srcBySpec).length === 0) return composed;
-
-  // Escape every '<' so an embedded '</script>' (or any tag) in a worker's
-  // source can't break out of the shim's <script>. < parses back to '<'
-  // inside the JS string literal, so the worker source is byte-identical.
-  const lit = JSON.stringify(srcBySpec).replace(/</g, '\\u003c');
-  // The shim overrides Worker so a known spec loads from an inlined blob; any
-  // other spec passes straight through to the native constructor. Module
-  // workers (type:'module') are passed through via opts — they work if the
-  // worker is self-contained (a blob: base can't resolve relative imports).
-  const shim = '<script data-peerd-worker-shim>(function(){'
-    + `var S=${lit},N=self.Worker;if(!N)return;`
-    + 'function W(u,o){'
-    + 'if(Object.prototype.hasOwnProperty.call(S,u)){'
-    + "u=URL.createObjectURL(new Blob([S[u]],{type:'application/javascript'}));}"
-    + 'return new N(u,o);}'
-    + 'W.prototype=N.prototype;self.Worker=W;'
-    + '})();</script>';
-  return injectAtHeadStart(composed, shim);
-};
-
-// Insert a snippet as the FIRST thing in <head> (so it runs before any app
-// script that constructs a Worker); prepend if the doc is headless.
-/**
- * @param {string} html
- * @param {string} snippet
- */
-const injectAtHeadStart = (html, snippet) => {
-  const m = /<head[^>]*>/i.exec(html);
-  if (!m) return snippet + html;
-  const at = m.index + m[0].length;
-  return html.slice(0, at) + snippet + html.slice(at);
 };
 
 /**
