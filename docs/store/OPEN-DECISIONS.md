@@ -30,6 +30,16 @@ This decision closes the direct URL import path only. The broader Store policy
 for code that a run fetches as data, saves locally, or passes to a JavaScript or
 WebAssembly execution API is tracked separately.
 
+### Pod AssemblyScript compiler
+
+The `asc` command in Pods ships only in the Chrome Preview package. The
+compiler is vendored in `extension/vendor/assemblyscript/`, so nothing
+downloads at run time. It still turns local source into WebAssembly that an App
+can run, which is the open policy above. Store packages omit the directory, and
+the Store artifact check fails if it is present. Firefox packages omit it too,
+because the AMO linter refuses its 13.5 MB `binaryen/index.js`. Without the
+compiler, `asc` answers that it is only in the Chrome Preview build.
+
 ### Dweb
 
 The store package omits `peerd-distributed`. The preview package includes it.
