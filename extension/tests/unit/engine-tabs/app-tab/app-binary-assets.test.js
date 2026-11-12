@@ -687,6 +687,88 @@ const runDirectData = () => new Promise((resolve, reject) => {
   document.body.appendChild(iframe);
 });
 
+/** @param {string} html @returns {Promise<string[]>} */
+const runDirectProblems = (html) => new Promise((resolve, reject) => {
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px';
+  /** @type {string[]} */
+  const problems = [];
+  /** @type {MessagePort | null} */
+  let runnerPort = null;
+  const cleanup = () => {
+    clearTimeout(timer);
+    runnerPort?.close();
+    window.removeEventListener('message', onMessage);
+    iframe.remove();
+  };
+  const timer = setTimeout(() => {
+    cleanup();
+    reject(new Error(`runner problem handshake timed out after ${JSON.stringify(problems)}`));
+  }, 8000);
+  /** @param {MessageEvent} event */
+  const onMessage = (event) => {
+    if (event.source !== iframe.contentWindow) return;
+    if (event.data?.type === 'app-problem') problems.push(event.data.problem);
+    else if (event.data?.type === 'runner-problems-done') {
+      cleanup();
+      resolve(problems);
+    }
+  };
+  window.addEventListener('message', onMessage);
+  iframe.addEventListener('load', () => {
+    const channel = new MessageChannel();
+    runnerPort = channel.port1;
+    runnerPort.addEventListener('message', (event) => {
+      if (event.data?.type !== 'runner-ready') return;
+      runnerPort?.postMessage({ type: 'app-body', html, entry: 'index.html', assets: {} });
+    });
+    runnerPort.start();
+    iframe.contentWindow?.postMessage({ type: 'runner-init' }, '*', [channel.port2]);
+  }, { once: true });
+  iframe.src = '/engine-tabs/app-tab/runner.html';
+  document.body.appendChild(iframe);
+});
+
+describe('App runner failed code', () => {
+  it('names a script that did not load and a module import that failed, and not an image', async () => {
+    expect(await runDirectProblems(`<img src="no-such-image.png"><script src="no-such-script.js?v=1"><\/script>
+      <script type="module">import './no-such-module.js';<\/script>
+      <script>addEventListener('load', () => parent.postMessage({ type: 'runner-problems-done' }, '*'));<\/script>`))
+      .toEqual(['missing-file', 'modules']);
+  });
+
+  it('names a dynamic import that failed, and not an ordinary App error', async () => {
+    expect(await runDirectProblems(`<script>
+      addEventListener('unhandledrejection', (event) => {
+        if (event.reason instanceof TypeError) setTimeout(() => parent.postMessage({ type: 'runner-problems-done' }, '*'));
+      });
+      Promise.reject(new Error('an ordinary rejection'));
+      import('./no-such-chunk.js');
+      throw new Error('an ordinary error');
+    <\/script>`)).toEqual(['modules']);
+  });
+});
+
+describe('App runner storage', () => {
+  it('holds values in page memory, with the methods on the Storage prototype of the frame', async () => {
+    const { composeApp } = await import('/peerd-engine/app-compose.js');
+    const [report] = await runDirectProblems(composeApp({ 'index.html': `<script>
+      const read = (run) => { try { return run(); } catch (error) { return error.name; } };
+      localStorage.setItem('a', 1);
+      localStorage.b = 2;
+      Storage.prototype.setItem.call(sessionStorage, 'c', 3);
+      parent.postMessage({ type: 'app-problem', problem: JSON.stringify([
+        String(localStorage), localStorage instanceof Storage, localStorage.a, localStorage.getItem('b'),
+        localStorage.length, Object.keys(localStorage), sessionStorage.c, sessionStorage.length, localStorage.key(NaN),
+        read(() => localStorage.setItem('big', 'x'.repeat(6 * 1024 * 1024))), localStorage.length, 'caches' in self,
+      ]) }, '*');
+      parent.postMessage({ type: 'runner-problems-done' }, '*');
+    <\/script>` }));
+    expect(JSON.parse(report)).toEqual(['[object Storage]', true, '1', '2', 2, ['a', 'b'], '3', 1, 'a',
+      'QuotaExceededError', 2, false]);
+  });
+});
+
 describe('App runner binary assets', () => {
   it('permits gamepads and WASM in the opaque App frame without full screen', async () => {
     // eslint-disable-next-line no-restricted-globals

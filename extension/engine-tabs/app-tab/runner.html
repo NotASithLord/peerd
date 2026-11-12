@@ -225,14 +225,37 @@
         window.parent.postMessage({ type: 'app-problem', problem }, '*');
       };
       window.addEventListener('peerd-app-file-missing', () => reportProblem('missing-file'));
+      window.addEventListener('peerd-app-module-failed', () => reportProblem('modules'));
       const reportFeature = (error) => {
         try {
           if (error?.name === 'SecurityError') reportProblem('feature');
           else if (/SharedArrayBuffer/.test(String(error?.message))) reportProblem('threads');
+          else if (/dynamically imported module|module specifier/i.test(String(error?.message))) reportProblem('modules');
         } catch (_e) { /* an App-made error object stays App data */ }
       };
       window.addEventListener('error', (event) => reportFeature(event.error));
       window.addEventListener('unhandledrejection', (event) => reportFeature(event.reason));
+      // App code that the browser could not load is the usual cause of a blank
+      // App, and the failed load makes no error that a window listener gets.
+      // A script element fires its own error event, which does not bubble.
+      // Only a script counts: a missing image or style does not stop an App.
+      window.addEventListener('error', (event) => {
+        try {
+          const script = event.target;
+          if (script?.localName !== 'script') return;
+          const src = script.getAttribute('src');
+          // A module script with no src ran no code: one of its imports did not load.
+          if (src === null) {
+            if (script.type === 'module') reportProblem('modules');
+            return;
+          }
+          // The file server already reported a blob: URL, and the policy
+          // listener a remote URL. This is a tag that composeApp left in place,
+          // because the App does not have the file.
+          const url = new URL(src, location.href);
+          if (url.protocol === location.protocol && url.host === location.host) reportProblem('missing-file');
+        } catch (_e) { /* an App-made element stays App data */ }
+      }, true);
       // A one-shot handoff: the file server takes this map and deletes the
       // property before any App script runs. It holds bytes only, never the port.
       Object.defineProperty(window, '__peerdAppFiles', { value: appFiles, configurable: true });

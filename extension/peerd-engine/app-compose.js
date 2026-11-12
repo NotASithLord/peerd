@@ -34,7 +34,7 @@ export const composeApp = (files, entry = 'index.html') => {
     if (!hrefMatch) return full;
     const href = hrefMatch[2];
     if (!isRelativeAndKnown(href, files, entry)) return full;
-    const path = resolveRel(entry, href);
+    const path = resolveRel(entry, href, files);
     assertStaticSource(path);
     visited.add(path);
     return `<style data-from="${escapeAttr(path)}">${files[path]}</style>`;
@@ -43,11 +43,12 @@ export const composeApp = (files, entry = 'index.html') => {
   // Inline <script src="./..."></script>  → <script>…</script>
   // Capture the closing tag too so we don't leave a dangling </script>.
   // why: Minified exports often leave the src value unquoted (src=game.js).
-  const SCRIPT_RE = /<script\b([^>]*?)\bsrc\s*=\s*(?:(['"])([^'"]+)\2|([^\s'"<>=`]+))([^>]*?)>(\s*)<\/script>/gi;
+  // A ?query or a #hash of such a value can hold a "=" (src=game.js?v=1).
+  const SCRIPT_RE = /<script\b([^>]*?)\bsrc\s*=\s*(?:(['"])([^'"]+)\2|([^\s'"<>=`?#]+(?:[?#][^\s'"<>`]*)?))([^>]*?)>(\s*)<\/script>/gi;
   composed = composed.replace(SCRIPT_RE, (full, beforeSrc, _q, quotedSrc, bareSrc, afterSrc) => {
     const src = quotedSrc ?? bareSrc;
     if (!isRelativeAndKnown(src, files, entry)) return full;
-    const path = resolveRel(entry, src);
+    const path = resolveRel(entry, src, files);
     assertStaticSource(path);
     visited.add(path);
     // Preserve type="module" etc. if present.
@@ -65,6 +66,8 @@ export const APP_FILES_HANDOFF = '__peerdAppFiles';
 // The file server fires this Window event when the App asks for a file it does
 // not have. The runner reports it to the App tab without the path.
 export const APP_FILE_MISSING_EVENT = 'peerd-app-file-missing';
+// The file server fires this Window event when a module Worker does not start.
+export const APP_MODULE_FAILED_EVENT = 'peerd-app-module-failed';
 
 const APP_FILE_TYPES = {
   html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript',
@@ -94,8 +97,10 @@ const APP_FILE_TYPES = {
  * @param {Record<string, string>} types
  * @param {string} handoff
  * @param {string} missingEvent
+ * @param {RegExp} dataPath
+ * @param {string} moduleFailedEvent
  */
-export function serveAppFiles(scope, entry, types, handoff, missingEvent) {
+export function serveAppFiles(scope, entry, types, handoff, missingEvent, dataPath, moduleFailedEvent) {
   'use strict';
   /** @type {Record<string, ArrayBuffer>} */
   const files = Object.create(null);
@@ -297,7 +302,11 @@ export function serveAppFiles(scope, entry, types, handoff, missingEvent) {
   // why: Loaders also add scripts, start workers, and load audio worklets by
   // URL, and the browser loads those itself. Give it a blob: URL of the App
   // file. A missing file gets a revoked blob: URL, so the load fails the way a
-  // 404 does and never reads a packaged extension file.
+  // 404 does and never reads a packaged extension file. An App data path gets
+  // the same answer: fetch and XHR can read it, but peerd.data can rewrite it
+  // with no new consent, so these calls do not give it to a code loader. This
+  // guards against a mistake and is not a boundary: App code can still run its
+  // own data, for example with eval or a blob: URL.
   /** @type {Record<string, string>} */
   const blobUrls = Object.create(null);
   let missingUrl = '';
@@ -306,7 +315,7 @@ export function serveAppFiles(scope, entry, types, handoff, missingEvent) {
     const found = resolve(input);
     if (!found) return input;
     const { path } = found;
-    if (path === null) {
+    if (path === null || dataPath.test(path)) {
       missing();
       if (!missingUrl) {
         missingUrl = URL.createObjectURL(new Blob());
@@ -343,6 +352,13 @@ export function serveAppFiles(scope, entry, types, handoff, missingEvent) {
       /** @param {string | URL} url @param {WorkerOptions} [options] */
       constructor(url, options) {
         super(/** @type {string} */ (appUrl(url)), options);
+        // why: A module Worker does not start in the App frame. The only sign
+        // is an error event with no message, and only the App can see it.
+        if (options?.type === 'module') {
+          this.addEventListener('error', (event) => {
+            if (!event.message) scope.dispatchEvent(new Event(moduleFailedEvent));
+          });
+        }
       }
     };
   }
@@ -359,6 +375,92 @@ export function serveAppFiles(scope, entry, types, handoff, missingEvent) {
   }
 }
 
+/**
+ * Give the App a localStorage and a sessionStorage that hold values in page
+ * memory, and remove window.caches.
+ * why: In the opaque App frame a read of these three properties throws
+ * SecurityError, and game engines read them with no try/catch. The stand-ins
+ * never touch real browser storage or the parent, and nothing is saved: the
+ * values go when the App closes. Without caches, an engine takes the path it
+ * has for a page with no Cache API, which is also what a Worker of this frame
+ * gets. indexedDB stays native: its read does not throw, and open() throws the
+ * SecurityError that engines already handle. composeApp serializes this
+ * function into the App document, so it must not use anything outside its body.
+ *
+ * @param {Window & typeof globalThis} scope
+ */
+export function keepAppStorageInMemory(scope) {
+  'use strict';
+  // A real Storage holds about this many UTF-16 units of keys and values.
+  const QUOTA = 5 * 1024 * 1024;
+  /** @type {WeakMap<object, Map<string, string>>} */
+  const held = new WeakMap();
+  /** @param {object} storage */
+  const itemsOf = (storage) => {
+    const items = held.get(storage);
+    if (!items) throw new TypeError('Illegal invocation');
+    return items;
+  };
+  /** @param {Map<string, string>} items @param {string} key @param {string} value */
+  const store = (items, key, value) => {
+    let size = key.length + value.length;
+    for (const [name, text] of items) if (name !== key) size += name.length + text.length;
+    if (size > QUOTA) throw new scope.DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    items.set(key, value);
+  };
+  // why on the prototype: a library can call Storage.prototype.setItem.call(storage, ...)
+  // or patch it. No real Storage exists in this frame, so only the stand-ins use these.
+  const proto = scope.Storage?.prototype ?? {};
+  Object.defineProperties(proto, Object.getOwnPropertyDescriptors({
+    get length() { return itemsOf(this).size; },
+    /** @param {unknown} index */
+    key(index) { return [...itemsOf(this).keys()][Number(index) >>> 0] ?? null; },
+    /** @param {unknown} key */
+    getItem(key) { return itemsOf(this).get(String(key)) ?? null; },
+    /** @param {unknown} key @param {unknown} value */
+    setItem(key, value) { store(itemsOf(this), String(key), String(value)); },
+    /** @param {unknown} key */
+    removeItem(key) { itemsOf(this).delete(String(key)); },
+    clear() { itemsOf(this).clear(); },
+  }));
+  const memoryStorage = () => {
+    /** @type {Map<string, string>} */
+    const items = new Map();
+    // why a Proxy: engines also read and write keys as properties (storage[key]).
+    const storage = new Proxy(Object.create(proto), {
+      get: (target, name, receiver) => (typeof name === 'string' && !(name in target)
+        ? items.get(name) : Reflect.get(target, name, receiver)),
+      // why the target for a Symbol: a real Storage keeps a Symbol key as a plain property.
+      set: (target, name, value, receiver) => {
+        if (typeof name === 'symbol') return Reflect.set(target, name, value, receiver);
+        store(items, name, String(value));
+        return true;
+      },
+      defineProperty: (target, name, descriptor) => {
+        if (typeof name === 'symbol') return Reflect.defineProperty(target, name, descriptor);
+        // A real Storage refuses a getter or a setter with a TypeError.
+        if (!('value' in descriptor || 'writable' in descriptor)) return false;
+        store(items, name, String(descriptor.value));
+        return true;
+      },
+      has: (target, name) => name in target || items.has(/** @type {string} */ (name)),
+      deleteProperty: (target, name) => (typeof name === 'symbol'
+        ? Reflect.deleteProperty(target, name) : items.delete(name) || true),
+      ownKeys: (target) => [...items.keys(), ...Reflect.ownKeys(target)],
+      getOwnPropertyDescriptor: (target, name) => {
+        if (typeof name === 'symbol') return Reflect.getOwnPropertyDescriptor(target, name);
+        return items.has(name)
+          ? { value: items.get(name), writable: true, enumerable: true, configurable: true } : undefined;
+      },
+    });
+    held.set(storage, items);
+    return { configurable: true, enumerable: true, get: () => storage };
+  };
+  Object.defineProperty(scope, 'localStorage', memoryStorage());
+  Object.defineProperty(scope, 'sessionStorage', memoryStorage());
+  Reflect.deleteProperty(scope, 'caches');
+}
+
 /** @param {string} entry */
 const appFileServerScript = (entry) => {
   // Escape every '<' so no argument can end the script early.
@@ -366,7 +468,8 @@ const appFileServerScript = (entry) => {
   const literal = (value) => JSON.stringify(value).replace(/</g, '\\u003c');
   return '<script data-peerd-file-server>'
     + `(${serveAppFiles})(self,${literal(entry)},${literal(APP_FILE_TYPES)},${literal(APP_FILES_HANDOFF)},`
-    + `${literal(APP_FILE_MISSING_EVENT)});`
+    + `${literal(APP_FILE_MISSING_EVENT)},${APP_DATA_PATH_RE},${literal(APP_MODULE_FAILED_EVENT)});`
+    + `(${keepAppStorageInMemory})(self);`
     + '</script>';
 };
 
@@ -385,7 +488,7 @@ const injectAtDocumentStart = (html, snippet) => {
 // why: Accept only known bundle paths and resolve them from the actual entry.
 /** @param {string} ref @param {Record<string,string>} files @param {string} [entry] */
 const isRelativeAndKnown = (ref, files, entry = 'index.html') =>
-  isBundleRelative(ref) && resolveRel(entry, ref) in files;
+  isBundleRelative(ref) && resolveRel(entry, ref, files) in files;
 
 // Reject absolute and in-document references.
 /** @param {string} ref */
@@ -398,22 +501,28 @@ const isBundleRelative = (ref) =>
 /**
  * @param {string} basePath
  * @param {string} relPath
+ * @param {Record<string,string>} files
  */
-const resolveRel = (basePath, relPath) => {
+const resolveRel = (basePath, relPath, files) => {
   // basePath is the entry file (e.g. 'index.html' or 'pages/about.html')
   // relPath is './style.css' or '../shared/main.js'
-  const baseDir = basePath.includes('/')
-    ? basePath.slice(0, basePath.lastIndexOf('/'))
-    : '';
-  const parts = (baseDir ? baseDir.split('/') : []).concat(
-    relPath.split('/').filter((p) => p !== '.'),
-  );
-  const resolved = [];
-  for (const p of parts) {
-    if (p === '..') resolved.pop();
-    else if (p) resolved.push(p);
-  }
-  return resolved.join('/');
+  const baseDir = basePath.slice(0, basePath.lastIndexOf('/') + 1);
+  /** @param {string} ref */
+  const from = (ref) => {
+    const parts = (baseDir ? baseDir.split('/') : []).concat(ref.split('/').filter((p) => p !== '.'));
+    const resolved = [];
+    for (const p of parts) {
+      if (p === '..') resolved.pop();
+      else if (p) resolved.push(p);
+    }
+    return resolved.join('/');
+  };
+  // why: A ?query or a #hash is not part of the file name (game.js?v=3),
+  // but an App file can have ? or # in its own name (c#.js). A query cannot change the parent path.
+  const cut = relPath.search(/[?#]/);
+  const path = from(cut < 0 ? relPath : relPath.slice(0, cut));
+  const exact = cut < 0 ? path : path + relPath.slice(cut);
+  return exact in files ? exact : path;
 };
 
 /**
