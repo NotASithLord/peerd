@@ -17,19 +17,19 @@ export const CODE_STYLE_NOTE = [
   '</code-style>',
 ].join('\n');
 
-// App-runtime gotcha, NOT style: the sandboxed opaque-origin iframe has no file
-// server, so cross-file ES modules don't resolve and a Worker can't load by path
-// (composeApp rewrites `new Worker('worker.js')` to a blob worker). The agent
+// App-runtime gotcha, NOT style: the sandboxed opaque-origin iframe serves only
+// fetch and XHR reads of App files, so cross-file ES modules don't resolve and
+// a Worker can't load by path (composeApp rewrites `new Worker('worker.js')` to
+// a blob worker). The agent
 // burned several turns hand-rolling workers before this was written down. Lives
 // HERE (with the other create-time notes) so it has ONE source: the app arm
 // discloses it in its result (flag-OFF), and the App ACTOR — the agent that
 // actually writes the page files — gets it in its lore (flag-ON, system-prompt.js).
 export const APP_RUNTIME_NOTE = [
   '<app-runtime>',
-  'The App runs in a sandboxed, opaque-origin iframe with NO file server, so your',
-  'page scripts CANNOT use cross-file ES modules: import/export BETWEEN your files',
-  "won't resolve (there's no URL to fetch ./other.js from) and the app silently",
-  'fails to start. Put your JS in classic <script> tags (multiple tags share ONE',
+  'The App runs in a sandboxed, opaque-origin iframe. Your page scripts CANNOT use',
+  "cross-file ES modules: import/export BETWEEN your files won't resolve and the app",
+  'silently fails to start. Put your JS in classic <script> tags (multiple tags share ONE',
   'global scope — define in one, use in the next) OR a single self-contained',
   '<script type="module"> with no relative imports. Same for CSS: inline <style> or',
   'tag-relative <link href="./x.css"> (peerd inlines those).',
@@ -38,14 +38,15 @@ export const APP_RUNTIME_NOTE = [
   "a blob worker can't import other app files. Or tile work across",
   'requestAnimationFrame frames; for pure no-UI compute, a Notebook/script are simpler.',
   'Apps have NO ambient network: fetch/XHR/WebSocket/WebRTC, CDN/remote assets,',
-  'iframes, external/document navigation, form actions, downloads, and popups are blocked. Bundle JS,',
+  'iframes, external/document navigation, form actions, downloads, and popups are blocked.',
+  'fetch and XHR of your own App files by relative path work. peerd serves them from memory. Bundle JS,',
   'CSS, and text files. For binary files such as WASM, images, audio, video, and fonts,',
   'use contentBase64 with app_write_file or {base64} in sandbox_create files.',
   'Known binary filename extensions are always treated as binary. Other names use the stored',
   'file kind and byte checks. Inside the App,',
   'window.peerd.assets.bytes(path) returns raw bytes and .url(path) returns a blob:',
-  'URL for image, media, or font consumers. Do not fetch that blob URL because the',
-  'sandbox blocks fetch. Instantiate WASM from bytes. Model-authored binary writes',
+  'URL for image, media, or font consumers. Do not fetch that blob URL. To fetch a',
+  'file, use its relative path. Instantiate WASM from bytes or fetch(path). Model-authored binary writes',
   'are deliberately small; import or peer sharing is the practical path for large assets.',
   'For durable JSON user content, use await window.peerd.data.get/set/delete/list.',
   'It can write only data/<key>.json in this App working tree, so Git history can',

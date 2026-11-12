@@ -78,6 +78,8 @@ describe('schema diet — descriptor sizes dropped, no capability lost', () => {
     expect(APP_RUNTIME_NOTE).toContain('./mithril.js');
     expect(APP_RUNTIME_NOTE).not.toContain('USE MITHRIL');
     expect(APP_RUNTIME_NOTE).toContain('consent-gated parent dweb bridge');
+    expect(APP_RUNTIME_NOTE).toContain('fetch and XHR of your own App files by relative path work');
+    expect(APP_RUNTIME_NOTE).not.toContain('sandbox blocks fetch');
   });
 
   test('net main-surface delta across the three tools is meaningfully negative', () => {
