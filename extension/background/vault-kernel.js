@@ -40,7 +40,7 @@ import {
   VaultNotInitializedError,
   WrongPassphraseError,
 } from '/peerd-egress/kernel-storage.js';
-import { makeUiPorts } from './ui-ports.js';
+import { makeUiPorts, makeWindowSurfaces } from './ui-ports.js';
 import { makeActorIsolationStateStore, readColdActorIsolation } from './actor-isolation-state.js';
 import { ACTOR_WORKER_PROTOCOL } from '/shared/actor-worker-protocol.js';
 import { createKernelBrowserNetworkRuntime } from './kernel-browser-network-authority.js';
@@ -200,7 +200,11 @@ const settingsStore = makeSettingsStore({
 });
 const vaultPosture = createVaultPostureIndex({ kv });
 const auditLog = createAuditLog({ idb, maxEntries: DEFAULT_AUDIT_MAX_ENTRIES });
-const uiPorts = makeUiPorts();
+const uiPorts = makeUiPorts({
+  onBroadcast: (/** @type {any} */ message) => {
+    if (message?.type === 'state' || message?.type === 'turn/streaming') void confirmation.refreshBadge();
+  },
+});
 const postChatNote = (/** @type {string} */ text, /** @type {any} */ action = null,
   /** @type {string|null} */ sessionId = null) => {
   if (uiPorts.size < 1) return;
@@ -221,6 +225,10 @@ const confirmation = createKernelConfirmation({
   sessionCache,
   isSidepanelSender: sidepanelUi,
   isHomeSender: homeUi,
+  readStreaming: async () => {
+    const sessionId = await sessionCache.sessionGet('currentSessionId');
+    return typeof sessionId === 'string' && controllerRelays()?.turnSlots?.isBusy(sessionId) === true;
+  },
 });
 const denylistPolicy = createKernelDenylistPolicy({
   kv,
@@ -337,6 +345,21 @@ const coldReceipts = createKernelColdReceipts({
   selfHostedChrome: kernelSelfHostedChrome,
 });
 const kernelEvents = coldReceipts;
+const windowSurfaces = makeWindowSurfaces({
+  browser, session: sessionCache, homeUrl, isPanelSender: sidepanelUi,
+  publish: (/** @type {any} */ surface) => {
+    uiPorts.broadcast({ type: 'surfaces', ...surface });
+    void browser.runtime.sendMessage({ type: 'surfaces/changed', ...surface }).catch(() => {});
+  },
+});
+for (const [name, open] of /** @type {const} */ ([['onOpened', true], ['onClosed', false]])) {
+  kernelEvents.event(`sidePanel.${name}`, /** @type {any} */ (browser).sidePanel?.[name], 'kernel-window-surfaces')
+    ?.addListener((/** @type {any} */ info) => {
+      void windowSurfaces.panel(info.windowId, open).catch(() => {});
+    });
+}
+kernelEvents.event('tabs.onAttached', browser.tabs.onAttached, 'kernel-window-surfaces')
+  ?.addListener(() => { void windowSurfaces.refresh().catch(() => {}); });
 const firstTab = attachKernelFirstTab({
   browser, events: kernelEvents, session: sessionCache, store: kv, ready: vaultReady, homeUrl,
   isEnabled: () => settingsStore.get().firstTabEnabled === true,
@@ -413,8 +436,8 @@ if (kernelSelfHostedChrome && kernelUpdateCustody) {
   });
 }
 
-const { closePanel: closeKernelPanel } = attachKernelFrontDoor({
-  browser, events: kernelEvents, uiPorts, settingsStore, openHome, ready: vaultReady,
+const { closePanel: closeKernelPanel, openWindowHome } = attachKernelFrontDoor({
+  browser, events: kernelEvents, uiPorts, settingsStore, openHome, windowSurfaces, ready: vaultReady,
 });
 
 const providerProjection = createKernelProviderProjection({
@@ -652,6 +675,7 @@ const systemReadRoutes = makeSystemReadRoutes({
   sessions: kernelSessions,
   buildStateSnapshot: stateSnapshot,
   uiPorts,
+  getSurfaces: windowSurfaces.get,
 });
 const loadProductionRuntimeModule = makeBoundedModuleLoader(
   runtimeModules.productionRuntime,
@@ -677,7 +701,7 @@ const loadDemandPlane = makeBoundedModuleLoader(async () => {
         createTurnFactories: createKernelTurnAuthorityAdapter,
       });
     },
-    browser, idb, kv, sessionCache, vault, auditLog, settingsStore, uiPorts,
+    browser, idb, kv, sessionCache, vault, auditLog, settingsStore, uiPorts, openWindowHome,
     denylist: denylistPolicy,
     firefox: kernelFirefox,
     dwebEnabled: DWEB_ENABLED,
@@ -945,13 +969,22 @@ attachKernelLifecycleEvents({
       ?? (() => Promise.reject(new Error('kernel-update-custody-unavailable')))
     : undefined,
 });
+const windowTabOwners = firstTab.watchTabs(browserEventOwners.tabs);
 attachKernelTabEvents({
   browser,
   registry: kernelEvents,
   firefox: kernelFirefox,
   ...browserEventOwners.tabs,
   // The first tab notes each window where the user closed or unpinned it.
-  ...firstTab.watchTabs(browserEventOwners.tabs),
+  ...windowTabOwners,
+  onRemoved: (/** @type {number} */ id, /** @type {any} */ info) => {
+    void windowSurfaces.refresh().catch(() => {});
+    return windowTabOwners.onRemoved(id, info);
+  },
+  onUpdated: (/** @type {number} */ id, /** @type {any} */ change, /** @type {any} */ tab) => {
+    if (change.url) void windowSurfaces.refresh().catch(() => {});
+    return windowTabOwners.onUpdated(id, change, tab);
+  },
 });
 if (kernelFirefox) {
   void browser.tabs.query({}).then((tabs) => childGuard.reconcile(tabs))
@@ -1104,11 +1137,7 @@ kernelEvents.event(
 })));
 
 const broadcastSurfaces = () => {
-  const sidePanelOpen = uiPorts.hasNamed('sidepanel');
-  uiPorts.broadcast({ type: 'surfaces', sidePanelOpen });
-  try {
-    void browser.runtime.sendMessage({ type: 'surfaces/changed', sidePanelOpen }).catch(() => {});
-  } catch {}
+  void windowSurfaces.refresh().catch(() => {});
 };
 const uiPortOwner = createKernelUiPortOwner({
   uiPorts,

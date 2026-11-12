@@ -36,10 +36,12 @@ const sidePanelApi = () =>
 // why: cache the stable tab ID before the click to preserve user activation.
 /** @type {number | null} */
 let cachedTabId = null;
+/** @type {number | null} */
+let cachedWindowId = null;
 const resolveTabId = () => {
   try {
     const p = browser.tabs?.getCurrent?.();
-    if (p?.then) p.then((t) => { cachedTabId = t?.id ?? null; }).catch(() => {});
+    if (p?.then) p.then((t) => { cachedTabId = t?.id ?? null; cachedWindowId = t?.windowId ?? null; }).catch(() => {});
   } catch { /* no tabs API in this context */ }
 };
 
@@ -365,7 +367,8 @@ const listenForSurfaceChanges = () => {
   if (surfaceListenerAttached) return;
   try {
     browser.runtime.onMessage.addListener((/** @type {unknown} */ raw) => {
-      const msg = /** @type {{ type?: unknown, sidePanelOpen?: unknown } | null} */ (raw);
+      const msg = /** @type {{ type?: unknown, windowId?: unknown, sidePanelOpen?: unknown } | null} */ (raw);
+      if (typeof msg?.windowId === 'number' && msg.windowId !== cachedWindowId) return;
       if (msg?.type === 'surfaces/changed' && typeof msg.sidePanelOpen === 'boolean') {
         setPanelOpen(msg.sidePanelOpen);
       }

@@ -16,7 +16,9 @@ const withBrowser = async (tabs: Tab[], currentWindow: number, run: () => Promis
     update: async (id: number, properties: { active?: boolean, url?: string }) => {
       calls.push(`activate tab ${id}${properties.url ? ` at ${properties.url.slice(HOME.length)}` : ''}`);
     },
-    create: async ({ url }: { url: string }) => { calls.push(`create ${url.slice(HOME.length) || 'home'}`); },
+    create: async ({ url, windowId, pinned, index }: { url: string, windowId?:number, pinned?:boolean, index?:number }) => {
+      calls.push(`create ${url.slice(HOME.length) || 'home'} in window ${windowId}${pinned && index === 0 ? ' pinned first' : ''}`);
+    },
   };
   native.windows = {
     getCurrent: async () => ({ id: currentWindow }),
@@ -38,8 +40,7 @@ describe('openHome', () => {
     ];
     expect(pickHomeTab(homes, 20)?.id).toBe(3);
     expect(pickHomeTab(homes, 10)?.id).toBe(1);
-    // A window with no Home tab falls back to the first one anywhere.
-    expect(pickHomeTab(homes, 30)?.id).toBe(1);
+    expect(pickHomeTab(homes, 30)).toBeUndefined();
     expect(pickHomeTab([{ id: 2, windowId: 20 }, { id: 4, windowId: 20 }], 20)?.id).toBe(2);
     expect(pickHomeTab([], 20)).toBeUndefined();
   });
@@ -56,6 +57,21 @@ describe('openHome', () => {
   test('with no Home tab it opens one', async () => {
     const calls = await withBrowser([{ id: 5, windowId: 20, pinned: false, url: 'https://example.com/' }],
       20, () => openHome());
-    expect(calls).toEqual(['create home']);
+    expect(calls).toEqual(['create home in window 20']);
+  });
+
+  test('an event window overrides last focus and keeps its sticky Home before a pinned duplicate', async () => {
+    const calls = await withBrowser([
+      { id: 1, windowId: 10, pinned: true, url: HOME },
+      { id: 6, windowId: 20, pinned: true, url: HOME },
+      { id: 7, windowId: 20, pinned: false, url: `${HOME}#library` },
+    ], 10, () => openHome('chat', { windowId: 20, tabId: 7 }));
+    expect(calls).toEqual(['activate tab 7 at #chat', 'focus window 20']);
+  });
+
+  test('an empty event window creates its own Home with the enabled first-tab option', async () => {
+    const calls = await withBrowser([{ id: 1, windowId: 10, pinned: true, url: HOME }],
+      10, () => openHome('chat', { windowId: 20, pinned: true }));
+    expect(calls).toEqual(['create #chat in window 20 pinned first']);
   });
 });

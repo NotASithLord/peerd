@@ -38,12 +38,13 @@ const AGENT_TAB_COLORS = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF']
  * @param {{ broadcast: (m: any) => void, hasNamed: (name: string) => boolean }} deps.uiPorts
  * @param {{ patterns: () => any }} deps.denylistStore
  * @param {(windowId?:number) => Promise<unknown>} deps.closeSidePanel
+ * @param {(windowId?:number)=>unknown} [deps.openWindowHome]
  * @param {() => boolean} [deps.isWatchOn]  live read of the watchAgentTab setting (default off)
  * @param {() => ('panel'|'home')} [deps.getFrontDoorView]  live read of the frontDoorView setting (default 'panel')
  * @param {(key:string,event:any)=>any} [deps.coldEvent]
  */
 export const makeTabAffordances = ({
-  browser, uiPorts, denylistStore, closeSidePanel,
+  browser, uiPorts, denylistStore, closeSidePanel, openWindowHome = (windowId) => openHome('chat', { windowId }),
   isWatchOn = () => false, getFrontDoorView = () => 'panel',
   coldEvent = (_key, event) => event,
 }) => {
@@ -250,19 +251,8 @@ export const makeTabAffordances = ({
   coldEvent('tabs.onRemoved', browser.tabs?.onRemoved)?.addListener((/** @type {number} */ tabId) => { peerdWebTabs.delete(tabId); });
 
   // ── 3. the front door — toolbar icon + Alt+Shift+P ──────────────────────────
-  // The toolbar icon is peerd's FRONT DOOR, and which surface it opens is the
-  // user's `frontDoorView` setting (Settings → Behavior): 'panel' (default)
-  // pulls the chat into the window-global side panel (Chrome) / sidebar
-  // (Firefox) so it sits next to the page and follows you onto ANY tab;
-  // 'home' restores the original full-page-first model (DESIGN-12) — home
-  // with no home up yet, the panel once home IS up. The Alt+Shift+P command
-  // is the dedicated twin: it ALWAYS pulls the panel in, from anywhere.
-  //
-  // Hard constraint: sidePanel.open()/sidebarAction.open() must run SYNCHRONOUSLY
-  // inside the click/keystroke gesture — no await before them or the activation is
-  // dropped. So every decision input must be available without awaiting: the window
-  // id (from the listener's tab arg) and "is home open?" (two sync signals below).
-  // We cannot tabs.query() in the gesture; decidePullIn is a pure sync fn.
+  // Modern Chrome returns to the Home owner in the event's window.
+  // Legacy panel and Firefox sidebar opens keep the browser gesture.
 
   // Sync "is home open?" — a boot-seeded set of home tab ids OR a live home port.
   // why both: the set survives an SW respawn (the home port may not have reconnected
@@ -304,23 +294,14 @@ export const makeTabAffordances = ({
     if (!none) lastFocusedWindowId = winId;
   });
 
-  // Mirror the front-door choice into Chrome's NATIVE action-click behavior.
-  // With openPanelOnActionClick:true the browser opens the side panel itself —
-  // before the SW even wakes — so the default 'panel' front door can never
-  // race cold-start settings hydration (the store serves channel defaults
-  // until its async load lands, and the click that WAKES the worker beats it).
-  // Consequence: action.onClicked then only fires for 'home' users, which is
-  // the inference decidePullIn's nativePanelMirror leg rides. Chrome persists
-  // the behavior browser-side; re-applying at boot + on a frontDoorView write
-  // (both SW-wired) keeps it true to the setting. Native semantics also make
-  // the icon a panel TOGGLE for 'panel' users — the platform convention for
-  // side-panel extensions. Firefox has no equivalent, so its icon path keeps
-  // the sync settings read (a 'home' opt-in there can still see one
-  // panel-open on a cold event-page wake — accepted residual).
+  // Home return uses the extension action handler. Do not let the native
+  // panel toggle intercept it. The older front door keeps its panel preference.
+  const homeWorkspace = typeof (/** @type {any} */ (browser)).sidePanel?.onOpened?.addListener === 'function'
+    && typeof (/** @type {any} */ (browser)).sidePanel?.onClosed?.addListener === 'function';
   const syncFrontDoorBehavior = async () => {
     try {
       await (/** @type {any} */ (browser)).sidePanel?.setPanelBehavior?.({
-        openPanelOnActionClick: getFrontDoorView() === 'panel',
+        openPanelOnActionClick: !homeWorkspace && getFrontDoorView() === 'panel',
       });
     } catch (e) {
       console.warn('[sw] setPanelBehavior failed', e);
@@ -338,6 +319,7 @@ export const makeTabAffordances = ({
       fromShortcut,
       frontDoorView: getFrontDoorView(),
       nativePanelMirror: !!(/** @type {any} */ (browser)).sidePanel?.setPanelBehavior,
+      homeWorkspace,
     });
     // Toggle-closed (shortcut only) — close needs no gesture, so fire and forget.
     if (target === 'close') { closeSidePanel(windowId); return; }
@@ -345,16 +327,16 @@ export const makeTabAffordances = ({
       const panelWindowId = windowId ?? lastFocusedWindowId;
       if (target === 'panel' && panelWindowId != null) {
         const p = (/** @type {any} */ (browser)).sidePanel.open({ windowId: panelWindowId });
-        if (p?.catch) p.catch((/** @type {any} */ e) => { console.warn('[sw] sidePanel.open failed', e); openHome(); });
+        if (p?.catch) p.catch((/** @type {any} */ e) => { console.warn('[sw] sidePanel.open failed', e); openWindowHome(panelWindowId); });
         return;
       }
       if (target === 'sidebar') {
         const p = browser.sidebarAction.open();
-        if (p?.catch) p.catch((/** @type {any} */ e) => { console.warn('[sw] sidebarAction.open failed', e); openHome(); });
+        if (p?.catch) p.catch((/** @type {any} */ e) => { console.warn('[sw] sidebarAction.open failed', e); openWindowHome(windowId); });
         return;
       }
     } catch (e) { console.warn('[sw] pull-in open threw', e); }
-    openHome();
+    openWindowHome(windowId ?? lastFocusedWindowId ?? undefined);
   };
 
   coldEvent('action.onClicked', browser.action?.onClicked)?.addListener((/** @type {any} */ tab) => {

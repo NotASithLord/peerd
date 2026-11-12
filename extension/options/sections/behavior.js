@@ -141,7 +141,9 @@ export const BehaviorSection = {
     ];
 
     // ── Behavior — changes how it works, not what it may do ─────────────────
-    const frontDoor = s.frontDoorView === 'home' ? 'home' : 'panel';
+    const homeWorkspace = typeof globalThis.chrome?.sidePanel?.onOpened?.addListener === 'function'
+      && typeof globalThis.chrome?.sidePanel?.onClosed?.addListener === 'function';
+    const frontDoor = homeWorkspace || s.frontDoorView === 'home' ? 'home' : 'panel';
     const firstTabOn = s.firstTabEnabled === true;
     const reasoningEnabled = s.reasoningEnabled !== false;
     const effort = s.reasoningEffort ?? 'medium';
@@ -163,15 +165,18 @@ export const BehaviorSection = {
       settingsRow({
         id: 'front-door',
         label: 'Toolbar button',
-        summary: frontDoor === 'panel'
+        summary: homeWorkspace ? 'Returns to the Home chat in this window.' : frontDoor === 'panel'
           ? 'Opens the chat in the side panel, next to the page you’re on.'
           : 'Opens the full-page home tab. Once home is open, the button pulls the panel in instead.',
-        why: 'The keyboard shortcut (Cmd+Shift+P on Mac, Alt+Shift+P elsewhere) always toggles the side panel, whichever default you pick.',
+        why: homeWorkspace
+          ? 'The toolbar button and the existing keyboard shortcut return to the same Home chat. Home keeps the draft while you browse or use split view.'
+          : 'The keyboard shortcut (Cmd+Shift+P on Mac, Alt+Shift+P elsewhere) always toggles the side panel, whichever default you pick.',
         open: whyOpen('front-door'),
         onToggleWhy: toggleWhy('front-door'),
         control: m('select.set-select', {
           id: 'front-door-view',
           'aria-label': 'What the toolbar button opens',
+          disabled: homeWorkspace,
           value: frontDoor,
           onchange: async (/** @type {{ target: HTMLSelectElement }} */ e) => {
             await send({ type: 'settings/update', patch: { frontDoorView: e.target.value } });

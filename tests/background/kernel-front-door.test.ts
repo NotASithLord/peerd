@@ -18,6 +18,8 @@ const makeHarness = ({
   panelOpen = false,
   frontDoorView = 'panel' as 'panel'|'home',
   nativeMirror = false,
+  nativeWorkspace = false,
+  nativeClosed = true,
   firefox = false,
 } = {}) => {
   const action = event();
@@ -25,6 +27,7 @@ const makeHarness = ({
   const focus = event();
   const calls: string[] = [];
   const closedIn: Array<number|null|undefined> = [];
+  const openedHomeIn: Array<number|null|undefined> = [];
   const browser: any = {
     runtime: { id: 'extension-id' },
     action: { onClicked: action },
@@ -38,6 +41,8 @@ const makeHarness = ({
       sidebarAction: { open: () => { calls.push('sidebar'); return Promise.resolve(); } },
     } : {
       sidePanel: {
+        ...(nativeWorkspace ? { onOpened: event() } : {}),
+        ...(nativeWorkspace && nativeClosed ? { onClosed: event() } : {}),
         open: ({ windowId }: any) => { calls.push(`panel:${windowId}`); return Promise.resolve(); },
         ...(nativeMirror ? {
           setPanelBehavior: ({ openPanelOnActionClick }: any) => {
@@ -56,12 +61,29 @@ const makeHarness = ({
     isPanelOpen: () => panelOpen,
     getFrontDoorView: () => frontDoorView,
     closePanel: (windowId) => { calls.push('close'); closedIn.push(windowId); },
-    openHome: () => { calls.push('home'); },
+    openHome: (windowId) => { calls.push('home'); openedHomeIn.push(windowId); },
   });
-  return { action, command, focus, calls, closedIn, coldKeys, api };
+  return { action, command, focus, calls, closedIn, openedHomeIn, coldKeys, api };
 };
 
 describe('thin-kernel synchronous front door', () => {
+  test('modern Chrome returns both gestures to the event window Home and disables the panel mirror', async () => {
+    const h = makeHarness({ nativeWorkspace: true, nativeMirror: true, panelOpen: true });
+    h.action.emit({ windowId: 17 });
+    h.command.emit('pull-in-peerd', { windowId: 28 });
+    expect(h.openedHomeIn).toEqual([17, 28]);
+    expect(h.closedIn).toEqual([]);
+    await h.api.syncNativeBehavior();
+    expect(h.calls).toEqual(['home', 'home', 'native:false']);
+  });
+  test('Chrome 141 without a close event keeps the native panel shortcut and action mirror', async () => {
+    const h = makeHarness({ nativeWorkspace: true, nativeClosed: false, nativeMirror: true, panelOpen: true });
+    h.command.emit('pull-in-peerd', { windowId: 17 });
+    expect(h.closedIn).toEqual([17]);
+    expect(h.openedHomeIn).toEqual([]);
+    await h.api.syncNativeBehavior();
+    expect(h.calls).toEqual(['close', 'native:true']);
+  });
   test('registers the three exact cold events once and opens in the gesture stack', () => {
     const harness = makeHarness();
     expect(harness.coldKeys).toEqual([

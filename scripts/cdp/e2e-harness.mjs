@@ -927,6 +927,29 @@ export async function launchPeerd({
     };
     let lastActionTargetId = null;
     const openNativePanelTarget = async (budgetMs) => {
+      // The toolbar returns to Home. Open the native panel with its own gesture.
+      const opener = await attach(created.webSocketDebuggerUrl);
+      try {
+        await opener.send('Page.enable');
+        await opener.send('Page.navigate', { url: `chrome-extension://${sw.id}/options/options.html` });
+        const ready = await waitFor(() => evalIn(opener,
+          `typeof chrome !== 'undefined' && typeof chrome.sidePanel?.open === 'function'`).catch(() => false),
+        { budgetMs, pollMs: 25 });
+        if (!ready) throw new Error('The native panel API did not start.');
+        const windowId = await evalIn(opener, `typeof chrome.sidePanel?.onOpened?.addListener === 'function'
+          ? chrome.windows.getLastFocused().then(window => window.id) : null`, true);
+        if (typeof windowId === 'number') {
+          const opened = await opener.send('Runtime.evaluate', {
+            expression: `chrome.sidePanel.open({windowId:${windowId}})`,
+            awaitPromise: true, returnByValue: true, userGesture: true,
+          });
+          if (opened.exceptionDetails) throw new Error(opened.exceptionDetails.text);
+          return await waitFor(findNativePanelTarget, { budgetMs, pollMs: 25 });
+        }
+      } finally {
+        await opener.send('Page.navigate', { url: 'about:blank' });
+        opener.close();
+      }
       const { targetInfos: actionTargets = [] } = await browserConn.send('Target.getTargets', {
         filter: [{ type: 'tab', exclude: false }, { exclude: false }],
       });
@@ -953,7 +976,9 @@ export async function launchPeerd({
       }
       return null;
     };
-    const target = await openNativePanelTarget(Math.min(10_000, READY_BUDGET_MS));
+    let target;
+    try { target = await openNativePanelTarget(Math.min(10_000, READY_BUDGET_MS)); }
+    catch (error) { activationPage.close(); cleanup(); throw error; }
     if (!target) {
       activationPage.close();
       cleanup();

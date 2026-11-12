@@ -7,6 +7,12 @@ import {
 const NATIVE_KERNEL_GUARDS = [
   'offscreen.createDocument|background/kernel-feature-host.js',
   'offscreen.closeDocument|background/kernel-feature-host.js',
+  'sidePanel.onOpened|background/kernel-front-door.js',
+  'sidePanel.onClosed|background/kernel-front-door.js',
+  'sidePanel.onOpened|background/tab-affordances.js',
+  'sidePanel.onClosed|background/tab-affordances.js',
+  'runtime.getContexts|background/ui-ports.js',
+  'sidePanel.onClosed|background/ui-ports.js',
   'sidePanel.open|background/kernel-front-door.js',
   'sidePanel.setPanelBehavior|background/kernel-front-door.js',
   'runtime.requestUpdateCheck|background/vault-kernel.js',
