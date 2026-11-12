@@ -83,7 +83,7 @@ export const GUARDED_CHROME_ONLY: readonly GuardedChromeOnlyApi[] = [
     proof: ["typeof browser.offscreen?.closeDocument === 'function'", 'await browser.offscreen.closeDocument()'] },
   { api: 'sidePanel.open', file: 'background/kernel-front-door.js',
     why: 'decidePullIn selects Firefox sidebarAction when sidePanel.open is absent',
-    proof: ["hasSidePanel: typeof browser.sidePanel?.open === 'function'", 'browser.sidePanel.open({ windowId })'] },
+    proof: ["hasSidePanel: typeof browser.sidePanel?.open === 'function'", 'browser.sidePanel.open({ windowId: panelWindowId })'] },
   { api: 'sidePanel.setPanelBehavior', file: 'background/kernel-front-door.js',
     why: 'native preference sync returns false when the capability is absent',
     proof: ["typeof browser.sidePanel?.setPanelBehavior !== 'function'", 'await browser.sidePanel.setPanelBehavior('] },

@@ -37,7 +37,7 @@ const AGENT_TAB_COLORS = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF']
  * @param {any} deps.browser
  * @param {{ broadcast: (m: any) => void, hasNamed: (name: string) => boolean }} deps.uiPorts
  * @param {{ patterns: () => any }} deps.denylistStore
- * @param {() => Promise<any>} deps.closeSidePanel
+ * @param {(windowId?:number) => Promise<unknown>} deps.closeSidePanel
  * @param {() => boolean} [deps.isWatchOn]  live read of the watchAgentTab setting (default off)
  * @param {() => ('panel'|'home')} [deps.getFrontDoorView]  live read of the frontDoorView setting (default 'panel')
  * @param {(key:string,event:any)=>any} [deps.coldEvent]
@@ -329,7 +329,7 @@ export const makeTabAffordances = ({
 
   // The pull-in itself — open() runs synchronously (no await before it) to keep the
   // gesture; a failed/declined open falls back to home so the icon never dead-ends.
-  const pullInPeerd = (/** @type {number} */ windowId, { fromShortcut = false } = {}) => {
+  const pullInPeerd = (/** @type {number|undefined} */ windowId, { fromShortcut = false } = {}) => {
     const target = decidePullIn({
       homeOpen: isHomeOpen(),
       panelOpen: uiPorts.hasNamed('sidepanel'),
@@ -340,10 +340,11 @@ export const makeTabAffordances = ({
       nativePanelMirror: !!(/** @type {any} */ (browser)).sidePanel?.setPanelBehavior,
     });
     // Toggle-closed (shortcut only) — close needs no gesture, so fire and forget.
-    if (target === 'close') { closeSidePanel(); return; }
+    if (target === 'close') { closeSidePanel(windowId); return; }
     try {
-      if (target === 'panel' && windowId != null) {
-        const p = (/** @type {any} */ (browser)).sidePanel.open({ windowId });
+      const panelWindowId = windowId ?? lastFocusedWindowId;
+      if (target === 'panel' && panelWindowId != null) {
+        const p = (/** @type {any} */ (browser)).sidePanel.open({ windowId: panelWindowId });
         if (p?.catch) p.catch((/** @type {any} */ e) => { console.warn('[sw] sidePanel.open failed', e); openHome(); });
         return;
       }
@@ -365,7 +366,7 @@ export const makeTabAffordances = ({
   // fail-closed SW boundary the injected-web-page button would have required.
   coldEvent('commands.onCommand', browser.commands?.onCommand)?.addListener((/** @type {string} */ command, /** @type {any} */ tab) => {
     if (command !== 'pull-in-peerd') return;
-    pullInPeerd(/** @type {number} */ (tab?.windowId ?? lastFocusedWindowId), { fromShortcut: true });
+    pullInPeerd(tab?.windowId, { fromShortcut: true });
   });
 
   return { noteAgentTab, broadcastAgentTab, scheduleWebTabHint, showWebTabHint, setTabAnchor, isHomeOpen, focusAgentTab, syncFrontDoorBehavior };

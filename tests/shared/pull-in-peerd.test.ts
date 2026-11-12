@@ -5,7 +5,7 @@ const source = readFileSync('extension/shared/pull-in-peerd.js', 'utf8');
 // why: use the exact module functions without changing the live browser API.
 const load = (browser: any) => new Function('browser', `'use strict';
   ${source.replace("import browser from '/shared/browser-api.js';", '').replace(/^export const /gm, 'const ')}
-  return { resolveTarget: typeof resolveTabId === 'function' ? resolveTabId : resolveWindowId, openPanel, panelKind, onPanelOpenChange, listenForSurfaceChanges };
+  return { resolveTarget: typeof resolveTabId === 'function' ? resolveTabId : resolveWindowId, openPanel, panelKind, onPanelOpenChange, listenForSurfaceChanges, onToggleClick };
 `)(browser);
 
 test('pull-in opens by stable tab ID after a window move, inside the gesture', async () => {
@@ -74,5 +74,35 @@ test('a panel listener hears the state at once, then each change the kernel push
     push({ type: 'surfaces/changed', sidePanelOpen: true });
     push({ type: 'surfaces/changed', sidePanelOpen: false });
     expect(seen).toEqual([false, true, false]);
+  } finally { scope.document = saved; }
+});
+
+
+test('a rejected close restores the open toggle without retrying the close', async () => {
+  const scope = globalThis as { document?: unknown };
+  const saved = scope.document;
+  scope.document = { getElementById: () => null };
+  try {
+    const messages: string[] = [];
+    let push: (message: unknown) => void = () => {};
+    const api = load({
+      sidePanel: { open: () => {} },
+      runtime: {
+        onMessage: { addListener: (listener: typeof push) => { push = listener; } },
+        sendMessage: async ({ type }: { type: string }) => {
+          messages.push(type);
+          return type === 'surfaces/get' ? { sidePanelOpen: true } : { ok: false };
+        },
+      },
+    });
+    const seen: boolean[] = [];
+    api.listenForSurfaceChanges();
+    api.onPanelOpenChange((open: boolean) => { seen.push(open); });
+    push({ type: 'surfaces/changed', sidePanelOpen: true });
+    api.onToggleClick();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(messages).toEqual(['sidepanel/close', 'surfaces/get']);
+    expect(seen).toEqual([false, true, false, true]);
   } finally { scope.document = saved; }
 });

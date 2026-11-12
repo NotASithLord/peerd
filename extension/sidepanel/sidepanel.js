@@ -287,7 +287,20 @@ const prefillComposer = (text) => {
   currentState = { ...currentState, composerPrefill: { text, nonce: prefillNonce } };
   m.redraw();
 };
-const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, openAgentTab, prefillComposer };
+const closePanel = async () => {
+  const sidePanel = globalThis.chrome?.sidePanel;
+  if (!sidePanel?.close) return send({ type: 'sidepanel/close' });
+  try {
+    const { id } = await browser.windows.getCurrent();
+    if (typeof id !== 'number' || id < 0) throw new Error('no-sidepanel-window');
+    await sidePanel.close({ windowId: id });
+    return { ok: true };
+  } catch (cause) {
+    showEffectFailure({ type: 'sidepanel/close' }, cause);
+    return { ok: false };
+  }
+};
+const uiActions = { loadActor, confirmAnswer, dismissNotice, requestDebugger, openAgentTab, prefillComposer, closePanel };
 
 // ---- brand hand-off: is the options tab the active one? -------------------
 //

@@ -86,7 +86,7 @@ export const App = {
       : null;
 
     return m('div', { class: 'app-shell' }, [
-      unlocked ? m(TopBar, { state, send, optionsActive }) : null,
+      unlocked ? m(TopBar, { state, send, optionsActive, uiActions }) : null,
       notices,
       actorIsolation,
       m('.body', unlocked
@@ -159,8 +159,8 @@ const Wordmark = () => {
 };
 
 const TopBar = {
-  /** @param {{ attrs: { state: ChatState, send: Send, optionsActive: boolean } }} vnode */
-  view: ({ attrs: { state, send, optionsActive } }) => {
+  /** @param {{ attrs: { state: ChatState, send: Send, optionsActive: boolean, uiActions: UiActions } }} vnode */
+  view: ({ attrs: { state, send, optionsActive, uiActions } }) => {
     const unlocked = state.vault.initialized && !state.vault.locked;
     return m('.topbar', [
       // Brand cluster: the preview badge sits inline to the RIGHT of the
@@ -239,15 +239,11 @@ const TopBar = {
           title: 'Settings',
           onclick: () => openOptions(),
         }, icon('set')),
-        // Close the panel. The toolbar action OPENS peerd (the side panel by
-        // default, or Home via the frontDoorView setting) — only Chrome's
-        // native action-click toggle ever closes it — so the panel keeps its
-        // own dismiss; this reuses the SW's sidepanel/close (Chrome-only,
-        // no-op on Firefox's sidebar).
+        // Close this panel from its own browser window.
         m('button.icon', {
           'aria-label': 'Close panel',
           title: 'Close panel',
-          onclick: () => settleUiEffect(send({ type: 'sidepanel/close' })),
+          onclick: () => settleUiEffect(uiActions.closePanel?.()),
         }, icon('x')),
       ]) : null,
     ]);
