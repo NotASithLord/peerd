@@ -10,6 +10,60 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-29
+
+### Added
+
+- Apps can use a full-screen view while keeping Peerd one click away.
+- Optional first-tab access keeps Home and the assistant easy to reopen,
+  with explicit settings and recovery behavior.
+
+### Improved
+
+- Discover presents clearer app names, refined browsing and review flows,
+  and more consistent starter-app and contact surfaces.
+- Native P2P diagnostics retain bounded ICE connectivity evidence. Physical
+  cluster qualification exercises sustained discovery, signed transfers,
+  peer churn, corruption recovery, and signaling outages.
+- Native P2P and WASM acceptance can verify the exact runtime bundled in
+  an installed browser, preserving version and input-integrity checks.
+- Native visual verification requires complete evidence, and typed
+  site-client reads retain their authority boundaries.
+- Cluster diagnostics can record file-descriptor counts, controlled-renderer
+  scheduling delays, and a fixture-idle baseline before the mesh starts.
+
+### Fixed
+
+- Saturated meshes retrieve signed app content over existing authenticated
+  paths. Bounded batches support delayed links, and replay bookkeeping retains
+  the full protection window during sustained retrieval.
+- App retrieval retains authenticated provider routes until completion or
+  cancellation, and bounded directory traversal recovers stale introductions.
+- Full routing meshes replace a connection only after proving a live alternate
+  path that survives both peers' proposed replacements. Expired or cancelled
+  reservations preserve the existing connection, and active transfers retain
+  their fixed protection window even on newly established links.
+- Busy rendezvous queues preserve healthy links, handshake admission leaves
+  room for inbound progress, and neighbor selection gives untried peers a turn.
+- Offline repair uses authenticated common brokers; routing suggestions omit
+  cooling edges, and returned content leases survive referral-search cleanup.
+- Network disable waits for vault recovery already in flight, and revoked
+  feature starts cannot recreate a host after the disable acknowledgement.
+- Concurrent controller startup work uses the bounded admission queue while
+  preserving execution limits, cancellation deadlines, and the separate stop lane.
+- Network verification diagnostics expose bounded queue pressure without
+  recording message contents or weakening signature checks.
+- Notebook WASI commands reject incompatible imports and command exports
+  before module instantiation.
+
+### Scope
+
+- P2P remains opt-in and Chrome-preview-only. Physical two-peer qualification
+  does not establish representative WAN/NAT reachability or network scale.
+- Browser binaries and installed-client updates require separate qualification.
+  Public Mac distribution additionally requires Developer ID signing,
+  notarization, and successful installed-client update verification.
+
 ## [0.10.0] - 2026-10-28
 
 ### Added
