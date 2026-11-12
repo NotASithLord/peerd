@@ -287,10 +287,12 @@ try {
   });
   await check('healthy transfer recovers after corruption', async () => verify(await workers[seederIndex].call('fetch', { uri: published.uri })));
   await check('unsharing stops remote content serving', async () => {
-    await workers[seederIndex].call('seed', { uri: published.uri });
+    const seeded = await workers[seederIndex].call('seed', { uri: published.uri });
     await workers[0].call('unshare', { hash: published.hash });
     await assert.rejects(explicitProviderProbe(), /peer does not hold/);
-    return { rejected: true };
+    // why: awaiting a best-effort announcement does not prove replication.
+    // Preserve its receipt to distinguish distribution from retrieval failures.
+    return { rejected: true, seeder: seederIndex, announcement: seeded.announcement };
   });
   await check('peer leave removes authenticated links', async () => {
     // Preserve the first lifetime's counters before this worker recreates its

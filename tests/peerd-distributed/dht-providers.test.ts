@@ -114,3 +114,48 @@ test('provider lookup reports RPC and malformed-reply uncertainty without losing
     expect(result.map(contact => contact.did)).toEqual(next === 'provider' ? [provider.did] : []);
   }
 });
+
+test('provider lookup follows a healthy referral while another query is stalled',async()=>{
+ const [identity,slow,fast,next,provider]=await Promise.all(Array.from({length:5},()=>generateIdentity()));
+ let release!:()=>void,followed!:()=>void,active=0,maximum=0;
+ const gate=new Promise<void>(resolve=>release=resolve),advanced=new Promise<void>(resolve=>followed=resolve);
+ const node=createDhtNode({identity,selfId:await nodeIdOf(identity.did),store:createDhtStore(),alpha:2,
+  rpc:async contact=>{
+   active++;maximum=Math.max(maximum,active);
+   try{
+    if(contact.did===slow.did){await gate;return {t:'PROVIDERS',providers:[],nodes:[]};}
+    if(contact.did===fast.did)return {t:'PROVIDERS',providers:[],nodes:[{did:next.did}]};
+    followed();return {t:'PROVIDERS',providers:[provider.did],nodes:[]};
+   }finally{active--;}
+  }});
+ await node.learn(slow.did);await node.learn(fast.did);
+ const result=node.findProviderContacts(KEY);let timer:ReturnType<typeof setTimeout>|undefined;
+ try{
+  const reached=await Promise.race([advanced.then(()=>true),new Promise<boolean>(resolve=>{timer=setTimeout(()=>resolve(false),300);})]);
+  expect(reached).toBe(true);expect(maximum).toBe(2);
+ }finally{clearTimeout(timer);release();await result;}
+ expect((await result).map(contact=>contact.did)).toContain(provider.did);
+});
+
+test('progressive provider lookup retains query and concurrency bounds',async()=>{
+ const peers=await Promise.all(Array.from({length:70},()=>generateIdentity()));
+ let active=0,maximum=0;const queried:string[]=[];
+ const node=createDhtNode({identity:peers[0],selfId:await nodeIdOf(peers[0].did),store:createDhtStore(),alpha:3,k:64,
+  rpc:async contact=>{
+   queried.push(contact.did);active++;maximum=Math.max(maximum,active);
+   await Promise.resolve();active--;
+   return {t:'PROVIDERS',providers:[],nodes:peers.slice(1).map(peer=>({did:peer.did}))};
+  }});
+ await node.learn(peers[1].did);await node.learn(peers[2].did);
+ expect(await node.findProviderContacts(KEY)).toEqual([]);
+ expect(queried).toHaveLength(64);expect(new Set(queried).size).toBe(64);expect(maximum).toBeLessThanOrEqual(3);
+});
+
+test('provider lookup cancellation stops new work and ignores late referrals',async()=>{
+ const [identity,first,second,provider]=await Promise.all(Array.from({length:4},()=>generateIdentity()));
+ const controller=new AbortController();let calls=0;
+ const node=createDhtNode({identity,selfId:await nodeIdOf(identity.did),store:createDhtStore(),alpha:2,
+  rpc:async()=>{calls++;controller.abort();return {t:'PROVIDERS',providers:[provider.did],nodes:[{did:provider.did}]};}});
+ await node.learn(first.did);await node.learn(second.did);
+ expect(await node.findProviderContacts(KEY,{signal:controller.signal})).toEqual([]);expect(calls).toBe(1);
+});

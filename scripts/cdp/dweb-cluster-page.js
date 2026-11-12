@@ -206,8 +206,8 @@ window.cluster = {
   async seed({ uri }) {
     const hash = await base.seedApp(received.get(uri));
     // seedApp intentionally announces in the background for product latency;
-    // acceptance needs the replacement-provider record durably observed before
-    // removing the publisher, rather than racing that background effect.
+    // collect the explicit announcement receipt before removing the publisher.
+    // A best-effort result with stored:0 is not evidence of remote durability.
     const announcement = await base.announceProvider(uri);
     return { hash, announcement };
   },
