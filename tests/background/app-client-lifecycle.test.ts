@@ -325,7 +325,10 @@ describe('App OPFS lifecycle posture', () => {
 });
 
 describe('App executable identity mutations', () => {
-  const fixture = (trackerOverrides: Record<string, any> = {}) => {
+  const fixture = (
+    trackerOverrides: Record<string, any> = {},
+    onManifestMutation: (appId: string, writerSessionId?: string) => void = () => {},
+  ) => {
     const events: string[] = [];
     let record: any = { id: 'app-1', entryFile: 'index.html', fileKinds: {
       'index.html': 'text', 'data/state.json': 'text',
@@ -363,6 +366,7 @@ describe('App executable identity mutations', () => {
         },
         delete: async (path: string) => { files.delete(path); },
       }) as any,
+      onManifestMutation,
     });
     return { client, events, files };
   };
@@ -454,6 +458,24 @@ describe('App executable identity mutations', () => {
     await expect(client.deleteFile({ appId: 'app-1', path: 'index.html',
       invalidateDweb: false })).rejects.toThrow('Only runtime data');
     expect(events).toEqual(['repository']);
+  });
+
+  test('single-file calls accept the listed root slash and keep traversal refused', async () => {
+    const manifestWriters: Array<string | undefined> = [];
+    const { client, files } = fixture({}, (_appId, writer) => { manifestWriters.push(writer); });
+    expect(await client.readFile({ appId: 'app-1', path: '/index.html' })).toBe('old');
+    await client.compareAndWriteFile({ appId: 'app-1', path: '/index.html', content: 'new',
+      expectedExists: true, expectedContent: 'old', reload: false });
+    await client.writeFile({ appId: 'app-1', path: '/peerd.json', content: '{}',
+      sessionId: 'actor-1', reload: false });
+    expect(new TextDecoder().decode(files.get('index.html'))).toBe('new');
+    expect(files.has('peerd.json')).toBe(true);
+    expect(manifestWriters).toEqual(['actor-1']);
+    for (const path of ['/', '//index.html', '/./index.html', '/../index.html', 'a//b.txt']) {
+      await expect(client.readFile({ appId: 'app-1', path })).rejects.toThrow('app file path');
+      await expect(client.writeFile({ appId: 'app-1', path, content: 'x', reload: false }))
+        .rejects.toThrow('app file path');
+    }
   });
 
   test('snapshots use the repository lane without rotating consent', async () => {

@@ -197,11 +197,14 @@ describe('kernel production runtime', () => {
           resolveAppOwnerRoot: (sessionId) => `root:${sessionId}`,
           loadUserEndpoints: () => ['https://api.test'],
           hasUnresolvedSideEffects: (sessionId) => sessionId === 'unknown',
+          onAppManifestMutation: (appId, writer) => ({ appId, writer }),
         }),
         close: () => {},
       };
     }));
     expect(await assembly.engine.resolveAppOwnerRoot('child')).toBe('root:child');
+    expect(await assembly.engine.onAppManifestMutation('app', 'actor'))
+      .toEqual({ appId: 'app', writer: 'actor' });
     expect(await assembly.transfer.loadUserEndpoints()).toEqual(['https://api.test']);
     expect(await assembly.turn.goal.hasUnresolvedSideEffects('unknown')).toBe(true);
   });
