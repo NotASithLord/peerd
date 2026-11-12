@@ -11,7 +11,7 @@ export { activeTrigger } from './composer/parse.js';
 export { filterCandidates } from './composer/palette-filter.js';
 export {
   classifyAttachment, ATTACHMENT_CAPS, MAX_ATTACHMENTS_PER_MESSAGE,
-  DOC_MEDIA_TYPES, IMAGE_MEDIA_TYPES, formatBytes,
+  DOC_MEDIA_TYPES, IMAGE_MEDIA_TYPES, formatBytes, isGameBuildFile,
 } from './loop/attachments.js';
 export { manifestLabel } from './tools/manifests.js';
 export { bundleToOtlp } from './observability/otel-export.js';

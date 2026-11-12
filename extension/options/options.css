@@ -249,6 +249,21 @@
 .library-git-import > p { margin: 5px 0 8px; font-size: 11px; }
 .library-git-import-row { display: grid; grid-template-columns: minmax(14rem, 2fr) minmax(8rem, 1fr) minmax(8rem, 1fr) auto; gap: 6px; }
 .library-git-import-row input { min-width: 0; font-size: 11px; }
+/* Narrow widths wrap whole toolbar buttons onto a second row, never their labels. */
+.library-toolbar { flex-wrap: wrap; }
+.library-toolbar .library-btn { white-space: nowrap; }
+.library-upload-pick, .library-upload-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.library-upload-input { display: none; }
+.library-upload-review { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 12px; line-height: 1.4; }
+.library-upload-review p, .library-upload-review ul { margin: 0 0 6px; }
+.library-upload-review ul { padding-left: 18px; }
+.library-upload-name { font-size: 14px; }
+.library-upload-problems { color: var(--danger); }
+.library-upload-details { margin: 4px 0 10px; font-size: 11px; }
+.library-upload-details summary { cursor: pointer; }
+.library-upload-details dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 10px; margin: 6px 0; }
+.library-upload-details dd { margin: 0; overflow-wrap: anywhere; }
+.library-upload-review .library-upload-files { max-height: 160px; overflow: auto; font-size: 10.5px; overflow-wrap: anywhere; }
 
 .library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
 .library-card {

@@ -11,7 +11,7 @@ import {
   makeReconciledUiSender, putUiEffectFailureNotice, settleUiEffect, redrawForRuntimeMessage,
 } from '/shared/ui-effects.js';
 import { makeConfirmationAnswer } from '/sidepanel/confirmation-answer.js';
-import { CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
+import { APP_FILE_UPLOAD_ENABLED, CHANNEL, DWEB_ENABLED } from '/shared/channel-config.js';
 import { BROWSER } from '/shared/build-config.js';
 import { openOptions } from '/shared/open-options.js';
 import { LibrarySection } from './library-section.js';
@@ -942,7 +942,9 @@ const content = (showDweb, holdNudges, view = activeView) => {
     currentSessionId: currentState.session?.sessionId,
     chatOwnedBySidePanel: sidePanelOpen,
   });
-  if (view === 'library') return m(LibrarySection, { send, dweb: showDweb });
+  if (view === 'library') {
+    return m(LibrarySection, { send, dweb: showDweb, upload: APP_FILE_UPLOAD_ENABLED });
+  }
   if (view === 'eval') {
     loadEvalSection();
     if (evalLoadState === 'ready' && EvalSection) return m(EvalSection, { send });

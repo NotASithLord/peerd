@@ -276,6 +276,28 @@ export const verifyStoreArtifact = async (
         (error as { message?: string })?.message ?? String(error)}`);
     }
 
+    // d2b. Adding a game from the user's files is preview-only (#333). Check
+    // the shipped flag, then that the Library button and the add route both
+    // read it, so a store package can neither show nor accept the upload.
+    try {
+      const stagedConfig = await import(pathToFileURL(join(tmp, 'shared', 'channel-config.js')).href);
+      if (stagedConfig.APP_FILE_UPLOAD_ENABLED !== false) {
+        failures.push('shared/channel-config.js does not disable adding games from files');
+      }
+      for (const [host, gate] of [
+        ['home/home.js', 'upload:APP_FILE_UPLOAD_ENABLED'],
+        ['background/kernel-executable-live.js', 'APP_FILE_UPLOAD_ENABLED,'],
+        ['background/routes/engine.js', 'if(!APP_FILE_UPLOAD_ENABLED)'],
+      ]) {
+        if (!readFileSync(join(tmp, host), 'utf8').replace(/\s+/g, '').includes(gate)) {
+          failures.push(`${host} does not gate adding games from files on package policy`);
+        }
+      }
+    } catch (error) {
+      failures.push(`file upload policy verification could not run: ${
+        (error as { message?: string })?.message ?? String(error)}`);
+    }
+
     // d3. the store package must not ship the permissions held out of initial
     // submission (debugger / the CDP path — STORE_STRIPPED_PERMISSIONS). The
     // generator strips them (gen-manifest.ts) and store-posture.test.ts pins

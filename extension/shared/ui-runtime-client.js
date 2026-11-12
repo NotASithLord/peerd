@@ -13,7 +13,7 @@ const READ_TYPES = new Set([
   'transfer/inspectImport', 'vault/prfStatus', 'vm/get-meta',
 ]);
 const LONG_EFFECT = new Set([
-  'apps/import-git', 'export/artifact', 'import/apply',
+  'apps/import-git', 'apps/import-files', 'export/artifact', 'import/apply',
   'apps/repository/commit', 'apps/repository/restore',
   'apps/repository/branch', 'apps/repository/checkout',
   'apps/repository/link', 'apps/repository/fetch', 'apps/repository/push',

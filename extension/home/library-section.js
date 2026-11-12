@@ -20,6 +20,7 @@
 
 import m from '/vendor/mithril/mithril.js';
 import { openOptions } from '/shared/open-options.js';
+import { LibraryUpload, createUploadState } from './library-upload.js';
 
 /** @typedef {import('../options/sections/reset-row.js').Send} Send */
 /**
@@ -221,6 +222,8 @@ export const LibrarySection = {
     vnode.state.gitImportRef = '';
     vnode.state.gitImportBusy = false;
     vnode.state.gitImportOutcomeUnknown = false;
+    vnode.state.uploadOpen = false;
+    vnode.state.upload = createUploadState();
     vnode.state.notice = null;
     vnode.state.unconfirmedApps = new Set(); // App effects awaiting catalog reconciliation
     LibrarySection.refresh(vnode);
@@ -789,11 +792,11 @@ export const LibrarySection = {
     }
   },
 
-  /** @param {{ state: any, attrs: { send: Send, dweb?: boolean } }} vnode */
+  /** @param {{ state: any, attrs: { send: Send, dweb?: boolean, upload?: boolean } }} vnode */
   view(vnode) {
     const ui = vnode.state;
 
-    const header = m('div', { style: 'display:flex; align-items:center; gap:8px; margin:0 0 12px;' }, [
+    const header = m('div.library-toolbar', { style: 'display:flex; align-items:center; gap:8px; margin:0 0 12px;' }, [
       m('p.muted', { style: 'margin:0; font-size:12px;' },
         ui.apps ? `${ui.apps.length} app${ui.apps.length === 1 ? '' : 's'}` : ''),
       m('.spacer', { style: 'flex:1;' }),
@@ -802,6 +805,12 @@ export const LibrarySection = {
         'aria-expanded': String(ui.gitImportOpen),
         onclick: () => { ui.gitImportOpen = !ui.gitImportOpen; ui.error = null; },
       }, ui.gitImportOpen ? 'Cancel import' : 'Import Git'),
+      vnode.attrs.upload ? m('button.library-btn', {
+        type: 'button',
+        'aria-expanded': String(ui.uploadOpen),
+        disabled: ui.upload.adding,
+        onclick: () => { ui.uploadOpen = !ui.uploadOpen; ui.upload = createUploadState(); ui.error = null; ui.notice = null; },
+      }, ui.uploadOpen ? 'Cancel adding' : 'Add from files') : null,
       m('button.icon.library-star', {
         title: ui.favOnly ? 'Show all apps' : 'Show favorites only', 'aria-label': 'Show favorites only',
         'aria-pressed': String(ui.favOnly),
@@ -886,8 +895,17 @@ export const LibrarySection = {
         }, 'I checked the Library; allow another clone'),
       ]) : null,
     ]) : null;
+    const upload = vnode.attrs.upload && ui.uploadOpen ? m(LibraryUpload, {
+      state: ui.upload,
+      send: vnode.attrs.send,
+      onAdded: (/** @type {string} */ notice) => {
+        ui.uploadOpen = false;
+        ui.notice = notice;
+        LibrarySection.refresh(vnode);
+      },
+    }) : null;
     if (ui.apps.length === 0) {
-      return m('div', [header, ...banners, gitImport,
+      return m('div', [header, ...banners, gitImport, upload,
         m('p.muted', 'No apps yet. Ask peerd in a chat to build one. It appears here when it is saved.'),
         m('button.linklike', { type: 'button', onclick: () => openOptions('transfer') },
           'Import a .peerd file in Settings > Backup & restore > Artifacts')]);
@@ -910,6 +928,7 @@ export const LibrarySection = {
       header,
       ...banners,
       gitImport,
+      upload,
       m('input.library-search', {
         type: 'search',
         placeholder: 'Filter apps… (name, tag)',

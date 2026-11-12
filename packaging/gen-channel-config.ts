@@ -32,6 +32,11 @@ export const dwebEnabledForTarget = (channel: ConfigChannel, browser?: Browser):
 export const remoteModuleImportsEnabledForTarget = (channel: ConfigChannel, browser?: Browser): boolean =>
   channel === 'preview';
 
+// Adding a game from the user's files is preview-only until the store review
+// question about App code (#333) is settled.
+export const appFileUploadEnabledForTarget = (channel: ConfigChannel): boolean =>
+  channel === 'preview';
+
 // Firefox extension module Workers cannot load generated child module URLs.
 // The packaged target selects a single linked entry there; Chrome keeps the
 // native module graph until the shared path has equivalent field coverage.
@@ -92,6 +97,7 @@ export const genChannelConfigSource = (
 export const CHANNEL = ${JSON.stringify(channel)};
 export const DWEB_ENABLED = ${JSON.stringify(dwebEnabledForTarget(channel, browser))};
 export const REMOTE_MODULE_IMPORTS_ENABLED = ${JSON.stringify(remoteModuleImportsEnabledForTarget(channel, browser))};
+export const APP_FILE_UPLOAD_ENABLED = ${JSON.stringify(appFileUploadEnabledForTarget(channel))};
 export const NOTEBOOK_MODULE_LOADER = ${JSON.stringify(notebookModuleLoaderForTarget(browser))};
 
 export const CHANNEL_DEFAULTS = Object.freeze(${'{'}

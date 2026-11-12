@@ -13,6 +13,11 @@ export const BINARY_ASSET_EXTENSIONS = new Set([
   'ttf', 'otf', 'woff', 'woff2',
 ]);
 export const MAX_MODEL_APP_FILE_BYTES = 500_000;
+// why here: the App storage caps and the upload staging folder also serve
+// pages that prepare App files, and this leaf is cheap in every context.
+export const MAX_APP_TOTAL_BYTES = 50_000_000;
+export const MAX_APP_FILES = 256;
+export const APP_UPLOAD_OPFS_ROOT = 'peerd-app-uploads';
 
 /** @typedef {'text' | 'binary'} AppFileKind */
 

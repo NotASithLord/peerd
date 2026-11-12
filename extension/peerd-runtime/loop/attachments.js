@@ -196,6 +196,13 @@ export const classifyAttachment = (att) => {
   return 'unsupported';
 };
 
+/**
+ * A game build (.zip or .wasm) cannot ride a chat message. The composer names
+ * the Library flow that takes one instead of a flat refusal.
+ * @param {string} name
+ */
+export const isGameBuildFile = (name) => /\.(?:zip|wasm)$/i.test(String(name ?? ''));
+
 // base64 → decoded byte count (every 4 chars decode to 3 bytes, minus
 // padding). Used so the cap is enforced against what would actually
 // ship, not against a caller-claimed size.
