@@ -288,10 +288,10 @@ describe('home.library', () => {
     try {
       clickText(root, 'button', 'Share');   // opens the dialog (no dispatch yet)
       await flush();
-      expect(send.calls.some((c) => c.type === 'dweb/base/share-app')).toBe(false);
-      expect(root.textContent).toContain('including data/*.json');
       const input = need(root, '.library-share input', HTMLInputElement);
-      expect(input).toBeTruthy();
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      expect(send.calls.some((c) => c.type === 'dweb/base/share-app')).toBe(false);
+      expect(root.querySelector(`#${input.getAttribute('aria-describedby')}`)?.textContent).toContain('including data/*.json');
       expect(input.disabled).toBe(false);        // editable on first share
       input.value = 'My Cool App!';
       input.dispatchEvent(new Event('input'));

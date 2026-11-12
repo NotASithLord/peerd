@@ -254,6 +254,8 @@ const replyFailure = (reply, knownMessage) => Object.assign(
 );
 /** @param {string} path @param {unknown} error @param {'save'|'create'|'delete'} [action] */
 const showSaveFailure = (path, error, action = 'save') => {
+  const notice = document.getElementById('app-security-notice');
+  if (notice?.firstElementChild?.textContent === 'Edits saved.') notice.remove();
   if (saveStatus.hidden && document.activeElement instanceof HTMLElement) {
     saveReturnFocus = document.activeElement;
   }
@@ -261,7 +263,7 @@ const showSaveFailure = (path, error, action = 'save') => {
   saveOutcomeUnknown ||= refusal?.outcomeKnown === false;
   const pastAction = action === 'delete' ? 'deleted' : action === 'create' ? 'created' : 'saved';
   saveMessage.textContent = saveOutcomeUnknown
-    ? `Peerd could not confirm whether ${path} was ${pastAction}. Your edits are still open. Download a copy before reopening the App to check the saved file.`
+    ? `peerd could not confirm whether ${path} was ${pastAction}. Your edits are still open. Download a copy before reopening the App to check the saved file.`
     : refusal?.error === 'vault-locked'
       ? `Could not ${action} ${path}: the vault is locked. Your edits are still open. Unlock it in the peerd panel, then retry.`
     : refusal?.code === 'app-file-invalid-json'
@@ -276,8 +278,6 @@ const clearSaveFailure = () => {
   if (saveOutcomeUnknown) return;
   const restoreFocus = saveStatus.contains(document.activeElement);
   saveStatus.hidden = true;
-  saveRetry.disabled = false;
-  saveRetry.textContent = 'Retry';
   if (restoreFocus) {
     if (saveReturnFocus?.isConnected) saveReturnFocus.focus({ preventScroll: true });
     else editorApi?.focus?.();
@@ -868,7 +868,7 @@ const editMode = async () => {
       pinnedFile: appMeta.entryFile,
       isReadOnlyFile: (path) => binaryFilePaths.has(path) || isBinaryAssetPath(path),
       onReadOnlyFile: (path) => showNotice(
-        `${path} is a binary file and cannot be edited here. Ask peerd to replace it, or import another App package.`,
+        `${path} is a binary file and cannot be edited here. Ask peerd to replace it, or import another App package from Library (Import Git) or Settings (Artifacts).`,
         { persistent: true },
       ),
       writeFile: async (path, content) => {
@@ -894,9 +894,8 @@ const editMode = async () => {
       onSaveError: showSaveFailure,
       onMutationError: (action, path, error) => showSaveFailure(path, error, action),
       onDirtyChange: (dirty) => { if (!dirty) clearSaveFailure(); },
-      onSaved: () => {
-        if (!editorApi?.hasUnsavedChanges()) clearSaveFailure();
-      },
+      onSaved: () => !saveOutcomeUnknown && !editorApi?.hasUnsavedChanges()
+        && !document.getElementById('app-security-notice') && showNotice('Edits saved.'),
     });
   }
   editorPanel.hidden = false;

@@ -741,10 +741,10 @@ export const EmptyState = {
       class: isHome ? 'empty-state--home' : '',
       'data-active-tab-status': attrs.activeTabStatus ?? 'none',
     }, [
-    m('p', canSend ? 'peerd is ready.' : 'Provider setup needed.'),
+    m('p', canSend ? 'peerd is ready.' : composer?.reason === 'controller-not-ready' ? 'peerd is starting up.' : 'Provider setup needed.'),
     m('p.muted', canSend
       ? 'Ask anything — or pick a path:'
-      : composerUnavailableCopy(composer)),
+      : composer?.reason === 'controller-not-ready' ? 'This can take a moment. Your draft stays here.' : composerUnavailableCopy(composer)),
     canSend
       ? m('.path-menu', { class: isHome ? 'path-menu--home' : '' }, prompts.map((p, i) => {
           const shown = ui.shown?.[i] ?? Infinity;
@@ -805,7 +805,7 @@ export const EmptyState = {
             ]),
           ]);
         }))
-      : m('button', { onclick: () => openOptions('providers') }, 'Open settings'),
+      : composer?.reason === 'controller-not-ready' ? null : m('button', { onclick: () => openOptions('providers') }, 'Open settings'),
     ]));
   },
 };
