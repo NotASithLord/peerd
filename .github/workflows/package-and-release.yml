@@ -85,7 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -124,7 +124,7 @@ jobs:
       # why: retain the real failure report and screenshots on fork PRs too.
       - name: Upload failed App egress evidence
         if: always() && steps.app-egress.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: app-egress-diagnostics-run${{ github.run_number }}.${{ github.run_attempt }}
           path: scripts/cdp/artifacts/
@@ -139,7 +139,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -226,7 +226,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -258,7 +258,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -302,7 +302,7 @@ jobs:
         # Human passphrase setup, first controller message, App/isomorphic-git,
         # and real event-page discard/recovery over the exact Store XPI.
         run: bun run test:firefox:cutover
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: firefox-runtime-diagnostics
@@ -323,7 +323,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -356,7 +356,7 @@ jobs:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
         # Real Preview custody/storage and native WebRTC. Only rendezvous is local.
         run: bun scripts/cdp/manual-address-twopeer.mjs
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: manual-address-twopeer
@@ -367,7 +367,7 @@ jobs:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
           P2P_INSTALL_CANCELLATION: '1'
         run: bun scripts/cdp/manual-address-twopeer.mjs
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: install-cancellation-twopeer
@@ -379,7 +379,7 @@ jobs:
           P2P_INSTALL_CANCELLATION: '1'
           P2P_WASM_EXECUTION: '1'
         run: bun scripts/cdp/manual-address-twopeer.mjs
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: wasm-install-cancellation-twopeer
@@ -392,7 +392,7 @@ jobs:
           P2P_WASM_EXECUTION: '1'
           P2P_RANDOM_DISCOVERY: '1'
         run: bun scripts/cdp/manual-address-twopeer.mjs
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: catalog-install-cancellation-twopeer
@@ -404,7 +404,7 @@ jobs:
           P2P_WASM_EXECUTION: '1'
           P2P_ACTIVATION_RACE: '1'
         run: bun scripts/cdp/manual-address-twopeer.mjs
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: discovered-wasm-twopeer
@@ -417,7 +417,7 @@ jobs:
           P2P_RANDOM_DISCOVERY: '1'
           P2P_ACTIVATION_RACE: '1'
         run: bun scripts/cdp/manual-address-twopeer.mjs
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: random-wasm-twopeer
@@ -429,7 +429,7 @@ jobs:
           P2P_RANDOM_DISCOVERY: '1'
           P2P_ACTIVATION_RACE: '1'
         run: bun scripts/cdp/manual-address-twopeer.mjs
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: random-js-twopeer
@@ -446,7 +446,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -464,7 +464,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -539,7 +539,7 @@ jobs:
         run: bun run test:e2e:controller-faults
       - name: Upload MV3 lifecycle diagnostics
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: chrome-lifecycle-diagnostics
           path: |
@@ -590,7 +590,7 @@ jobs:
       PEERD_BROWSER_WINDOW_EVIDENCE: '1'
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
       # fetch-depth 0: the comparison needs the MERGE BASE's tree, and a shallow
@@ -644,7 +644,7 @@ jobs:
       # erase the head's failing checks, screenshots, or crash diagnostics.
       - name: Preserve head render evidence before comparison
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: visual-head-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.sha }}-run${{ github.run_number }}.${{ github.run_attempt }}
           path: |
@@ -688,7 +688,7 @@ jobs:
       # what the lane actually covers.
       - name: Upload every screen (both sides + diff masks)
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: visual-screens-${{ github.event.pull_request.number && format('pr{0}', github.event.pull_request.number) || github.sha }}-run${{ github.run_number }}.${{ github.run_attempt }}
           path: |
@@ -785,7 +785,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -813,7 +813,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -856,7 +856,7 @@ jobs:
           sudo chmod 4755 "$CHROME_DEVEL_SANDBOX"
           stat -c '%U:%G %a %n' "$CHROME_DEVEL_SANDBOX"
           bun run bench:cold-sw -- --lane="$COLD_START_LANE"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: cold-start-diagnostics
@@ -875,7 +875,7 @@ jobs:
         browser: [chrome, firefox]
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -914,7 +914,7 @@ jobs:
       # hit the upload step itself errors and reds the whole matrix on changes
       # that built + verified fine. Keep uploads for main + tags (the release/QA
       # inputs); cap retention so they can't pile up indefinitely.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: github.event_name != 'pull_request'
         with:
           name: peerd-${{ matrix.channel }}-${{ matrix.browser }}
@@ -952,7 +952,7 @@ jobs:
       attestations: write
     steps:
       - name: Harden runner (audit egress and source writes)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1152,7 +1152,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner (audit egress)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
           egress-policy: audit
 
