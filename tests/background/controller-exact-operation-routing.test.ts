@@ -216,6 +216,9 @@ const specs = Object.fromEntries([
   op('app', 'app.read-file', 'readFile', { appId: 'app-1', path: 'index.html' }),
   op('app', 'app.list-files', 'listFiles', { appId: 'app-1' }),
   op('app', 'app.delete-file', 'deleteFile', { appId: 'app-1', path: 'old.html' }),
+  op('app', 'app.copy-pod-files', 'copyPodFiles', {
+    direction: 'pod_to_app', podId, appId: 'app-1', files: [{ from: 'build/game.wasm', to: 'game.wasm' }],
+  }),
   op('app', 'app.observe', 'observeRuntime'),
   op('app', 'app.act', 'actRuntime', { action: 'click', params: { selector: '#save' } }),
   op('app', 'app.run-code', 'runCode', {
@@ -353,6 +356,7 @@ const METHOD_ARGUMENT_FIELDS = Object.freeze({
   'turn.app.read-file': ['appId', 'path'],
   'turn.app.list-files': ['appId'],
   'turn.app.delete-file': ['appId', 'path'],
+  'turn.app.copy-pod-files': ['direction', 'podId', 'appId', 'files'],
   'turn.app.observe': [],
   'turn.app.act': ['action', 'params'],
   'turn.app.run-code': ['code', 'timeoutMs'],

@@ -28,7 +28,7 @@ const EFFECT_ROUTES = Object.freeze([
   'notebook/write-file', 'notebook/read-file', 'notebook/destroy',
   'app/update', 'app/open', 'app/search', 'app/read', 'app/delete',
   'app/write-file', 'app/read-file', 'app/list-files', 'app/delete-file',
-  'app/observe', 'app/act', 'app/run-code',
+  'app/observe', 'app/act', 'app/run-code', 'app/copy-pod-files',
   'memory/read-scope', 'memory/read-subtree', 'memory/write',
   'todo/read', 'todo/replace',
   'page/open-tab', 'page/read', 'page/snapshot', 'page/read-state',

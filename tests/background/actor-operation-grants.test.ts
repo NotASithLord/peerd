@@ -63,7 +63,7 @@ const identities = [
     expected: (operation: string) => ['app', 'repository', 'editing']
       .includes(policyFor(operation).authorityClass)
       && except(operation, [
-        'turn.app.open', 'turn.app.search',
+        'turn.app.open', 'turn.app.search', 'turn.app.copy-pod-files',
         'turn.repository.read-pod', 'turn.repository.destroy-pod',
       ]),
   },

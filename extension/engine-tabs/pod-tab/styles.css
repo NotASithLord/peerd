@@ -34,9 +34,17 @@ body { font: 13px/1.45 var(--mono); }
 .boot-card.is-failed { color: var(--fg-muted); }
 /* why: a Pod combines an editor and terminal, so its 42px identity strip keeps
    the mixed workspace oriented while sibling engine-tab chrome remains an owner decision. */
-#pod-app { height: 100%; display: grid; grid-template-rows: 42px minmax(180px, 1fr) minmax(220px, .8fr); }
+#pod-app { height: 100%; display: grid; grid-template-rows: 42px auto minmax(180px, 1fr) minmax(220px, .8fr); }
 #pod-app[hidden] { display: none; }
-header { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--bg-elev); }
+header { grid-row: 1; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--bg-elev); }
+/* why explicit rows: the notice row collapses to nothing while it is hidden.
+   The right padding keeps its text clear of the fixed pull-in control. */
+#pod-outside-files { grid-row: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 140px 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg-elev); }
+#pod-outside-files[hidden] { display: none; }
+#pod-outside-files p { margin: 0; flex-basis: 100%; }
+#pod-outside-files details { color: var(--fg-muted); }
+#workspace-pane { grid-row: 3; }
+#terminal-pane { grid-row: 4; }
 .sep, #pod-id, #pod-status { color: var(--muted); }
 .kind { color: var(--fg); font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
 .spacer { flex: 1; }

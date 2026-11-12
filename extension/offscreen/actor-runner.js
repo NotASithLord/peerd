@@ -1066,6 +1066,14 @@ export const runActor = async (job, {
             }), { observeResult: true });
           return;
         }
+        if (m.type === 'app-copy-pod-files-request') {
+          await relayExactToolMessage(m, 'app-copy-pod-files-response', () =>
+            sendToSW('app/copy-pod-files', {
+              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.app.copy-pod-files'),
+              direction: m.direction, podId: m.podId, appId: m.appId, files: m.files,
+            }), { observeResult: true });
+          return;
+        }
         if (m.type === 'app-read-file-request') {
           await relayExactToolMessage(m, 'app-read-file-response', () =>
             sendToSW('app/read-file', {

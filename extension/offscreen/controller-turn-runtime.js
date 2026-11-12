@@ -698,6 +698,12 @@ const runControllerTurnWith = async (payload, options) => {
               deleteFile: (
                 /** @type {string|undefined} */ appId, /** @type {string} */ path,
               ) => rpc('turn.app.delete-file', { ...binding(), appId, path }),
+              copyPodFiles: (
+                /** @type {string} */ direction, /** @type {string} */ podId,
+                /** @type {string} */ appId, /** @type {unknown} */ files,
+              ) => rpc('turn.app.copy-pod-files', {
+                ...binding(), direction, podId, appId, files,
+              }),
               observeRuntime: () => rpc('turn.app.observe', binding()),
               actRuntime: (
                 /** @type {string} */ action,

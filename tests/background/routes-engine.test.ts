@@ -261,6 +261,70 @@ describe('pod/git: instance-pinned isomorphic-git shell bridge', () => {
   });
 });
 
+describe('Pod outside-files mark', () => {
+  const sender = { tab: { id: 99 } };
+  const mark = { publisher: 'did:key:z6MkPeer', appId: 'app-9', appName: 'Game', markedAt: 1 };
+  type PodRecord = { id: string; name: string; outsideFiles: typeof mark | null };
+  const markedDeps = (over: Record<string, unknown> = {}) => {
+    const records: Record<string, PodRecord> = { 'pod-1': { id: 'pod-1', name: 'Pod', outsideFiles: mark } };
+    const deps = baseDeps({
+      podRegistry: {
+        get: async (id: string) => records[id] ?? null,
+        update: async (id: string, patch: Partial<PodRecord>) => {
+          if (!records[id]) return null;
+          records[id] = { ...records[id], ...patch };
+          return records[id];
+        },
+      },
+      ...over,
+    });
+    return { deps, records };
+  };
+
+  test('a marked Pod refuses its audited web fetch before egress', async () => {
+    let fetched = false;
+    const { deps } = markedDeps({ vmHttpFetch: async () => { fetched = true; return { ok: true }; } });
+    const reply = await makeEngineRoutes(deps)['pod/web-fetch']({
+      podId: 'pod-1', jobId: 'job-1', url: 'https://example.com/x.wasm', method: 'GET',
+    }, sender);
+    expect(reply.ok).toBe(false);
+    expect(reply.error).toContain('did:key:z6MkPeer');
+    expect(fetched).toBe(false);
+  });
+
+  test('a marked Pod refuses Git remote operations even with a user grant', async () => {
+    let remoteCalls = 0;
+    const { deps } = markedDeps();
+    deps.repositories.getRemote = async () => ({ url: 'https://github.com/a/b.git' });
+    deps.repositories.fetch = async () => { remoteCalls += 1; return { remote: { url: 'x' } }; };
+    deps.repositories.clone = async () => { remoteCalls += 1; return { remote: { url: 'x' } }; };
+    const routes = makeEngineRoutes(deps);
+    for (const argv of [['fetch'], ['clone', 'https://github.com/a/b.git']]) {
+      const reply = await routes['pod/git']({ podId: 'pod-1', argv, remoteGrant: true }, sender);
+      expect(reply.result.exitCode).toBe(126);
+      expect(reply.result.stderr).toContain('Web access and Git remotes are off');
+    }
+    expect(remoteCalls).toBe(0);
+    const local = await routes['pod/git']({ podId: 'pod-1', argv: ['status'] }, sender);
+    expect(local.result.exitCode).toBe(0);
+  });
+
+  test('only the Pod tab can clear the mark, and the meta reports it until then', async () => {
+    const { deps, records } = markedDeps();
+    const routes = makeEngineRoutes(deps);
+    expect((await routes['pod/get-meta']({ podId: 'pod-1' }, sender)).record.outsideFiles).toEqual(mark);
+    expect(await routes['pod/clear-outside-files']({ podId: 'pod-1' }, { tab: { id: 12 } }))
+      .toEqual({ ok: false, error: 'pod-sender-not-instance-pinned' });
+    expect(records['pod-1'].outsideFiles).toEqual(mark);
+    expect(await routes['pod/clear-outside-files']({ podId: 'pod-1' }, sender)).toEqual({ ok: true });
+    expect(records['pod-1'].outsideFiles).toBeNull();
+    const reply = await routes['pod/web-fetch']({
+      podId: 'pod-1', jobId: 'job-2', url: 'https://example.com/', method: 'GET',
+    }, sender);
+    expect(reply.ok).toBe(true);
+  });
+});
+
 describe('App repository quiescence', () => {
   for (const [routeName, message, repositoryMethod] of [
     ['apps/repository/commit', { appId: 'a1', message: 'save' }, 'commitApp'],

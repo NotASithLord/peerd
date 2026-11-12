@@ -8,9 +8,12 @@
 // second filesystem, Node/POSIX compatibility layer, or browser Linux runtime.
 
 import browser from '/shared/browser-api.js';
-import { buildModule, createEditor, opfsHelpers, podGitRemoteOperation, POD_OPFS_ROOT } from '/peerd-engine/index.js';
+import {
+  buildModule, createEditor, isLosslessUtf8Text, opfsHelpers, podGitRemoteOperation, POD_OPFS_ROOT,
+} from '/peerd-engine/index.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
 import { isServiceWorkerSender } from '/shared/messaging.js';
+import { base64ByteLength, fromBase64, toBase64 } from '/shared/bundle/bytes.js';
 import { buildWorkerSource, mapWorkerError, NOTEBOOK_BUILTINS } from '../notebook-tab/worker-source.js';
 import { createExternalWorkspaceLockManager } from './external-workspace-lock.js';
 import { createPodJobOperationTracker, podJobState, podJobStatusMessage } from './job-state.js';
@@ -62,6 +65,17 @@ wasmerAvailability.title = wasmerAvailable ? 'Local WASI/WASIX runtime'
 if (!wasmerAvailable) runFileButton.title = wasmerAvailability.title;
 runFileButton.disabled = !wasmerAvailable;
 const stopButton = /** @type {HTMLButtonElement} */ (element('stop-button'));
+const outsideFilesNotice = element('pod-outside-files');
+const outsideFilesClear = /** @type {HTMLButtonElement} */ (element('pod-outside-files-clear'));
+
+/** @param {{publisher?:unknown,appName?:unknown,appId?:unknown}|null} mark */
+const showOutsideFiles = (mark) => {
+  outsideFilesNotice.hidden = !mark;
+  if (!mark) return;
+  element('pod-outside-files-detail').textContent = `App: ${String(mark.appName ?? '')} (${String(mark.appId ?? '')}). `
+    + `Publisher: ${String(mark.publisher ?? 'unknown')}. `
+    + 'Blocked until you allow it: web requests (curl) and Git clone, fetch, push and remote links.';
+};
 
 /** @param {string} className @param {string} text */
 const append = (className, text) => {
@@ -195,6 +209,14 @@ const makePodResolverDeps = () => ({
 
 /** @param {any} args */
 const checkedFileContent = (args) => {
+  if (typeof args.contentBase64 === 'string') {
+    let size = -1;
+    try { size = base64ByteLength(args.contentBase64); } catch { /* reported below */ }
+    if (size < 0) throw new Error('file write content is not valid base64');
+    // why: check the decoded size before decoding allocates it.
+    if (size > MAX_FILE_BYTES) throw new Error(`file write exceeds Pod limit: ${size} > ${MAX_FILE_BYTES}`);
+    return fromBase64(args.contentBase64);
+  }
   const content = args.content;
   const size = typeof content === 'string' ? new TextEncoder().encode(content).byteLength
     : content instanceof ArrayBuffer || ArrayBuffer.isView(content) ? content.byteLength : -1;
@@ -489,7 +511,7 @@ const startJob = (command, { jobId, timeoutMs = 30_000, background = false, rend
   return background ? Promise.resolve(publicJob(job)) : completion;
 };
 
-const POD_ROUTES = new Set(['pod/exec', 'pod/status', 'pod/cancel', 'pod/read-file', 'pod/write-file', 'pod/list-files', 'pod/workspace-lock']);
+const POD_ROUTES = new Set(['pod/exec', 'pod/status', 'pod/cancel', 'pod/read-file', 'pod/read-bytes', 'pod/write-file', 'pod/list-files', 'pod/workspace-lock', 'pod/outside-files']);
 browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ message, /** @type {any} */ sender, /** @type {(value:any)=>void} */ sendResponse) => {
   if (!message || !isServiceWorkerSender(sender)
       || !POD_ROUTES.has(message.type) || message.podId !== podId) return false;
@@ -519,15 +541,42 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ me
       }
       else if (message.type === 'pod/cancel') sendResponse({ ok: true, podId, ...(await cancelJob(String(message.jobId ?? ''))) });
       else if (message.type === 'pod/read-file') sendResponse({ ok: true, content: await enqueueWorkspace(() => workspace.read(message.path)) });
+      else if (message.type === 'pod/read-bytes') {
+        const read = async () => {
+          const bytes = await workspace.readBytes(message.path);
+          if (bytes.byteLength > MAX_FILE_BYTES) throw new Error(`file read exceeds Pod limit: ${bytes.byteLength} > ${MAX_FILE_BYTES}`);
+          return bytes;
+        };
+        // why: the holder of an external lock already owns the workspace
+        // lane. Queuing behind its own hold would deadlock until the lease ends.
+        const bytes = externalWorkspaceLocks.owns(String(message.lockToken ?? ''))
+          ? await read() : await enqueueWorkspace(read);
+        sendResponse({ ok: true, base64: toBase64(bytes), size: bytes.byteLength });
+      }
+      else if (message.type === 'pod/outside-files') {
+        showOutsideFiles(message.mark ?? null);
+        sendResponse({ ok: true });
+      }
       else if (message.type === 'pod/write-file') {
         const content = checkedFileContent(message);
-        let activeWrite = await editor.writeExternalActiveFile(message.path, content);
+        // why: the editor holds text. Bytes that are not lossless text never
+        // enter it, so an open binary file cannot be saved back corrupted.
+        const editorText = typeof content === 'string' ? content
+          : isLosslessUtf8Text(content) ? new TextDecoder('utf-8', { ignoreBOM: true }).decode(content) : null;
+        const targetPath = String(message.path ?? '').replace(/^\/+/, '');
+        if (editorText === null && editor.getActiveFile() === targetPath) {
+          throw new Error(`the Pod editor shows ${targetPath}; open another file and retry the write`);
+        }
+        const writeActive = () => editorText === null
+          ? Promise.resolve({ handled: false, conflict: false, path: targetPath })
+          : editor.writeExternalActiveFile(message.path, editorText);
+        let activeWrite = await writeActive();
         if (activeWrite.conflict) {
           throw new Error(`active editor changed; read ${activeWrite.path} and retry the write`);
         }
         if (!activeWrite.handled) {
           await editor.flushSave();
-          activeWrite = await editor.writeExternalActiveFile(message.path, content);
+          activeWrite = await writeActive();
           if (activeWrite.conflict) {
             throw new Error(`active editor changed; read ${activeWrite.path} and retry the write`);
           }
@@ -588,6 +637,19 @@ stopButton.addEventListener('click', () => {
   if (activeForegroundJobId) cancelJob(activeForegroundJobId).catch(() => {});
 });
 
+outsideFilesClear.addEventListener('click', async () => {
+  outsideFilesClear.disabled = true;
+  try {
+    const reply = /** @type {{ok?:boolean,error?:string}|undefined} */ (
+      await browser.runtime.sendMessage({ type: 'pod/clear-outside-files', podId }));
+    if (!reply?.ok) throw new Error(reply?.error ?? 'Web access could not be turned back on');
+    showOutsideFiles(null);
+    append('entry-meta', 'Web access and Git remotes are back on in this Pod.\n');
+  } catch (error) {
+    append('entry-stderr', `${/** @type {{message?:string}} */ (error)?.message ?? String(error)}\n`);
+  } finally { outsideFilesClear.disabled = false; }
+});
+
 const runFile = async () => {
   if (!editor || runFileButton.disabled) return;
   try {
@@ -616,6 +678,7 @@ runFileButton.addEventListener('click', runFile);
   const meta = /** @type {any} */ (await browser.runtime.sendMessage({ type: 'pod/get-meta', podId }));
   if (!meta?.ok) throw new Error(meta?.error ?? 'Pod metadata unavailable');
   podRecord = meta.record;
+  showOutsideFiles(meta.record.outsideFiles ?? null);
   editor = await createEditor({
     mountEl: element('editor-mount'), opfsBase: [POD_OPFS_ROOT, podId],
     pinnedFile: 'README.md', onRun: wasmerAvailable ? runFile : undefined,

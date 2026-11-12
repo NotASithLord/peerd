@@ -16,7 +16,7 @@ const routes = (names: readonly string[]) => (deps: any) => Object.fromEntries(
 describe('kernel executable runtime', () => {
   test('assembles only owned routes and derives every sender gate from admission', async () => {
     const factories = {
-      makeKernelPodRoutes: routes(['pod/cancel-io', 'pod/get-meta', 'pod/git', 'pod/web-fetch']),
+      makeKernelPodRoutes: routes(['pod/cancel-io', 'pod/clear-outside-files', 'pod/get-meta', 'pod/git', 'pod/web-fetch']),
       makeKernelWebFetchRoutes: routes(['sw/web-fetch', 'sw/web-fetch-abort']),
       makeKernelArtifactRoutes: routes(['export/artifact', 'import/inspect', 'import/apply']),
       makeKernelAppDeleteRoutes: routes(['apps/delete']),
@@ -73,7 +73,7 @@ describe('kernel executable runtime', () => {
       ])({ isAllowed: () => true }) },
       transfer: {},
       factories: {
-        makeKernelPodRoutes: routes(['pod/cancel-io', 'pod/get-meta', 'pod/git', 'pod/web-fetch']),
+        makeKernelPodRoutes: routes(['pod/cancel-io', 'pod/clear-outside-files', 'pod/get-meta', 'pod/git', 'pod/web-fetch']),
         makeKernelWebFetchRoutes: routes(['sw/web-fetch', 'sw/web-fetch-abort']),
         makeKernelArtifactRoutes: routes(['export/artifact', 'import/inspect', 'import/apply']),
         makeKernelAppDeleteRoutes: routes(['apps/delete']),

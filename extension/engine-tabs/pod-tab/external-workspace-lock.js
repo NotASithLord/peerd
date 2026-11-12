@@ -81,5 +81,11 @@ export const createExternalWorkspaceLockManager = ({
     return true;
   };
 
-  return { acquire, renew, release };
+  /** @param {string} token */
+  const owns = (token) => {
+    const record = locks.get(token);
+    return !!record && record.owned && !record.cancelled;
+  };
+
+  return { acquire, renew, release, owns };
 };

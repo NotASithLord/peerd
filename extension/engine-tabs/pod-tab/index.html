@@ -26,6 +26,11 @@
       <button id="run-file-button" type="button" disabled aria-describedby="wasmer-availability" title="Run the open file (Ctrl+Enter or Cmd+Enter)">Run file</button>
       <span id="pod-status">ready</span>
     </header>
+    <section id="pod-outside-files" aria-label="Web access" hidden>
+      <p><strong>Web access is off in this Pod.</strong> It has files from an App made by someone else.</p>
+      <button id="pod-outside-files-clear" type="button">Allow web access again</button>
+      <details><summary>Technical details</summary><p id="pod-outside-files-detail"></p></details>
+    </section>
     <section id="workspace-pane" aria-label="Pod workspace"><div id="editor-mount"></div></section>
     <section id="terminal-pane" aria-label="Pod terminal">
       <div id="terminal-output" role="region" aria-label="Pod terminal output" tabindex="0"></div>

@@ -140,6 +140,7 @@ const operationGrantRows = {
   app_read_file: ['turn.app.read-file'],
   app_list_files: ['turn.app.list-files'],
   app_delete_file: ['turn.app.delete-file'],
+  pod_app_copy: ['turn.app.copy-pod-files'],
   app_observe: ['turn.app.observe'],
   app_act: ['turn.app.act'],
   app_code: ['turn.app.run-code'],

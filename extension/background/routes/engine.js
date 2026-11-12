@@ -150,6 +150,12 @@ export const makeEngineRoutes = (deps) => {
       ? 'pod-sender-not-instance-pinned'
       : null;
   };
+  // why: a Pod holding files from an App another person published must not
+  // reach the web or a Git remote until the user says so in the Pod tab.
+  /** @param {{outsideFiles?:{publisher?:unknown}|null}|null} record */
+  const outsideFilesRefusal = (record) => record?.outsideFiles
+    ? `This Pod has files from an App made by someone else (${String(record.outsideFiles.publisher ?? 'unknown')}). Web access and Git remotes are off until the user allows them again in the Pod tab.`
+    : null;
   /** @param {unknown} value */
   const canonicalUrl = (value) => {
     try { return new URL(String(value)).href; }
@@ -169,6 +175,10 @@ export const makeEngineRoutes = (deps) => {
     return repositories.coordinate(ref, async () => {
     const [command = '', ...args] = argv.map(String);
     const remoteOp = podGitRemoteOperation(argv);
+    const outsideFiles = remoteOp ? outsideFilesRefusal(await podRegistry.get(podId)) : null;
+    if (outsideFiles) {
+      return { ok: true, result: { stdout: '', stderr: `git ${command}: ${outsideFiles}\n`, exitCode: 126 } };
+    }
     /** @type {string|undefined} */ let expectedRemote;
     if (remoteOp && remoteGrant !== true) {
       let target = null;
@@ -333,6 +343,8 @@ export const makeEngineRoutes = (deps) => {
       const senderError = await podSenderError(podId, sender);
       if (senderError) return { ok: false, error: senderError };
       if (typeof url !== 'string' || !url) return { ok: false, error: 'url-required' };
+      const outsideFiles = outsideFilesRefusal(await podRegistry.get(podId));
+      if (outsideFiles) return { ok: false, error: outsideFiles };
       const abortable = registerPodController(podId, jobId);
       try {
         await awaitWithinSignal(awaitDenylistPolicy, abortable?.controller.signal ?? null);
@@ -363,8 +375,20 @@ export const makeEngineRoutes = (deps) => {
       const record = await podRegistry.get(podId);
       return {
         ok: true,
-        record: { id: record.id, name: record.name, persistent: record.persistent !== false },
+        record: {
+          id: record.id, name: record.name, persistent: record.persistent !== false,
+          outsideFiles: record.outsideFiles ?? null,
+        },
       };
+    },
+    // why only the Pod's own tab: its button is a user gesture. Pod jobs run in
+    // sealed Workers with no extension messaging, so they cannot send this.
+    'pod/clear-outside-files': async ({ podId }, sender) => {
+      const senderError = await podSenderError(podId, sender);
+      if (senderError) return { ok: false, error: senderError };
+      if (!await podRegistry.update(podId, { outsideFiles: null })) return { ok: false, error: 'pod-not-found' };
+      auditLog.append({ type: 'pod_outside_files_cleared', details: { podId } }).catch(() => {});
+      return { ok: true };
     },
     // why: The worker stays authoritative for OPFS write posture.
     'lifecycle/assert-opfs-writable': async (_msg, sender = undefined) => {

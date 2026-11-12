@@ -90,7 +90,7 @@ describe('kernel engine route owners', () => {
       .toEqual({ ok: false, error: 'pod-sender-not-instance-pinned' });
     expect(await pod['pod/get-meta']({ podId: 'pod-1' }, { tab: { id: 9 } }))
       .toEqual({
-        ok: true, record: { id: 'pod-1', name: 'Pod', persistent: true },
+        ok: true, record: { id: 'pod-1', name: 'Pod', persistent: true, outsideFiles: null },
       });
     expect(await pod['pod/web-fetch']({
       podId: 'pod-1', url: 'https://example.test/write', method: 'POST',
