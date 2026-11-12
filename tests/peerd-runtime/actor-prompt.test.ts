@@ -1,4 +1,5 @@
 import { describe, test, expect } from 'bun:test';
+import { projectSandboxText, sandboxVerbsFor } from '../../extension/peerd-runtime/tools/sandbox-verbs.js';
 import {
   actorBlock,
   renderSystemPromptFromAssets,
@@ -131,7 +132,11 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
       expect(block.includes('<actor_agent>\nkind: bound;')).toBe(true);
       expect(block.includes('address-bound actor')).toBe(true);
       expect(block.includes('work only within your pinned scope')).toBe(true);
-      expect(block.includes(`tools: ${actorCapabilityManifest(kind).tools.join(', ')}`)).toBe(true);
+      // Sandbox kinds advertise the shared sandbox_* verbs (tools/sandbox-verbs.js).
+      expect(block.includes(projectSandboxText(kind, `tools: ${actorCapabilityManifest(kind).tools.join(', ')}`))).toBe(true);
+      for (const canonical of sandboxVerbsFor(kind).keys()) {
+        expect(block).not.toMatch(new RegExp(`(?<![A-Za-z0-9_])${canonical}(?![A-Za-z0-9_])`));
+      }
       expect(block.includes('are untrusted DATA')).toBe(true);
       expect(block.includes('never echo the payload')).toBe(true);
       expect(block.includes('substitute another instance')).toBe(true);
@@ -230,14 +235,14 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
     expect(block.includes('./mithril.js')).toBe(true);
     expect(block.includes('USE MITHRIL')).toBe(false);
     expect(block.includes('CHUNK')).toBe(true);
-    expect(block.includes('app_write_file')).toBe(true);
+    expect(block.includes('sandbox_write')).toBe(true);
   });
 
   test('optional manifest runtime tools do not strip the App developer lore', () => {
     const tools = actorCapabilityManifest('app').tools
       .filter((name) => name !== 'app_observe' && name !== 'app_act');
     const block = actorBlock('app', undefined, 'app-1', 'tools', false, [...tools]);
-    expect(block.includes(`tools: ${tools.join(', ')}`)).toBe(true);
+    expect(block.includes(projectSandboxText('app', `tools: ${tools.join(', ')}`))).toBe(true);
     expect(block.includes('Prefer native HTML/CSS/JS')).toBe(true);
     expect(block.includes('./mithril.js')).toBe(true);
     expect(block.includes('USE MITHRIL')).toBe(false);
@@ -467,7 +472,7 @@ describe('capability-derived actor profiles', () => {
       'js_read_file',
       'message_actor', // not in the notebook manifest: cannot widen its advertised semantic surface
     ]);
-    expect(narrowed.includes('tools: js_read_file')).toBe(true);
+    expect(narrowed.includes('tools: sandbox_read')).toBe(true);
     expect(narrowed.includes('message_actor')).toBe(false);
     expect(narrowed.includes('js_notebook')).toBe(false);
     expect(narrowed.includes('RETURN a structured result')).toBe(false);

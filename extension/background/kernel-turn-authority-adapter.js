@@ -2959,6 +2959,20 @@ export const createKernelTurnAuthorityAdapter = (deps) => {
         await syncNetworkCustody();
         return { ok: true };
       },
+      // why: the Pod tab reports readiness once its workspace and editor are
+      // up. Without this route a freshly opened Pod tab stayed "pending"
+      // until a service-worker restart's bootstrap marked it ready: every Pod
+      // command that opens the tab failed after the ready timeout, and creating
+      // a Pod stalled for it. Readiness is accepted only from the exact tab
+      // that adopted this Pod.
+      'pod/tab-ready': async (/** @type {any} */ message, /** @type {any} */ sender) => {
+        if (!trustedEngineMessage(sender) || typeof message?.podId !== 'string'
+            || engine.podTabTracker.parseIdFromUrl(sender.tab.url) !== message.podId
+            || !await engine.podRegistry.get(message.podId)
+            || engine.podTabTracker.getTabId(message.podId) !== sender.tab.id) return false;
+        engine.podTabTracker.onTabReady(message.podId, sender.tab.id);
+        return false;
+      },
       'app/tab-ready': (/** @type {any} */ message, /** @type {any} */ sender) =>
         trustedEngineMessage(sender) ? attachAppTabActor(message, sender) : false,
       'app/actor-retry': (/** @type {any} */ message, /** @type {any} */ sender) =>

@@ -247,7 +247,7 @@ export const createKernelExecutableControl = (deps) => {
         return typeof message?.notebookId === 'string'
           && ownsTab(sender, paths.notebook, message.notebookId);
       }
-      if (route === 'pod/tab-adopt') {
+      if (route === 'pod/tab-adopt' || route === 'pod/tab-ready') {
         return typeof message?.podId === 'string'
           && ownsTab(sender, paths.pod, message.podId);
       }

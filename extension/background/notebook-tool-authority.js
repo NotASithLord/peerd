@@ -4,27 +4,17 @@
 // worker, OPFS namespace, catalog, tab, repository lock, cancellation, and the
 // actor/session binding; the controller owns validation and result shaping.
 
-const mismatch = () => Object.assign(new Error('Notebook authority mismatch'), {
-  outcomeKnown: true, retryable: false,
-});
+import { createEngineAuthorityGuards, engineAuthorityMismatch } from './engine-process.js';
+
+const mismatch = () => engineAuthorityMismatch('Notebook');
 
 /** @param {{binding:any,ctx:any,signal:AbortSignal,shared?:any}} input */
 export const createNotebookToolAuthority = ({ binding, ctx, signal, shared = {} }) => {
   const args = binding.args;
   const sessionId = ctx?.session?.sessionId;
-  const boundNotebookId = ctx?.actorType === 'notebook' ? ctx.actorInstanceId : null;
-  const requireBoundNotebook = (/** @type {unknown} */ notebookId) => {
-    if (boundNotebookId && notebookId !== boundNotebookId) throw mismatch();
-  };
-  const requireOperation = (/** @type {string} */ name) => {
-    if (binding.operation !== name) throw mismatch();
-  };
-  const requireLive = () => {
-    if (!signal?.aborted) return;
-    throw Object.assign(new Error('Notebook operation stopped before mutation'), {
-      outcomeKnown: true, outcomeKind: 'pre-effect-failure', retryable: false,
-    });
-  };
+  const {
+    boundId: boundNotebookId, requireBound: requireBoundNotebook, requireOperation, requireLive,
+  } = createEngineAuthorityGuards({ label: 'Notebook', actorType: 'notebook', binding, ctx, signal });
 
   return Object.freeze({
     readNotebook: async (/** @type {string} */ notebookId) => {

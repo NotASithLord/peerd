@@ -8,7 +8,7 @@
 // tests/peerd-engine/command-queue.test.ts.
 
 import { describe, it, expect } from '../../framework.js';
-import { createVmTabTracker } from '/background/vm-tab-tracker.js';
+import { createVmTabTracker } from '/background/tab-tracker.js';
 import { createVmClient } from '/background/vm-client.js';
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -143,7 +143,7 @@ const makeHarness = () => {
     setDefaultForSession: async (_sid, id) => { defaultId = id; },
     create: async () => ({ id: `vm-${++created}` }),
   }));
-  const tracker = /** @type {ReturnType<typeof import('/background/vm-tab-tracker.js').createVmTabTracker>} */ (/** @type {unknown} */ (
+  const tracker = /** @type {ReturnType<typeof import('/background/tab-tracker.js').createVmTabTracker>} */ (/** @type {unknown} */ (
     { ensureTab: async () => 7, getTabId: () => 7 }));
   // now:()=>1 keeps the idle-reuse freeze probe dormant (idleMs stays tiny), so these
   // serialization/interrupt tests exercise only the command lane — the freeze gate has
@@ -283,7 +283,7 @@ const makeRebootHarness = ({ plan, timeoutMs = 40, readyProbeMs = 40, idleProbeM
     if (step === 'hang' || step === undefined) return new Promise(() => {});
     return Promise.resolve(step);
   };
-  const tracker = /** @type {ReturnType<typeof import('/background/vm-tab-tracker.js').createVmTabTracker>} */ (/** @type {unknown} */ ({
+  const tracker = /** @type {ReturnType<typeof import('/background/tab-tracker.js').createVmTabTracker>} */ (/** @type {unknown} */ ({
     ensureTab: async () => { created = true; return 7; },
     getTabId: () => (fresh && !created ? null : 7),
     /** @param {string} id */ reloadTab: async (id) => { reloads.push(id); return true; },

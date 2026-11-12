@@ -22,7 +22,7 @@ import {
   stampLifecycleToolResult,
 } from './host-effect-verdict.js';
 import { semanticCallAuditEntry } from './semantic-call-audit.js';
-import { parsePodShell, podGitRemoteIntents } from '/peerd-engine/authority.js';
+import { decidePodOperation } from './pod-tool-authority.js';
 import { bindRepositoryToolAuthority } from './repository-tool-authority.js';
 import { bindVmToolAuthority } from './vm-tool-authority.js';
 import { bindNotebookToolAuthority } from './notebook-tool-authority.js';
@@ -45,10 +45,7 @@ import {
 } from '../shared/controller-kernel-quota.js';
 import { createAuthorityEffectScheduler } from './authority-effect-scheduler.js';
 import { authorityEffectResourceKey } from './authority-effect-resource.js';
-import {
-  canonicalCloneDigest,
-  sameCanonicalStructuredClone,
-} from '../shared/canonical-clone-digest.js';
+import { canonicalCloneDigest } from '../shared/canonical-clone-digest.js';
 import { authorityEffectConfirmationPresentation } from '../shared/authority-confirmation-presentation.js';
 import {
   createReadOnlyOperationGrant,
@@ -1342,6 +1339,42 @@ export const makeControllerTurnBridge = ({
       );
     }, entry.semanticEffect.callId);
   };
+  // why one Pod policy: the admission checks and the Git-consent state machine
+  // live in pod-tool-authority.js, shared with the actor relay. This host owns
+  // only its envelope: claim, refusal text, run signal, liveness and receipt.
+  const runPodOperation = async (
+    /** @type {any} */ run,
+    /** @type {Record<string,any>} */ value,
+    /** @type {string} */ operation,
+    /** @type {string} */ podOperation,
+    /** @type {string[]} */ businessKeys,
+    /** @type {string[]} */ optionalKeys,
+    /** @type {Record<string,string>} */ refusalText,
+  ) => {
+    const entry = domainExecutionEntry(run, value, operation, 'pod', businessKeys, optionalKeys);
+    if (!entry) return failed(refusalText.mismatch, true);
+    const decision = decidePodOperation(podOperation, {
+      message: value, args: entry.call?.args, domainState: entry.domainState, ctx: entry.custody?.ctx,
+    });
+    if ('refusal' in decision) {
+      return failed(refusalText[decision.refusal] ?? refusalText.mismatch, true);
+    }
+    decision.admit();
+    const effect = decision.effect({ signal: run.signal });
+    if (!effect) {
+      return decision.whenUnavailable === 'decline' ? known(false) : failed('pod_unavailable', true);
+    }
+    const result = /** @type {any} */ (await runDomainEffect(
+      run, entry, operation, effect,
+      decision.outcome ? HOST_EFFECT_OUTCOME[decision.outcome] : null,
+    ));
+    // why authorityValue: this host's effect envelope wraps the client's value
+    // as { authorityValue, authorityReceipt }. (No orchestrator grant includes
+    // turn.pod.* today, so this path is dormant; it must still settle the value.)
+    if (result?.ok === true) decision.settle(result.value?.authorityValue, () => runIsLive(run));
+    return result;
+  };
+
   const repositoryExecutionEntry = (
     /** @type {any} */ run,
     /** @type {Record<string,any>} */ value,
@@ -2025,170 +2058,42 @@ export const makeControllerTurnBridge = ({
             prepared.dispatchAdmission);
           }, effect.callId);
         }
-        case 'turn.pod.resolve': {
-          const entry = domainExecutionEntry(
-            run, value, operation, 'pod', ['podId'], ['command'],
-          );
-          if (!entry || value.podId !== entry.call?.args?.podId) {
-            return failed('Pod resolution authority mismatch', true);
-          }
-          const ctx = entry.custody?.ctx;
-          if (typeof ctx?.podClient?.resolveId !== 'function') {
-            return failed('pod_unavailable', true);
-          }
-          const result = /** @type {any} */ (await runDomainEffect(
-            run, entry, operation, () =>
-              ctx.podClient.resolveId({ sessionId: ctx.session?.sessionId, podId: value.podId }),
-          ));
-          if (result?.ok === true && typeof result.value === 'string') {
-            entry.domainState.podId = result.value;
-            if (typeof value.command === 'string') entry.domainState.command = value.command;
-          }
-          return result;
-        }
-        case 'turn.pod.read-remote': {
-          const entry = domainExecutionEntry(run, value, operation, 'pod', ['podId']);
-          const intent = entry ? podGitRemoteIntents(entry.domainState.command ?? '')[0] : null;
-          if (!entry || typeof value.podId !== 'string'
-              || value.podId !== entry.domainState.podId
-              || !intent || intent.url) {
-            return failed('Pod remote authority mismatch', true);
-          }
-          const readRemote = entry.custody?.ctx?.repositories?.getRemote;
-          const result = /** @type {any} */ (await runDomainEffect(
-            run, entry, operation, () => typeof readRemote === 'function'
-              ? readRemote({ kind: 'pod', id: value.podId }) : null,
-          ));
-          if (result?.ok === true) entry.domainState.remote = result.value;
-          return result;
-        }
-        case 'turn.pod.confirm-git': {
-          const entry = domainExecutionEntry(run, value, operation, 'pod', ['op']);
-          const intents = entry ? podGitRemoteIntents(entry.domainState.command ?? '') : [];
-          const intent = intents.length === 1 ? intents[0] : null;
-          const target = intent?.url ?? entry?.domainState?.remote?.url;
-          if (!entry || typeof entry.domainState.podId !== 'string'
-              || !intent || value.op !== intent.op || typeof target !== 'string') {
-            return failed('Pod Git confirmation authority mismatch', true);
-          }
-          let origin;
-          try { origin = new URL(target).origin; }
-          catch { return failed('Pod Git remote is invalid', true); }
-          const confirm = entry.custody?.ctx?.confirm;
-          if (typeof confirm !== 'function') return known(false);
-          const result = /** @type {any} */ (await runDomainEffect(
-            run, entry, operation, () => confirm({
-            tool: 'pod_exec', kind: `git_${intent.op}`,
-            sideEffect: intent.op === 'push' ? 'mutate_external' : 'write',
-            origins: [origin],
-            summary: intent.op === 'push'
-              ? `Allow this one Pod job to push code and commit history to ${target}?`
-              : `Allow this one Pod job to ${intent.op} ${target} through peerd's audited Git transport?`,
-            }, run.signal), HOST_EFFECT_OUTCOME.confirmation,
-          ));
-          if (result?.ok === true
-              && runIsLive(run)
-              && [true, 'yes_once', 'yes_session'].includes(result.value)) {
-            entry.domainState.remoteGitGrant = { op: intent.op, url: target };
-          }
-          return result;
-        }
-        case 'turn.pod.exec': {
-          const entry = domainExecutionEntry(run, value, operation, 'pod', [
+        case 'turn.pod.resolve':
+          return runPodOperation(run, value, operation, 'resolve', ['podId'], ['command'], {
+            mismatch: 'Pod resolution authority mismatch',
+          });
+        case 'turn.pod.read-remote':
+          return runPodOperation(run, value, operation, 'read-remote', ['podId'], [], {
+            mismatch: 'Pod remote authority mismatch',
+          });
+        case 'turn.pod.confirm-git':
+          return runPodOperation(run, value, operation, 'confirm-git', ['op'], [], {
+            mismatch: 'Pod Git confirmation authority mismatch',
+            'invalid-remote': 'Pod Git remote is invalid',
+          });
+        case 'turn.pod.exec':
+          return runPodOperation(run, value, operation, 'exec', [
             'command', 'podId', 'timeoutMs', 'background', 'remoteGitGrant',
-          ]);
-          const args = entry?.call?.args;
-          let program;
-          let intents;
-          try {
-            program = parsePodShell(args?.command ?? '');
-            intents = podGitRemoteIntents(args?.command ?? '');
-          } catch { return failed('Pod command authority mismatch', true); }
-          const expectedTimeout = Math.min(300_000, Math.max(1, Number(args?.timeoutMs) || 30_000));
-          const expectedBackground = args?.background === true || program.background;
-          const expectedGrant = intents.length === 1
-            ? entry?.domainState?.remoteGitGrant ?? null : null;
-          if (!entry || intents.length > 1 || typeof entry.domainState.podId !== 'string'
-              || value.command !== args?.command || value.podId !== entry.domainState.podId
-              || value.timeoutMs !== expectedTimeout || value.background !== expectedBackground
-              || !sameCanonicalStructuredClone(value.remoteGitGrant, expectedGrant)) {
-            return failed('Pod execution authority mismatch', true);
-          }
-          if (expectedGrant) entry.domainState.remoteGitGrant = null;
-          const execute = entry.custody?.ctx?.podClient?.exec;
-          if (typeof execute !== 'function') return failed('pod_unavailable', true);
-          return runDomainEffect(run, entry, operation, () => execute(value.command, {
-            podId: value.podId,
-            timeoutMs: expectedTimeout,
-            background: expectedBackground,
-            remoteGitGrant: expectedGrant,
-            signal: expectedBackground ? undefined : run.signal,
-          }), HOST_EFFECT_OUTCOME.podExecution);
-        }
-        case 'turn.pod.status': {
-          const entry = domainExecutionEntry(run, value, operation, 'pod', [
+          ], [], {
+            mismatch: 'Pod execution authority mismatch',
+            'invalid-command': 'Pod command authority mismatch',
+          });
+        case 'turn.pod.status':
+          return runPodOperation(run, value, operation, 'status', [
             'podId', 'jobId', 'stream', 'offset', 'limit',
-          ]);
-          const args = entry?.call?.args;
-          if (!entry || value.podId !== args?.podId || value.jobId !== args?.jobId
-              || value.stream !== args?.stream || value.offset !== args?.offset
-              || value.limit !== args?.limit) {
-            return failed('Pod status authority mismatch', true);
-          }
-          const readStatus = entry.custody?.ctx?.podClient?.status;
-          if (typeof readStatus !== 'function') return failed('pod_unavailable', true);
-          return runDomainEffect(run, entry, operation, () => readStatus({
-            sessionId: entry.custody.ctx.session?.sessionId,
-            podId: value.podId, jobId: value.jobId, stream: value.stream,
-            offset: value.offset, limit: value.limit,
-          }));
-        }
-        case 'turn.pod.cancel': {
-          const entry = domainExecutionEntry(run, value, operation, 'pod', [
-            'podId', 'jobId',
-          ]);
-          const args = entry?.call?.args;
-          if (!entry || typeof value.jobId !== 'string' || value.jobId !== args?.jobId
-              || value.podId !== args?.podId) {
-            return failed('Pod cancellation authority mismatch', true);
-          }
-          const cancel = entry.custody?.ctx?.podClient?.cancel;
-          if (typeof cancel !== 'function') return failed('pod_unavailable', true);
-          return runDomainEffect(run, entry, operation, () => cancel(value.jobId, {
-            sessionId: entry.custody.ctx.session?.sessionId, podId: value.podId,
-          }), HOST_EFFECT_OUTCOME.podCancel);
-        }
-        case 'turn.pod.read-file': {
-          const entry = domainExecutionEntry(run, value, operation, 'pod', ['podId', 'path']);
-          const args = entry?.call?.args;
-          if (!entry || typeof value.path !== 'string' || value.path !== args?.path
-              || value.podId !== args?.podId) {
-            return failed('Pod file-read authority mismatch', true);
-          }
-          const readFile = entry.custody?.ctx?.podClient?.readFile;
-          if (typeof readFile !== 'function') return failed('pod_unavailable', true);
-          return runDomainEffect(run, entry, operation, () => readFile(value.path, {
-            sessionId: entry.custody.ctx.session?.sessionId, podId: value.podId,
-          }));
-        }
-        case 'turn.pod.write-file': {
-          const entry = domainExecutionEntry(run, value, operation, 'pod', [
+          ], [], { mismatch: 'Pod status authority mismatch' });
+        case 'turn.pod.cancel':
+          return runPodOperation(run, value, operation, 'cancel', ['podId', 'jobId'], [], {
+            mismatch: 'Pod cancellation authority mismatch',
+          });
+        case 'turn.pod.read-file':
+          return runPodOperation(run, value, operation, 'read-file', ['podId', 'path'], [], {
+            mismatch: 'Pod file-read authority mismatch',
+          });
+        case 'turn.pod.write-file':
+          return runPodOperation(run, value, operation, 'write-file', [
             'podId', 'path', 'content',
-          ]);
-          const args = entry?.call?.args;
-          if (!entry || typeof value.path !== 'string' || typeof value.content !== 'string'
-              || value.path !== args?.path || value.content !== args?.content
-              || value.podId !== args?.podId) {
-            return failed('Pod file-write authority mismatch', true);
-          }
-          const writeFile = entry.custody?.ctx?.podClient?.writeFile;
-          if (typeof writeFile !== 'function') return failed('pod_unavailable', true);
-          return runDomainEffect(run, entry, operation, () => writeFile(
-            value.path, value.content, {
-              sessionId: entry.custody.ctx.session?.sessionId, podId: value.podId,
-            },
-          ), HOST_EFFECT_OUTCOME.podMutation);
-        }
+          ], [], { mismatch: 'Pod file-write authority mismatch' });
         case 'turn.repository.read-pod': {
           const entry = repositoryExecutionEntry(run, value, operation, ['podId']);
           if (!entry) return failed('repository Pod read authority mismatch', true);

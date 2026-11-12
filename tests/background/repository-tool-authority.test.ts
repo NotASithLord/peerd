@@ -329,3 +329,59 @@ describe('repository tool authority', () => {
     expect(commits).toBe(0);
   });
 });
+
+describe('Pod destroy custody', () => {
+  const destroyHarness = (records: Map<string, any>) => {
+    const order: string[] = [];
+    const shared: any = {};
+    const ctx = {
+      podRegistry: {
+        get: async (id: string) => records.get(id) ?? null,
+        delete: async (id: string) => { order.push(`delete:${id}`); records.delete(id); },
+      },
+      podTabTracker: { closeTab: async (id: string) => { order.push(`close:${id}`); } },
+      repositories: {
+        coordinate: async (_ref: unknown, operation: () => Promise<unknown>) => {
+          order.push('lock');
+          return operation();
+        },
+        destroy: async (ref: any) => { order.push(`git:${ref.id}`); },
+      },
+    };
+    const authority = (operation: string) => createRepositoryToolAuthority({
+      binding: { operation, args: { podId: 'pod-1' } }, ctx, signal, shared,
+    });
+    return { order, read: authority('turn.repository.read-pod'), destroy: authority('turn.repository.destroy-pod') };
+  };
+
+  test('an inspected, unpinned Pod is destroyed inside its repository lane', async () => {
+    const { order, read, destroy } = destroyHarness(new Map([['pod-1', { name: 'Work' }]]));
+    await read.readPod('pod-1');
+    await destroy.destroyPod('pod-1');
+    expect(order).toEqual(['lock', 'close:pod-1', 'git:pod-1', 'delete:pod-1']);
+  });
+
+  test('a Pod pinned after it was inspected is not destroyed', async () => {
+    const records = new Map<string, any>([['pod-1', { name: 'Work' }]]);
+    const { order, read, destroy } = destroyHarness(records);
+    await read.readPod('pod-1');
+    records.set('pod-1', { name: 'Work', pinned: true });
+    await expect(destroy.destroyPod('pod-1')).rejects.toThrow('repository authority mismatch');
+    expect(order).toEqual(['lock']);
+  });
+
+  test('a Pod removed after it was inspected is not destroyed again', async () => {
+    const records = new Map<string, any>([['pod-1', { name: 'Work' }]]);
+    const { order, read, destroy } = destroyHarness(records);
+    await read.readPod('pod-1');
+    records.delete('pod-1');
+    await expect(destroy.destroyPod('pod-1')).rejects.toThrow('repository authority mismatch');
+    expect(order).toEqual(['lock']);
+  });
+
+  test('destroy without a prior inspection of that Pod is refused before the lane', async () => {
+    const { order, destroy } = destroyHarness(new Map([['pod-1', { name: 'Work' }]]));
+    await expect(destroy.destroyPod('pod-1')).rejects.toThrow('repository authority mismatch');
+    expect(order).toEqual([]);
+  });
+});

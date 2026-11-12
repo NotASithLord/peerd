@@ -7,6 +7,10 @@ import { TOOL_METADATA_ORDER, TOOL_METADATA_RECORDS } from './tools/metadata/cat
 import { resolveToolOrigins } from './tool-origin-policy.js';
 
 export { TOOL_METADATA_ORDER, resolveToolOrigins };
+export {
+  canonicalSandboxHistory, canonicalSandboxLoopEvent, canonicalSandboxToolName,
+  isSandboxActorType, projectSandboxHistory, projectSandboxTools, projectSandboxTrimSummary,
+} from './tools/sandbox-verbs.js';
 
 /** @param {string} name */
 export const getToolMetadata = (name) => /** @type {Record<string, any>} */ (
