@@ -25,7 +25,7 @@ const memoryRegistry = () => {
     deleted,
     create: async (/** @type {any} */ opts) => {
       const record = {
-        id: `binary-client-${++sequence}`,
+        id: opts.id ?? `binary-client-${++sequence}`,
         name: opts.name,
         entryFile: opts.entryFile,
         tags: opts.tags ?? [],
@@ -157,7 +157,7 @@ describe('App storage binary contract', () => {
     /** @type {any[]} */ const replacements = [];
     const repositories = testRepositories({
       initApp: async () => 'base',
-      statusApp: async () => ({ oid: 'base' }),
+      statusApp: async (/** @type {string} */ id) => ({ oid: registry.records.has(id) ? 'base' : null }),
       replaceWorkingTree: async (/** @type {any} */ _ref, /** @type {any} */ options) => {
         replacements.push(options);
         return { oid: 'next', created: true };
@@ -262,7 +262,7 @@ describe('App storage binary contract', () => {
     expect(failed).toBe(true);
     expect(registry.records.size).toBe(0);
     expect(registry.deleted.length).toBe(1);
-    await opfsHelpers(['peerd-apps', 'binary-client-1']).nuke();
+    await opfsHelpers(['peerd-apps', registry.deleted[0]]).nuke();
   });
 
   it('validates entry changes before writes and rolls bytes back on metadata failure', async () => {

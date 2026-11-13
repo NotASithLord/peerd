@@ -136,55 +136,53 @@ export const createKernelRepositoryControl = (deps) => {
     if (operation === 'repository.import') {
       if (!projection || deps.vault.isLocked()) return failure('vault-locked', true);
       const sessionId = await deps.sessionCache?.sessionGet?.('currentSessionId') ?? null;
-      let record = await deps.catalog.createImported({
-        name: payload.name, ownerSessionId: sessionId,
-      });
-      try {
-        const repository = await deps.repositories.clone({ kind: 'app', id: record.id }, {
-          url: payload.url,
-          ...(payload.ref ? { ref: payload.ref } : {}),
-          depth: payload.depth,
-          signal,
-        });
-        const { fileKinds, contract } = await deps.appFiles.inspectApp(record.id);
-        if (contract.capabilities.includes('dweb') && deps.allowDweb !== true) {
-          throw Object.assign(
-            new Error('this dwapp requires a preview build with the dweb enabled'),
-            { outcomeKnown: true },
-          );
-        }
-        const updated = await deps.catalog.patch(record.id, {
-          entryFile: contract.entry, fileKinds,
-          ...(contract.capabilities.includes('dweb')
-            ? { dweb: { uri: null, publisher: null, hash: null, local: true } } : {}),
-        });
-        if (!updated) throw Object.assign(
-          new Error('App import catalog record disappeared'), { outcomeKnown: true },
-        );
-        record = updated;
-        if (typeof sessionId === 'string') {
-          await deps.catalog.setDefaultForSession(sessionId, record.id);
-        }
-        return success({ ok: true, record, repository, contract });
-      } catch (cause) {
-        if (/** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown === false) {
-          return failure('repository-import-outcome-unknown', false, cause);
-        }
+      const id = `app-${crypto.randomUUID()}`;
+      return coordinate(id, async () => {
+        if (await deps.catalog.get(id)) return failure('app-already-exists', true);
         try {
-          await deps.repositories.destroy({ kind: 'app', id: record.id }, {
-            worktree: true, signal,
+          const repository = await deps.repositories.clone({ kind: 'app', id }, {
+            url: payload.url,
+            ...(payload.ref ? { ref: payload.ref } : {}),
+            depth: payload.depth,
+            signal,
           });
-        } catch (cleanupCause) {
-          return failure('repository-import-repository-rollback-unknown', false, cleanupCause);
+          const { fileKinds, contract } = await deps.appFiles.inspectApp(id);
+          const dwapp = contract.capabilities.includes('dweb');
+          if (dwapp && deps.allowDweb !== true) {
+            throw Object.assign(
+              new Error('this dwapp requires a preview build with the dweb enabled'),
+              { outcomeKnown: true },
+            );
+          }
+          const record = await deps.catalog.createImported({
+            id, name: payload.name, ownerSessionId: sessionId, entryFile: contract.entry, fileKinds,
+            ...(dwapp
+              ? { dweb: { uri: null, publisher: null, hash: null, local: true } } : {}),
+          });
+          if (typeof sessionId === 'string') {
+            await deps.catalog.setDefaultForSession(sessionId, id);
+          }
+          return success({ ok: true, record, repository, contract });
+        } catch (cause) {
+          if (/** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown === false) {
+            return failure('repository-import-outcome-unknown', false, cause);
+          }
+          try {
+            await deps.repositories.destroy({ kind: 'app', id }, {
+              worktree: true, signal,
+            });
+          } catch (cleanupCause) {
+            return failure('repository-import-repository-rollback-unknown', false, cleanupCause);
+          }
+          try { await deps.catalog.remove(id); }
+          catch (cleanupCause) {
+            return failure('repository-import-catalog-rollback-unknown', false, cleanupCause);
+          }
+          return success({
+            ok: false, error: /** @type {{message?:string}} */ (cause)?.message ?? String(cause),
+          });
         }
-        try { await deps.catalog.remove(record.id); }
-        catch (cleanupCause) {
-          return failure('repository-import-catalog-rollback-unknown', false, cleanupCause);
-        }
-        return success({
-          ok: false, error: /** @type {{message?:string}} */ (cause)?.message ?? String(cause),
-        });
-      }
+      });
     }
     if (!projection) return failure('kernel-operation-denied', true);
     const appId = payload.appId;

@@ -129,29 +129,30 @@ export const createKernelAppCatalog = ({
       async () => kernelSessionAppId(await read(), sessionId),
       (registry) => registry.getDefaultForSession(sessionId),
     ),
-    /** @param {{name?:unknown,ownerSessionId?:unknown}} input */
-    createImported: (input = {}) => run(async () => {
+    /** @param {Partial<import('/peerd-engine/app-registry.js').AppRecord>} opts */
+    createImported: (opts = {}) => run(async () => {
       const state = parseKernelAppCatalogRow(await read()) ?? {
         schemaVersion: 1, apps: {}, sessionDefaults: {},
       };
-      const id = newId();
+      const id = opts.id ?? newId();
       if (!/^app-[a-z0-9-]{1,92}$/.test(id) || state.apps[id]) {
         throw new Error('invalid or duplicate App id');
       }
       const createdAt = now();
       const record = {
         id,
-        name: (typeof input.name === 'string' && input.name.trim()
-          ? input.name.trim() : 'Git App').slice(0, 80),
-        tags: [], entryFile: 'index.html', fileKinds: {},
-        ownerSessionId: typeof input.ownerSessionId === 'string' ? input.ownerSessionId : null,
+        name: (typeof opts.name === 'string' && opts.name.trim()
+          ? opts.name.trim() : 'Git App').slice(0, 80),
+        tags: [], entryFile: opts.entryFile ?? 'index.html', fileKinds: opts.fileKinds ?? {},
+        ownerSessionId: typeof opts.ownerSessionId === 'string' ? opts.ownerSessionId : null,
         createdAt, updatedAt: createdAt, favorite: false,
         source: 'imported', thumbnail: null,
+        ...(opts.dweb ? { dweb: opts.dweb } : {}),
       };
       state.apps[id] = record;
       await idb.put('apps', { key: KERNEL_APP_CATALOG_KEY, value: state });
       return record;
-    }, (registry) => registry.create({ ...input, source: 'imported' })),
+    }, (registry) => registry.create({ ...opts, source: 'imported' })),
     /** @param {string} appId */
     remove: (appId) => run(async () => {
       const state = parseKernelAppCatalogRow(await read());
