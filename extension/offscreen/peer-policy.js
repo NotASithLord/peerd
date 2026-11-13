@@ -26,6 +26,6 @@ export const createPeerPolicyView = () => {
     // Retain the last explicit block set for destructive cache enforcement.
     /** @param {string} did */
     isExplicitlyBlocked: (did) => blocked.has(did),
-    revision: () => revision,
+    revision: () => revision, available: () => available,
   };
 };

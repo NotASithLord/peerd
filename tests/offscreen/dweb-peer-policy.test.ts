@@ -107,25 +107,25 @@ test('a kernel policy outage closes admission without destroying retained discov
   await boundary.refreshPeerPolicy();
   const identity = await generateIdentity();
   const mesh = createRoomMesh({ roomId: 'policy-recycle', identity });
-  const base = await createBaseNetwork({ identity, mesh, userBlocked: boundary.peerPolicy.isBlocked });
+  const base = await createBaseNetwork({ identity, mesh, userBlocked: boundary.peerPolicy.isBlocked, userPolicyAvailable: boundary.peerPolicy.available });
   boundary.setHandle({ base });
   try {
     const shared = await base.publishApp({ name: 'retained', entry: 'index.html', files: { 'index.html': 'retained' } });
     const { dwapp_id } = await base.publishMeta({ slug: 'retained', name: 'retained', head: {
       version_id: shared.hash, content_addr: shared.uri, size: shared.packedBytes,
     } });
-    expect(await base.findDwapp(dwapp_id)).not.toBeNull();
+    expect(await base.findDwapp(dwapp_id)).not.toBeNull(); const verified = await base.fetchApp(shared.uri);
     reply = { ok: false };
     await expect(boundary.refreshPeerPolicy()).rejects.toThrow('peer-policy-unavailable');
     expect(boundary.peerPolicy.isBlocked(identity.did)).toBe(true);
     expect(await base.findDwapp(dwapp_id)).not.toBeNull();
-    await expect(base.fetchApp(shared.uri)).rejects.toThrow('publisher-user-blocked');
+    const denied = base.fetchApp(shared.uri); await expect(denied).rejects.toThrow('peer-policy-unavailable'); await expect(base.seedApp(verified)).rejects.toThrow('peer-policy-unavailable');
     reply = { ok: true, policy: { v: 1, revision: 1, blocked: [] } };
     await boundary.refreshPeerPolicy();
-    expect(boundary.peerPolicy.isBlocked(identity.did)).toBe(false);
+    expect(boundary.peerPolicy.isBlocked(identity.did)).toBe(false); await expect(denied).rejects.toThrow('peer-policy-unavailable');
     expect(await base.findDwapp(dwapp_id)).not.toBeNull();
     reply = { ok: true, policy: { v: 1, revision: 2, blocked: [identity.did] } };
     await boundary.refreshPeerPolicy();
-    expect(await base.findDwapp(dwapp_id)).toBeNull();
+    expect(await base.findDwapp(dwapp_id)).toBeNull(); await expect(base.fetchApp(shared.uri)).rejects.toThrow('publisher-user-blocked'); await expect(base.seedApp(verified)).rejects.toThrow('publisher-user-blocked');
   } finally { base.close(); mesh.close(); }
 });

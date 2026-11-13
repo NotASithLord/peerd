@@ -376,7 +376,7 @@ const baseLifecycle = makeStartStopBarrier({
       identity,
       discoveryEnabled: discoverySettings.enabled,
       localRecoveryPending: reseedNotifier.pending,
-      isBlocked: peerPolicy.isBlocked,
+      isBlocked: peerPolicy.isBlocked, userPolicyAvailable: peerPolicy.available,
       onMesh: (/** @type {any} */ mesh) => { policyMeshes.add(mesh); return () => policyMeshes.delete(mesh); },
       admitPeer: async (/** @type {string} */ did) => { await refreshPeerPolicy(); return !peerPolicy.isBlocked(did); },
       // Signature/shape/derived-id verification happens in discovery before
