@@ -54,13 +54,13 @@ const subMsgTopic = (id) => `dwapp/${id}/msg`;            // a sub-protocol's go
 /**
  * @param {{ identity: import('./transport/mesh.js').Identity, mesh: any,
  *   meta?: () => any, dial?: any, audit?: import('./transport/mesh.js').AuditFn,
- *   now?: () => number, maxBundleBytes?: number, discoveryEnabled?: ()=>boolean, localRecoveryPending?: ()=>boolean, userBlocked?: (did:string)=>boolean,
+ *   now?: () => number, maxBundleBytes?: number, discoveryEnabled?: ()=>boolean, localRecoveryPending?: ()=>boolean, userBlocked?: (did:string)=>boolean, userPolicyAvailable?: ()=>boolean,
  *   discoveryDisseminationProfile?: typeof import('./apps/discovery.js').DISCOVERY_BOUNDED_PROFILE | null,
  *   admitDwappMeta?: ((candidate: { dwappId: string, publisher: string, seq: number, versionId: string }) => Promise<boolean>) | null }} opts
  */
 export const createBaseNetwork = async ({
   identity, mesh, meta = () => ({}), dial = null, audit = null,
-  now = Date.now, maxBundleBytes = MAX_BUNDLE_BYTES, admitDwappMeta = null, userBlocked = () => false, discoveryEnabled = () => true, localRecoveryPending = () => false,
+  now = Date.now, maxBundleBytes = MAX_BUNDLE_BYTES, admitDwappMeta = null, userBlocked = () => false, userPolicyAvailable = () => true, discoveryEnabled = () => true, localRecoveryPending = () => false,
   discoveryDisseminationProfile = null,
 }) => {
   // why: reject unsupported local rollout settings before acquiring node
@@ -293,7 +293,7 @@ export const createBaseNetwork = async ({
   // re-attribution). Then announce ourselves as a provider.
   /** @param {{ manifest: any, payload: Uint8Array }} opts */
   const seedApp = async ({ manifest, payload }) => {
-    if (isBlocked(manifest.publisher)) throw new Error('publisher-user-blocked');
+    if (isBlocked(manifest.publisher)) throw new Error(userPolicyAvailable() ? 'publisher-user-blocked' : 'peer-policy-unavailable');
     assertBundleWithinLimits(manifest);
     if (!(payload instanceof Uint8Array) || payload.byteLength !== manifest.size) {
       throw new Error('seed App payload does not match its signed manifest size');
@@ -312,7 +312,7 @@ export const createBaseNetwork = async ({
         throw new Error(`seed App compressed chunk ${index} failed verification`);
       }
     }
-    if (isBlocked(manifest.publisher)) throw new Error('publisher-user-blocked');
+    if (isBlocked(manifest.publisher)) throw new Error(userPolicyAvailable() ? 'publisher-user-blocked' : 'peer-policy-unavailable');
     node.content.publish({ manifest, hash, chunks });
     announceProvider(formatPeerdUri({ did: manifest.publisher ?? identity.did, hash })).catch(() => {}); // background durability
     return hash;
@@ -382,7 +382,7 @@ export const createBaseNetwork = async ({
       let publisher = null;
       let localHash = null;
       try { ({ did: publisher, hash: localHash } = parsePeerdUri(uri)); } catch { /* malformed uri → skip the fast path */ }
-      if (publisher && isBlocked(publisher)) throw new Error('publisher-user-blocked');
+      if (publisher && isBlocked(publisher)) throw new Error(userPolicyAvailable() ? 'publisher-user-blocked' : 'peer-policy-unavailable');
       // why: a seeder can be the only remaining provider of another author's
       // App. Read its explicitly announced bytes without a mesh channel to self,
       // preserving the original signer and verifying the same addressed content.
@@ -499,7 +499,7 @@ export const createBaseNetwork = async ({
     options?.signal?.throwIfAborted();
     const { did, hash } = parsePeerdUri(uri);
     const generation = contributionGeneration;
-    if (did && isBlocked(did)) throw new Error('publisher-user-blocked');
+    if (did && isBlocked(did)) throw new Error(userPolicyAvailable() ? 'publisher-user-blocked' : 'peer-policy-unavailable');
     // why: only a completed, explicitly requested lookup can suppress a recent
     // suggestion. A newer request supersedes an older completion; policy and
     // host changes invalidate all tickets without retaining unbounded history.
@@ -518,7 +518,7 @@ export const createBaseNetwork = async ({
     }
     retrievalHistory.forget(address, ticket);
     if (closed) throw new Error('base network closed');
-    if (isBlocked(result.manifest.publisher)) throw new Error('publisher-user-blocked');
+    if (isBlocked(result.manifest.publisher)) throw new Error(userPolicyAvailable() ? 'publisher-user-blocked' : 'peer-policy-unavailable');
     // why: a ban/unban during a transfer cannot resurrect pre-policy history.
     // Evidence is local to the exact verified version and the live host lifetime.
     if (!closed && generation === contributionGeneration) {
