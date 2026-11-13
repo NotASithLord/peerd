@@ -880,19 +880,18 @@ export const makeOffscreenActorClient = ({
     pendingClaims.add(claimDrain);
     grant.pendingClaimsByCall.set(msg.callId, pendingClaims);
     let handedToDispatch = false;
-    const releaseClaim = () => {
+    const releaseClaim = (refused = false) => {
+      if (refused && !grant.effectReceipts.has(msg.effectId)) {
+        grant.effectReceipts.set(msg.effectId, Object.freeze({
+          callId: msg.callId, effectId: msg.effectId, operation,
+          outcome: 'not-performed', outcomeKnown: true, performed: false,
+          retryable: false, code: 'authority_claim_refused',
+          error: 'exact authority claim was refused before host dispatch',
+        }));
+      }
       pendingClaims.delete(claimDrain);
       if (pendingClaims.size === 0) grant.pendingClaimsByCall.delete(msg.callId);
       resolveClaim();
-    };
-    const refuseReservedClaim = () => {
-      if (grant.effectReceipts.has(msg.effectId)) return;
-      grant.effectReceipts.set(msg.effectId, Object.freeze({
-        callId: msg.callId, effectId: msg.effectId, operation,
-        outcome: 'not-performed', outcomeKnown: true, performed: false,
-        retryable: false, code: 'authority_claim_refused',
-        error: 'exact authority claim was refused before host dispatch',
-      }));
     };
     try {
       const ctx = await contextForOperation(grant, operation);
@@ -940,10 +939,7 @@ export const makeOffscreenActorClient = ({
         effect: { callId: msg.callId, effectId: msg.effectId, parentEffect },
       });
     } finally {
-      if (!handedToDispatch) {
-        refuseReservedClaim();
-        releaseClaim();
-      }
+      if (!handedToDispatch) releaseClaim(true);
     }
   };
   const domainEntry = (
@@ -976,7 +972,7 @@ export const makeOffscreenActorClient = ({
   const dwebEntry = entryForDomain('dweb');
   // why: domain admission reserves the run claim before route-local validation.
   const refuseClaimedEntry = (/** @type {any} */ entry, /** @type {any} */ refusal) => {
-    entry?.releaseClaim?.();
+    entry?.releaseClaim?.(true);
     return refusal;
   };
   // why: semantic effects have one sealed envelope; accepting another shape would create a fallback.
@@ -1546,7 +1542,7 @@ export const makeOffscreenActorClient = ({
   ) => {
     const operation = fixedOperation(routeOperation);
     if (!entry || entry.operation !== operation) {
-      entry?.releaseClaim?.();
+      entry?.releaseClaim?.(true);
       return { ok: false, error: `${operation}: authority mismatch`, outcomeKnown: true };
     }
     const policy = controllerDomainOperationPolicy(operation);

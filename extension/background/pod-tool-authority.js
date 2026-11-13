@@ -73,7 +73,7 @@ const nothing = () => {};
  * @returns {{ refusal: PodRefusal } | PodPlan}
  */
 export const decidePodOperation = (operation, { message, args, domainState, ctx }) => {
-  const boundPodId = ctx?.actorType === 'pod' ? ctx.actorInstanceId : null;
+  const podId = ctx?.actorType === 'pod' ? ctx.actorInstanceId : message.podId;
   const sessionId = ctx?.session?.sessionId;
   const client = ctx?.podClient;
   /** @type {{ refusal: PodRefusal }} */
@@ -88,13 +88,13 @@ export const decidePodOperation = (operation, { message, args, domainState, ctx 
     case 'resolve': {
       // A bound actor may omit podId (meaning its own Pod) or name its own Pod;
       // an unbound caller must name exactly the admitted Pod (or none).
-      const admitted = boundPodId
-        ? message.podId === undefined || message.podId === boundPodId
+      const admitted = ctx?.actorType === 'pod'
+        ? message.podId === undefined || message.podId === podId
         : message.podId === args?.podId;
       if (!admitted) return mismatch;
       return plan({
         effect: () => typeof client?.resolveId === 'function'
-          ? () => client.resolveId({ sessionId, podId: boundPodId ?? message.podId })
+          ? () => client.resolveId({ sessionId, podId })
           : null,
         settle: (value) => {
           if (typeof value !== 'string') return;
@@ -199,11 +199,11 @@ export const decidePodOperation = (operation, { message, args, domainState, ctx 
       if (message.podId !== args?.podId || message.jobId !== args?.jobId
           || message.stream !== args?.stream || message.offset !== args?.offset
           || message.limit !== args?.limit
-          || boundPodId && message.podId !== boundPodId) return mismatch;
+          || message.podId !== undefined && message.podId !== podId) return mismatch;
       return plan({
         effect: () => typeof client?.status === 'function'
           ? () => client.status({
-            sessionId, podId: message.podId, jobId: message.jobId, stream: message.stream,
+            sessionId, podId, jobId: message.jobId, stream: message.stream,
             offset: message.offset, limit: message.limit,
           })
           : null,
@@ -212,25 +212,25 @@ export const decidePodOperation = (operation, { message, args, domainState, ctx 
 
     case 'cancel': {
       if (typeof message.jobId !== 'string' || message.jobId !== args?.jobId
-          || message.podId !== args?.podId || boundPodId && message.podId !== boundPodId) {
+          || message.podId !== args?.podId || message.podId !== undefined && message.podId !== podId) {
         return mismatch;
       }
       return plan({
         outcome: 'podCancel',
         effect: () => typeof client?.cancel === 'function'
-          ? () => client.cancel(message.jobId, { sessionId, podId: message.podId })
+          ? () => client.cancel(message.jobId, { sessionId, podId })
           : null,
       });
     }
 
     case 'read-file': {
       if (typeof message.path !== 'string' || message.path !== args?.path
-          || message.podId !== args?.podId || boundPodId && message.podId !== boundPodId) {
+          || message.podId !== args?.podId || message.podId !== undefined && message.podId !== podId) {
         return mismatch;
       }
       return plan({
         effect: () => typeof client?.readFile === 'function'
-          ? () => client.readFile(message.path, { sessionId, podId: message.podId })
+          ? () => client.readFile(message.path, { sessionId, podId })
           : null,
       });
     }
@@ -238,14 +238,14 @@ export const decidePodOperation = (operation, { message, args, domainState, ctx 
     case 'write-file': {
       if (typeof message.path !== 'string' || typeof message.content !== 'string'
           || message.path !== args?.path || message.content !== args?.content
-          || message.podId !== args?.podId || boundPodId && message.podId !== boundPodId) {
+          || message.podId !== args?.podId || message.podId !== undefined && message.podId !== podId) {
         return mismatch;
       }
       return plan({
         outcome: 'podMutation',
         effect: () => typeof client?.writeFile === 'function'
           ? () => client.writeFile(message.path, message.content, {
-            sessionId, podId: message.podId,
+            sessionId, podId,
           })
           : null,
       });
