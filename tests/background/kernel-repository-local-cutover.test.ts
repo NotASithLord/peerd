@@ -38,8 +38,8 @@ const repositoryDeps = (overrides: Record<string, any> = {}) => {
     records, calls,
     catalog: {
       get: async (id: string) => records.get(id) ?? null,
-      createImported: async ({ name }: any) => {
-        const record = { id: 'import-1', name: name ?? 'Imported' };
+      createImported: async ({ id, name, ...metadata }: any) => {
+        const record = { id, name: name ?? 'Imported', ...metadata };
         records.set(record.id, record);
         return record;
       },
@@ -151,7 +151,7 @@ describe('repository controller cutover', () => {
     });
   });
 
-  test('does not roll back a provisional import after clone outcome loss', async () => {
+  test('does not publish or roll back an import after clone outcome loss', async () => {
     const lane = repositoryLane({ repositories: {
       clone: async () => { throw Object.assign(new Error('lost'), { outcomeKnown: false }); },
     } });
@@ -161,7 +161,7 @@ describe('repository controller cutover', () => {
       ok: false, code: 'repository-import-outcome-unknown', outcomeKnown: false,
     });
     expect(lane.calls).toEqual([]);
-    expect(lane.records.has('import-1')).toBe(true);
+    expect([...lane.records.keys()]).toEqual(['app-1']);
   });
 
   test('reports the exact failed import rollback custodian', async () => {

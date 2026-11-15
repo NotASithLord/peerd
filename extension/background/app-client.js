@@ -419,6 +419,7 @@ export const createAppClient = ({
     appId, name, files, html, tags, entryFile, sessionId, dweb, source, fileKinds, syncContentHash,
   } = {}) => {
     if (typeof name !== 'string' || !name.trim()) throw new Error('name required');
+    name = name.trim().slice(0, 80);
 
     const suppliedFiles = files && typeof files === 'object'
       ? files
@@ -426,60 +427,54 @@ export const createAppClient = ({
     if (!suppliedFiles || !Object.keys(suppliedFiles).length) {
       throw new AppFileContentError('files (or html) required');
     }
-    const requestedEntry = entryFile || 'index.html';
     /** @type {Record<string, unknown>} */
     const fileMap = Object.assign(Object.create(null), suppliedFiles);
     if (!Object.hasOwn(fileMap, 'peerd.json')) {
       fileMap['peerd.json'] = `${JSON.stringify(buildAppManifest({
-        entry: requestedEntry,
+        entry: entryFile || 'index.html',
         dwapp: !!dweb,
       }), null, 2)}\n`;
     }
-    const manifestContent = normalizeFileContent(
+    const { kind, stored: manifest } = normalizeFileContent(
       'peerd.json',
       fileMap['peerd.json'],
       fileKinds?.['peerd.json'],
     );
-    if (manifestContent.kind !== 'text') {
+    if (kind !== 'text') {
       throw new AppFileContentError('peerd.json must be text');
     }
-    const contract = parseAppManifest(typeof manifestContent.stored === 'string'
-      ? manifestContent.stored
-      : new TextDecoder().decode(manifestContent.stored));
-    const entry = contract.entry;
+    const { entry } = parseAppManifest(typeof manifest === 'string' ? manifest : new TextDecoder().decode(manifest));
     const normalized = normalizeFileMap(fileMap, entry, fileKinds);
 
-    const record = await registry.create({
-      ...(appId ? { id: appId } : {}),
-      name: name.trim().slice(0, 80),
-      tags,
-      source,
-      entryFile: entry,
-      ownerSessionId: sessionId ?? null,
-      dweb,
-      syncContentHash,
-      fileKinds: normalized.fileKinds,
-    });
-
-    try {
-      const opfs = guardedOpfsForApp(record.id);
-      for (const { path, stored } of normalized.files) await opfs.write(path, stored);
-      if (repositories?.initApp) {
-        await repositories.initApp(record.id, {
-          message: `create ${record.name}`,
-          includeIgnored: source === 'dweb' && typeof dweb?.hash === 'string' && dweb.hash.length > 0,
-        });
+    const id = appId ?? `app-${crypto.randomUUID()}`;
+    if (typeof id !== 'string' || !/^app-[a-z0-9-]{1,92}$/.test(id)) throw new Error('invalid app id');
+    return withWriteLock(id, async () => {
+      const opfs = guardedOpfsForApp(id);
+      if (await registry.get(id) || (await opfs.list()).length || (await repositories.statusApp?.(id))?.oid) {
+        throw new Error('App id exists');
       }
-      if (sessionId) await registry.setDefaultForSession(sessionId, record.id);
-    } catch (error) {
-      const cleanup = await Promise.allSettled([
-        guardedOpfsForApp(record.id).nuke(),
-        repositories?.destroyApp ? repositories.destroyApp(record.id) : Promise.resolve(),
-        registry.delete(record.id),
-      ]);
-      throwAppRollbackResult(error, cleanup);
-    }
-    return record;
+      try {
+        for (const { path, stored } of normalized.files) await opfs.write(path, stored);
+        await repositories.initApp?.(id, {
+          message: `create ${name}`,
+          includeIgnored: source === 'dweb' && typeof dweb?.hash === 'string' && !!dweb.hash,
+        });
+        // why: a catalog record must never expose incomplete files after a crash.
+        const record = await registry.create({
+          id, name, tags, source, entryFile: entry,
+          ownerSessionId: sessionId ?? null, dweb, syncContentHash, fileKinds: normalized.fileKinds,
+        });
+        if (sessionId) await registry.setDefaultForSession(sessionId, id);
+        return record;
+      } catch (error) {
+        const cleanup = await Promise.allSettled([
+          opfs.nuke(),
+          repositories.destroyApp?.(id),
+          registry.delete(id),
+        ]);
+        throwAppRollbackResult(error, cleanup);
+      }
+    });
   };
 
   /** Clone a repository and instantiate the validated peerd.json contract.
@@ -488,63 +483,60 @@ export const createAppClient = ({
     if (typeof url !== 'string') throw new Error('git URL required');
     if (!repositories) throw new Error('browser Git is unavailable');
     await beforeOpfsMutation();
-    const record = await registry.create({
-      name: (typeof name === 'string' && name.trim() ? name.trim() : 'Git App').slice(0, 80),
-      source: 'imported', entryFile: 'index.html', ownerSessionId: sessionId ?? null,
-    });
-    try {
-      const repository = await repositories.clone({ kind: 'app', id: record.id }, {
-        url,
-        ...(typeof ref === 'string' && ref ? { ref } : {}),
-        depth: Math.min(500, Math.max(1, Number(depth) || 50)),
-        signal,
-      });
-      const opfs = guardedOpfsForApp(record.id);
-      const listed = await opfs.list();
-      if (listed.length > MAX_APP_FILES) {
-        throw new AppFileLimitError(`App has too many files: ${listed.length} > ${MAX_APP_FILES}`);
-      }
-      const paths = new Set();
-      /** @type {Record<string, 'text' | 'binary'>} */
-      const fileKinds = Object.create(null);
-      let totalBytes = 0;
-      for (const file of listed) {
-        const path = validateAppPath(file.path.replace(/^\/+/, ''));
-        paths.add(path);
-        const bytes = await opfs.readBytes(path);
-        totalBytes += bytes.byteLength;
-        if (totalBytes > MAX_APP_TOTAL_BYTES) {
-          throw new AppFileLimitError(`App is too large: ${totalBytes} > ${MAX_APP_TOTAL_BYTES} bytes`);
+    const id = `app-${crypto.randomUUID()}`;
+    return withWriteLock(id, async () => {
+      if (await registry.get(id)) throw new Error('App id exists');
+      try {
+        const repository = await repositories.clone({ kind: 'app', id }, {
+          url,
+          ...(typeof ref === 'string' && ref ? { ref } : {}),
+          depth: Math.min(500, Math.max(1, Number(depth) || 50)),
+          signal,
+        });
+        const opfs = guardedOpfsForApp(id);
+        const listed = await opfs.list();
+        if (listed.length > MAX_APP_FILES) {
+          throw new AppFileLimitError(`App has too many files: ${listed.length} > ${MAX_APP_FILES}`);
         }
-        fileKinds[path] = inferAppFileKind(path, bytes);
+        /** @type {Record<string, 'text' | 'binary'>} */
+        const fileKinds = Object.create(null);
+        let totalBytes = 0;
+        for (const file of listed) {
+          const path = validateAppPath(file.path.replace(/^\/+/, ''));
+          const bytes = await opfs.readBytes(path);
+          totalBytes += bytes.byteLength;
+          if (totalBytes > MAX_APP_TOTAL_BYTES) {
+            throw new AppFileLimitError(`App is too large: ${totalBytes} > ${MAX_APP_TOTAL_BYTES} bytes`);
+          }
+          fileKinds[path] = inferAppFileKind(path, bytes);
+        }
+        let contract;
+        if (fileKinds['peerd.json']) {
+          if (fileKinds['peerd.json'] !== 'text') throw new AppFileContentError('peerd.json must be text');
+          contract = parseAppManifest(await opfs.read('peerd.json'));
+        }
+        else if (fileKinds['index.html']) contract = parseAppManifest(JSON.stringify(buildAppManifest({ entry: 'index.html' })));
+        else throw new Error('repository is not an App: add peerd.json or index.html');
+        if (!fileKinds[contract.entry]) throw new Error(`peerd.json entry is missing: ${contract.entry}`);
+        if (fileKinds[contract.entry] !== 'text') throw new AppFileContentError(`entryFile must be text: ${contract.entry}`);
+        const dwapp = contract.capabilities.includes('dweb');
+        if (dwapp && !allowDweb) throw new Error('this dwapp requires a preview build with the dweb enabled');
+        const record = await registry.create({
+          id, name: (typeof name === 'string' && name.trim() || 'Git App').slice(0, 80),
+          source: 'imported', ownerSessionId: sessionId ?? null, entryFile: contract.entry, fileKinds,
+          ...(dwapp
+            ? { dweb: { uri: null, publisher: null, hash: null, local: true } } : {}),
+        });
+        if (sessionId) await registry.setDefaultForSession(sessionId, id);
+        return { record, repository, contract };
+      } catch (error) {
+        const cleanup = await Promise.allSettled([
+          repositories.destroy({ kind: 'app', id }, { worktree: true }),
+          registry.delete(id),
+        ]);
+        throwAppRollbackResult(error, cleanup);
       }
-      let contract;
-      if (paths.has('peerd.json')) {
-        if (fileKinds['peerd.json'] !== 'text') throw new AppFileContentError('peerd.json must be text');
-        contract = parseAppManifest(await opfs.read('peerd.json'));
-      }
-      else if (paths.has('index.html')) contract = parseAppManifest(JSON.stringify(buildAppManifest({ entry: 'index.html' })));
-      else throw new Error('repository is not an App: add peerd.json or index.html');
-      if (!paths.has(contract.entry)) throw new Error(`peerd.json entry is missing: ${contract.entry}`);
-      if (fileKinds[contract.entry] !== 'text') throw new AppFileContentError(`entryFile must be text: ${contract.entry}`);
-      if (contract.capabilities.includes('dweb') && !allowDweb) throw new Error('this dwapp requires a preview build with the dweb enabled');
-      const dwapp = contract.capabilities.includes('dweb')
-        ? { uri: null, publisher: null, hash: null, local: true }
-        : null;
-      const updated = await registry.update(record.id, {
-        entryFile: contract.entry,
-        fileKinds,
-        ...(dwapp ? { dweb: dwapp } : {}),
-      });
-      if (sessionId) await registry.setDefaultForSession(sessionId, record.id);
-      return { record: updated, repository, contract };
-    } catch (error) {
-      const cleanup = await Promise.allSettled([
-        repositories.destroy({ kind: 'app', id: record.id }, { worktree: true }),
-        registry.delete(record.id),
-      ]);
-      throwAppRollbackResult(error, cleanup);
-    }
+    });
   };
 
   /**

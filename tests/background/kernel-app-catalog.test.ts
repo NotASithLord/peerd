@@ -51,7 +51,7 @@ describe('native kernel App catalog', () => {
     }]) expect(parseKernelAppCatalogRow(invalid)).toBeNull();
   });
 
-  test('creates, finalizes, selects, and removes one imported App atomically per catalog write', async () => {
+  test('publishes a complete imported App, selects it, and removes it', async () => {
     const idb = makeIdb();
     await idb.put('apps', { key: 'apps.v1', value: {
       schemaVersion: 1, apps: {}, sessionDefaults: {},
@@ -59,15 +59,13 @@ describe('native kernel App catalog', () => {
     const catalog = createKernelAppCatalog({
       idb, now: () => 99, newId: () => 'app-import',
     });
-    await expect(catalog.createImported({ name: '  Git App  ', ownerSessionId: 'chat' }))
+    await expect(catalog.createImported({ id: 'app-import', name: '  Git App  ', ownerSessionId: 'chat',
+      entryFile: 'main.html', fileKinds: { 'main.html': 'text' } }))
       .resolves.toMatchObject({
         id: 'app-import', name: 'Git App', ownerSessionId: 'chat', source: 'imported',
+        entryFile: 'main.html', fileKinds: { 'main.html': 'text' },
       });
-    await expect(catalog.patch('app-import', {
-      entryFile: 'main.html', fileKinds: { 'main.html': 'text' },
-    })).resolves.toMatchObject({
-      id: 'app-import', entryFile: 'main.html', fileKinds: { 'main.html': 'text' },
-    });
+    expect(idb.calls.filter(([op]: any) => op === 'put')).toHaveLength(2);
     await expect(catalog.setDefaultForSession('chat', 'app-import')).resolves.toBe(true);
     expect(idb.row.value.sessionDefaults).toEqual({ chat: 'app-import' });
     await expect(catalog.remove('app-import')).resolves.toBe(true);
