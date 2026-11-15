@@ -12863,7 +12863,7 @@ Promise.resolve().then(async () => {
       if (body.includes('<actor_agent>') && body.includes('kind: ephemeral')) {
         actorAppState.childCalls += 1;
         if (actorAppState.childCalls === 1) return { sse: sseToolCall('sandbox_create', { kind: 'app', name: 'Lava', files: { 'index.html': '<!-- placeholder -->' } }) };
-        if (!actorAppState.appId) { const m = body.match(/app-[a-z0-9]+-[a-z0-9]+/); if (m) actorAppState.appId = m[0]; }
+        if (!actorAppState.appId) { const m = (toolResultsIn(body).at(-1) ?? '').match(/app-[a-z0-9-]+/); if (m) actorAppState.appId = m[0]; }
         if (actorAppState.childCalls === 2) return { sse: sseToolCall('message_actor', { to: actorAppState.appId || 'app-unknown', message: 'write the real lava lamp code into index.html' }) };
         return { sse: sseText('CHILD-BUILT-APP') };
       }
