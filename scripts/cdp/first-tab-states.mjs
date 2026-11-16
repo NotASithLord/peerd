@@ -505,15 +505,19 @@ export const FIRST_TAB_STATES = [
           await evalIn(page, `!document.querySelector('.chat-view .onboarding-card')`), '');
         await rec.visualPage('home-first-tab-hint', page);
 
-        // Actors opens with a heading, so a view change has a place to land.
-        await clickAndRedraw(page, '[data-home-view="actors"]');
+        // Lab opens with a heading, so a view change has a place to land.
+        // why twice: Lab loads on its first open, after the focus step ran.
+        await clickAndRedraw(page, '[data-home-view="eval"]');
+        await waitFor(() => evalIn(page, `!!document.querySelector('.home-content .eval-lab h2')`), { budgetMs: 10_000, pollMs: 50 });
+        await clickAndRedraw(page, '[data-home-view="chat"]');
+        await clickAndRedraw(page, '[data-home-view="eval"]');
         const landed = await waitFor(() => evalIn(page, `(() => {
           const active = document.activeElement;
           return active && active.closest('.home-content') && !active.closest('.first-tab-hint')
             ? active.tagName + ':' + active.textContent.trim().slice(0, 40) : null;
         })()`), { budgetMs: 3_000, pollMs: 50 });
         rec.check('with the hint on screen, a rail click puts focus in the new view, not on the hint',
-          landed === 'H1:Actors', String(landed ?? await evalIn(page, `document.activeElement?.outerHTML?.slice(0, 120)`)));
+          landed === 'H2:Lab', String(landed ?? await evalIn(page, `document.activeElement?.outerHTML?.slice(0, 120)`)));
 
         second = await openWidePage(ctx, 'home/home.html#library', { ready: '.home-shell' });
         await pin(second);
@@ -545,7 +549,7 @@ export const FIRST_TAB_STATES = [
           return content?.classList.contains('home-content--library') && !!document.querySelector('.home-panel-bar')
             ? content.className : null;
         })()`), { budgetMs: 10_000, pollMs: 80 });
-        rec.check('with chat in the side panel, the pinned Home tab shows the apps, not the actor map',
+        rec.check('with chat in the side panel, the pinned Home tab shows the apps',
           !!besidePanel, String(besidePanel ?? await evalIn(page, `document.querySelector('.home-content')?.className`)));
         await page.send('Emulation.setDeviceMetricsOverride', WIDE_METRICS);
         await rec.visualPage('home-first-tab-beside-panel', page);

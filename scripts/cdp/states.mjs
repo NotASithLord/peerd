@@ -12484,16 +12484,15 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
           bothLive?.roots?.length === 2,
           JSON.stringify(bothLive?.roots?.map((root) => root.session?.sessionId) ?? liveProbe));
 
-        await evalIn(page, `document.querySelector('[data-home-view="actors"]')?.click()`);
+        // The rail has no Actors item. The deep link opens the page.
+        await evalIn(page, `location.hash = '#actors'`);
 
         const rendered = await waitFor(() => evalIn(page, `(() => {
           const space = document.querySelector('.actor-space');
           const rooms = [...document.querySelectorAll('.actor-space-room')];
           const nodes = [...document.querySelectorAll('.actor-space-node')];
-          const actorBadge = document.querySelector('[data-home-view="actors"] .home-nav-count');
           if (!space || rooms.length < 2 || nodes.length < 6
-            || !space.textContent?.includes('BETA-ROOT compare the rollout options')
-            || actorBadge?.textContent?.trim() !== '4') return null;
+            || !space.textContent?.includes('BETA-ROOT compare the rollout options')) return null;
           const rect = space.getBoundingClientRect();
           const alphaRoom = rooms.find((room) => room.getAttribute('data-root-session') === ${JSON.stringify(alphaRoot)});
           const alphaTree = alphaRoom?.querySelector('.actor-space-tree');
@@ -12504,7 +12503,7 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
             nodes: nodes.length,
             subactors: document.querySelectorAll('.actor-space-node.is-subactor').length,
             orbs: document.querySelectorAll('.actor-space .peerd-spinner').length,
-            actorBadge: actorBadge.textContent.trim(),
+            actorsInRail: !!document.querySelector('[data-home-view="actors"]'),
             navGroups: [...document.querySelectorAll('.home-nav-group-label')]
               .map((label) => label.textContent.trim()),
             text: space.textContent ?? '',
@@ -12532,9 +12531,9 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
             && rendered?.roots?.includes(betaRoot)
             && rendered?.orbs >= 5,
           JSON.stringify(rendered));
-        rec.check('the rail groups Chats and Actors under Agent and shows a live actor count',
-          rendered?.actorBadge === '4'
-            && rendered?.navGroups?.join('|') === 'Agent|Create|Network',
+        rec.check('the rail has no Actors item and keeps the Create and Network groups beside the panel',
+          rendered?.actorsInRail === false
+            && rendered?.navGroups?.join('|') === 'Create|Network',
           JSON.stringify(rendered));
         rec.check('the full-screen map exposes current work, topology semantics, and fits the viewport',
           rendered?.text.includes('alpha isolated research')
@@ -12628,7 +12627,6 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
           const overview = await rpc(page, { type: 'actors/overview' });
           const view = await evalIn(page, `(() => ({
             text: document.querySelector('.actor-space-empty')?.textContent ?? '',
-            badge: document.querySelector('[data-home-view="actors"] .home-nav-count')?.textContent ?? null,
             hidden: document.hidden,
           }))()`);
           emptyProbe = {
@@ -12640,12 +12638,12 @@ addEventListener('keydown', event => parent.postMessage({type:'full-screen-key',
             })),
             view,
           };
-          return emptyProbe.roots.length === 0 && view?.text && !view.badge
-            ? { text: view.text, badge: null } : null;
+          return emptyProbe.roots.length === 0 && view?.text
+            ? { text: view.text } : null;
         },
         { budgetMs: 45_000, pollMs: 150 });
         rec.check('the permanent monitor settles to an honest empty state',
-          empty?.text?.includes('The instance is quiet') && empty.badge === null,
+          empty?.text?.includes('The instance is quiet'),
           JSON.stringify(empty ?? emptyProbe));
       } finally {
         actorOverviewState.releaseLive();

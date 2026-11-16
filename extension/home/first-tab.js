@@ -92,11 +92,10 @@ export const presenceAfterPortLoss = (state) => ({
 
 /**
  * With chat in the side panel, a pinned Home tab shows the apps: the "open
- * your apps" half of its hint. Other Home tabs show Actors.
+ * your apps" half of its hint. Other Home tabs show the Library.
  * @param {{ pinned?: boolean, discover: boolean }} input
  */
-export const viewBesidePanel = ({ pinned, discover }) => pinned !== true ? 'actors'
-  : discover ? 'discover' : 'library';
+export const viewBesidePanel = ({ pinned, discover }) => pinned === true && discover ? 'discover' : 'library';
 
 // The extension icon: five stripes and a white "p", traced from
 // icons/icon128.png on its 128-unit grid. The colors are the icon's own.
