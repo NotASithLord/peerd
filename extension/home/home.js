@@ -124,6 +124,10 @@ let discoverOpenKey = null;
 const keepDiscoverKey = (n) => { if (n.link === 'discover' && n.key) discoverOpenKey = n.key; };
 
 const ALL_VIEWS = new Set(['chat', 'chats', 'actors', 'library', 'eval', 'discover', 'contacts', 'network']);
+// Actors is not in the rail: it shows agent internals. The page stays, and
+// only the #actors deep link opens it.
+/** @type {Set<string | null>} */
+const HIDDEN_VIEWS = new Set(['actors']);
 /** @param {string | null | undefined} v */
 const isValidView = (v) => !!v && ALL_VIEWS.has(v) && (!DWEB_VIEWS.has(v) || DWEB_ENABLED);
 // A `#view` fragment is an explicit deep-link (openHome('library') → "Open
@@ -146,7 +150,7 @@ const readView = () => {
   if (fromHash) return fromHash;
   try {
     const v = localStorage.getItem(VIEW_KEY);
-    if (isValidView(v)) return v;
+    if (isValidView(v) && !HIDDEN_VIEWS.has(v)) return v;
   } catch { /* storage disabled / private mode */ }
   return 'chat';
 };
@@ -530,9 +534,8 @@ function applySidePanelOpen(open) {
   if (open === sidePanelOpen) return;
   sidePanelOpen = open;
   if (open) {
-    // Chat in the side panel + instance-wide Actors on the full tab is the
-    // complementary two-level view: local work beside the page, global runtime
-    // topology on home. A pinned Home tab shows the apps instead.
+    // Chat is in the side panel, so the full tab shows the Library. A pinned
+    // Home tab shows the apps instead.
     if (activeView === 'chat') { stashedChatView = activeView; activeView = besidePanel(); }
   } else if (stashedChatView) { activeView = stashedChatView; stashedChatView = null; }
   m.redraw();
@@ -573,8 +576,7 @@ const gate = (heading, copy) => m('.options-gate', m('.options-gate-card', [
   m('p', copy),
 ]));
 
-// The rail's nav items. Chat is present only when home OWNS the chat; Actors is
-// permanent because its scope is the whole instance, not the selected session.
+// The rail's nav items. Chat is present only when home OWNS the chat
 // (no side panel open — single-homed). Discover/Network/Contacts are dweb-only
 // (absent on the store build and when the user switches dweb off).
 /** @param {boolean} showDweb */
@@ -582,7 +584,6 @@ const navItems = (showDweb) => [
   // "Chats" is the top-level rail item; the chat page itself carries the
   // recent-chats list + "New chat" column (ChatListPanel, ChatGPT-style).
   ...(sidePanelOpen ? [] : [{ id: 'chat', label: 'Chats', group: 'agent' }]),
-  { id: 'actors', label: 'Actors', group: 'agent' },
   { id: 'library', label: 'Library', group: 'create' },
   { id: 'eval', label: 'Lab', group: 'create' },
   ...(DWEB_ENABLED ? [{ id: 'discover', label: 'Discover', group: 'network' }] : []),
@@ -966,8 +967,9 @@ const HomeApp = {
     const items = navItems(showDweb);
     // Keep activeView valid if it vanished from the rail (dweb switched off, or the
     // side panel took Chat). Fall back to the FIRST available item, which is
-    // Actors when the panel owns chat and Chat otherwise, never a dead view.
-    if (!items.some((it) => it.id === activeView)) activeView = items[0]?.id ?? 'library';
+    // Library when the panel owns chat and Chat otherwise, never a dead view.
+    // A hidden view has no rail item and stays.
+    if (!items.some((it) => it.id === activeView) && !HIDDEN_VIEWS.has(activeView)) activeView = items[0]?.id ?? 'library';
 
     const rail = m('nav.home-rail', [
       // Brand cluster: wordmark + preview badge below it, flush-left + aligned

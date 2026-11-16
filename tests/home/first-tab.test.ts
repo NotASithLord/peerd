@@ -54,11 +54,11 @@ describe('first tab: the one-time offer', () => {
     expect(firstTabKeptVisible({ kept: false, messages: 0 })).toBe(false);
   });
 
-  test('with chat in the side panel, a pinned Home tab shows the apps, other Home tabs show Actors', () => {
+  test('with chat in the side panel, a pinned Home tab shows the apps, other Home tabs show the Library', () => {
     expect(viewBesidePanel({ pinned: true, discover: true })).toBe('discover');
     expect(viewBesidePanel({ pinned: true, discover: false })).toBe('library');
-    expect(viewBesidePanel({ pinned: false, discover: true })).toBe('actors');
-    expect(viewBesidePanel({ pinned: undefined, discover: false })).toBe('actors');
+    expect(viewBesidePanel({ pinned: false, discover: true })).toBe('library');
+    expect(viewBesidePanel({ pinned: undefined, discover: false })).toBe('library');
   });
 
   test('the hint shows only in a pinned tab, until it was seen', () => {

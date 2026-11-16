@@ -26,7 +26,7 @@ export const discoverSurface = () => {
   if (process.env.PEERD_VISUAL_BASE_RENDER !== '1') {
     return {
       base: false, flow: true, phase2: true, says: true, blocks: true, mine: true, added: true, changed: true, plain: true, lines: true,
-      names: true, polish: true, tree: null,
+      names: true, polish: true, bar: true, slow: true, tree: null,
     };
   }
   const tree = process.argv.find(arg => arg.startsWith('--extension='))?.slice('--extension='.length);
@@ -47,7 +47,9 @@ export const discoverSurface = () => {
     changed: source.includes('It changed on this device after you installed it.'), plain: source.includes('This is you.'),
     lines: fixtureHas('explore.js', 'share-copied') && fixtureHas('contacts.js', 'unblock-failed'),
     names: existsSync(catalog) && readFileSync(catalog, 'utf8').includes("name: 'Tables and charts'"),
-    polish: fixtureHas('explore.js', 'update-done'), tree,
+    polish: fixtureHas('explore.js', 'update-done'),
+    bar: existsSync(join(tree, 'home/install-transfer.js')) && readFileSync(join(tree, 'home/install-transfer.js'), 'utf8').includes('disc-progress'),
+    slow: fixtureHas('explore.js', 'install-slow'), tree,
   };
 };
 
@@ -202,6 +204,13 @@ const FLOW_FRAMES = [
   ['offline-failed', 'offline-failed', `${has('Peer network is offline')} && ${byTree('peerd could not read your Library.', 'Could not read your Library.')}
     && !${has('You can still open the apps')} && !${has('Apps you install from peers')}`, []],
   ['installing', 'installing', has('You can leave this page. The install keeps going.'), ['dweb/base/install']],
+  // A download that outlives the page deadline keeps its progress card, never the not-sure card.
+  ['install-slow', 'install-slow', `!!document.querySelector('.disc-panel [role="progressbar"]') && ${has('42% · 1.1 GB of 2.6 GB')}
+    && document.querySelector('.disc-app-size')?.textContent === '2.6 GB'
+    && [...document.querySelectorAll('.disc-transfer button')].some(b => b.textContent === 'Cancel' && !b.disabled)
+    && ${has('You can leave this page. The install keeps going.')}
+    && ![...document.querySelectorAll('button')].some(b => b.textContent === 'Check again') && !${has('peerd is not sure')}`,
+  ['dweb/base/install'], { slow: true, narrow: true }],
   // why the status line: focus never lands on Open, which runs the app.
   ['installed', 'installed', `${focused('.disc-panel .disc-installed')} && ${byTree('is now in your Library.', 'In your Library.')}`,
     ['dweb/base/install'], { narrow: true, newCheck: ['each done step says it is done in words, not only with its check', `(() => {
@@ -384,7 +393,7 @@ const FLOW_FRAMES = [
 ];
 
 const frameState = ([mode, frame, ready, effects, {
-  phase2 = false, says = false, blocks = false, mine = false, changed = false, plain = false, lines = false, polish = false,
+  phase2 = false, says = false, blocks = false, mine = false, changed = false, plain = false, lines = false, polish = false, slow = false,
   narrowCheck = null, newCheck = null, again = null,
 } = {}], narrow = false) => ({
   name: `discovery-${mode}${narrow ? '-narrow' : ''}`, kind:'visual', phase:'post-unlock', responder:null,
@@ -395,7 +404,7 @@ const frameState = ([mode, frame, ready, effects, {
     const reason = changed && !surface.changed ? 'this Discover screen was introduced on this branch'
       : !surface.flow || (phase2 && !surface.phase2) || (says && !surface.says) || (blocks && !surface.blocks) || (mine && !surface.mine)
         ? 'the merge-base tree does not draw this screen'
-        : (plain && !surface.plain) || (lines && !surface.lines) || (polish && !surface.polish)
+        : (plain && !surface.plain) || (lines && !surface.lines) || (polish && !surface.polish) || (slow && !surface.slow)
           ? 'the merge-base fixture cannot reach this screen' : null;
     if (reason) {
       rec.observe('merge-base surface', { present:false, reason });
@@ -588,9 +597,10 @@ const installControlState = (mode, narrow) => ({
     const page = await openExtPage(ctx, `tests/fixtures/explore.html?state=install-${mode}`);
     try {
       await page.send('Emulation.setDeviceMetricsOverride', { width: narrow ? 320 : 960, height: narrow ? 1450 : 900, deviceScaleFactor: 1, mobile: false });
-      const text = mode === 'progress' ? 'Downloading and checking files: 2 of 8 pieces.'
-        : mode === 'committing' ? 'Finishing installation. It is too late to cancel.' : 'Installation cancelled.';
-      rec.check('install state renders', !!await waitFor(() => evalIn(page, has(text)), { budgetMs: 8000, pollMs: 50 }));
+      const ready = mode === 'progress' ? (surface.bar ? `${has('Downloading…')} && ${has('25%')}` : has('Downloading and checking files: 2 of 8 pieces.'))
+        : mode === 'committing' ? has(surface.bar ? 'Almost done. It is too late to cancel.' : 'Finishing installation. It is too late to cancel.')
+          : has('Installation cancelled.');
+      rec.check('install state renders', !!await waitFor(() => evalIn(page, ready), { budgetMs: 8000, pollMs: 50 }));
       rec.check('install controls fit viewport', await evalIn(page, 'document.documentElement.scrollWidth <= innerWidth'));
       rec.check('only precommit retrieval offers Cancel', await evalIn(page,
         `[...document.querySelectorAll('.disc-transfer button')].some(b => b.textContent === 'Cancel' && !b.disabled) === ${mode === 'progress'}`));

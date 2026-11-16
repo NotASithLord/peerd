@@ -24,6 +24,9 @@ import { matchesWords, searchWords } from './explore-order.js';
  * version the update replaced; its `declared` is the reply record's (see
  * verifiedDeclared). `commonsAdded` holds it at a confirmed add,
  * so only a read that started later can say Commons was deleted since.
+ * `host` is what the host said of each install: no entry = no status reply
+ * yet; true = a live attempt; 'checking' = no live attempt and one Library
+ * read runs; false = no live attempt and that read is done.
  * @typedef {{
  *   busy: Record<string, string>,
  *   running: Map<string, {action:'install'|'update', uri:string|undefined}>,
@@ -36,6 +39,7 @@ import { matchesWords, searchWords } from './explore-order.js';
  *   committed: Map<string, {appId:string, version_id:string|null, seq:number, read:number, uri?:string, declared?:unknown}>,
  *   reads: number,
  *   commonsAdded: number|null,
+ *   host: Map<string, boolean|'checking'>,
  * }} DiscoverEffects
  */
 /** @typedef {'all'|'updates'|'contacts'|'included'} Pill */
@@ -52,7 +56,7 @@ import { matchesWords, searchWords } from './explore-order.js';
  * @returns {DiscoverEffects} */
 export const createEffects = () => ({
   busy: {}, running: new Map(), unconfirmed: new Map(), installedId: {}, notices: {}, conflicts: new Map(), commons: null, link: null,
-  committed: new Map(), reads: 0, commonsAdded: null,
+  committed: new Map(), reads: 0, commonsAdded: null, host: new Map(),
 });
 
 const IN_FLIGHT = Object.freeze(['installing', 'updating']);
@@ -116,10 +120,33 @@ export const shortKey = (did) => (typeof did === 'string' ? did.slice(-8) : '???
 // why 1000: the design reads 48,213 bytes as "48 KB". A non-empty bundle
 // never rounds down to "0 KB".
 /** @param {unknown} size */
-export const kbLabel = (size) => {
+export const sizeLabel = (size) => {
   if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0) return null;
-  return `${Math.max(size > 0 ? 1 : 0, Math.round(size / 1000))} KB`;
+  if (size < 999_500) return `${Math.max(size > 0 ? 1 : 0, Math.round(size / 1000))} KB`;
+  if (size < 999_500_000) {
+    const mb = size / 1e6;
+    const tenth = Math.round(mb * 10) / 10;
+    return `${tenth < 10 ? tenth : Math.round(mb)} MB`;
+  }
+  return `${Math.round(size / 1e8) / 10} GB`;
 };
+// why 99: the card never shows 100% while the host still works.
+/** The numbers of a download in progress, or null when the host sent none.
+ * @param {unknown} progress
+ * @returns {{percent:number, sizes:string|null}|null} */
+export const transferProgress = (progress) => {
+  const { phase, done, total } = /** @type {{phase?:unknown, done?:unknown, total?:unknown}} */ (progress ?? {});
+  if ((phase !== 'chunk' && phase !== 'bytes') || typeof done !== 'number' || typeof total !== 'number'
+      || !Number.isSafeInteger(done) || !Number.isSafeInteger(total) || done < 0 || total <= 0 || done > total) return null;
+  return { percent: Math.min(99, Math.floor(done / total * 100)),
+    sizes: phase === 'bytes' ? `${sizeLabel(done)} of ${sizeLabel(total)}` : null };
+};
+// why the host decides: the page deadline can pass while the host still
+// downloads. Only a host with no live attempt, after one Library read, makes
+// the outcome unknown (see DiscoverEffects.host).
+/** @template {string} S @param {S} state @param {boolean|'checking'|undefined} host
+ * @returns {S|'installing'} */
+export const panelState = (state, host) => state === 'unknown' && host !== false ? 'installing' : state;
 /** @param {unknown} size */
 export const bytesLabel = (size) => {
   if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0) return null;

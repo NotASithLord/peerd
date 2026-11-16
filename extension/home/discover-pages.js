@@ -278,7 +278,9 @@ const linkButton = (label, onclick) => m('button.linklike.disc-link-btn', { type
  * `secondary` sits next to `primary`; `sharing` explains what
  * Install and share does; `onLibrary` adds Go to Library next to Open.
  * `action` names the effect that runs, failed, may still finish or finished
- * on this visit; the steps list takes its name from it.
+ * on this visit; the steps list takes its name from it. `transfer` stays
+ * mounted in the unknown state, where it draws nothing, so its status read
+ * continues and a live host attempt brings the progress card back.
  * @param {{state:InstallState, name:string, message:string|null, action?:'install'|'update',
  *   failure?:{action:'install'|'update', hint:string, cancelled?:boolean}|null, unknown?:{status:string, hint:string}|null,
  *   transfer?:any, notice:string|null, error:unknown, primary:ButtonProps|null, secondary?:ButtonProps|null,
@@ -302,7 +304,7 @@ export const installPanel = ({
           step.sub ? m('span.type-small.disc-step-sub', step.sub) : null,
         ]),
       ]))) : null,
-    state === 'installing' && transfer ? m.fragment({}, [transfer]) : null,
+    (state === 'installing' || state === 'unknown') && transfer ? m.fragment({}, [transfer]) : null,
     state === 'installing' && message ? m('p.type-small.disc-footnote', { role: 'status' }, message) : null,
     state === 'installed' || (secondary && otherVersion) ? m('p.type-body-sm.disc-installed', { tabindex: -1, role: 'status' }, otherVersion
       ? 'Another version of this app is in your Library. Open runs the version you have.'

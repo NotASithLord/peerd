@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  appCountLabel, BLOCKED, bytesLabel, createEffects, descriptionLine, emptyBrowse, FAILED, failureHint, installSteps, isFailure, kbLabel,
-  keptCards, letterOf, libraryName, libraryPeerApps, libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, peerCountLabel,
-  pillFilter, rootView, savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, tileAction, toneOf, TONES, UNKNOWN,
+  appCountLabel, BLOCKED, bytesLabel, createEffects, descriptionLine, emptyBrowse, FAILED, failureHint, installSteps, isFailure,
+  keptCards, letterOf, libraryName, libraryPeerApps, libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, panelState, peerCountLabel,
+  pillFilter, rootView, savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, sizeLabel, tileAction, toneOf, TONES, transferProgress, UNKNOWN,
   unknownLines, updateOffer, verifiedDeclared, wasmLabel, yourApps,
 } from '../../extension/home/discover-model.js';
 import type { DwebApp } from '../../extension/home/discover-model.js';
@@ -24,13 +24,46 @@ const TOKEN_FOR_HEX: Record<string, string> = {
 const ready = (status: string) => ({ ok: true, featureLeases: { leases: { dweb: { status } } } });
 
 describe('discover labels', () => {
-  test('KB uses 1000-byte units, floors a non-empty bundle at 1 KB and rejects invalid sizes', () => {
-    expect(kbLabel(48213)).toBe('48 KB');
-    expect(kbLabel(1)).toBe('1 KB');
-    expect(kbLabel(999)).toBe('1 KB');
-    expect(kbLabel(131_499)).toBe('131 KB');
-    expect(kbLabel(0)).toBe('0 KB');
-    for (const invalid of [undefined, null, -1, 1.5, Number.NaN, '48213']) expect(kbLabel(invalid)).toBe(null);
+  test('sizes use 1000-byte units up to GB, floor a non-empty bundle at 1 KB and reject invalid sizes', () => {
+    expect(sizeLabel(2_583_054_919)).toBe('2.6 GB');
+    expect(sizeLabel(1_107_425_877)).toBe('1.1 GB');
+    expect(sizeLabel(340_000_000)).toBe('340 MB');
+    expect(sizeLabel(1_500_000)).toBe('1.5 MB');
+    expect(sizeLabel(999_600)).toBe('1 MB');
+    expect(sizeLabel(9_960_000)).toBe('10 MB');
+    expect(sizeLabel(48213)).toBe('48 KB');
+    expect(sizeLabel(1)).toBe('1 KB');
+    expect(sizeLabel(999)).toBe('1 KB');
+    expect(sizeLabel(131_499)).toBe('131 KB');
+    expect(sizeLabel(0)).toBe('0 KB');
+    for (const invalid of [undefined, null, -1, 1.5, Number.NaN, '48213']) expect(sizeLabel(invalid)).toBe(null);
+  });
+
+  test('transfer progress gives a percent below 100 and sizes only for bytes', () => {
+    expect(transferProgress({ phase: 'bytes', done: 1_107_425_877, total: 2_583_054_919 })).toEqual({ percent: 42, sizes: '1.1 GB of 2.6 GB' });
+    expect(transferProgress({ phase: 'chunk', done: 2, total: 8 })).toEqual({ percent: 25, sizes: null });
+    expect(transferProgress({ phase: 'chunk', done: 8, total: 8 })?.percent).toBe(99);
+    for (const invalid of [undefined, null, { phase: 'chunk', done: 9, total: 8 }, { phase: 'chunk', done: 0, total: 0 },
+      { phase: 'bytes', done: 1.5, total: 8 }, { phase: 'chunk', done: -1, total: 8 }, { phase: 'locating', done: 2, total: 8 }]) {
+      expect(transferProgress(invalid)).toBe(null);
+    }
+  });
+
+  test('only a host with no live attempt, after its Library read, leaves the outcome unknown', () => {
+    expect(panelState('unknown', undefined)).toBe('installing');
+    expect(panelState('unknown', true)).toBe('installing');
+    expect(panelState('unknown', 'checking')).toBe('installing');
+    expect(panelState('unknown', false)).toBe('unknown');
+    for (const state of ['review', 'installing', 'installed', 'failed', 'conflict', 'cant-run']) {
+      for (const host of [undefined, true, 'checking', false] as const) expect(panelState(state, host)).toBe(state);
+    }
+  });
+
+  test('each effects record has its own empty host map', () => {
+    const first = createEffects();
+    expect(first.host).toBeInstanceOf(Map);
+    expect(first.host.size).toBe(0);
+    expect(createEffects().host).not.toBe(first.host);
   });
 
   test('exact bytes use the locale number format with a singular for one byte', () => {

@@ -1,12 +1,11 @@
 // @ts-check
 // home/network-section.js — the peers + network-info view (dweb, preview-only).
 //
-// A live window onto the always-on base network: who you're connected to, by
-// what real path (the IPv6 bet, on screen), and the lobby/DHT facts. The
-// centerpiece is an animated radial peer graph in the WebTorrent spirit — YOU
-// at the hub, peers orbiting, each in its own peerd brand color — but honest
-// about a browser mesh: nodes are dids/names, NOT IPs (WebRTC hides peer IPs),
-// and each edge shows its TRUE ICE path (direct IPv6 / IPv4-STUN / relay).
+// A live window onto the always-on base network: one status line, the list of
+// people on the network, and the lobby/DHT facts in Technical details.
+// Honest about a browser mesh: people are dids/names, NOT IPs (WebRTC hides
+// peer IPs), and each one shows its TRUE ICE path (direct IPv6 / IPv4-STUN /
+// relay).
 //
 // Data arrives over ONE SW round-trip (dweb/distributed/info → the offscreen
 // base host's info()); this page is a pure CLIENT — it never imports the dweb
@@ -26,18 +25,16 @@ import m from '/vendor/mithril/mithril.js';
  * @property {boolean | string} [linked]
  * @property {string} [path]
  * @property {string} [kind]
- * @property {string} [via]
  * @property {number} [lastSeen]
+ * @property {string} [host]
  */
-
-const SVGNS = 'http://www.w3.org/2000/svg';
 
 // --- brand color per peer (random per did, cached for the session) -----------
 // Mirrors the commons participant rail (owner direction 2026-06-12: every dweb
 // peer gets a peerd brand color, chosen at random client-side — the sanctioned
 // exception to "one accent on monochrome", because the peers ARE the content).
-// Cached in a module Map so a peer keeps its color across the 3s refresh and any
-// graph rebuild. p·cyan e·red e·amber r·green d·magenta.
+// Cached in a module Map so a peer keeps its color across the 3s refresh.
+// p·cyan e·red e·amber r·green d·magenta.
 const BRAND = ['#00B7EB', '#EF4444', '#F59E0B', '#22C55E', '#D946EF'];
 /** @type {Map<string, string>} */
 const colorByDid = new Map();
@@ -58,8 +55,13 @@ const colorOf = (did) => {
 // did short form — the codebase-canonical last 8 chars (rooms.js short()).
 /** @param {string} did */
 const short = (did) => (typeof did === 'string' ? did.slice(-8) : '????????');
+const NO_NAME = 'No name yet';
 /** @param {Peer} p */
-const labelOf = (p) => (p.name && p.name.trim() ? p.name.trim().slice(0, 18) : short(p.did));
+const labelOf = (p) => (p.name && p.name.trim() ? p.name.trim() : NO_NAME);
+// why a copy: peerCountLabel lives in the Discover model, and an import of it
+// would push the Home static graph over its ceiling (cold-entry-graphs test).
+/** @param {number} n */
+const connectedLabel = (n) => `Connected to ${n} ${n === 1 ? 'person' : 'people'}`;
 
 // The honest connectivity label + a kind (for color). Never fabricates a path:
 // link-less peers are "heard via gossip"; a linked peer whose ICE stats haven't
@@ -68,304 +70,45 @@ const labelOf = (p) => (p.name && p.name.trim() ? p.name.trim().slice(0, 18) : s
 /** @param {Peer} p */
 const pathInfo = (p) => {
   if (p.kind === 'bootstrap') return p.linked
-    ? { label: 'bootstrap · signaling', kind: 'bootstrap' }
-    : { label: 'bootstrap · connecting…', kind: 'connecting' };
-  if (!p.linked) return { label: 'heard · gossip', kind: 'gossip' };
+    ? { label: 'bootstrap · signaling', kind: 'bootstrap', plain: 'Connected' }
+    : { label: 'bootstrap · connecting…', kind: 'connecting', plain: 'Connecting…' };
+  if (!p.linked) return { label: 'heard · gossip', kind: 'gossip', plain: 'Not connected' };
   const path = p.path;
-  if (!path || path === 'unknown') return { label: 'connecting…', kind: 'connecting' };
-  if (path === 'direct-ipv6') return { label: 'direct · IPv6', kind: 'direct' };
-  if (path === 'direct-ipv4') return { label: 'direct · IPv4', kind: 'direct' };
-  if (path.includes('srflx')) return { label: 'direct · IPv4 (STUN)', kind: 'stun' };
-  if (path.includes('relay')) return { label: 'relay · TURN', kind: 'relay' };
-  return { label: path, kind: 'stun' };
+  if (!path || path === 'unknown') return { label: 'connecting…', kind: 'connecting', plain: 'Connecting…' };
+  const plain = path.includes('relay') ? 'Connected through a relay' : 'Connected';
+  if (path === 'direct-ipv6') return { label: 'direct · IPv6', kind: 'direct', plain };
+  if (path === 'direct-ipv4') return { label: 'direct · IPv4', kind: 'direct', plain };
+  if (path.includes('srflx')) return { label: 'direct · STUN', kind: 'stun', plain };
+  if (path.includes('relay')) return { label: 'relay · TURN', kind: 'relay', plain };
+  return { label: path, kind: 'stun', plain };
 };
 
-// The bootstrap (rendezvous) node is shown in the graph as a normal node,
-// labelled by its domain — no special status badge. It has no did (it's a
-// signaling server, not a mesh peer), so we synthesize one. linked === 'up'.
+// The bootstrap (rendezvous) node is a server, not a person. The list of
+// people leaves it out. It shows as "Meeting point" in Technical details only.
+// It has no did, so we synthesize one. linked === 'up'.
 const BOOTSTRAP_DID = '__bootstrap__';
 /** @param {string} url */
 const domainOf = (url) => { try { return new URL(url).hostname; } catch { return 'bootstrap'; } };
 /** @param {any} info */
 const bootstrapPeer = (info) => (info.bootstrapUrl && info.rendezvous !== 'none'
-  ? { did: BOOTSTRAP_DID, name: domainOf(info.bootstrapUrl), linked: info.rendezvous === 'up', kind: 'bootstrap' }
+  ? { did: BOOTSTRAP_DID, host: domainOf(info.bootstrapUrl), linked: info.rendezvous === 'up', kind: 'bootstrap' }
   : null);
 
-// --- the animated radial peer graph ------------------------------------------
-// Mithril owns the SVG SHELL (the <svg>, the static "You" hub); this component
-// owns the peer LAYER imperatively (createElementNS into <g.pn-layer>) and a
-// requestAnimationFrame loop that springs each peer to its slot on a slowly
-// rotating ring, with light mutual repulsion + damping so it breathes like the
-// WebTorrent graph. Mithril never declares children for .pn-layer, so its
-// diff leaves our imperative nodes (and their rAF-written geometry) untouched.
-// prefers-reduced-motion → a static ring, no rAF.
-/**
- * @typedef {object} NodeRef
- * @property {SVGGElement} g
- * @property {SVGLineElement} line
- * @property {SVGCircleElement} dot
- * @property {SVGTextElement} label
- * @property {number} intro
- * @property {string | null} via
- * @property {SVGLineElement | null} introEdge
- */
-/** @typedef {{ x: number, y: number, vx: number, vy: number }} Phys */
-
-const PeerGraph = () => {
-  const W = 600, H = 380, CX = W / 2, CY = H / 2;
-  const RING = Math.min(W, H) * 0.36;
-  const MAX = 40;                 // graph node cap (the list shows the rest)
-  const INTRO_FRAMES = 165;       // the introduction handoff window (~2.75s @ 60fps) — long enough to read
-  /** @type {Map<string, Phys>} */
-  const phys = new Map();         // did -> { x, y, vx, vy }
-  /** @type {Map<string, NodeRef>} */
-  const nodes = new Map();        // did -> { g, line, dot, label, intro, via, introEdge }
-  /** @type {Peer[]} */
-  let peers = [];
-  /** @type {Element | null} */
-  let layer = null;
-  let raf = 0;
-  let rot = 0;
-  let reduced = false;
-  /** @type {MediaQueryList | null} */
-  let mq = null;          // the prefers-reduced-motion query (re-checked live)
-  // Park join animations until the graph is actually on screen. It sits BELOW
-  // Library + Discover, so a peer can join while it's scrolled out of view; we
-  // queue those intros and replay them when it scrolls in (the user can only
-  // appreciate the handoff if they're looking at it).
-  /** @type {IntersectionObserver | null} */
-  let io = null;          // viewport observer
-  let visible = false;    // is the graph ≥40% in view?
-  /** @type {Map<string, string>} */
-  const pendingIntro = new Map(); // did -> introId, for joins that happened off-screen
-
-  // Peer i of n sits at an even angle on the ring (radius RING, ALWAYS — a lone
-  // peer still orbits; the old `n<=1 ? 0` collapsed it onto the hub). rot turns
-  // the whole ring slowly so it breathes. Verified in tools/check-graph-physics.mjs.
-  /**
-   * @param {number} i
-   * @param {number} n
-   */
-  const slot = (i, n) => {
-    const ang = (i / Math.max(1, n)) * Math.PI * 2 - Math.PI / 2 + rot;
-    return { x: CX + Math.cos(ang) * RING, y: CY + Math.sin(ang) * RING };
-  };
-
-  /**
-   * @param {string} tag
-   * @param {Record<string, any>} attrs
-   * @returns {SVGElement}
-   */
-  const mk = (tag, attrs) => {
-    const e = document.createElementNS(SVGNS, tag);
-    for (const k in attrs) e.setAttribute(k, String(attrs[k]));
-    return e;
-  };
-
-  // Sort by did so each peer keeps a stable slot as others join/leave (the
-  // snapshot order isn't stable); cap to MAX (the roster list shows the rest).
-  /** @param {Peer[]} list */
-  const setPeers = (list) => {
-    peers = [...(list || [])].sort((a, b) => (a.did < b.did ? -1 : a.did > b.did ? 1 : 0)).slice(0, MAX);
-  };
-
-  /**
-   * @param {NodeRef} ref
-   * @param {number} x
-   * @param {number} y
-   */
-  const writeGeom = (ref, x, y) => {
-    ref.dot.setAttribute('cx', String(x)); ref.dot.setAttribute('cy', String(y));
-    ref.line.setAttribute('x2', String(x)); ref.line.setAttribute('y2', String(y));
-    ref.label.setAttribute('x', String(x)); ref.label.setAttribute('y', String(y + 20));
-  };
-
-  // Arm the introduction handoff for `n`: snap its dot back to the introducer and
-  // (re)create the trailing intro edge, so the spring + crossfade play from there.
-  // Used for a live join (graph on screen) and a replayed one (scrolled into view).
-  /**
-   * @param {NodeRef} n
-   * @param {string} did
-   * @param {string} introId
-   */
-  const armIntro = (n, did, introId) => {
-    const st = phys.get(did), via = phys.get(introId);
-    if (!st || !via) return;                       // introducer left → skip the handoff
-    st.x = via.x; st.y = via.y; st.vx = 0; st.vy = 0;
-    writeGeom(n, st.x, st.y);
-    n.intro = INTRO_FRAMES; n.via = introId;
-    if (n.introEdge) { n.introEdge.remove(); n.introEdge = null; }
-    const vp = peers.find((x) => x.did === introId);
-    n.introEdge = /** @type {SVGLineElement} */ (mk('line', { class: 'pn-intro-edge', x1: st.x, y1: st.y, x2: st.x, y2: st.y, stroke: colorOf((vp && vp.did) || introId) }));
-    n.g.insertBefore(n.introEdge, n.g.firstChild);  // in the node's group → removed with it
-  };
-
-  // The graph scrolled into view: play the intros we parked while it was off-screen.
-  const replayPending = () => {
-    for (const [did, introId] of pendingIntro) {
-      const n = nodes.get(did);
-      if (n) armIntro(n, did, introId);
-    }
-    pendingIntro.clear();
-  };
-
-  // Reconcile the SVG peer layer + physics with the latest peers list.
-  const sync = () => {
-    // local const so TS keeps the non-null narrowing inside the forEach below
-    const lyr = layer;
-    if (!lyr) return;
-    const live = new Set(peers.map((p) => p.did));
-    for (const [did, n] of [...nodes]) {
-      if (!live.has(did)) { n.g.remove(); nodes.delete(did); phys.delete(did); }
-    }
-    peers.forEach((p, i) => {
-      const info = pathInfo(p);
-      const faint = info.kind === 'gossip' || info.kind === 'connecting';
-      let n = nodes.get(p.did);
-      if (!n) {
-        const s = slot(i, peers.length);
-        // Introduction handoff: if we know WHO introduced this peer (p.via — the
-        // bootstrap, or another peer in the mesh-assisted case), spawn AT the
-        // introducer and trail an intro edge as the peer springs out to its slot.
-        // Otherwise spawn just inside the ring slot (springs the last bit out).
-        const introId = p.via === 'rendezvous' ? BOOTSTRAP_DID : p.via;
-        const hasVia = introId && phys.get(introId);
-        const sx = CX + (s.x - CX) * 0.82;
-        const sy = CY + (s.y - CY) * 0.82;
-        phys.set(p.did, { x: sx, y: sy, vx: 0, vy: 0 });
-        const g = /** @type {SVGGElement} */ (mk('g', { class: 'pn' }));
-        const line = /** @type {SVGLineElement} */ (mk('line', { x1: CX, y1: CY, x2: sx, y2: sy }));
-        const dot = /** @type {SVGCircleElement} */ (mk('circle', { r: 9, cx: sx, cy: sy }));
-        const label = /** @type {SVGTextElement} */ (mk('text', { class: 'pn-label', x: sx, y: sy }));
-        g.append(line, dot, label);
-        lyr.append(g);
-        n = { g, line, dot, label, intro: 0, via: null, introEdge: null };
-        nodes.set(p.did, n);
-        // The handoff animates FROM the introducer — now if the graph is on
-        // screen, else parked until it scrolls into view (so it isn't burned
-        // down unseen below the fold). reduced-motion users opt out entirely.
-        if (hasVia && introId && !reduced) {
-          if (visible) armIntro(n, p.did, introId);
-          else pendingIntro.set(p.did, introId);
-        }
-      }
-      n.line.setAttribute('class', `pn-edge pn-edge--${info.kind}`);
-      n.dot.setAttribute('class', `pn-dot${faint ? ' pn-dot--faint' : ''}`);
-      n.dot.setAttribute('fill', colorOf(p.did));
-      n.label.textContent = labelOf(p);
-    });
-    if (reduced) place();
-  };
-
-  const place = () => {
-    peers.forEach((p, i) => {
-      const st = phys.get(p.did), ref = nodes.get(p.did);
-      if (!st || !ref) return;
-      const s = slot(i, peers.length);
-      st.x = s.x; st.y = s.y;
-      writeGeom(ref, s.x, s.y);
-    });
-  };
-
-  // Spring each peer toward its (slowly rotating) ring slot, with damping. No
-  // mutual repulsion: the slots are already evenly spaced, so repulsion only
-  // fired during transit and wasn't worth the O(n²) sweep. Constants verified
-  // in tools/check-graph-physics.mjs (all counts converge to the ring, no NaN).
-  const tick = () => {
-    rot += 0.0011;
-    const n = peers.length;
-    peers.forEach((p, i) => {
-      const st = phys.get(p.did), ref = nodes.get(p.did);
-      if (!st || !ref) return;
-      const t = slot(i, n);
-      // Softer pull + a touch more damping so the dot's TRAVEL fills the intro
-      // window (~1.1s to settle) instead of snapping to the ring in ~0.85s and
-      // leaving the eye to read "done" while only the edge crossfade runs.
-      st.vx += (t.x - st.x) * 0.012;
-      st.vy += (t.y - st.y) * 0.012;
-      st.vx *= 0.88; st.vy *= 0.88;
-      st.x += st.vx; st.y += st.vy;
-      writeGeom(ref, st.x, st.y);
-      // The handoff: the intro edge (introducer→peer) fades out as the direct
-      // edge (You→peer) fades in; then the introducer steps out of the path.
-      if (ref.intro > 0) {
-        ref.intro -= 1;
-        const prog = ref.intro / INTRO_FRAMES;           // 1 → 0
-        const via = ref.via ? phys.get(ref.via) : undefined;
-        if (ref.introEdge && via) {
-          ref.introEdge.setAttribute('x1', String(via.x)); ref.introEdge.setAttribute('y1', String(via.y));
-          ref.introEdge.setAttribute('x2', String(st.x)); ref.introEdge.setAttribute('y2', String(st.y));
-          ref.introEdge.setAttribute('opacity', (prog * 0.9).toFixed(3));
-        }
-        ref.line.setAttribute('opacity', ((1 - prog) * 0.6).toFixed(3));
-        if (ref.intro === 0) {
-          if (ref.introEdge) { ref.introEdge.remove(); ref.introEdge = null; }
-          ref.line.removeAttribute('opacity');           // back to the CSS default
-        }
-      }
-    });
-    raf = requestAnimationFrame(tick);
-  };
-
-  // Start the rAF or fall to a static ring, honoring prefers-reduced-motion —
-  // re-evaluated live so a mid-session OS toggle takes effect (not just at mount).
-  const applyMotion = () => {
-    reduced = mq?.matches ?? false;
-    if (reduced) { if (raf) { cancelAnimationFrame(raf); raf = 0; } place(); }
-    else if (!raf) raf = requestAnimationFrame(tick);
-  };
-
-  return {
-    /** @param {{ dom: Element, attrs: { peers: Peer[] } }} vnode */
-    oncreate(vnode) {
-      layer = vnode.dom.querySelector('.pn-layer');
-      setPeers(vnode.attrs.peers);
-      sync();
-      mq = window.matchMedia?.('(prefers-reduced-motion: reduce)') ?? null;
-      mq?.addEventListener?.('change', applyMotion);
-      applyMotion();        // sets `reduced` + starts rAF or places statically
-      // Track whether the graph is ≥40% in view; when it scrolls in, replay any
-      // joins that arrived while it was below the fold (the parking gate).
-      io = new IntersectionObserver((entries) => {
-        const onScreen = entries.some((e) => e.intersectionRatio >= 0.4);
-        if (onScreen && !visible) { visible = true; if (!reduced) replayPending(); }
-        else if (!onScreen) visible = false;
-      }, { threshold: [0, 0.4] });
-      io.observe(vnode.dom);
-    },
-    /** @param {{ attrs: { peers: Peer[] } }} vnode */
-    onupdate(vnode) {
-      setPeers(vnode.attrs.peers);
-      sync();
-    },
-    onremove() {
-      mq?.removeEventListener?.('change', applyMotion);
-      io?.disconnect();
-      if (raf) cancelAnimationFrame(raf);
-      raf = 0; nodes.clear(); phys.clear(); pendingIntro.clear();
-    },
-    /** @param {{ attrs: { selfLabel?: string, peers?: Peer[] } }} vnode */
-    view(vnode) {
-      const selfLabel = vnode.attrs.selfLabel || 'You';
-      const count = (vnode.attrs.peers || []).length;
-      return m('svg.peerd-net-graph', {
-        viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'xMidYMid meet',
-        role: 'img', 'aria-label': `Network graph: you and ${count} peer${count === 1 ? '' : 's'}`,
-      }, [
-        m('g.pn-layer'),                                              // imperatively managed
-        m('circle.pn-self-ring', { cx: CX, cy: CY, r: 17 }),
-        m('circle.pn-self', { cx: CX, cy: CY, r: 11 }),
-        m('text.pn-self-label', { x: CX, y: CY + 32, 'text-anchor': 'middle' }, selfLabel),
-      ]);
-    },
-  };
-};
+// why the same dot as the row: two people with no name differ only by it,
+// and a person who is not connected gets a faint one.
+/** @param {Peer} p */
+const swatch = (p) => m('span.peerd-net-swatch', {
+  class: ['gossip', 'connecting'].includes(pathInfo(p).kind) ? 'peerd-net-swatch--faint' : undefined,
+  style: `background:${colorOf(p.did)}`,
+});
 
 /**
  * @param {string} k
  * @param {string} v
+ * @param {Peer} [person] the person of this fact, for the dot of their row
  */
-const fact = (k, v) => m('.peerd-net-fact', [
+const fact = (k, v, person) => m('.peerd-net-fact', [
+  person ? swatch(person) : null,
   m('span.peerd-net-fact-k', k),
   m('span.peerd-net-fact-v', v),
 ]);
@@ -397,6 +140,29 @@ export const NetworkSection = () => {
   /** @type {ReturnType<typeof setInterval> | number} */
   let timer = 0;
   let dead = false;      // set on unmount — an in-flight poll must not redraw
+  /** @type {Map<string, string>} */
+  let names = new Map(); // did -> saved contact name
+  /** @type {string | null} */
+  let namesFor = null;   // the sorted peer dids of the last contacts read
+
+  // Names are optional: a locked vault or a failed read leaves the page as it is.
+  /** @param {Send} send */
+  const readNames = async (send) => {
+    try {
+      const r = await send({ type: 'contacts/list' });
+      if (r?.ok !== true || !Array.isArray(r.contacts)) return;
+      /** @type {Map<string, string>} */
+      const next = new Map();
+      for (const row of r.contacts) {
+        const name = typeof row?.name === 'string' ? row.name.trim() : '';
+        if (row?.saved === true && typeof row.did === 'string' && name) next.set(row.did, name);
+      }
+      names = next;
+      if (!dead) m.redraw();
+    } catch (cause) {
+      void cause;
+    }
+  };
 
   /** @param {Send} send */
   const refresh = (send) => {
@@ -412,6 +178,10 @@ export const NetworkSection = () => {
           appliedEpoch = epoch;
           info = r;
           error = null;
+          if (r.running) {
+            const dids = (Array.isArray(r.peers) ? r.peers : []).map((/** @type {Peer} */ p) => p.did).sort().join(' ');
+            if (dids !== namesFor) { namesFor = dids; void readNames(send); }
+          }
           const expected = transitionUnknown === 'start' ? true
             : transitionUnknown === 'stop' ? false : null;
           if (expected === null || r.running === expected) transitionUnknown = null;
@@ -463,7 +233,7 @@ export const NetworkSection = () => {
   const stop = async (send) => {
     // Destructive — drops every live connection — so confirm before the kill.
     if (typeof confirm === 'function'
-      && !confirm('Shut down all peer-to-peer networking? This drops every live connection and keeps it off (it won’t come back on unlock) until you start it again.')) return;
+      && !confirm('Stop the peer network? People cannot get apps from you, and you cannot get apps from them. An app that downloads now may not finish. Network and Contacts leave the menu. The network stays off until you turn it on again in Discover.')) return;
     stopping = true; error = null; if (!dead) m.redraw();
     /** @type {string | null} */
     let stopErr = null;
@@ -529,41 +299,49 @@ export const NetworkSection = () => {
           }, starting ? 'Starting…' : 'Start the network'),
         ]));
       }
-      // The bootstrap node rides the graph as a normal node (no status badge) —
-      // prepend it so it's there whether or not other peers are.
+      // The meeting point is in Technical details only. The list shows people.
       const boot = bootstrapPeer(info);
       /** @type {Peer[]} */
-      const peers = info.peers || [];
-      /** @type {Peer[]} */
-      const graphPeers = boot ? [boot, ...peers] : peers;
+      const peers = (info.peers || []).map((/** @type {Peer} */ p) => {
+        const name = names.get(p.did);
+        return name ? { ...p, name } : p;
+      });
+      const connected = info.linkedCount >= 1;
       return m('.peerd-net', [
-        m('.peerd-net-facts', [
-          fact('You', short(info.did)),
-          fact('Lobby', info.lobby || '—'),
-          fact('Peers', `${info.peerCount} · ${info.linkedCount} direct`),
-          fact('DHT', String(info.dhtSize ?? 0)),
-        ]),
-        m(PeerGraph, { peers: graphPeers, selfLabel: 'You' }),   // no wrapper — sits on the page bg
-        peers.length === 0 && !boot
-          ? m('.peerd-net-empty', 'You’re the first one here. The network is live and listening, '
-              + 'and peers appear as they come online, each link showing its true path.')
-          : m('ul.peerd-net-list', graphPeers.map((p) => {
+        m('p.peerd-net-status[role=status]', connected
+          ? connectedLabel(info.linkedCount) : 'Looking for people who share apps…'),
+        connected ? m('p.peerd-net-sub',
+          'You can get apps from the people here, and they can get the apps you share.') : null,
+        peers.length === 0
+          ? m('.peerd-net-empty', 'Nobody else is here right now. People show up here when they come online.')
+          : m('ul.peerd-net-list', peers.map((p) => {
             const pi = pathInfo(p);
-            const isBoot = p.kind === 'bootstrap';
             return m('li.peerd-net-row', { key: p.did }, [
-              m('span.peerd-net-swatch', { style: `background:${colorOf(p.did)}` }),
-              m('span.peerd-net-name', labelOf(p)),
-              m('span.peerd-net-did', isBoot ? '' : short(p.did)),
-              m('span.peerd-net-path', { class: `peerd-net-path--${pi.kind}` }, pi.label),
+              swatch(p),
+              m('span.peerd-net-name', m('bdi', labelOf(p))),
+              m('span.peerd-net-path', { class: `peerd-net-path--${pi.kind}` }, pi.plain),
             ]);
           })),
+        peers.some((p) => labelOf(p) === NO_NAME)
+          ? m('p.peerd-net-sub', ['To add a name for a person, open ', m('a.peerd-net-link', { href: '#contacts' }, 'Contacts'), '.']) : null,
+        m('details.peerd-net-tech', [
+          m('summary', 'Technical details'),
+          m('.peerd-net-facts', [
+            fact('You', short(info.did)),
+            fact('Lobby', info.lobby || 'Not set'),
+            fact('People', `${info.peerCount} seen · ${info.linkedCount} connected`),
+            fact('DHT', String(info.dhtSize ?? 0)),
+            boot ? fact('Meeting point', `${boot.host} · ${pathInfo(boot).label}`) : null,
+            ...peers.map((p) => fact(labelOf(p), `${short(p.did)} · ${pathInfo(p).label}`, p)),
+          ]),
+        ]),
+        m('a.peerd-net-link', { href: '#discover' }, 'Find apps'),
         // Kill switch — symmetric to "Start the network" in the offline view.
         // Drops every live connection and persists dweb off (won't auto-restart
         // on unlock) — docs/specs/FEATURE-FIRST-CLASS-MESSAGING.md §2.
         transitionUnknown === 'stop' ? m.fragment({}, [
           m('button.peerd-net-btn', {
             disabled: stopping || !!refreshInFlight,
-            style: 'margin-top:10px; font-size:12px; opacity:.75;',
             onclick: () => refresh(send),
           }, refreshInFlight ? 'Checking…' : 'Recheck network status'),
           m('button.peerd-net-btn.secondary', {
@@ -572,7 +350,6 @@ export const NetworkSection = () => {
           }, stopping ? 'Finishing…' : 'Finish same stop'),
         ]) : m('button.peerd-net-btn', {
           disabled: stopping || !!refreshInFlight,
-          style: 'margin-top:10px; font-size:12px; opacity:.75;',
           onclick: () => stop(send),
         }, stopping ? 'Stopping…' : 'Stop the network'),
       ]);
