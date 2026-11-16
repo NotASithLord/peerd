@@ -44,8 +44,6 @@ const NETWORK_PEOPLE_STATES = [false, true].map(narrow => ({
   name: `home-network-people${narrow ? '-narrow' : ''}`,
   kind: 'visual', phase: 'post-unlock', responder: null,
   async run(ctx, rec) {
-    // why before the page loads: the graph turns until reduced motion is on,
-    // and it places its people at the width it first sees.
     const page = await openWidePage(ctx, 'tests/fixtures/network.html', {
       metrics: { width: narrow ? 320 : 960, height: 900, deviceScaleFactor: 1, mobile: false }, ready: '.peerd-net',
     });

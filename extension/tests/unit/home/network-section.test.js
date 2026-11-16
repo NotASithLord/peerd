@@ -283,10 +283,11 @@ describe('home.network', () => {
     const { root, unmount } = await mountView(people());
     try {
       const status = root.querySelector('.peerd-net [role=status]');
-      const graph = root.querySelector('svg.peerd-net-graph');
+      const list = root.querySelector('ul.peerd-net-list');
       expect(status?.textContent).toBe('Connected to 2 people');
       expect(root.textContent).toContain('You can get apps from the people here, and they can get the apps you share.');
-      expect(!!(status && graph && (status.compareDocumentPosition(graph) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+      expect(!!(status && list && (status.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+      expect(root.querySelector('svg')).toBeFalsy();
     } finally { unmount(); }
   });
 
@@ -305,7 +306,6 @@ describe('home.network', () => {
       expect(root.textContent.includes('You can get apps from the people here')).toBe(false);
       expect(root.querySelector('.peerd-net-empty')?.textContent)
         .toBe('Nobody else is here right now. People show up here when they come online.');
-      expect(root.textContent).toContain('The meeting point is a server that helps people find each other.');
       expect(root.querySelector('ul.peerd-net-list')).toBeFalsy();
     } finally { unmount(); }
   });
@@ -320,17 +320,14 @@ describe('home.network', () => {
     } finally { unmount(); }
   });
 
-  it('a person gets the name from Contacts, in the row and in the graph', async () => {
+  it('a person gets the name from Contacts in the row', async () => {
     const { root, unmount } = await mountView(people());
     try {
       await flush();
       const rows = rowTexts(root);
-      const labels = [...root.querySelectorAll('.pn-label')].map((label) => label.textContent);
       expect(rows.some((text) => text.includes('Ana'))).toBe(true);
       expect(root.querySelector('.peerd-net-name bdi')?.textContent).toBe('Ana');
-      expect(labels.includes('Ana')).toBe(true);
       expect(rows.filter((text) => text.includes('No name yet')).length).toBe(2);
-      expect(labels.filter((label) => label === 'No name yet').length).toBe(2);
       expect(root.textContent).toContain('To add a name for a person, open Contacts.');
       expect(byText(root, 'a.peerd-net-link', 'Contacts')?.getAttribute('href')).toBe('#contacts');
     } finally { unmount(); }
@@ -346,7 +343,7 @@ describe('home.network', () => {
     } finally { unmount(); }
   });
 
-  it('with each person named and no meeting point, the hint and the note stay away', async () => {
+  it('with each person named and no meeting point, the hint stays away', async () => {
     const send = people({
       'dweb/distributed/info': () => ({ ...PEOPLE_INFO, rendezvous: 'none', peerCount: 1, linkedCount: 1, peers: [PEOPLE_INFO.peers[0]] }),
     });
@@ -355,8 +352,6 @@ describe('home.network', () => {
       await flush();
       expect(rowTexts(root)[0]).toContain('Ana');
       expect(root.textContent.includes('To add a name for a person')).toBe(false);
-      expect(root.textContent.includes('The meeting point is a server')).toBe(false);
-      expect(root.querySelector('.pn-dot--boot')).toBeFalsy();
       expect(root.querySelector('details.peerd-net-tech')?.textContent.includes('Meeting point')).toBe(false);
     } finally { unmount(); }
   });
@@ -439,7 +434,7 @@ describe('home.network', () => {
     } finally { unmount(); }
   });
 
-  it('the meeting point is in the graph, neutral, and not in the list of people', async () => {
+  it('the meeting point is in Technical details only, not in the list of people', async () => {
     const send = people({ 'dweb/distributed/info': () => ({ ...PEOPLE_INFO, peerCount: 1, linkedCount: 1, peers: [PEOPLE_INFO.peers[0]] }) });
     const { root, unmount } = await mountView(send);
     try {
@@ -448,19 +443,8 @@ describe('home.network', () => {
       expect(rowTexts(root).some((text) => text.includes('bootstrap'))).toBe(false);
       expect(outsideTech(root).includes('bootstrap.peerd.ai')).toBe(false);
       expect(root.querySelector('details.peerd-net-tech')?.textContent).toContain('bootstrap.peerd.ai · bootstrap · signaling');
-      expect(root.textContent).toContain('The meeting point is a server that helps people find each other.');
-      const boot = root.querySelector('.pn-dot--boot');
-      expect(boot?.hasAttribute('fill')).toBe(false);
-      expect(boot?.parentElement?.querySelector('.pn-label')?.textContent).toBe('Meeting point');
-      expect(root.querySelectorAll('.pn-dot:not(.pn-dot--boot)[fill]').length).toBe(1);
-      expect(root.querySelector('svg.peerd-net-graph')?.getAttribute('aria-label')).toBe('Network graph: you and 1 person');
-    } finally { unmount(); }
-  });
-
-  it('the graph label counts people only', async () => {
-    const { root, unmount } = await mountView(people());
-    try {
-      expect(root.querySelector('svg.peerd-net-graph')?.getAttribute('aria-label')).toBe('Network graph: you and 3 people');
+      expect(root.querySelector('details.peerd-net-tech')?.textContent).toContain('Meeting point');
+      expect(outsideTech(root).includes('Meeting point')).toBe(false);
     } finally { unmount(); }
   });
 
