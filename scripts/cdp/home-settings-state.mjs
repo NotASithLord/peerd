@@ -149,7 +149,8 @@ export const HOME_SETTINGS_STATES = [
         if (method !== 'Page.javascriptDialogOpening') return;
         dialog = params;
         void page.send('Page.handleJavaScriptDialog', { accept: params.type === 'confirm'
-          && params.message.startsWith('Shut down all peer-to-peer networking?') }).catch((cause) => { dialogFailure = String(cause); });
+          && params.message.startsWith(process.env.PEERD_VISUAL_BASE_RENDER === '1'
+            ? 'Shut down all peer-to-peer networking?' : 'Stop the peer network?') }).catch((cause) => { dialogFailure = String(cause); });
       };
       try {
         // why: A tab switch inside one Home window intentionally closes a nonsticky panel.

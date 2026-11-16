@@ -8,7 +8,7 @@ import { discoverSurface } from './starter-visuals.mjs';
 // inspection is an effect. why the copy read: a link page of an installed app
 // asks whether its copy changed on this device, as the app page does.
 const READS = ['apps/list', 'dweb/base/heard', 'bootstrap/ready', 'dweb/distributed/info', 'contacts/list', 'dweb/blocked-peers',
-  'dweb/app-local-changes'];
+  'dweb/app-local-changes', 'dweb/base/install-status'];
 
 // The older tree's separate address section, as it shipped.
 const renderSection = (mode) => `(async () => {
@@ -75,6 +75,8 @@ const renderShareLink = (mode) => `(async () => {
     if (message.type === 'bootstrap/ready') return { ok: true, featureLeases: { leases: { dweb: { status: 'active' } } } };
     if (message.type === 'dweb/distributed/info') return { ok: true, running: true, linkedCount: 1 };
     if (message.type === 'dweb/app-local-changes') return { ok: true, changed: false };
+    // The host has no live attempt, so the held receipt draws the not-sure card.
+    if (message.type === 'dweb/base/install-status') return { ok: true, attempt: null };
     if (message.type !== 'dweb/base/inspect-address') throw new Error('unexpected fixture mutation');
     // why declared: a link check also reports what the verified files ask of peerd.
     return { ok: true, summary: { ...target, name: 'Peer-hosted WASM notebook',

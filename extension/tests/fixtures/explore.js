@@ -21,6 +21,8 @@ const apps = [
   return {...app,dwapp_id:`fixture-${i}`,publisher,version_id,seq:2,size:1024 * (i+1),uri:`peerd://${publisher}/${version_id}`};
 });
 const [orbit, notes, garden] = apps;
+// install-slow: a large app whose download outlives the page deadline.
+if (frame === 'install-slow') notes.size = 2583054919;
 if (frame === 'recent-misses') {
   const observedAt = Date.now();
   for (const app of apps) Object.assign(app, { retrieval: { outcome: 'no-provider-found', observedAt, expiresAt: observedAt + 30_000 } });
@@ -93,6 +95,7 @@ const EFFECTS = {
   installed: () => { notesInstalled = true; return { ok: true, app: { id: 'local-notes' } }; },
   failed: () => ({ ok: false, error: 'fixture failure' }),
   unknown: () => ({ ok: false, outcomeKnown: false }),
+  'install-slow': () => ({ ok: false, outcomeKnown: false }),
   // The host refuses the files of a maker blocked in another tab.
   'install-blocked': () => ({ ok: false, error: 'publisher-user-blocked' }),
 };
@@ -125,9 +128,11 @@ const send = async message => {
     // why no key while it is not running: the host knows none then.
     return {ok:true,running,linkedCount:frame === 'looking' ? 0 : 3,did:running ? self : null};
   }
-  if (message.type === 'dweb/base/install-status') return { ok: true, attempt: {
+  // The host has no live attempt in the two unknown frames, so they draw the not-sure card.
+  if (message.type === 'dweb/base/install-status') return { ok: true, attempt: ['unknown', 'update-unknown'].includes(frame) ? null : {
     id: 'fixture-attempt', phase: frame === 'install-committing' ? 'committing' : 'retrieving',
-    cancellable: frame !== 'install-committing', progress: { phase: 'chunk', done: 2, total: 8 },
+    cancellable: frame !== 'install-committing',
+    progress: frame === 'install-slow' ? { phase: 'bytes', done: 1107425877, total: 2583054919 } : { phase: 'chunk', done: 2, total: 8 },
   } };
   if (message.type === 'dweb/base/install' && transferFrame) return new Promise(resolve => { finishTransfer = resolve; });
   if (message.type === 'dweb/base/cancel-install' && transferFrame) {
@@ -173,6 +178,7 @@ const STEPS = {
   'install-committing': [['.disc-primary', 'Install and share']],
   'install-cancelled': [['.disc-primary', 'Install and share'], ['.disc-transfer button', 'Cancel']],
   installing: [['.disc-primary', 'Install and share']],
+  'install-slow': [['.disc-primary', 'Install and share']],
   installed: [['.disc-primary', 'Install and share']],
   'open-unknown': [['.disc-primary', 'Install and share'], ['.disc-primary', 'Open']],
   failed: [['.disc-primary', 'Install and share']],
@@ -226,6 +232,7 @@ const STEPS = {
 };
 const OPEN_KEYS = /** @type {Record<string, string>} */ ({
   'install-progress': notes.dwapp_id, 'install-committing': notes.dwapp_id, 'install-cancelled': notes.dwapp_id,
+  'install-slow': notes.dwapp_id,
   installing: notes.dwapp_id, installed: notes.dwapp_id, failed: notes.dwapp_id,
   'open-unknown': notes.dwapp_id,
   unknown: notes.dwapp_id, maker: notes.dwapp_id, 'cant-run': garden.dwapp_id, update: notes.dwapp_id, share: notes.dwapp_id,

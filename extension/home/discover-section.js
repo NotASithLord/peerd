@@ -26,9 +26,9 @@ import { blockedSet, effectOutcome, withoutBlocked } from './blocked-makers.js';
 import { discoveryAddress } from './discovery-address.js';
 import { exploreOrder, EXPLORE_WINDOW, nextSuggestion, recentRetrievalMiss, suggestionKey } from './explore-order.js';
 import {
-  BLOCKED, BLOCKED_ERROR, bytesLabel, COMMONS_NAME, createEffects, emptyBrowse, FAILED, failureHint, isFailure, kbLabel, keptCards,
-  letterOf, libraryName, libraryPeerApps, libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, pillFilter,
-  appCountLabel, peerCountLabel, rootView, savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, tileAction, toneOf,
+  BLOCKED, BLOCKED_ERROR, bytesLabel, COMMONS_NAME, createEffects, emptyBrowse, FAILED, failureHint, isFailure, keptCards,
+  letterOf, libraryName, libraryPeerApps, libraryStatus, makerMenu, matchQuery, networkState, noSuggestionNote, pageState, panelState, pillFilter,
+  appCountLabel, peerCountLabel, rootView, savedContactNames, savedNameForm, saysIt, shareLinkError, shortKey, sizeLabel, tileAction, toneOf,
   UNKNOWN, unknownLines, updateOffer, verifiedDeclared, wasmLabel, yourApps,
 } from './discover-model.js';
 import {
@@ -113,7 +113,7 @@ const sharedEffects = createEffects();
 export const DiscoverSection = (initialVnode) => {
   let attrs = initialVnode.attrs;
   const effects = attrs.effects ?? sharedEffects;
-  const { busy, running, notices, unconfirmed, installedId, conflicts, committed } = effects;
+  const { busy, running, notices, unconfirmed, installedId, conflicts, committed, host: hostStates } = effects;
   let dead = false;
   /** @type {Element|null} */ let rootDom = null;
   let viewEnabled = attrs.enabled;
@@ -266,6 +266,7 @@ export const DiscoverSection = (initialVnode) => {
             busy[id] = 'installed';
             if (target.action === 'install') { fresh.add(id); updatedNow.delete(id); } else updatedNow.add(id);
             unconfirmed.delete(id);
+            hostStates.delete(id);
           }
           // Absence is not a causal receipt: the original install/update send
           // may still be alive after the UI deadline and can commit later. Keep
@@ -295,6 +296,15 @@ export const DiscoverSection = (initialVnode) => {
     });
     busy[id] = UNKNOWN;
   };
+  // why one Library read before the not-sure card: the host commits the app
+  // to the Library before it drops its attempt.
+  /** @param {string} key @param {boolean} live @param {() => Promise<unknown>} read */
+  const hostSeen = (key, live, read) => {
+    if (live) { hostStates.set(key, true); redraw(); return; }
+    // why keep a `false`: a remount reads the status again, and the not-sure card must not blink.
+    if (hostStates.get(key) !== false) hostStates.set(key, 'checking');
+    void read().finally(() => { if (hostStates.get(key) === 'checking') hostStates.set(key, false); m.redraw(); });
+  };
 
   /** @param {string} id @param {'install'|'update'} action @param {DwebApp} app @param {unknown} result */
   const markFailure = (id, action, app, result) => {
@@ -303,11 +313,24 @@ export const DiscoverSection = (initialVnode) => {
       return;
     }
     unconfirmed.delete(id);
+    hostStates.delete(id);
     conflicts.delete(id);
     const failure = /** @type {{code?:string,error?:string}} */ (result);
     // why keep the runtime reason: Technical details shows it.
     busy[id] = failure?.code === 'install-cancelled' ? 'install-cancelled' : RUNTIME_CODES.includes(failure?.code ?? '') && typeof failure?.error === 'string' ? failure.error
       : failure?.error === BLOCKED_ERROR ? BLOCKED : FAILED;
+  };
+
+  // why the fence opens: the host confirms a cancel only before its commit, so
+  // this is a known failure. While the page's own send still runs, its reply
+  // says the same and this does nothing.
+  /** @param {string} id */
+  const markCancelled = (id) => {
+    if (!unconfirmed.has(id)) return;
+    unconfirmed.delete(id);
+    hostStates.delete(id);
+    busy[id] = 'install-cancelled';
+    redraw();
   };
 
   const refresh = () => {
@@ -575,6 +598,7 @@ export const DiscoverSection = (initialVnode) => {
     const id = app.dwapp_id;
     if (!id || !localReady || app.runtimeCompatibility?.status === 'unsupported' || unconfirmed.has(id)
         || ['installing', 'updating'].includes(busy[id]) || linkHolds(app) || linkedId(app)) return;
+    hostStates.delete(id);
     busy[id] = 'installing';
     running.set(id, { action: 'install', uri: app.uri });
     delete notices[id];
@@ -617,6 +641,7 @@ export const DiscoverSection = (initialVnode) => {
         || ['installing', 'updating'].includes(busy[id])) return;
     const conflictToken = strategy ? liveConflict(app) : undefined;
     if (strategy && conflictToken === undefined) return;
+    hostStates.delete(id);
     busy[id] = 'updating';
     running.set(id, { action: 'update', uri: app.uri });
     delete notices[id];
@@ -719,7 +744,10 @@ export const DiscoverSection = (initialVnode) => {
   const copyNote = () => copyState?.status === 'failed' && !copyState.field.startsWith(SHARE)
     ? 'Could not copy. Select the text and copy it yourself.' : null;
 
-  const forgetPending = () => { sessionStorage.removeItem(PENDING_KEY); linkPending = null; };
+  const forgetPending = () => {
+    if (linkPending) hostStates.delete(`link:${linkPending.address}`);
+    sessionStorage.removeItem(PENDING_KEY); linkPending = null;
+  };
 
   // why: a share link must pin its signer and entire app revision, and the
   // summary must echo exactly what was parsed before anything is shown.
@@ -811,6 +839,10 @@ export const DiscoverSection = (initialVnode) => {
       void reloadLocal();
     }
     if (failure) linkFailure = failure;
+    // why: a status reply that came while the send ran could not read the
+    // Library (reconcileLink waits for the send), so read it one time now.
+    const hostKey = linkPending ? `link:${linkPending.address}` : '';
+    if (hostKey && hostStates.get(hostKey) === false) { hostStates.delete(hostKey); hostSeen(hostKey, false, () => reconcileLink(true)); }
     redraw();
   };
   const installLink = async () => {
@@ -821,6 +853,7 @@ export const DiscoverSection = (initialVnode) => {
     // Persist BEFORE sending so reload keeps its UI receipt; the host owns cross-tab deduplication.
     try { sessionStorage.setItem(PENDING_KEY, target.address); }
     catch { linkPending = null; linkFailure = RECEIPT_FAILED; return; }
+    hostStates.delete(`link:${target.address}`);
     linkBusy = 'install'; linkFailure = ''; linkNotice = '';
     redraw();
     // why in the effects: the page says "You can leave this page. The install
@@ -831,7 +864,17 @@ export const DiscoverSection = (initialVnode) => {
     if (effects.link === link) effects.link = null;
   };
 
-  const reconcileLink = async () => {
+  // why as a known failure: see markCancelled. While the send still runs, its reply says the same.
+  const cancelledLink = () => {
+    if (!linkPending || linkBusy === 'install') return;
+    linkPreview ??= { ...linkPending, name: null };
+    forgetPending();
+    linkFailure = 'install-cancelled'; linkNotice = '';
+    redraw();
+  };
+
+  // why quiet: the read after a host status reply is not the user's Check again.
+  const reconcileLink = async (quiet = false) => {
     if (!linkPending || linkBusy) return;
     const pending = linkPending;
     linkBusy = 'reconcile'; linkNotice = '';
@@ -846,8 +889,8 @@ export const DiscoverSection = (initialVnode) => {
       // Library read shows it on its heard page too, as after an install.
       if (match && typeof match.id === 'string') {
         linkPreview ??= { ...pending, name: null }; linkAppId = match.id; linkFresh = true; forgetPending(); void reloadLocal();
-      } else linkNotice = 'peerd still cannot tell if the install finished. It may still finish by itself. Install stays off until peerd knows.';
-    } catch { linkNotice = 'peerd could not read your Library. Check again in a moment.'; }
+      } else if (!quiet) linkNotice = 'peerd still cannot tell if the install finished. It may still finish by itself. Install stays off until peerd knows.';
+    } catch { if (!quiet) linkNotice = 'peerd could not read your Library. Check again in a moment.'; }
     finally { linkBusy = ''; redraw(); }
   };
 
@@ -1240,7 +1283,7 @@ export const DiscoverSection = (initialVnode) => {
       ? `In your Library${action.kind === 'update' ? ' · new version ready' : ''}` : null;
     return {
       key: f.id, name, letter: letterOf(name), tone: toneOf(f.id),
-      meta: where ?? (row ? kbLabel(app.size) : makerMeta(makerOf(app.publisher), kbLabel(app.size))),
+      meta: where ?? (row ? sizeLabel(app.size) : makerMeta(makerOf(app.publisher), sizeLabel(app.size))),
       description: app.description,
       error: rootAlert(f.id, true),
       // why keyed by kind: a poll can turn a focused Open into Update, or
@@ -1584,6 +1627,8 @@ export const DiscoverSection = (initialVnode) => {
       incompatible: f.incompatible, conflict: liveConflict(app) !== undefined, busy: f.state, uncertain: f.uncertain,
       installed: !!f.localId, sameVersion: f.sameVersion,
     });
+    // why false with no address: no transfer mounts for such a card, so no host status can arrive.
+    const shown = panelState(state, discoveryAddress(app) ? hostStates.get(f.id) : false);
     const name = nameOf(app);
     const effectBusy = ['installing', 'updating'].includes(f.state ?? '') || f.uncertain;
     const localId = f.localId;
@@ -1612,10 +1657,10 @@ export const DiscoverSection = (initialVnode) => {
     if (state === 'failed' && !blockedMaker) {
       primary = { label: 'Try again', disabled: offline, onclick: () => { void (f.localId ? update(app, f.localId) : install(app)); } };
     }
-    if (state === 'unknown') primary = { label: 'Check again', disabled: refreshing, onclick: () => { void manualRefresh(); } };
+    if (shown === 'unknown') primary = { label: 'Check again', disabled: refreshing, onclick: () => { void manualRefresh(); } };
     // why Open next to them on an update page: the installed version still runs.
     /** @type {ButtonProps|null} */ const open = localId ? { label: 'Open', onclick: () => { void openApp(localId, f.id); } } : null;
-    const secondary = (state === 'failed' || state === 'unknown') && primary ? open : null;
+    const secondary = (state === 'failed' || shown === 'unknown') && primary ? open : null;
     if (blockedMaker && open) primary = { ...open, open: true };
     const notice = notices[f.id] ?? (state === 'review' && !localReady ? libraryStatus({ ready: false, failed: localFailed })
       : offline && (state === 'review' || state === 'failed') ? NEEDS_NETWORK : null);
@@ -1640,14 +1685,18 @@ export const DiscoverSection = (initialVnode) => {
           open: { label: 'Open', onclick: () => { void openApp(localId, f.id); } }, notice, error,
         })
           : installPanel({
-            state, name, fresh: fresh.has(f.id), updated: updatedNow.has(f.id), changed: changed === true, action: effect,
-            transfer: state === 'installing' && discoveryAddress(app) ? m(InstallTransfer, {
-              key: `${f.id}:${f.state}`, send: attrs.send, address: discoveryAddress(app),
-              kind: f.state === 'updating' ? 'update' : 'install', ...(f.state === 'updating' && localId ? { appId: localId } : {}),
+            state: /** @type {import('./discover-model.js').InstallState} */ (shown), name, fresh: fresh.has(f.id), updated: updatedNow.has(f.id), changed: changed === true, action: effect,
+            // why this key: a key with the state would mount the transfer
+            // again at the page deadline and lose the last attempt.
+            transfer: ['installing', 'unknown'].includes(state) && discoveryAddress(app) ? m(InstallTransfer, {
+              key: `${f.id}:${effect}`, send: attrs.send, address: discoveryAddress(app),
+              kind: effect === 'update' ? 'update' : 'install', ...(effect === 'update' && localId ? { appId: localId } : {}),
+              quiet: shown === 'unknown', onHost: (/** @type {boolean} */ live) => hostSeen(f.id, live, reloadLocal),
+              onCancelled: () => markCancelled(f.id),
             }) : null,
-            message: state === 'installing' ? `You can leave this page. The ${effect} keeps going.` : null,
+            message: shown === 'installing' ? `You can leave this page. The ${effect} keeps going.` : null,
             failure: failure ? { action, ...failure } : null,
-            unknown: state === 'unknown' ? unknownLines(effect) : null,
+            unknown: shown === 'unknown' ? unknownLines(effect) : null,
             notice, error, primary, secondary, otherVersion: !f.sameVersion,
             // why no steps for the user's own app: they made it, so it never went through them.
             steps: !(f.mine && state === 'installed'),
@@ -1663,13 +1712,14 @@ export const DiscoverSection = (initialVnode) => {
       appHead({
         name, letter: letterOf(name), tone, maker,
         onMaker: () => { if (app.publisher) openMaker(app.publisher, name); },
-        meta: f.localId ? 'In your Library' : kbLabel(app.size), modified: state === 'conflict' || changed === true,
+        meta: f.localId ? 'In your Library' : sizeLabel(app.size), modified: state === 'conflict' || changed === true,
         description: app.description, onShare: address ? () => openShareDialog(f.id) : null,
       }),
       panel,
       state === 'cant-run' || state === 'conflict' || offer === 'update-cant-run' ? null
         : [safetyLines({ maker, checked, action, mine: f.mine, installed: !!f.localId, changed: changed === true }),
-          says ? saysItSection(says) : null],
+          // why: "Not known yet" tells the user to install an app that already installs.
+          says && !(says.kind === 'unknown' && (shown === 'installing' || shown === 'unknown')) ? saysItSection(says) : null],
       techView(appFacts(app, failure?.runtime ?? null), typeof app.includes_wasm === 'boolean' ? WASM_HINT : null),
       shareFor === f.id && address ? shareView(f.id, { name, letter: letterOf(name), tone, address, maker }) : null,
     ]);
@@ -1693,6 +1743,9 @@ export const DiscoverSection = (initialVnode) => {
       busy: installing ? 'installing' : linkFailure || undefined,
       uncertain: !installing && (!!linkPending || !!held), installed: !!localId, sameVersion: true,
     });
+    const hostKey = `link:${target.address}`;
+    // why false with no pending link: a page held by a heard install keeps the unknown block.
+    const shown = panelState(state === 'conflict' ? 'review' : state, linkPending ? hostStates.get(hostKey) : false);
     const failure = state === 'failed' && linkFailure ? (linkFailure === RECEIPT_FAILED
       ? { hint: 'Reload the page, then try again.', runtime: null } : failureHint(linkFailure)) : null;
     const blocked = !attrs.enabled || !!linkBusy;
@@ -1701,7 +1754,7 @@ export const DiscoverSection = (initialVnode) => {
       ? { label: 'Install and share', disabled: blocked || !linkPreview, onclick: () => { void installLink(); } }
       : state === 'failed' ? (linkFailure === BLOCKED ? null
         : { label: 'Try again', disabled: blocked || !linkPreview, onclick: () => { void installLink(); } })
-        : state === 'unknown' ? { label: 'Check again', disabled: !!linkBusy || refreshing, onclick: () => { void (linkPending ? reconcileLink() : manualRefresh()); } }
+        : shown === 'unknown' ? { label: 'Check again', disabled: !!linkBusy || refreshing, onclick: () => { void (linkPending ? reconcileLink() : manualRefresh()); } }
           : state === 'installed' ? { label: 'Open', open: true, disabled: !!linkBusy, onclick: () => { void openLinkApp(localId); } } : null;
     const bytes = bytesLabel(linkPreview?.decodedBytes);
     /** @type {Fact[]} */ const list = [
@@ -1729,17 +1782,19 @@ export const DiscoverSection = (initialVnode) => {
       backLink({ onclick: goBack }),
       appHead({
         name, letter: letterOf(name), tone, maker, onMaker: () => openMaker(target.publisher, name),
-        meta: localId ? 'In your Library' : kbLabel(linkPreview?.decodedBytes), modified: changed === true,
+        meta: localId ? 'In your Library' : sizeLabel(linkPreview?.decodedBytes), modified: changed === true,
         description: card?.description, onShare: () => openShareDialog('link'),
       }),
       state === 'cant-run' ? cantRunPanel() : installPanel({
-        state: state === 'conflict' ? 'review' : state, name, fresh: linkFresh, changed: changed === true, action: held?.action ?? 'install',
-        transfer: state === 'installing' && linkBusy === 'install' ? m(InstallTransfer, {
+        state: /** @type {import('./discover-model.js').InstallState} */ (shown), name, fresh: linkFresh, changed: changed === true, action: held?.action ?? 'install',
+        transfer: (state === 'installing' && linkBusy === 'install') || (state === 'unknown' && !!linkPending) ? m(InstallTransfer, {
           key: target.address, send: attrs.send, address: target.address, kind: 'address',
+          quiet: shown === 'unknown', onHost: (/** @type {boolean} */ live) => hostSeen(hostKey, live, () => reconcileLink(true)),
+          onCancelled: cancelledLink,
         }) : null,
-        message: state === 'installing' ? `You can leave this page. The ${held?.action ?? 'install'} keeps going.` : null,
+        message: shown === 'installing' ? `You can leave this page. The ${held?.action ?? 'install'} keeps going.` : null,
         failure: failure ? { action: 'install', ...failure } : null,
-        unknown: state === 'unknown' ? unknownLines(held?.action ?? 'install') : null,
+        unknown: shown === 'unknown' ? unknownLines(held?.action ?? 'install') : null,
         notice: linkNotice || null,
         error: rootAlert('link'),
         primary, steps: !(mine && state === 'installed'), sharing: state === 'review' ? SHARING : null, onLibrary: toLibrary,

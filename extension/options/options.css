@@ -516,6 +516,10 @@ button.linklike.disc-app-maker { padding: 0; font-size: 13px; text-align: left; 
 .disc-panel .disc-hint { color: var(--secondary); }
 /* why: after an install, focus moves to this line (never to Open). */
 .disc-installed:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* why a copy of the .voice-progress shape: that rule is scoped to Settings. */
+.disc-transfer { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.disc-progress { align-self: stretch; height: 6px; border: 1px solid var(--border); border-radius: var(--r2); background: var(--elev2); overflow: hidden; }
+.disc-progress-fill { height: 100%; background: var(--accent); }
 .disc-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0; }
 .disc-step { display: flex; gap: 12px; align-items: flex-start; padding: 8px 0; }
 .disc-step-mark { flex: none; width: 28px; height: 28px; border-radius: 50%; border: 1.5px solid var(--border-strong); display: inline-flex; align-items: center; justify-content: center; font: 600 12px/1 var(--font-mono); color: var(--muted); }
@@ -608,7 +612,13 @@ button.disc-danger:hover { background: color-mix(in srgb, var(--danger) 10%, tra
    The peers/network-info view + the animated radial peer graph. Peer dots carry
    their per-did brand color (set inline); everything else is monochrome but for
    the honest path-colored edges + the magenta (d·distributed) "You" hub. */
-.peerd-net { display: flex; flex-direction: column; gap: 14px; }
+.peerd-net { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 640px; margin: 0 auto; }
+.peerd-net > .peerd-net-btn { align-self: flex-start; }
+.peerd-net-status { margin: 0; font-size: 15px; font-weight: 600; color: var(--fg); }
+.peerd-net-sub { margin: 0; font-size: 13px; color: var(--fg-muted); }
+.peerd-net-tech summary { cursor: pointer; font-size: 12px; color: var(--fg-muted); }
+.peerd-net-tech .peerd-net-facts { margin-top: 8px; }
+.peerd-net-link { align-self: flex-start; font-size: 13px; color: var(--fg); }
 
 .peerd-net-facts {
   display: flex; flex-wrap: wrap; gap: 8px 18px;
@@ -640,7 +650,14 @@ button.disc-danger:hover { background: color-mix(in srgb, var(--danger) 10%, tra
 /* Peer dots + labels. Dot fill is set inline (per-did brand color). */
 .pn-dot { stroke: var(--bg); stroke-width: 1.5; }
 .pn-dot--faint { opacity: 0.45; }
+/* The meeting point is a server: a neutral dot, never a brand color. */
+.pn-dot--boot { fill: var(--fg-muted); }
 .pn-label { fill: var(--fg); font-size: 10px; text-anchor: middle; }
+/* why: the graph scales with the page, and 10 units is about 5px on a phone-width page. */
+@media (max-width: 480px) {
+  .pn-label { font-size: 18px; transform: translateY(8px); }
+  .pn-self-label { font-size: 20px; transform: translateY(6px); }
+}
 
 /* Edges colored by the REAL ICE path — the honest-infrastructure beat. */
 .pn-edge { stroke-width: 1.4; opacity: 0.55; fill: none; }
@@ -654,6 +671,7 @@ button.disc-danger:hover { background: color-mix(in srgb, var(--danger) 10%, tra
    (its stroke is set inline to the introducer's color), fading as the direct
    edge forms — the WebRTC signaling story, on screen. */
 .pn-intro-edge { stroke-width: 2; fill: none; stroke-dasharray: 5 6; animation: pn-flow 0.9s linear infinite; }
+.pn-intro-edge--boot { stroke: var(--fg-muted); }
 @keyframes pn-flow { to { stroke-dashoffset: -11; } }
 @keyframes pn-blink { 0%, 100% { opacity: 0.18; } 50% { opacity: 0.5; } }
 
@@ -676,17 +694,20 @@ button.disc-danger:hover { background: color-mix(in srgb, var(--danger) 10%, tra
 /* The peer roster (list mirror of the graph — also the a11y fallback). */
 .peerd-net-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .peerd-net-row {
-  display: grid; grid-template-columns: 14px 1fr auto auto; align-items: center; gap: 10px;
+  display: grid; grid-template-columns: 14px 1fr auto; align-items: center; gap: 10px;
   padding: 7px 10px; border-radius: var(--radius); font-size: 13px;
 }
 .peerd-net-row:hover { background: var(--bg-elev); }
 .peerd-net-swatch { width: 10px; height: 10px; border-radius: 50%; }
+/* A person who is not connected: the same faint dot as in the graph. */
+.peerd-net-swatch--faint { opacity: 0.45; }
+.peerd-net-fact .peerd-net-swatch { flex: none; align-self: center; }
 .peerd-net-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .peerd-net-did { color: var(--fg-muted); font-family: var(--font-mono); font-size: 11px; }
 .peerd-net-path { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--fg-muted); white-space: nowrap; }
-.peerd-net-path--direct { color: var(--ok); border-color: var(--ok); }
-.peerd-net-path--stun   { color: var(--cyan); border-color: var(--cyan); }
-.peerd-net-path--relay  { color: var(--warn); border-color: var(--warn); }
+/* why one color: the chip says "Connected" for each of these paths. The ink
+   token is the text color; the path colors stay on the graph edges. */
+.peerd-net-path--direct, .peerd-net-path--stun, .peerd-net-path--relay { color: var(--ok-ink); border-color: var(--ok); }
 .peerd-net-path--bootstrap { color: var(--fg-muted); border-color: var(--border); }
 
 /* Discover — the dweb app store list (apps peers are sharing). Mirrors the

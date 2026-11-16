@@ -28,6 +28,7 @@ import m from '/vendor/mithril/mithril.js';
  * @property {string} [kind]
  * @property {string} [via]
  * @property {number} [lastSeen]
+ * @property {string} [host]
  */
 
 const SVGNS = 'http://www.w3.org/2000/svg';
@@ -58,8 +59,13 @@ const colorOf = (did) => {
 // did short form — the codebase-canonical last 8 chars (rooms.js short()).
 /** @param {string} did */
 const short = (did) => (typeof did === 'string' ? did.slice(-8) : '????????');
+const NO_NAME = 'No name yet';
 /** @param {Peer} p */
-const labelOf = (p) => (p.name && p.name.trim() ? p.name.trim().slice(0, 18) : short(p.did));
+const labelOf = (p) => (p.name && p.name.trim() ? p.name.trim() : NO_NAME);
+// why a copy: peerCountLabel lives in the Discover model, and an import of it
+// would push the Home static graph over its ceiling (cold-entry-graphs test).
+/** @param {number} n */
+const connectedLabel = (n) => `Connected to ${n} ${n === 1 ? 'person' : 'people'}`;
 
 // The honest connectivity label + a kind (for color). Never fabricates a path:
 // link-less peers are "heard via gossip"; a linked peer whose ICE stats haven't
@@ -68,27 +74,29 @@ const labelOf = (p) => (p.name && p.name.trim() ? p.name.trim().slice(0, 18) : s
 /** @param {Peer} p */
 const pathInfo = (p) => {
   if (p.kind === 'bootstrap') return p.linked
-    ? { label: 'bootstrap · signaling', kind: 'bootstrap' }
-    : { label: 'bootstrap · connecting…', kind: 'connecting' };
-  if (!p.linked) return { label: 'heard · gossip', kind: 'gossip' };
+    ? { label: 'bootstrap · signaling', kind: 'bootstrap', plain: 'Connected' }
+    : { label: 'bootstrap · connecting…', kind: 'connecting', plain: 'Connecting…' };
+  if (!p.linked) return { label: 'heard · gossip', kind: 'gossip', plain: 'Not connected' };
   const path = p.path;
-  if (!path || path === 'unknown') return { label: 'connecting…', kind: 'connecting' };
-  if (path === 'direct-ipv6') return { label: 'direct · IPv6', kind: 'direct' };
-  if (path === 'direct-ipv4') return { label: 'direct · IPv4', kind: 'direct' };
-  if (path.includes('srflx')) return { label: 'direct · IPv4 (STUN)', kind: 'stun' };
-  if (path.includes('relay')) return { label: 'relay · TURN', kind: 'relay' };
-  return { label: path, kind: 'stun' };
+  if (!path || path === 'unknown') return { label: 'connecting…', kind: 'connecting', plain: 'Connecting…' };
+  const plain = path.includes('relay') ? 'Connected through a relay' : 'Connected';
+  if (path === 'direct-ipv6') return { label: 'direct · IPv6', kind: 'direct', plain };
+  if (path === 'direct-ipv4') return { label: 'direct · IPv4', kind: 'direct', plain };
+  if (path.includes('srflx')) return { label: 'direct · STUN', kind: 'stun', plain };
+  if (path.includes('relay')) return { label: 'relay · TURN', kind: 'relay', plain };
+  return { label: path, kind: 'stun', plain };
 };
 
-// The bootstrap (rendezvous) node is shown in the graph as a normal node,
-// labelled by its domain — no special status badge. It has no did (it's a
-// signaling server, not a mesh peer), so we synthesize one. linked === 'up'.
+// The bootstrap (rendezvous) node is a server, not a person. The graph shows
+// it as "Meeting point" with a neutral dot, and the list of people leaves it
+// out. It has no did, so we synthesize one. Its host name goes to Technical
+// details only. linked === 'up'.
 const BOOTSTRAP_DID = '__bootstrap__';
 /** @param {string} url */
 const domainOf = (url) => { try { return new URL(url).hostname; } catch { return 'bootstrap'; } };
 /** @param {any} info */
 const bootstrapPeer = (info) => (info.bootstrapUrl && info.rendezvous !== 'none'
-  ? { did: BOOTSTRAP_DID, name: domainOf(info.bootstrapUrl), linked: info.rendezvous === 'up', kind: 'bootstrap' }
+  ? { did: BOOTSTRAP_DID, name: 'Meeting point', host: domainOf(info.bootstrapUrl), linked: info.rendezvous === 'up', kind: 'bootstrap' }
   : null);
 
 // --- the animated radial peer graph ------------------------------------------
@@ -195,8 +203,11 @@ const PeerGraph = () => {
     writeGeom(n, st.x, st.y);
     n.intro = INTRO_FRAMES; n.via = introId;
     if (n.introEdge) { n.introEdge.remove(); n.introEdge = null; }
-    const vp = peers.find((x) => x.did === introId);
-    n.introEdge = /** @type {SVGLineElement} */ (mk('line', { class: 'pn-intro-edge', x1: st.x, y1: st.y, x2: st.x, y2: st.y, stroke: colorOf((vp && vp.did) || introId) }));
+    const edge = { x1: st.x, y1: st.y, x2: st.x, y2: st.y };
+    // why a class for the meeting point: it is a server, so it gets no brand color.
+    n.introEdge = /** @type {SVGLineElement} */ (mk('line', introId === BOOTSTRAP_DID
+      ? { class: 'pn-intro-edge pn-intro-edge--boot', ...edge }
+      : { class: 'pn-intro-edge', ...edge, stroke: colorOf(introId) }));
     n.g.insertBefore(n.introEdge, n.g.firstChild);  // in the node's group → removed with it
   };
 
@@ -250,9 +261,10 @@ const PeerGraph = () => {
         }
       }
       n.line.setAttribute('class', `pn-edge pn-edge--${info.kind}`);
-      n.dot.setAttribute('class', `pn-dot${faint ? ' pn-dot--faint' : ''}`);
-      n.dot.setAttribute('fill', colorOf(p.did));
-      n.label.textContent = labelOf(p);
+      const isBoot = p.kind === 'bootstrap';
+      n.dot.setAttribute('class', `pn-dot${faint ? ' pn-dot--faint' : ''}${isBoot ? ' pn-dot--boot' : ''}`);
+      if (!isBoot) n.dot.setAttribute('fill', colorOf(p.did));
+      n.label.textContent = labelOf(p).slice(0, 18);
     });
     if (reduced) place();
   };
@@ -344,13 +356,13 @@ const PeerGraph = () => {
       if (raf) cancelAnimationFrame(raf);
       raf = 0; nodes.clear(); phys.clear(); pendingIntro.clear();
     },
-    /** @param {{ attrs: { selfLabel?: string, peers?: Peer[] } }} vnode */
+    /** @param {{ attrs: { selfLabel?: string, peers?: Peer[], people?: number } }} vnode */
     view(vnode) {
       const selfLabel = vnode.attrs.selfLabel || 'You';
-      const count = (vnode.attrs.peers || []).length;
+      const count = vnode.attrs.people ?? (vnode.attrs.peers || []).length;
       return m('svg.peerd-net-graph', {
         viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'xMidYMid meet',
-        role: 'img', 'aria-label': `Network graph: you and ${count} peer${count === 1 ? '' : 's'}`,
+        role: 'img', 'aria-label': `Network graph: you and ${count} ${count === 1 ? 'person' : 'people'}`,
       }, [
         m('g.pn-layer'),                                              // imperatively managed
         m('circle.pn-self-ring', { cx: CX, cy: CY, r: 17 }),
@@ -361,11 +373,21 @@ const PeerGraph = () => {
   };
 };
 
+// why the same dot as the row: two people with no name differ only by it,
+// and a person who is not connected gets a faint one, as in the graph.
+/** @param {Peer} p */
+const swatch = (p) => m('span.peerd-net-swatch', {
+  class: ['gossip', 'connecting'].includes(pathInfo(p).kind) ? 'peerd-net-swatch--faint' : undefined,
+  style: `background:${colorOf(p.did)}`,
+});
+
 /**
  * @param {string} k
  * @param {string} v
+ * @param {Peer} [person] the person of this fact, for the dot of their row
  */
-const fact = (k, v) => m('.peerd-net-fact', [
+const fact = (k, v, person) => m('.peerd-net-fact', [
+  person ? swatch(person) : null,
   m('span.peerd-net-fact-k', k),
   m('span.peerd-net-fact-v', v),
 ]);
@@ -397,6 +419,29 @@ export const NetworkSection = () => {
   /** @type {ReturnType<typeof setInterval> | number} */
   let timer = 0;
   let dead = false;      // set on unmount — an in-flight poll must not redraw
+  /** @type {Map<string, string>} */
+  let names = new Map(); // did -> saved contact name
+  /** @type {string | null} */
+  let namesFor = null;   // the sorted peer dids of the last contacts read
+
+  // Names are optional: a locked vault or a failed read leaves the page as it is.
+  /** @param {Send} send */
+  const readNames = async (send) => {
+    try {
+      const r = await send({ type: 'contacts/list' });
+      if (r?.ok !== true || !Array.isArray(r.contacts)) return;
+      /** @type {Map<string, string>} */
+      const next = new Map();
+      for (const row of r.contacts) {
+        const name = typeof row?.name === 'string' ? row.name.trim() : '';
+        if (row?.saved === true && typeof row.did === 'string' && name) next.set(row.did, name);
+      }
+      names = next;
+      if (!dead) m.redraw();
+    } catch (cause) {
+      void cause;
+    }
+  };
 
   /** @param {Send} send */
   const refresh = (send) => {
@@ -412,6 +457,10 @@ export const NetworkSection = () => {
           appliedEpoch = epoch;
           info = r;
           error = null;
+          if (r.running) {
+            const dids = (Array.isArray(r.peers) ? r.peers : []).map((/** @type {Peer} */ p) => p.did).sort().join(' ');
+            if (dids !== namesFor) { namesFor = dids; void readNames(send); }
+          }
           const expected = transitionUnknown === 'start' ? true
             : transitionUnknown === 'stop' ? false : null;
           if (expected === null || r.running === expected) transitionUnknown = null;
@@ -463,7 +512,7 @@ export const NetworkSection = () => {
   const stop = async (send) => {
     // Destructive — drops every live connection — so confirm before the kill.
     if (typeof confirm === 'function'
-      && !confirm('Shut down all peer-to-peer networking? This drops every live connection and keeps it off (it won’t come back on unlock) until you start it again.')) return;
+      && !confirm('Stop the peer network? People cannot get apps from you, and you cannot get apps from them. An app that downloads now may not finish. Network and Contacts leave the menu. The network stays off until you turn it on again in Discover.')) return;
     stopping = true; error = null; if (!dead) m.redraw();
     /** @type {string | null} */
     let stopErr = null;
@@ -529,41 +578,53 @@ export const NetworkSection = () => {
           }, starting ? 'Starting…' : 'Start the network'),
         ]));
       }
-      // The bootstrap node rides the graph as a normal node (no status badge) —
-      // prepend it so it's there whether or not other peers are.
+      // The meeting point rides the graph only. The list shows people.
       const boot = bootstrapPeer(info);
       /** @type {Peer[]} */
-      const peers = info.peers || [];
+      const peers = (info.peers || []).map((/** @type {Peer} */ p) => {
+        const name = names.get(p.did);
+        return name ? { ...p, name } : p;
+      });
       /** @type {Peer[]} */
       const graphPeers = boot ? [boot, ...peers] : peers;
+      const connected = info.linkedCount >= 1;
       return m('.peerd-net', [
-        m('.peerd-net-facts', [
-          fact('You', short(info.did)),
-          fact('Lobby', info.lobby || '—'),
-          fact('Peers', `${info.peerCount} · ${info.linkedCount} direct`),
-          fact('DHT', String(info.dhtSize ?? 0)),
-        ]),
-        m(PeerGraph, { peers: graphPeers, selfLabel: 'You' }),   // no wrapper — sits on the page bg
-        peers.length === 0 && !boot
-          ? m('.peerd-net-empty', 'You’re the first one here. The network is live and listening, '
-              + 'and peers appear as they come online, each link showing its true path.')
-          : m('ul.peerd-net-list', graphPeers.map((p) => {
+        m('p.peerd-net-status[role=status]', connected
+          ? connectedLabel(info.linkedCount) : 'Looking for people who share apps…'),
+        connected ? m('p.peerd-net-sub',
+          'You can get apps from the people here, and they can get the apps you share.') : null,
+        m(PeerGraph, { peers: graphPeers, people: peers.length, selfLabel: 'You' }),   // no wrapper: it sits on the page bg
+        peers.length === 0
+          ? m('.peerd-net-empty', 'Nobody else is here right now. People show up here when they come online.')
+          : m('ul.peerd-net-list', peers.map((p) => {
             const pi = pathInfo(p);
-            const isBoot = p.kind === 'bootstrap';
             return m('li.peerd-net-row', { key: p.did }, [
-              m('span.peerd-net-swatch', { style: `background:${colorOf(p.did)}` }),
-              m('span.peerd-net-name', labelOf(p)),
-              m('span.peerd-net-did', isBoot ? '' : short(p.did)),
-              m('span.peerd-net-path', { class: `peerd-net-path--${pi.kind}` }, pi.label),
+              swatch(p),
+              m('span.peerd-net-name', m('bdi', labelOf(p))),
+              m('span.peerd-net-path', { class: `peerd-net-path--${pi.kind}` }, pi.plain),
             ]);
           })),
+        peers.some((p) => labelOf(p) === NO_NAME)
+          ? m('p.peerd-net-sub', ['To add a name for a person, open ', m('a.peerd-net-link', { href: '#contacts' }, 'Contacts'), '.']) : null,
+        boot ? m('p.peerd-net-sub', 'The meeting point is a server that helps people find each other.') : null,
+        m('details.peerd-net-tech', [
+          m('summary', 'Technical details'),
+          m('.peerd-net-facts', [
+            fact('You', short(info.did)),
+            fact('Lobby', info.lobby || 'Not set'),
+            fact('People', `${info.peerCount} seen · ${info.linkedCount} connected`),
+            fact('DHT', String(info.dhtSize ?? 0)),
+            boot ? fact('Meeting point', `${boot.host} · ${pathInfo(boot).label}`) : null,
+            ...peers.map((p) => fact(labelOf(p), `${short(p.did)} · ${pathInfo(p).label}`, p)),
+          ]),
+        ]),
+        m('a.peerd-net-link', { href: '#discover' }, 'Find apps'),
         // Kill switch — symmetric to "Start the network" in the offline view.
         // Drops every live connection and persists dweb off (won't auto-restart
         // on unlock) — docs/specs/FEATURE-FIRST-CLASS-MESSAGING.md §2.
         transitionUnknown === 'stop' ? m.fragment({}, [
           m('button.peerd-net-btn', {
             disabled: stopping || !!refreshInFlight,
-            style: 'margin-top:10px; font-size:12px; opacity:.75;',
             onclick: () => refresh(send),
           }, refreshInFlight ? 'Checking…' : 'Recheck network status'),
           m('button.peerd-net-btn.secondary', {
@@ -572,7 +633,6 @@ export const NetworkSection = () => {
           }, stopping ? 'Finishing…' : 'Finish same stop'),
         ]) : m('button.peerd-net-btn', {
           disabled: stopping || !!refreshInFlight,
-          style: 'margin-top:10px; font-size:12px; opacity:.75;',
           onclick: () => stop(send),
         }, stopping ? 'Stopping…' : 'Stop the network'),
       ]);

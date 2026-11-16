@@ -62,6 +62,11 @@ const local = (id, app, dweb = {}) => ({
   dweb: { uri: app.uri, dwapp_id: app.dwapp_id, version_id: app.version_id, seq: app.seq, publisher: app.publisher, ...dweb },
 });
 
+/** A card with a real share address, so its app page reads the host status. */
+const bigApp = card('big', 'Big game', ANA, { version_id: 'b'.repeat(64), size: 2_583_054_919 });
+const liveAttempt = Object.freeze({ id: 'attempt-1', phase: 'retrieving', cancellable: true,
+  progress: Object.freeze({ phase: 'bytes', done: 1_107_425_877, total: 2_583_054_919 }) });
+
 /**
  * A fake host. Read routes answer from `state`; `routes` answer the rest.
  * Any other message throws, which a case can see in `calls`.
@@ -89,6 +94,7 @@ const fakeHost = (initial = {}, routes = {}) => {
     if (message.type === 'contacts/list') return { ok: true, contacts: state.contacts };
     if (message.type === 'dweb/blocked-peers') return { ok: true, blocked: state.blocked };
     if (message.type === 'dweb/app-local-changes') return { ok: true, changed: state.changedHere.includes(String(message.appId)) };
+    if (message.type === 'dweb/base/install-status') return { ok: true, attempt: null };
     throw new Error(`unexpected ${message.type}`);
   };
   /** @param {string} type */
@@ -131,6 +137,27 @@ const until = async (ready) => {
     if (performance.now() > end) throw new Error('Discover did not settle');
     await settle();
   }
+};
+/**
+ * Holds the timed status reads of InstallTransfer, so a case steps them by
+ * hand and waits on no real timer. Every other timer runs as usual.
+ */
+const holdReads = () => {
+  const real = globalThis.setTimeout;
+  /** @type {Array<{run: () => void, ms: number}>} */ let held = [];
+  globalThis.setTimeout = /** @type {typeof setTimeout} */ (/** @type {unknown} */ (
+    (/** @type {() => void} */ run, /** @type {number} */ ms) => {
+      if (ms !== 750 && ms !== 3000) return real(run, ms);
+      held.push({ run, ms });
+      return 0;
+    }));
+  return {
+    /** The waits of the reads that are due next. */
+    delays: () => held.map(read => read.ms),
+    /** Runs the reads that are due, then lets their replies land. */
+    step: async () => { const due = held; held = []; for (const read of due) read.run(); await settle(); },
+    release: () => { globalThis.setTimeout = real; },
+  };
 };
 /** @param {ParentNode} root @param {string} selector @returns {HTMLElement} */
 const el = (root, selector) => {
@@ -2047,6 +2074,317 @@ describe('home.discover app page', () => {
       expect(host.writes().length).toBe(0);
     } finally { view.close(); }
   });
+  it('after the page deadline a live download keeps its card', async () => {
+    const host = fakeHost({ heard: [bigApp] }, {
+      'dweb/base/install': () => { throw Object.assign(new Error('late'), { outcomeKnown: false }); },
+      'dweb/base/install-status': () => ({ ok: true, attempt: liveAttempt }),
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'big');
+      await click(view.root, 'Install and share');
+      await until(() => !!panel(view.root).querySelector('[role="progressbar"]'));
+      expect(button(panel(view.root), 'Cancel')?.disabled).toBe(false);
+      expect(text(panel(view.root))).toContain(KEEPS_GOING);
+      expect(panel(view.root).querySelectorAll('.disc-step')[1].classList.contains('is-working')).toBe(true);
+      expect(button(view.root, 'Check again')).toBe(undefined);
+      expect(text(view.root).includes('peerd is not sure')).toBe(false);
+      // "Not known yet" would tell the user to install an app that already installs.
+      expect(view.root.querySelector('.disc-says')).toBe(null);
+      expect(host.count('dweb/base/install')).toBe(1);
+    } finally { view.close(); }
+  });
+
+  // An attempt whose outcome the host does not know is not live.
+  const lostAttempt = Object.freeze({ id: 'attempt-0', phase: 'unknown', cancellable: false, progress: Object.freeze({ phase: 'chunk', done: 8, total: 8 }) });
+  for (const [what, idle] of /** @type {const} */ ([['no attempt', null], ['an attempt of unknown outcome', lostAttempt]])) {
+    it(`a host with ${what} gives the not-sure card after one Library read`, async () => {
+      /** @type {unknown} */ let attempt = idle;
+      const reads = holdReads();
+      const host = fakeHost({ heard: [bigApp] }, {
+        'dweb/base/install': () => { throw Object.assign(new Error('late'), { outcomeKnown: false }); },
+        'dweb/base/install-status': () => ({ ok: true, attempt }),
+      });
+      const view = mount({ send: host.send });
+      try {
+        await settle();
+        await openTile(view.root, 'big');
+        const before = host.count('apps/list');
+        await click(view.root, 'Install and share');
+        await until(() => text(panel(view.root)).includes(UNKNOWN_INSTALL));
+        expect(text(el(view.root, '.disc-panel .disc-hint'))).toBe('Check again before you try to install it again.');
+        expect(button(view.root, 'Check again')).toBeTruthy();
+        expect(view.root.querySelector('.disc-transfer')).toBe(null);
+        expect(button(view.root, 'Cancel')).toBe(undefined);
+        expect(view.root.querySelector('[role="progressbar"]')).toBe(null);
+        const types = host.calls.map(call => call.type);
+        expect(types.lastIndexOf('apps/list') > types.indexOf('dweb/base/install-status')).toBe(true);
+        expect(host.count('apps/list')).toBe(before + 1);
+        // Install stays fenced: the page offers no second install.
+        expect(button(view.root, 'Install and share')).toBe(undefined);
+        expect(host.count('dweb/base/install')).toBe(1);
+        // The same answer again reads the Library no more, and the quiet card reads the status slowly.
+        await reads.step();
+        expect(reads.delays()).toEqual([3000]);
+        await reads.step();
+        expect(host.count('dweb/base/install-status')).toBe(3);
+        expect(host.count('apps/list')).toBe(before + 1);
+        expect(text(panel(view.root))).toContain(UNKNOWN_INSTALL);
+        // The transfer still reads the status, so a live attempt brings the progress card back.
+        attempt = liveAttempt;
+        await reads.step();
+        await until(() => !!panel(view.root).querySelector('[role="progressbar"]'));
+        expect(button(view.root, 'Check again')).toBe(undefined);
+        expect(text(view.root).includes('peerd is not sure')).toBe(false);
+        // The progress card reads at its usual pace again.
+        await reads.step();
+        expect(reads.delays()).toEqual([750]);
+      } finally { reads.release(); view.close(); }
+    });
+  }
+
+  it('a download that ends after the deadline shows Installed, never not sure', async () => {
+    /** @type {unknown} */ let attempt = liveAttempt;
+    /** @type {ReturnType<typeof deferred>|null} */ let library = null;
+    const reads = holdReads();
+    const host = fakeHost({ heard: [bigApp] }, {
+      'dweb/base/install': () => { throw Object.assign(new Error('late'), { outcomeKnown: false }); },
+      'dweb/base/install-status': () => ({ ok: true, attempt }),
+      'apps/list': async () => { await library?.promise; return { ok: true, apps: host.state.library }; },
+      'apps/open': () => ({ ok: true }),
+    });
+    const view = mount({ send: host.send });
+    const notSure = () => text(view.root).includes('peerd is not sure');
+    try {
+      await settle();
+      await openTile(view.root, 'big');
+      await click(view.root, 'Install and share');
+      await until(() => !!panel(view.root).querySelector('[role="progressbar"]'));
+      host.state.library = [local('local-big', bigApp)];
+      attempt = null;
+      // The Library read that follows the status reply stays open, and the card must wait for it.
+      library = deferred();
+      const before = host.count('apps/list');
+      await reads.step();
+      await until(() => host.count('apps/list') > before);
+      for (let turn = 0; turn < 5; turn++) { await settle(); expect(notSure()).toBe(false); }
+      expect(text(panel(view.root))).toContain(KEEPS_GOING);
+      library.resolve(undefined);
+      await until(() => { expect(notSure()).toBe(false); return !!button(panel(view.root), 'Open'); });
+      expect(text(panel(view.root))).toContain('Installed. Big game is now in your Library.');
+      expect(view.root.querySelector('[role="progressbar"]')).toBe(null);
+      expect(host.count('dweb/base/install')).toBe(1);
+    } finally { library?.resolve(undefined); reads.release(); view.close(); }
+  });
+
+  it('the page deadline keeps the same transfer, with its bar', async () => {
+    const install = deferred();
+    const host = fakeHost({ heard: [bigApp] }, {
+      'dweb/base/install': () => install.promise,
+      'dweb/base/install-status': () => ({ ok: true, attempt: liveAttempt }),
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'big');
+      await click(view.root, 'Install and share');
+      await until(() => !!view.root.querySelector('.disc-transfer [role="progressbar"]'));
+      const transfer = el(view.root, '.disc-transfer');
+      install.reject(Object.assign(new Error('late'), { outcomeKnown: false }));
+      // A transfer that mounts again starts with no attempt, so its bar would blink.
+      for (let turn = 0; turn < 3; turn++) {
+        await settle();
+        expect(view.root.querySelector('.disc-transfer')).toBe(transfer);
+        expect(transfer.querySelector('[role="progressbar"]')).toBeTruthy();
+      }
+      expect(text(view.root).includes('peerd is not sure')).toBe(false);
+    } finally { view.close(); }
+  });
+
+  for (const other of [false, true]) {
+    it(other ? 'a later attempt that ends after a Cancel is not a cancelled install'
+      : 'a Cancel after the page deadline ends in Installation cancelled, and Try again installs', async () => {
+      /** @type {unknown} */ let attempt = liveAttempt;
+      const reads = holdReads();
+      const retry = deferred();
+      const host = fakeHost({ heard: [bigApp] }, {
+        'dweb/base/install': () => {
+          if (host.count('dweb/base/install') > 1) return retry.promise;
+          throw Object.assign(new Error('late'), { outcomeKnown: false });
+        },
+        'dweb/base/install-status': () => ({ ok: true, attempt }),
+        'dweb/base/cancel-install': (message) => {
+          attempt = { ...liveAttempt, phase: 'cancelling', cancellable: false };
+          return { ok: true, id: message.attemptId, phase: 'cancelling' };
+        },
+      });
+      const view = mount({ send: host.send });
+      try {
+        await settle();
+        await openTile(view.root, 'big');
+        await click(view.root, 'Install and share');
+        await until(() => !!button(panel(view.root), 'Cancel'));
+        await click(panel(view.root), 'Cancel');
+        expect(host.calls.find(call => call.type === 'dweb/base/cancel-install')?.attemptId).toBe('attempt-1');
+        await reads.step();
+        expect(text(panel(view.root))).toContain('Cancelling. Waiting for the install to stop…');
+        if (other) { attempt = { ...liveAttempt, id: 'attempt-2' }; await reads.step(); }
+        attempt = null;
+        await reads.step();
+        if (other) {
+          // The host said nothing about the later attempt, so the install stays fenced.
+          await until(() => text(panel(view.root)).includes(UNKNOWN_INSTALL));
+          expect(button(view.root, 'Try again')).toBe(undefined);
+          expect(text(panel(view.root)).includes('Installation cancelled.')).toBe(false);
+        } else {
+          await until(() => text(panel(view.root)).includes('Installation cancelled.'));
+          expect(text(view.root).includes('peerd is not sure')).toBe(false);
+          expect(button(view.root, 'Check again')).toBe(undefined);
+          expect(view.root.querySelector('.disc-transfer')).toBe(null);
+          await click(view.root, 'Try again');
+          expect(host.count('dweb/base/install')).toBe(2);
+        }
+      } finally { retry.resolve({ ok: false }); reads.release(); await settle(); view.close(); }
+    });
+  }
+
+  it('a Cancel while the page still waits for its install leaves the outcome to that reply', async () => {
+    /** @type {unknown} */ let attempt = liveAttempt;
+    const reads = holdReads();
+    const install = deferred();
+    const host = fakeHost({ heard: [bigApp] }, {
+      'dweb/base/install': () => install.promise,
+      'dweb/base/install-status': () => ({ ok: true, attempt }),
+      'dweb/base/cancel-install': (message) => ({ ok: true, id: message.attemptId, phase: 'cancelling' }),
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'big');
+      await click(view.root, 'Install and share');
+      await until(() => !!button(panel(view.root), 'Cancel'));
+      await click(panel(view.root), 'Cancel');
+      attempt = null;
+      await reads.step();
+      // A Try again now would send a second install that the late reply of the first would mark cancelled.
+      expect(button(view.root, 'Try again')).toBe(undefined);
+      expect(text(panel(view.root)).includes('Installation cancelled.')).toBe(false);
+      install.resolve({ ok: false, code: 'install-cancelled', outcomeKnown: true });
+      await until(() => text(panel(view.root)).includes('Installation cancelled.'));
+      expect(button(view.root, 'Try again')).toBeTruthy();
+      expect(host.count('dweb/base/install')).toBe(1);
+    } finally { install.resolve({ ok: false }); reads.release(); await settle(); view.close(); }
+  });
+});
+
+describe('home.discover install transfer', () => {
+  /** @param {unknown} attempt @param {(view: ReturnType<typeof mount>, host: ReturnType<typeof fakeHost>) => Promise<void>} run */
+  const during = async (attempt, run) => {
+    const install = deferred();
+    const host = fakeHost({ heard: [bigApp] }, {
+      'dweb/base/install': () => install.promise,
+      'dweb/base/install-status': () => ({ ok: true, attempt }),
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'big');
+      // A large app shows its size in GB.
+      expect(text(el(view.root, '.disc-app-size'))).toBe('2.6 GB');
+      await click(view.root, 'Install and share');
+      await until(() => !!view.root.querySelector('.disc-transfer [role="progressbar"]'));
+      await run(view, host);
+    } finally { install.resolve({ ok: false }); await settle(); view.close(); }
+  };
+  /** @param {ParentNode} root */
+  const lines = (root) => [...el(root, '.disc-transfer').querySelectorAll('p')].map(node => text(node));
+
+  it('byte progress draws one bar, the sizes and Cancel, and sends only plain data', async () => {
+    await during(liveAttempt, async (view, host) => {
+      const bars = view.root.querySelectorAll('[role="progressbar"]');
+      expect(bars.length).toBe(1);
+      expect(bars[0].getAttribute('aria-valuenow')).toBe('42');
+      expect(bars[0].getAttribute('aria-label')).toBe('Install progress');
+      expect(/** @type {HTMLElement} */ (el(bars[0], '.disc-progress-fill')).style.width).toBe('42%');
+      expect(lines(view.root)).toEqual(['Downloading…', '42% · 1.1 GB of 2.6 GB']);
+      expect(button(el(view.root, '.disc-transfer'), 'Cancel')?.disabled).toBe(false);
+      // A function in a message breaks runtime.sendMessage.
+      expect(host.calls.every(call => Object.values(call).every(value => typeof value !== 'function'))).toBe(true);
+      const status = host.calls.find(call => call.type === 'dweb/base/install-status');
+      expect([status?.address, status?.kind]).toEqual([discoveryAddress(bigApp), 'install']);
+    });
+  });
+
+  it('piece progress shows only the percent', async () => {
+    await during({ ...liveAttempt, progress: { phase: 'chunk', done: 2, total: 8 } }, async (view) => {
+      expect(el(view.root, '[role="progressbar"]').getAttribute('aria-valuenow')).toBe('25');
+      expect(lines(view.root)).toEqual(['Downloading…', '25%']);
+    });
+  });
+
+  it('a commit fills the bar and offers no Cancel', async () => {
+    await during({ id: 'attempt-1', phase: 'committing', cancellable: false }, async (view) => {
+      expect(el(view.root, '[role="progressbar"]').getAttribute('aria-valuenow')).toBe('100');
+      expect(lines(view.root)).toEqual(['Almost done. It is too late to cancel.']);
+      expect(button(view.root, 'Cancel')).toBe(undefined);
+    });
+  });
+
+  it('the file check keeps the bar', async () => {
+    await during({ ...liveAttempt, progress: { phase: 'verifying' } }, async (view) => {
+      expect(el(view.root, '[role="progressbar"]').getAttribute('aria-valuenow')).toBe('99');
+      expect(lines(view.root)).toEqual(['Checking the files…']);
+      expect(button(view.root, 'Cancel')).toBeTruthy();
+    });
+  });
+
+  it('an update names its bar and reads the status of the installed app', async () => {
+    const newer = card('big', 'Big game', ANA, { version_id: 'c'.repeat(64), seq: 2 });
+    const update = deferred();
+    const host = fakeHost({ heard: [newer], library: [local('local-big', newer, { version_id: 'b'.repeat(64), seq: 1 })] }, {
+      'dweb/base/update-app': () => update.promise,
+      'dweb/base/install-status': () => ({ ok: true, attempt: liveAttempt }),
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      el(view.root, '[data-key="big"] .disc-tile-action').click(); await settle();
+      await until(() => !!view.root.querySelector('.disc-transfer [role="progressbar"]'));
+      expect(el(view.root, '[role="progressbar"]').getAttribute('aria-label')).toBe('Update progress');
+      expect(text(panel(view.root))).toContain('You can leave this page. The update keeps going.');
+      const status = host.calls.find(call => call.type === 'dweb/base/install-status');
+      expect([status?.address, status?.kind, status?.appId]).toEqual([discoveryAddress(newer), 'update', 'local-big']);
+    } finally { update.resolve({ ok: false }); await settle(); view.close(); }
+  });
+
+  it('one lost status read keeps the bar and Cancel', async () => {
+    const install = deferred();
+    const reads = holdReads();
+    let count = 0;
+    const host = fakeHost({ heard: [bigApp] }, {
+      'dweb/base/install': () => install.promise,
+      'dweb/base/install-status': () => {
+        count += 1;
+        if (count === 2) throw new Error('lost');
+        return { ok: true, attempt: liveAttempt };
+      },
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await openTile(view.root, 'big');
+      await click(view.root, 'Install and share');
+      await until(() => !!view.root.querySelector('[role="progressbar"]'));
+      for (const read of [2, 3]) {
+        await reads.step();
+        expect(count).toBe(read);
+        expect(view.root.querySelector('[role="progressbar"]')).toBeTruthy();
+        expect(button(view.root, 'Cancel')).toBeTruthy();
+      }
+    } finally { reads.release(); install.resolve({ ok: false }); await settle(); view.close(); }
+  });
+
 });
 
 describe('home.discover the app says it', () => {
@@ -2229,7 +2567,8 @@ describe('home.discover the app says it', () => {
     const view = mount({ send: host.send }, { keepReceipt: true });
     try {
       await settle();
-      await click(view.root, 'Check again');
+      // The host has no attempt and the Library holds the app, so the page needs no Check again.
+      await until(() => !!button(panel(view.root), 'Open') && !!view.root.querySelector('.disc-says'));
       expect(button(panel(view.root), 'Open')?.disabled).toBe(false);
       expect(chips(view.root)).toEqual([['Comes with instructions for peerd', false]]);
       expect(text(el(view.root, '.disc-says .disc-footnote'))).toBe('From the app’s own files, checked when peerd installed it.');
@@ -3002,7 +3341,9 @@ describe('home.discover share link', () => {
         await click(view.root, 'Check link');
         await click(view.root, 'Install and share');
         expect(keptBeforeSend).toEqual([address]);
-        expect(text(panel(view.root))).toContain(UNKNOWN_INSTALL);
+        await until(() => text(panel(view.root)).includes(UNKNOWN_INSTALL));
+        // The read that follows the status reply is not the user's Check again, so it writes no notice.
+        expect(text(panel(view.root)).includes('peerd still cannot tell')).toBe(false);
         expect(button(view.root, 'Install and share')).toBe(undefined);
         view.close();
         view = mount({ send: host.send, effects }, { keepReceipt: true });
@@ -3285,11 +3626,11 @@ describe('home.discover share link', () => {
           await click(view.root, 'Check again');
           expect(text(el(view.root, '.disc-panel > [role="status"]:not(.disc-installed)'))).toBe(UNKNOWN_INSTALL);
           expect(button(view.root, 'Install and share')).toBe(undefined);
-          // The share-link Check again finds the exact receipt.
+          // The link page reads the Library after the host status reply, and finds the exact receipt.
           await earlyRead();
           await click(view.root, 'Discover');
           await click(view.root, 'Check link');
-          await click(view.root, 'Check again');
+          await until(() => !!button(panel(view.root), 'Open'));
           await click(view.root, 'Discover');
           await openTile(view.root, 'same');
         }
@@ -3594,6 +3935,131 @@ describe('home.discover share link', () => {
       expect(linkHost.calls.length).toBe(reads);
     } finally { inspect.resolve({ ok: false }); linkView.close(); }
   });
+  for (const live of [true, false]) {
+    it(live ? 'after the page deadline a live share-link download keeps its card'
+      : 'a share-link install that the Library holds shows Open with no Check again', async () => {
+      const host = fakeHost({ heard: [peerApp] }, {
+        'dweb/base/inspect-address': () => ({ ok: true, summary }),
+        'dweb/base/install-address': () => {
+          if (!live) host.state.library = [{ id: 'app-late', dweb: { uri: target.uri, hash: target.hash, publisher: target.publisher } }];
+          throw Object.assign(new Error('late'), { outcomeKnown: false });
+        },
+        'dweb/base/install-status': () => ({ ok: true, attempt: live ? liveAttempt : null }),
+      });
+      const view = mount({ send: host.send });
+      try {
+        await settle();
+        await click(view.root, 'Paste link');
+        enterLink(view.root, address);
+        await click(view.root, 'Check link');
+        await click(view.root, 'Install and share');
+        if (live) {
+          await until(() => !!panel(view.root).querySelector('[role="progressbar"]'));
+          expect(button(panel(view.root), 'Cancel')?.disabled).toBe(false);
+          expect(text(panel(view.root))).toContain(KEEPS_GOING);
+          expect(button(view.root, 'Check again')).toBe(undefined);
+          expect(text(panel(view.root)).includes('peerd is not sure')).toBe(false);
+          const status = host.calls.find(call => call.type === 'dweb/base/install-status');
+          expect([status?.address, status?.kind]).toEqual([address, 'address']);
+        } else {
+          await until(() => !!button(panel(view.root), 'Open'));
+          expect(button(view.root, 'Check again')).toBe(undefined);
+          expect(sessionStorage.getItem(KEY)).toBe(null);
+        }
+        expect(host.count('dweb/base/install-address')).toBe(1);
+      } finally { view.close(); sessionStorage.removeItem(KEY); }
+    });
+  }
+
+  it('a status reply during the send still gets its Library read at the page deadline', async () => {
+    const install = deferred();
+    const host = fakeHost({ heard: [peerApp] }, {
+      'dweb/base/inspect-address': () => ({ ok: true, summary }),
+      'dweb/base/install-address': () => install.promise,
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await click(view.root, 'Paste link');
+      enterLink(view.root, address);
+      await click(view.root, 'Check link');
+      await click(view.root, 'Install and share');
+      // The host has no attempt yet, and the page reads no Library while its send runs.
+      await until(() => host.count('dweb/base/install-status') > 0);
+      await settle();
+      host.state.library = [{ id: 'app-late', dweb: { uri: target.uri, hash: target.hash, publisher: target.publisher } }];
+      install.reject(Object.assign(new Error('late'), { outcomeKnown: false }));
+      await until(() => {
+        expect(text(panel(view.root)).includes('peerd is not sure')).toBe(false);
+        return !!button(panel(view.root), 'Open');
+      });
+      expect(button(view.root, 'Check again')).toBe(undefined);
+      expect(sessionStorage.getItem(KEY)).toBe(null);
+      expect(host.count('dweb/base/install-address')).toBe(1);
+    } finally { view.close(); sessionStorage.removeItem(KEY); }
+  });
+
+  it('a share-link Cancel while the page still waits for its install keeps the receipt until that reply', async () => {
+    /** @type {unknown} */ let attempt = liveAttempt;
+    const reads = holdReads();
+    const install = deferred();
+    const host = fakeHost({ heard: [peerApp] }, {
+      'dweb/base/inspect-address': () => ({ ok: true, summary }),
+      'dweb/base/install-address': () => install.promise,
+      'dweb/base/install-status': () => ({ ok: true, attempt }),
+      'dweb/base/cancel-install': (message) => ({ ok: true, id: message.attemptId, phase: 'cancelling' }),
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await click(view.root, 'Paste link');
+      enterLink(view.root, address);
+      await click(view.root, 'Check link');
+      await click(view.root, 'Install and share');
+      await until(() => !!button(panel(view.root), 'Cancel'));
+      await click(panel(view.root), 'Cancel');
+      attempt = null;
+      await reads.step();
+      expect(sessionStorage.getItem(KEY)).toBe(address);
+      expect(text(panel(view.root)).includes('Installation cancelled.')).toBe(false);
+      install.resolve({ ok: false, code: 'install-cancelled', outcomeKnown: true });
+      await until(() => text(panel(view.root)).includes('Installation cancelled.'));
+      expect(sessionStorage.getItem(KEY)).toBe(null);
+    } finally { install.resolve({ ok: false }); reads.release(); await settle(); view.close(); sessionStorage.removeItem(KEY); }
+  });
+
+  it('a Cancel after the page deadline of a share-link install ends in Installation cancelled', async () => {
+    /** @type {unknown} */ let attempt = liveAttempt;
+    const reads = holdReads();
+    const host = fakeHost({ heard: [peerApp] }, {
+      'dweb/base/inspect-address': () => ({ ok: true, summary }),
+      'dweb/base/install-address': () => { throw Object.assign(new Error('late'), { outcomeKnown: false }); },
+      'dweb/base/install-status': () => ({ ok: true, attempt }),
+      'dweb/base/cancel-install': (message) => {
+        attempt = { ...liveAttempt, phase: 'cancelling', cancellable: false };
+        return { ok: true, id: message.attemptId, phase: 'cancelling' };
+      },
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      await click(view.root, 'Paste link');
+      enterLink(view.root, address);
+      await click(view.root, 'Check link');
+      await click(view.root, 'Install and share');
+      await until(() => !!button(panel(view.root), 'Cancel'));
+      await click(panel(view.root), 'Cancel');
+      attempt = null;
+      await reads.step();
+      await until(() => text(panel(view.root)).includes('Installation cancelled.'));
+      expect(text(panel(view.root)).includes('peerd is not sure')).toBe(false);
+      expect(button(view.root, 'Check again')).toBe(undefined);
+      expect(button(view.root, 'Try again')).toBeTruthy();
+      expect(sessionStorage.getItem(KEY)).toBe(null);
+      expect(host.count('dweb/base/install-address')).toBe(1);
+    } finally { reads.release(); view.close(); sessionStorage.removeItem(KEY); }
+  });
+
 });
 
 describe('home.discover makers', () => {
