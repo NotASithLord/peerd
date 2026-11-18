@@ -82,3 +82,22 @@ test('progress snapshots omit arbitrary payloads and stop changing after cancell
   expect(owner.status('address')?.progress.phase).toBe('chunk');
   release(); expect((await result).name).toBe('AbortError');
 });
+
+test('byte progress keeps bounded counts and rejects regressions', async () => {
+  const owner = createImmutableInstallOwner(); let progress: (value: unknown) => void = () => {}; let release!: () => void;
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  const result = owner.run('bytes', null, async current => { progress = current.progress; await wait; current.beginCommit(); }).catch(error => error);
+  await Promise.resolve();
+  progress({ phase: 'bytes', done: 0, total: 100 });
+  expect(owner.status('bytes')?.progress).toEqual({ phase: 'bytes', done: 0, total: 100 });
+  progress({ phase: 'bytes', done: 50, total: 100, path: 'private file', segment: { payload: 'peer text' } });
+  const accepted = { phase: 'bytes', done: 50, total: 100 };
+  for (const counts of [{ done: 49, total: 100 }, { done: 51, total: 101 }, { done: -1, total: 100 },
+    { done: 101, total: 100 }, { done: 1.5, total: 100 }, { done: NaN, total: 100 }, { done: 50, total: Infinity }]) {
+    progress({ phase: 'bytes', ...counts }); expect(owner.status('bytes')?.progress).toEqual(accepted);
+  }
+  const attempt = owner.status('bytes')!; owner.cancel('bytes', attempt.id);
+  progress({ phase: 'bytes', done: 100, total: 100 });
+  expect(owner.status('bytes')?.progress).toEqual(accepted);
+  release(); expect((await result).name).toBe('AbortError');
+});

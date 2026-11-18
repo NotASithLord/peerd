@@ -242,6 +242,14 @@ export const DiscoverSection = (initialVnode) => {
         records = rows;
         installedByUri = byUri;
         installedByDwappId = byId;
+        if (linkPending && !linkBusy) {
+          const pending = linkPending;
+          const match = rows.find(app => app.dweb?.uri === pending.uri && app.dweb?.hash === pending.hash
+            && app.dweb?.publisher === pending.publisher);
+          if (match && typeof match.id === 'string') {
+            linkPreview ??= { ...pending, name: null }; linkAppId = match.id; linkFresh = true; forgetPending();
+          }
+        }
         // why only a read that started later: an older read can omit an
         // install or list the version an update replaced.
         for (const [id, commit] of committed) if (started > commit.read) committed.delete(id);
@@ -1403,7 +1411,7 @@ export const DiscoverSection = (initialVnode) => {
         action: pasteButton(false),
       }),
     ]),
-    noteBox({ icon: 'lock', text: 'Apps run in their own tab and cannot reach the internet by themselves. You can remove an app from your Library at any time.' }),
+    noteBox({ icon: 'lock', text: 'Apps run in their own browser tab. You can remove an app from your Library at any time.' }),
   ]);
 
   // why one key for every root while the network is on: a poll can swap the
@@ -1641,9 +1649,9 @@ export const DiscoverSection = (initialVnode) => {
         })
           : installPanel({
             state, name, fresh: fresh.has(f.id), updated: updatedNow.has(f.id), changed: changed === true, action: effect,
-            transfer: state === 'installing' && discoveryAddress(app) ? m(InstallTransfer, {
-              key: `${f.id}:${f.state}`, send: attrs.send, address: discoveryAddress(app),
-              kind: f.state === 'updating' ? 'update' : 'install', ...(f.state === 'updating' && localId ? { appId: localId } : {}),
+            transfer: ['installing', 'unknown'].includes(state) && discoveryAddress(app) ? m(InstallTransfer, {
+              key: `${f.id}:${effect}`, send: attrs.send, address: discoveryAddress(app),
+              kind: effect === 'update' ? 'update' : 'install', ...(effect === 'update' && localId ? { appId: localId } : {}),
             }) : null,
             message: state === 'installing' ? `You can leave this page. The ${effect} keeps going.` : null,
             failure: failure ? { action, ...failure } : null,
@@ -1734,7 +1742,7 @@ export const DiscoverSection = (initialVnode) => {
       }),
       state === 'cant-run' ? cantRunPanel() : installPanel({
         state: state === 'conflict' ? 'review' : state, name, fresh: linkFresh, changed: changed === true, action: held?.action ?? 'install',
-        transfer: state === 'installing' && linkBusy === 'install' ? m(InstallTransfer, {
+        transfer: (state === 'installing' && linkBusy === 'install' || state === 'unknown' && linkPending) ? m(InstallTransfer, {
           key: target.address, send: attrs.send, address: target.address, kind: 'address',
         }) : null,
         message: state === 'installing' ? `You can leave this page. The ${held?.action ?? 'install'} keeps going.` : null,

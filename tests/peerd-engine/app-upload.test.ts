@@ -2,6 +2,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   MAX_UPLOAD_ZIP_BYTES, prepareAppUpload, readUploadFolder, readUploadZip, stageAppUpload,
 } from '../../extension/peerd-engine/app-upload.js';
+import { MAX_FILE_TREE_FILES, MAX_FILE_TREE_BYTES } from '../../extension/peerd-engine/app-file-tree-upload.js';
 import { MAX_APP_FILES, MAX_APP_TOTAL_BYTES } from '../../extension/peerd-engine/app-assets.js';
 import { readZipEntry, readZipIndex } from '../../extension/peerd-runtime/doc/zip.js';
 import { makeZip } from '../peerd-runtime/doc/fixtures.ts';
@@ -136,15 +137,15 @@ describe('readUploadFolder', () => {
     };
     const collision = await readUploadFolder([counted('g/index.html'), counted('g/Index.html')]);
     expect(codes(collision.problems)).toEqual(['case-collision']);
-    const many = await readUploadFolder(Array.from({ length: MAX_APP_FILES + 1 }, (_, index) => counted(`g/f${index}.js`)));
+    const many = await readUploadFolder(Array.from({ length: MAX_FILE_TREE_FILES + 1 }, (_, index) => counted(`g/f${index}.js`)));
     expect(codes(many.problems)).toEqual(['too-many-files']);
-    expect(many.fileCount).toBe(MAX_APP_FILES + 1);
+    expect(many.fileCount).toBe(MAX_FILE_TREE_FILES + 1);
     expect(reads).toBe(0);
   });
 
   test('refuses a folder over the size cap from the declared sizes', async () => {
     const big = pickFile('g/big.data', 'x');
-    Object.defineProperty(big, 'size', { value: MAX_APP_TOTAL_BYTES + 1 });
+    Object.defineProperty(big, 'size', { value: MAX_FILE_TREE_BYTES + 1 });
     big.arrayBuffer = async () => { throw new Error('must not read'); };
     const prepared = await readUploadFolder([pickFile('g/index.html', PAGE), big]);
     expect(codes(prepared.problems)).toEqual(['too-large']);

@@ -20,6 +20,57 @@ const section = (start: string, end: string, text = source) => {
   return text.slice(from, to);
 };
 
+test('file tree publication retains the signed publisher and rejects a changed storage binding', async () => {
+  const identity = await generateIdentity();
+  const payload = new Uint8Array(readFileSync(new URL('../../extension/shared/bundle/chunk.js', import.meta.url)));
+  const built = await buildManifest({ payload, type: 'app', identity });
+  const tree = { hash: built.hash, uri: formatPeerdUri({ did: identity.did, hash: built.hash }),
+    storageKey: crypto.randomUUID(), manifest: built.manifest, index: { entry: 'chunk.js', files: [{ path: 'chunk.js', size: payload.length }] } };
+  const announced: string[] = [], owned: string[] = [];
+  const publish = new Function('swCall', 'publishAppSnapshot', 'fileTreeDescriptor', 'trackServedHash',
+    section('const publishLocalApp =', '/** @param {any} h @param {{release?') + '\nreturn publishLocalApp;')(
+    () => { throw new Error('A file tree cannot use the legacy snapshot route'); }, () => {},
+    (value: typeof tree) => ({ totalBytes: value.index.files.reduce((sum, file) => sum + file.size, 0) }),
+    (owner: string, hash: string) => { owned.push(`${owner}:${hash}`); return true; });
+  const host = { base: { loadFileTree: async () => tree,
+    announceFileTree: async (hash: string) => { announced.push(hash); } } };
+  const message = { appId: 'app-tree', entry: tree.index.entry,
+    fileTree: { hash: tree.hash, storageKey: tree.storageKey } };
+  expect(await publish(host, message, 'owner')).toMatchObject({ hash: tree.hash, uri: tree.uri,
+    publisher: identity.did, ownershipAdded: true, size: payload.length });
+  expect(announced).toEqual([tree.hash]);
+  expect(owned).toEqual([`owner:${tree.hash}`]);
+  await expect(publish(host, { ...message, fileTree: { ...message.fileTree, storageKey: crypto.randomUUID() } }, 'owner')).rejects.toThrow('binding changed');
+  expect(announced).toHaveLength(1);
+});
+
+test('recipient tree reshare does not mint or roll back another publisher card', async () => {
+  const msg = { fileTree: {}, sourceDweb: { publisher: 'original', hash: 'root', uri: 'peerd://original/root', dwapp_id: 'stream', seq: 4 } };
+  const boundary = new Function('msg', 'h', 'slug', 'publishedAppHead',
+    section('let seedOnly =', '          const publish = () =>') + '\nreturn { announce, seedOnly: () => seedOnly };')(
+    msg, { base: { did: 'recipient', publishMeta: () => { throw new Error('Cannot mint an original publisher card'); } } }, 'original', () => {});
+  expect(await boundary.announce({ publisher: 'original', hash: 'root', uri: msg.sourceDweb.uri }))
+    .toEqual({ dwapp_id: 'stream', seq: 4 });
+  expect(boundary.seedOnly()).toBe(true);
+  const released: string[] = [];
+  const rollback = new Function('unserveTrackedHash', 'h',
+    'return async state => {' + section('            if (state.seedOnly)', '            const { restored }') + '};')(
+    (_host: unknown, owner: string, hash: string) => { released.push(`${owner}:${hash}`); }, {});
+  expect(await rollback({ seedOnly: true, ownershipAdded: true, ownerId: 'share-owner', newHash: 'root' })).toEqual({ restored: true });
+  expect(released).toEqual(['share-owner:root']);
+});
+
+test('failed resharing releases newly acquired ownership even when the release hash is unchanged', () => {
+  const sharing = section("case 'dweb/base-host/share-app':", '// Unshare is idempotent');
+  const released: string[] = [];
+  const rollback = new Function('unserveTrackedHash', 'h', 'stableOwnerId', 'previousHash',
+    'return ({' + section('rollback: ({ hash, ownershipAdded }) => {', '          });', sharing) + '}).rollback;')(
+    (_host: unknown, owner: string, hash: string) => { released.push(`${owner}:${hash}`); }, {}, 'owner', 'same-root');
+  rollback({ hash: 'same-root', ownershipAdded: true });
+  rollback({ hash: 'same-root', ownershipAdded: false });
+  expect(released).toEqual(['owner:same-root']);
+});
+
 test('room startup cannot open a membership after consent generation rotates', async () => {
   let finishStart!: (value: any) => void;
   let entered!: () => void;
@@ -108,14 +159,14 @@ test('retired reseed compensates through the network, not its host wrapper', asy
   const makeCompensate = new Function(
     'handle', 'h', 'latestReseedAttempts', 'msg', 'reseedAttemptId',
     'rollbackSharePublication', 'publicationOwnerId', 'slug', 'previousCard',
-    'rollbackPublishedBytes',
+    'rollbackPublishedBytes', 'seedOnly',
     'return ({' + section('compensate: async (published, announced) => {',
       '            commit: (published) => {') + '}).compensate;',
   );
-  const invoke = async (previousCard: any) => {
+  const invoke = async (previousCard: any, seedOnly = false) => {
     const compensate = makeCompensate(h, h, new Map([['app', 'attempt']]), msg,
       'attempt', rollbackSharePublication, 'attempt-owner', 'app-slug', previousCard,
-      (item: any) => { released.push(item.hash); });
+      (item: any) => { released.push(item.hash); }, seedOnly);
     await compensate({ hash: 'new-hash' }, { card: { seq: 7 } });
   };
   await invoke(null);
@@ -127,6 +178,10 @@ test('retired reseed compensates through the network, not its host wrapper', asy
   expect(published[0].head).toEqual(previous.head);
   expect(published[0].seq).toBeGreaterThan(7);
   expect(released).toEqual(['new-hash', 'new-hash']);
+  await invoke(null, true);
+  expect(removed).toHaveLength(1);
+  expect(published).toHaveLength(1);
+  expect(released).toEqual(['new-hash', 'new-hash', 'new-hash']);
 });
 
 test('worker adoption retains the existing mesh without arming a duplicate reseed', async () => {

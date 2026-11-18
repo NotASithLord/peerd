@@ -61,12 +61,16 @@ export const addUpload = async (state, send) => {
   state.error = null;
   try {
     let uploadId;
-    try { uploadId = await (await loadRules()).stageAppUpload(prepared.files); } catch {
+    try {
+      uploadId = prepared.format === 'file-tree-v1'
+        ? await (await loadRules()).stageFileTreeFolder(prepared)
+        : await (await loadRules()).stageAppUpload(prepared.files);
+    } catch {
       state.error = 'peerd could not save these files on this computer. Try again.';
       return null;
     }
     let reply;
-    try { reply = await send({ type: 'apps/import-files', uploadId, name: prepared.name }); } catch {
+    try { reply = await send({ type: 'apps/import-files', uploadId, name: prepared.name, ...(prepared.format ? { format: prepared.format } : {}) }); } catch {
       reply = { ok: false, outcomeKnown: false };
     }
     if (!reply?.ok) {
@@ -101,8 +105,8 @@ const technicalDetails = (prepared) => m('details.library-upload-details', [
     ] : null,
   ]),
   m('ul.library-upload-files', [
-    ...Object.keys(prepared.files).sort().map((path) => m('li', [
-      m('code', path), ' ', m('span.muted', sizeLabel(prepared.files[path].byteLength)),
+    ...(prepared.fileDetails ?? Object.keys(prepared.files).sort().map(path => ({ path, size: prepared.files[path].byteLength }))).map(({ path, size }) => m('li', [
+      m('code', path), ' ', m('span.muted', sizeLabel(size)),
     ])),
     ...prepared.excluded.map((path) => m('li.muted', [m('code', path), ' left out'])),
   ]),

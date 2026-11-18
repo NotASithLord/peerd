@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Peerd game</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px system-ui, sans-serif; }
+    body { max-width: 36rem; margin: 12vh auto; padding: 1.5rem; }
+    h1 { font-size: 1.5rem; font-weight: 500; }
+    p { line-height: 1.5; }
+    button { padding: .65rem 1rem; font: inherit; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1 id="title">Opening game</h1>
+  <p id="status" role="status">Checking the installed files.</p>
+  <button id="close" type="button">Close game</button>
+  <script type="module" src="game-tab.js"></script>
+</body>
+</html>

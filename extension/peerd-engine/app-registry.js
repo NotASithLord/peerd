@@ -59,6 +59,7 @@ const STORAGE_KEY = 'apps.v1';
  *   dweb?: AppDwebMeta,
  *   shared?: boolean,
  *   syncContentHash?: string,
+ *   fileTree?: {hash:string,storageKey:string,totalBytes:number,fileCount:number},
  * }} AppRecord
  */
 
@@ -104,6 +105,7 @@ export const createAppRegistry = (deps) => {
       favorite: !!opts.favorite,
       source: opts.source ?? 'local',
       thumbnail: opts.thumbnail ?? null,
+      ...(opts.fileTree ? { fileTree: { ...opts.fileTree } } : {}),
       // why optional: only dwapps carry it — installed peer-to-peer (uri/
       // publisher/hash from the verified manifest) or shipped as a signed
       // seed. Its presence is what unlocks the app-tab dweb bridge. Set at

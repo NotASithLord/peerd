@@ -302,7 +302,7 @@ export const installPanel = ({
           step.sub ? m('span.type-small.disc-step-sub', step.sub) : null,
         ]),
       ]))) : null,
-    state === 'installing' && transfer ? m.fragment({}, [transfer]) : null,
+    ['installing', 'unknown'].includes(state) && transfer ? m.fragment({}, [transfer]) : null,
     state === 'installing' && message ? m('p.type-small.disc-footnote', { role: 'status' }, message) : null,
     state === 'installed' || (secondary && otherVersion) ? m('p.type-body-sm.disc-installed', { tabindex: -1, role: 'status' }, otherVersion
       ? 'Another version of this app is in your Library. Open runs the version you have.'
@@ -371,8 +371,6 @@ const safetyRow = (name, text) => m('.disc-safety-row', [
   m('span.disc-safety-icon', icon(name, 16)),
   m('span.type-body-sm.disc-safety-text', text),
 ]);
-// why "by itself": the app sandbox CSP blocks every network request of its
-// own, but an app can still reach peers through peerd.
 // why `checked`: a share link was inspected ('link'), or the Library holds
 // this version ('installed', or 'updated' on the visit that updated it), so
 // peerd has checked every file. A heard card is
@@ -402,7 +400,7 @@ export const safetyLines = ({ maker, checked, action = 'install', mine = false, 
   return m('section.disc-section.disc-safety', { 'aria-labelledby': SAFETY_TITLE }, [
     m('h3.type-label-strong', { id: SAFETY_TITLE }, 'What to know'),
     safetyRow('key', mine ? own : [...made, ...check, ' Nobody reviewed it for safety.']),
-    safetyRow('lock', 'It runs in its own tab and cannot reach the internet by itself.'),
+    safetyRow('lock', 'It runs in its own browser tab.'),
     safetyRow('globe', 'You can remove it from your Library at any time.'),
   ]);
 };

@@ -56,6 +56,12 @@ export const makeDwebShare = ({
 
   const snapshotDescriptorUnlocked = async (/** @type {string} */ appId) => {
     const record = await appRegistry.get(appId);
+    if (record?.fileTree) {
+      const digest = await sha256Hex(JSON.stringify({ appId, name: record.name, fileTree: record.fileTree }));
+      return Object.freeze({ ok: true, appId, name: record.name, entryFile: record.entryFile,
+        fileKinds: {}, files: {}, fileCount: record.fileTree.fileCount, totalBytes: record.fileTree.totalBytes,
+        digest, fileTree: { ...record.fileTree } });
+    }
     const snapshot = repositories?.workingSnapshot
       ? await repositories.workingSnapshot({ kind: 'app', id: appId }) : null;
     return descriptorFor(appId, record, snapshot);
@@ -99,7 +105,7 @@ export const makeDwebShare = ({
     };
     let release = null;
     let releaseSnapshot = null;
-    if (repositories) {
+    if (repositories && !record.fileTree) {
       const beforeRelease = await repositories.statusApp(appId);
       const changes = Array.isArray(beforeRelease.changed) ? beforeRelease.changed : [];
       const changedPaths = changes.slice(0, 3)
@@ -184,6 +190,7 @@ export const makeDwebShare = ({
         fileKinds: record.fileKinds ?? {},
         slug: useSlug,
         previousHash: previousShareHash,
+        ...(record.fileTree ? { fileTree: { ...record.fileTree }, sourceDweb: { ...record.dweb } } : {}),
         ...(release ? { release, releaseSnapshot } : {}),
       });
     } catch {
@@ -255,7 +262,7 @@ export const makeDwebShare = ({
       uri: reply.uri, publisher: reply.publisher ?? null, hash: reply.hash,
       ...(Number.isInteger(reply.size) ? { size: reply.size } : {}),
       version_id: reply.hash, slug: reply.slug, dwapp_id: reply.dwapp_id,
-      seq: reply.seq, manifest_created: reply.created, local: true,
+      seq: reply.seq, manifest_created: reply.created, local: reply.local !== false,
       ...(release ? {
         git_oid: release.gitCommitOid,
         source_git_oid: release.gitCommitOid,

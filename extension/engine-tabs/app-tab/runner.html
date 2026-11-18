@@ -33,6 +33,300 @@
       if (typeof globalThis[name] === 'function') realmSealed = false;
     }
 
+    // why: the seal above clears THIS realm only. A nested browsing context
+    // (iframe, frame, object, embed, fencedframe) is a new realm where
+    // RTCPeerConnection is back. A connected <link> can open a connection
+    // that CSP does not cover (preconnect, prerender), in the same step that
+    // connects it, and the HTML preload scanner does the same from markup
+    // alone while the parser waits for a script. An App is one composed
+    // document that reads its own files from memory, so it needs neither.
+    // Two rules hold from here on:
+    //   1. No blocked element becomes the child of any node.
+    //   2. No markup that names a blocked element reaches an HTML parser,
+    //      except as text that the parser and the scanner both skip: the
+    //      text of an inline script or style in the composed document, and
+    //      markup that App code sets inside a raw-text element.
+    // A link that is never connected starts nothing, so no attribute change
+    // on it matters. App code shares this realm: every guard uses only the
+    // references saved here, and every patched property is pinned.
+    const { apply, defineProperty, getOwnPropertyDescriptor } = Reflect;
+    const asText = String;
+    const lowerCase = String.prototype.toLowerCase;
+    const getterOf = (proto, name) => getOwnPropertyDescriptor(proto, name).get;
+    const nodeTypeOf = getterOf(Node.prototype, 'nodeType');
+    const parentOf = getterOf(Node.prototype, 'parentNode');
+    const firstChildOf = getterOf(Node.prototype, 'firstChild');
+    const nextSiblingOf = getterOf(Node.prototype, 'nextSibling');
+    const ownerDocumentOf = getterOf(Node.prototype, 'ownerDocument');
+    const namespaceOf = getterOf(Element.prototype, 'namespaceURI');
+    const localNameOf = getterOf(Element.prototype, 'localName');
+    const shadowRootOf = getterOf(Element.prototype, 'shadowRoot');
+    const innerOf = getterOf(Element.prototype, 'innerHTML');
+    const setInner = getOwnPropertyDescriptor(Element.prototype, 'innerHTML').set;
+    const outerOf = getterOf(Element.prototype, 'outerHTML');
+    const contentOf = getterOf(HTMLTemplateElement.prototype, 'content');
+    const lengthOf = getterOf(NodeList.prototype, 'length');
+    const addedNodesOf = getterOf(MutationRecord.prototype, 'addedNodes');
+    const matchesSelector = Element.prototype.matches;
+    const removeElement = Element.prototype.remove;
+    const createElementNS = Document.prototype.createElementNS;
+    const createFragment = Document.prototype.createDocumentFragment;
+    const parseFromString = DOMParser.prototype.parseFromString;
+    const serializeToString = XMLSerializer.prototype.serializeToString;
+    const observeNode = MutationObserver.prototype.observe;
+    const nativeWrite = Document.prototype.write;
+    const testPattern = RegExp.prototype.test;
+    const queryAll = {
+      __proto__: null,
+      1: Element.prototype.querySelectorAll,
+      9: Document.prototype.querySelectorAll,
+      11: DocumentFragment.prototype.querySelectorAll,
+    };
+    const live = document;
+    const parser = new DOMParser();
+    const serializer = new XMLSerializer();
+    // Markup is repaired here: this document has no browsing context, so it
+    // loads nothing, connects nothing, and runs no App code.
+    const inert = apply(parseFromString, parser, ['', 'text/html']);
+    const XHTML = 'http://www.w3.org/1999/xhtml';
+    const BLOCKED = 'iframe,frame,frameset,object,embed,fencedframe,portal,link';
+    const REMOVED = {
+      __proto__: null, iframe: 1, frame: 1, frameset: 1, object: 1, embed: 1,
+      fencedframe: 1, portal: 1, link: 1, noscript: 1,
+    };
+    const TEXT_ONLY = {
+      __proto__: null, title: 1, textarea: 1, style: 1, script: 1, xmp: 1, noembed: 1, noframes: 1, plaintext: 1,
+    };
+    const REPAIRED = `${BLOCKED},noscript,template,title,textarea,style,script,xmp,noembed,noframes,plaintext`;
+    // A tag name is the literal text after "<", so markup with no match makes
+    // no blocked element in any parser state. The prefix covers XML names.
+    const pin = (pattern) => {
+      defineProperty(pattern, 'exec', { value: RegExp.prototype.exec });
+      return Object.freeze(pattern);
+    };
+    const NAMES = pin(/<(?:[^\s<>/"'=:]*:)?(?:iframe|frame|frameset|object|embed|fencedframe|portal|link)(?:[\s/>]|$)/i);
+    const DOCUMENT = pin(/<(?:!doctype|html|head|body)[\s/>]/i);
+
+    // Remove every blocked element under a node. True when the node itself
+    // is one: the caller then keeps it out.
+    const scrub = (node) => {
+      if (node === null || (typeof node !== 'object' && typeof node !== 'function')) return false;
+      let type;
+      try { type = apply(nodeTypeOf, node, []); } catch (_e) { return false; }
+      const query = queryAll[type];
+      if (!query) return false;
+      if (type === 1 && apply(matchesSelector, node, [BLOCKED])) return true;
+      if (!apply(firstChildOf, node, [])) return false;
+      const found = apply(query, node, [BLOCKED]);
+      for (let i = apply(lengthOf, found, []) - 1; i >= 0; i--) apply(removeElement, found[i], []);
+      return false;
+    };
+    const hasMarkup = (element) => {
+      for (let child = apply(firstChildOf, element, []); child; child = apply(nextSiblingOf, child, [])) {
+        if (apply(nodeTypeOf, child, []) !== 3) return true;
+      }
+      return false;
+    };
+    // Repair an inert tree, template contents included. Also removed:
+    // <noscript>, which this parse reads as markup and the live parser as
+    // text, and an SVG or MathML element named like a raw-text HTML element
+    // when it holds more than text, which the preload scanner reads as text
+    // and the parser as markup. Both would let the two disagree on what
+    // follows.
+    const repair = (root) => {
+      const found = apply(queryAll[apply(nodeTypeOf, root, [])], root, [REPAIRED]);
+      let changed = false;
+      for (let i = apply(lengthOf, found, []) - 1; i >= 0; i--) {
+        const name = apply(localNameOf, found[i], []);
+        const html = apply(namespaceOf, found[i], []) === XHTML;
+        if (html && name === 'template') changed = repair(apply(contentOf, found[i], [])) || changed;
+        else if (REMOVED[name] || (!html && hasMarkup(found[i]))) {
+          apply(removeElement, found[i], []);
+          changed = true;
+        }
+      }
+      return changed;
+    };
+    const fragmentPass = (context) => (text) => {
+      let holder;
+      try {
+        holder = apply(createElementNS, inert, [apply(namespaceOf, context, []), apply(localNameOf, context, [])]);
+      } catch (_e) { holder = apply(createElementNS, inert, [XHTML, 'div']); }
+      apply(setInner, holder, [text]);
+      const template = apply(localNameOf, holder, []) === 'template' && apply(namespaceOf, holder, []) === XHTML;
+      const changed = repair(template ? apply(contentOf, holder, []) : holder);
+      return { changed, text: apply(innerOf, holder, []) };
+    };
+    // DOMParser keeps the doctype, <html>, <head> and <body>.
+    const documentPass = (text) => {
+      const parsed = apply(parseFromString, parser, [text, 'text/html']);
+      const changed = repair(parsed);
+      let out = '';
+      for (let node = apply(firstChildOf, parsed, []); node; node = apply(nextSiblingOf, node, [])) {
+        out += apply(nodeTypeOf, node, []) === 1
+          ? apply(outerOf, node, [])
+          : apply(serializeToString, serializer, [node]);
+      }
+      return { changed, text: out };
+    };
+    // Parse, repair and serialise until the text is stable, so the live
+    // parser gets text that makes the tree that was checked. '' when the
+    // text does not become stable.
+    const settle = (text, pass) => {
+      for (let round = 0; round < 6; round++) {
+        const result = pass(text);
+        if (!result.changed && result.text === text) return text;
+        text = result.text;
+      }
+      return '';
+    };
+    // Markup for a parser that App code calls. App code picks the parse
+    // context and the parser state, so no blocked name may remain at all.
+    // A stream sink (document.write) is repaired on every call, which also
+    // makes each call complete: a tag cannot start in one call and end in
+    // the next.
+    const cleanMarkup = (value, pass, stream) => {
+      const text = asText(value);
+      if (!stream && !apply(testPattern, NAMES, [text])) return text;
+      const out = settle(text, pass);
+      return apply(testPattern, NAMES, [out]) ? '' : out;
+    };
+    // Markup that is parsed inside one element. In the live document a
+    // script, a style and the other raw-text elements take it all as text,
+    // so their text stays as it is.
+    const cleanInside = (value, context) => {
+      let textOnly = false;
+      try {
+        textOnly = apply(ownerDocumentOf, context, []) === live && apply(namespaceOf, context, []) === XHTML
+          && TEXT_ONLY[apply(localNameOf, context, [])] === 1;
+      } catch (_e) { /* not an element: the fragment pass uses a <div> */ }
+      return textOnly ? asText(value) : cleanMarkup(value, fragmentPass(context));
+    };
+
+    // Backstop for a nested browsing context that a guard missed: its script
+    // runs in a later task, and this callback runs first. It cannot help a
+    // link, whose connection has left by then. A closed shadow root that the
+    // parser made from markup is out of reach; rule 2 keeps it clean.
+    const follow = (node) => {
+      const type = apply(nodeTypeOf, node, []);
+      if (type !== 1 && type !== 11) return;
+      const inside = apply(queryAll[type], node, ['*']);
+      const count = apply(lengthOf, inside, []);
+      for (let i = type === 1 ? -1 : 0; i < count; i++) {
+        const root = apply(shadowRootOf, i < 0 ? node : inside[i], []);
+        if (root) { watch(root); scrub(root); follow(root); }
+      }
+    };
+    const observer = new MutationObserver((records) => {
+      for (let r = 0; r < records.length; r++) {
+        const added = apply(addedNodesOf, records[r], []);
+        for (let i = apply(lengthOf, added, []) - 1; i >= 0; i--) {
+          if (scrub(added[i])) apply(removeElement, added[i], []);
+          else follow(added[i]);
+        }
+      }
+    });
+    const watch = (root) => apply(observeNode, observer, [root, { __proto__: null, childList: true, subtree: true }]);
+
+    // Replace a method or a setter and pin it, so App code cannot put the
+    // native one back. An API that this browser does not have is skipped.
+    const patch = (target, name, wrap) => {
+      const found = target && getOwnPropertyDescriptor(target, name);
+      if (!found) return;
+      const pinned = found.set
+        ? { get: found.get, set: wrap(found.set), enumerable: found.enumerable, configurable: false }
+        : { value: wrap(found.value), enumerable: found.enumerable, writable: false, configurable: false };
+      if (!defineProperty(target, name, pinned)) realmSealed = false;
+    };
+
+    // Node sinks, from the DOM and HTML standards: every method and setter
+    // that gives a node a parent. A blocked node stays out; a blocked
+    // descendant is removed first.
+    const insertAt = (index) => (native) => function (...args) {
+      return scrub(args[index]) ? args[index] : apply(native, this, args);
+    };
+    const insertAll = (native) => function (...args) {
+      for (let i = 0; i < args.length; i++) if (scrub(args[i])) args[i] = apply(createFragment, live, []);
+      return apply(native, this, args);
+    };
+    for (const name of ['appendChild', 'insertBefore', 'replaceChild']) patch(Node.prototype, name, insertAt(0));
+    for (const proto of [Element.prototype, Document.prototype, DocumentFragment.prototype]) {
+      for (const name of ['append', 'prepend', 'replaceChildren']) patch(proto, name, insertAll);
+      patch(proto, 'moveBefore', insertAt(0));
+    }
+    for (const proto of [Element.prototype, CharacterData.prototype, DocumentType.prototype]) {
+      for (const name of ['before', 'after', 'replaceWith']) patch(proto, name, insertAll);
+    }
+    patch(Element.prototype, 'insertAdjacentElement', insertAt(1));
+    for (const name of ['insertNode', 'surroundContents']) patch(Range.prototype, name, insertAt(0));
+    patch(Document.prototype, 'body', insertAt(0));
+    for (const name of ['caption', 'tHead', 'tFoot']) patch(HTMLTableElement.prototype, name, insertAt(0));
+    patch(HTMLSelectElement.prototype, 'add', insertAt(0));
+    patch(HTMLOptionsCollection.prototype, 'add', insertAt(0));
+    patch(Element.prototype, 'attachShadow', (native) => function (...args) {
+      const root = apply(native, this, args);
+      watch(root);
+      return root;
+    });
+
+    // Markup sinks: every method and setter that gives text to a parser.
+    const markupSetter = (outside) => (native) => function (value) {
+      apply(native, this, [cleanInside(value === null ? '' : value, outside ? apply(parentOf, this, []) : this)]);
+    };
+    const markupMethod = (pass) => (native) => function (...args) {
+      if (args.length) args[0] = pass ? cleanMarkup(args[0], pass) : cleanInside(args[0], this);
+      return apply(native, this, args);
+    };
+    patch(Element.prototype, 'innerHTML', markupSetter(false));
+    patch(Element.prototype, 'outerHTML', markupSetter(true));
+    patch(ShadowRoot.prototype, 'innerHTML', markupSetter(false));
+    for (const proto of [Element.prototype, ShadowRoot.prototype]) {
+      for (const name of ['setHTMLUnsafe', 'setHTML']) patch(proto, name, markupMethod());
+    }
+    for (const name of ['parseHTMLUnsafe', 'parseHTML']) patch(Document, name, markupMethod(documentPass));
+    patch(Range.prototype, 'createContextualFragment', markupMethod(fragmentPass()));
+    patch(Element.prototype, 'insertAdjacentHTML', (native) => function (where, value) {
+      const position = asText(where);
+      const place = apply(lowerCase, position, []);
+      const context = place === 'beforebegin' || place === 'afterend' ? apply(parentOf, this, []) : this;
+      return apply(native, this, [position, cleanInside(value, context)]);
+    });
+    patch(Document.prototype, 'execCommand', (native) => function (command, showUI, value) {
+      const name = asText(command);
+      const markup = apply(lowerCase, name, []) === 'inserthtml';
+      const text = markup && value !== undefined ? cleanMarkup(value, fragmentPass()) : value;
+      return apply(native, this, [name, showUI, text]);
+    });
+    for (const name of ['write', 'writeln']) {
+      patch(Document.prototype, name, (native) => function (...parts) {
+        let text = '';
+        for (let i = 0; i < parts.length; i++) text += asText(parts[i]);
+        const pass = apply(testPattern, DOCUMENT, [text]) ? documentPass : fragmentPass();
+        const result = apply(native, this, [cleanMarkup(text, pass, true)]);
+        watch(live);
+        return result;
+      });
+    }
+    patch(Document.prototype, 'open', (native) => function (...args) {
+      const result = apply(native, this, args);
+      watch(live);
+      return result;
+    });
+    // An XML parser can make a blocked element from a prefix or an entity
+    // that the name pattern does not see, so its result tree is scrubbed.
+    patch(DOMParser.prototype, 'parseFromString', (native) => function (...args) {
+      const parsed = apply(native, this, args);
+      scrub(parsed);
+      return parsed;
+    });
+    // The runner's own write of the composed App document. Unchanged when it
+    // names no blocked element. If not, it is repaired as a whole document,
+    // which keeps the doctype and the text of inline scripts and styles.
+    const writeApp = (html) => {
+      watch(live);
+      apply(nativeWrite, live, [apply(testPattern, NAMES, [html]) ? settle(html, documentPass) : html]);
+    };
+
     let initialized = false;
     window.addEventListener('message', (e) => {
       if (initialized || e.source !== window.parent) return;
@@ -262,7 +556,7 @@
       // why: App scripts intentionally execute inside this opaque-origin
       // sandbox, without extension APIs; only the parent supplies this document.
       // codeql[js/eval-like-call]
-      document.write(html);
+      writeApp(html);
       document.close();
       delete window.__peerdAppFiles;
 
@@ -365,11 +659,6 @@
           const raw = node.getAttribute('src');
           const url = raw && assetsApi.url(raw);
           if (url) node.setAttribute('src', url);
-        }
-        for (const node of document.querySelectorAll('link[rel~="icon"][href]')) {
-          const raw = node.getAttribute('href');
-          const url = raw && assetsApi.url(raw);
-          if (url) node.setAttribute('href', url);
         }
       } catch (_e) { /* the explicit assets API remains available */ }
 

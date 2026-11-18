@@ -17,6 +17,11 @@
 
 export const APP_DWEB_GENERATION_PREFIX = 'app.dweb-generation.';
 
+/** @typedef {{path:string,size:number,segments:Array<{hash:string,offset:number,size:number}>}} FileTreeFile */
+/** @typedef {{v:1,entry:string,files:FileTreeFile[]}} FileTreeIndex */
+/** @typedef {{uri:string,hash:string,storageKey:string,manifest:Record<string,unknown>,index:FileTreeIndex,
+ * directory:FileSystemDirectoryHandle,read:(path:string,offset:number,length:number,options?:{signal?:AbortSignal})=>Promise<Uint8Array>}} ReadOnlyFileTree */
+
 /**
  * @typedef {Object} DwebStatus
  * @property {boolean} available  false in the store package / stub
@@ -58,6 +63,9 @@ export const APP_DWEB_GENERATION_PREFIX = 'app.dweb-generation.';
  *   attach the dwapp postMessage bridge to a hosted app frame (app-tab)
  * @property {string=} seedAppKey
  * @property {string[]=} defaultSignaling
+ * @property {unknown} [createFileTreeContent]
+ * @property {string=} FILE_TREE_FORMAT
+ * @property {((hash:string)=>Promise<ReadOnlyFileTree>)=} loadFileTreeRecord
  */
 
 /** Thrown by the stub when a code path calls the dweb in a build (or

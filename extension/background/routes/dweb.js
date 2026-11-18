@@ -374,7 +374,7 @@ export const makeDwebRoutes = (deps) => {
     // signed representation crosses runtime messaging; the isolated artifact codec
     // checks its commitments and decodes files before storage. Legacy callbacks without
     // a seed still accept file envelopes. appClient enforces local import limits.
-    'dweb/app-install': storageRoute(async ({ appId, name, files, entryFile, fileKinds, dweb, seedBundle, publicationGeneration }) => {
+    'dweb/app-install': storageRoute(async ({ appId, name, files, entryFile, fileKinds, dweb, tree, seedBundle, publicationGeneration }) => {
       const isCurrent = () => publicationActive(publicationGeneration);
       if (typeof appId !== 'string' || !appId.startsWith('app-')) {
         return refuse('appId-required');
@@ -382,6 +382,19 @@ export const makeDwebRoutes = (deps) => {
       let record = null;
       let createdAppId = null;
       try {
+        if (tree) {
+          if (!isCurrent()) return custodyChanged();
+          const admitted = await admitTrackedVersion(dweb);
+          if (!admitted.ok) return refuse(admitted.error);
+          record = await appClient.createFileTree({ appId, name, tree, dweb, source: 'dweb' });
+          createdAppId = record.id;
+          if (!isCurrent()) throw new Error('dweb-custody-changed');
+          record = await appRegistry.update(record.id, { shared: true, dweb: { seed_hash: dweb.hash } });
+          if (!record || !isCurrent()) throw new Error('dweb-custody-changed');
+          const auditWarning = await auditCommittedChange({ type: 'dweb_app_installed',
+            details: { appId: record.id, uri: dweb?.uri, publisher: dweb?.publisher } });
+          return { ok: true, app: record, ...(auditWarning ? { warning: auditWarning } : {}) };
+        }
         if (seedBundle) {
           ({ files, entryFile, fileKinds } = await decodeAppSeedHandoff(seedBundle, dweb));
         }
@@ -455,6 +468,7 @@ export const makeDwebRoutes = (deps) => {
       return await appQuiescence.runUnlocked(appId, () => appClient.withWriteLock(appId, async () => {
         const rec = await appRegistry.get(appId);
         if (!rec) return refuse('app-not-found');
+        if (rec.fileTree) return refuse('file-tree-updates-unavailable');
         if (typeof entryFile !== 'string') return refuse('entryFile-required');
         if (rec.dweb?.publisher && dweb?.publisher !== rec.dweb.publisher) {
           return refuse('publisher-changed');

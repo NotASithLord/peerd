@@ -23,7 +23,7 @@ export const createRoutedContentReader=({store,providers,budget=contentServiceBu
       try{
         if(!/^[0-9a-f]{64}$/.test(request.hash)||!retrievalReplyLimit(request.kind))throw new RetrievalProtocolError();
         let bytes=null;
-        if(request.kind==='chunk')bytes=store.getChunk(request.hash)??null;
+        if(request.kind==='chunk')bytes=await (store.readChunk??store.getChunk)(request.hash)??null;
         else if(request.kind==='manifest'){
           const manifest=store.getManifest(request.hash);
           if(manifest){assertBundleWithinLimits(manifest);bytes=utf8(JSON.stringify(manifest));}

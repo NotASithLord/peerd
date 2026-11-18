@@ -192,7 +192,7 @@ describe('App OPFS lifecycle posture', () => {
     expect(body.indexOf('repositories?.destroyApp?.(appId)')).toBeGreaterThan(-1);
     expect(body.indexOf('guardedOpfsForApp(appId).nuke()'))
       .toBeGreaterThan(body.indexOf('repositories?.destroyApp?.(appId)'));
-    expect(body.indexOf('registry.delete(appId)'))
+    expect(body.lastIndexOf('registry.delete(appId)'))
       .toBeGreaterThan(body.indexOf('guardedOpfsForApp(appId).nuke()'));
   });
 

@@ -35,6 +35,12 @@ import { AppRoomAuthorityChangedError, createAppRoomAuthority } from '/offscreen
 import { requireAppRoomSnapshot } from '/offscreen/app-room-snapshot.js';
 import { createDwebReseedNotifier } from '/offscreen/dweb-reseed-notifier.js';
 import { runDwebReseedPublication } from '/offscreen/dweb-reseed-publication.js';
+import { readFileTreeUpload } from '/peerd-engine/app-upload.js';
+
+/** @param {{hash:string,uri:string,storageKey:string,manifest:{publisher:string},index:{entry:string,files:Array<{size:number}>}}} tree */
+const fileTreeDescriptor = tree => ({ hash: tree.hash, uri: tree.uri, storageKey: tree.storageKey,
+  publisher: tree.manifest.publisher, entry: tree.index.entry, fileCount: tree.index.files.length,
+  totalBytes: tree.index.files.reduce((total, file) => total + file.size, 0) });
 
 /** @param {...any} a */
 const log = (...a) => console.log('[offscreen/dweb]', ...a);
@@ -135,8 +141,18 @@ const servedHashesForApp = (appId) => [...new Set(
 )];
 
 /** @param {any} h @param {{ appId: string, name: string, entry: string,
- *   created?: number, expectedHash?: string, release?: any, releaseSnapshot?: any }} msg @param {string} ownerId */
+ *   created?: number, expectedHash?: string, release?: any, releaseSnapshot?: any,
+ *   fileTree?:{hash:string,storageKey:string} }} msg @param {string} ownerId */
 const publishLocalApp = async (h, msg, ownerId) => {
+  if (msg.fileTree) {
+    const tree = await h.base.loadFileTree(msg.fileTree.hash);
+    if (tree.storageKey !== msg.fileTree.storageKey || tree.index.entry !== msg.entry) throw new Error('Game release binding changed.');
+    await h.base.announceFileTree(tree.hash);
+    return { uri: tree.uri, hash: tree.hash, publisher: tree.manifest.publisher,
+      created: tree.manifest.created, size: fileTreeDescriptor(tree).totalBytes,
+      runtime: tree.manifest.meta?.runtime, includesWasm: tree.index.files.some((/** @type {{path:string}} */ file) => /\.wasm$/i.test(file.path)),
+      ownershipAdded: trackServedHash(ownerId, tree.hash) };
+  }
   const supplied = msg.releaseSnapshot;
   if (supplied && (
     !msg.release
@@ -950,6 +966,14 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
   (async () => {
     try {
       switch (msg.type) {
+        case 'dweb/base-host/stage-file-tree': {
+          if (!handle) throw new Error('The peer network is not running.');
+          const source = await readFileTreeUpload(msg.uploadId);
+          const tree = await handle.base.stageFileTree({ ...source,
+            runtime: { schema: 1, target: 'browser-app', requires: ['wasm-core'] } });
+          sendResponse({ ok: true, tree: fileTreeDescriptor(tree) });
+          return;
+        }
         // These host controls never wait on the operation they need to cancel.
         case 'dweb/base-host/install-status': {
           const target = immutableAppRoot(msg.address);
@@ -1146,7 +1170,6 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
           // dwapp_id → publishMeta amends the existing card (higher seq) instead of
           // forking a new app. That preserves the version identity.
           const slug = slugify(msg.slug || msg.name);
-          const previousHash = typeof msg.previousHash === 'string' ? msg.previousHash : null;
           const previousCard = h.base.heardDwapps().find((/** @type {any} */ row) => (
             row.publisher === h.base.did && row.slug === slug
           )) ?? null;
@@ -1158,12 +1181,21 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
               unserveTrackedHash(h, publicationOwnerId, published.hash);
             }
           };
-          const announce = (/** @type {any} */ published) => h.base.publishMeta({
+          let seedOnly = false;
+          const announce = async (/** @type {any} */ published) => {
+            seedOnly = !!msg.fileTree && published.publisher !== h.base.did;
+            if (seedOnly) {
+              if (msg.sourceDweb?.publisher !== published.publisher || msg.sourceDweb?.hash !== published.hash
+                || msg.sourceDweb?.uri !== published.uri) throw new Error('Game publisher binding changed.');
+              return { dwapp_id: msg.sourceDweb.dwapp_id, seq: msg.sourceDweb.seq };
+            }
+            return h.base.publishMeta({
               slug, name: msg.name, description: msg.description ?? '',
               head: publishedAppHead(published, msg.release),
               // why: A reseed reuses its signed version identity.
               ...(Number.isInteger(msg.seq) ? { seq: msg.seq } : {}),
             });
+          };
           const publish = () => publishLocalApp(h, msg, publicationOwnerId);
           const transaction = reseed ? await runDwebReseedPublication({
             current: reseedCurrent,
@@ -1174,7 +1206,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
               const newerAttemptOwnsThisHost = handle === h
                 && latestReseedAttempts.get(msg.appId) !== reseedAttemptId;
               let metadataFailure = null;
-              if (!newerAttemptOwnsThisHost) {
+              if (!newerAttemptOwnsThisHost && !seedOnly) {
                 try {
                   await rollbackSharePublication({
                     base: h.base,
@@ -1220,7 +1252,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
             publish,
             announce,
             rollback: ({ hash, ownershipAdded }) => {
-              if (ownershipAdded && hash !== previousHash) {
+              if (ownershipAdded) {
                 unserveTrackedHash(h, stableOwnerId, hash);
               }
             },
@@ -1236,6 +1268,7 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
               name: msg.name,
               newHash: hash,
               ownershipAdded: published.ownershipAdded,
+              seedOnly,
               previous: previousCard ? {
                 name: previousCard.name,
                 description: previousCard.description ?? '',
@@ -1244,11 +1277,12 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
               } : null,
             });
           }
-          log(`shared app "${msg.name}" (${slug}) → ${dwapp_id.slice(0, 12)}… seq ${card.seq}`);
+          const seq = card?.seq ?? announced.seq;
+          log(`shared app "${msg.name}" (${slug}) → ${String(dwapp_id ?? '').slice(0, 12)}… seq ${seq}`);
           sendResponse({
-            ok: true, uri, hash, size, created, dwapp_id, slug,
-            seq: card.seq, publisher: h.base.did, transactionId,
-            propagated: propagated !== false,
+            ok: true, uri, hash, size, created, dwapp_id, slug: seedOnly ? msg.sourceDweb.slug : slug,
+            seq, publisher: published.publisher ?? h.base.did, transactionId, local: !seedOnly,
+            ...(!seedOnly ? { propagated: propagated !== false } : {}),
           });
           return;
         }
@@ -1312,6 +1346,10 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
             return;
           }
           const result = await shareRollbacks.rollback(msg.transactionId, async (state) => {
+            if (state.seedOnly) {
+              if (state.ownershipAdded) unserveTrackedHash(h, state.ownerId, state.newHash);
+              return { restored: true };
+            }
             const { restored } = await rollbackSharePublication({
               base: h.base, state, failedSeq: msg.failedSeq,
               release: (ownerId, hash) => unserveTrackedHash(h, ownerId, hash),
@@ -1359,22 +1397,28 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
             if (publisherError) {
               return { ok: false, error: publisherError, outcomeKind: 'pre-effect-failure' };
             }
+            const tree = manifest.meta?.format === 'file-tree-v1'
+              ? await h.base.fetchFileTree({ uri: msg.uri, signal: control.signal, onProgress: control.progress,
+                expectedRuntime: { value: identity.runtime } }) : null;
             const client = /** @type {any} */ (await loadDweb());
             control.progress({ phase: 'verifying' });
-            const prepared = await client.prepareAppBundle({ uri: msg.uri, manifest, payload, name: msg.name,
+            const prepared = tree ? null : await client.prepareAppBundle({ uri: msg.uri, manifest, payload, name: msg.name,
               dwappId: identity?.dwappId ?? null, slug: identity?.slug ?? null, seq: identity?.seq ?? null });
             const appId = mintAppId();
             const ownerId = appContentOwner(appId, 'seed');
             control.beginCommit();
             const { announced: installed } = await runPublishTransaction({
               publish: async () => {
-                const hash = await h.base.seedApp({ manifest, payload });
+                const hash = tree ? (await h.base.announceFileTree(tree.hash)).hash : await h.base.seedApp({ manifest, payload });
                 return { hash, ownershipAdded: trackServedHash(ownerId, hash) };
               },
               announce: async () => {
                 const a = prepared;
                 const r = await swEffectCall('dweb/app-install', {
-                  appId, ...appSeedHandoff(a, manifest, payload),
+                  appId, ...(tree ? { name: msg.name, tree: fileTreeDescriptor(tree),
+                    dweb: { uri: tree.uri, hash: tree.hash, publisher: tree.manifest.publisher,
+                      version_id: tree.hash, dwapp_id: identity.dwappId, slug: identity.slug, seq: identity.seq } }
+                    : appSeedHandoff(a, manifest, payload)),
                   publicationGeneration: msg.publicationGeneration,
                 });
                 if (!r?.ok) throw publishFailureError(r, 'install failed');

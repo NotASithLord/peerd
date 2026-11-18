@@ -13,6 +13,10 @@ import {
 } from './app-assets.js';
 import { buildAppManifest, parseAppManifest } from './app-manifest.js';
 import { opfsHelpers } from './opfs.js';
+/** @param {PreparedUpload} prepared */
+export const stageFileTreeFolder = async prepared => (await import('./app-file-tree-upload.js')).stageFileTreeFolder(prepared);
+/** @param {string} uploadId */
+export const readFileTreeUpload = async uploadId => (await import('./app-file-tree-upload.js')).readFileTreeUpload(uploadId);
 
 /** @typedef {{ code: string, message: string }} UploadIssue */
 /**
@@ -28,6 +32,9 @@ import { opfsHelpers } from './opfs.js';
  * @property {string[]} excluded paths left out of the App
  * @property {UploadIssue[]} problems each one stops the add
  * @property {UploadIssue[]} warnings each one says the game may not start
+ * @property {'file-tree-v1'} [format]
+ * @property {Array<{path:string,file:File}>} [sources]
+ * @property {Array<{path:string,size:number}>} [fileDetails]
  */
 /** @typedef {{ path: string, size: number, read: (limit: number) => Promise<Uint8Array> }} UploadSource */
 
@@ -256,6 +263,12 @@ const collectUpload = async (sources, fallbackName) => {
  */
 export const readUploadFolder = (picked) => {
   const list = Array.from(picked);
+  if (list.length > MAX_APP_FILES || list.reduce((total, file) => total + file.size, 0) > MAX_APP_TOTAL_BYTES) {
+    return import('./app-file-tree-upload.js').then(module => module.prepareFileTreeFolder(list))
+      .catch(error => refusal('Game', issue(typeof error?.code === 'string' ? error.code : 'unreadable',
+        error instanceof Error ? error.message : 'peerd could not read these files.'),
+      { fileCount: list.length, totalBytes: list.reduce((total, file) => total + file.size, 0) }));
+  }
   return collectUpload(list.map((file) => ({
     path: file.webkitRelativePath || file.name,
     size: file.size,

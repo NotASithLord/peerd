@@ -98,6 +98,7 @@ export {
 } from './content/bundle.js';
 export { createContentStore } from './content/store.js';
 export { createContentResponder, fetchBundle } from './content/transfer.js';
+export { FILE_TREE_FORMAT, FILE_TREE_SEGMENT_BYTES, FILE_TREE_MAX_BYTES, validateFileTreeIndex, createFileTreeContent, loadFileTreeRecord } from './content/file-tree.js';
 
 // --- transport: connection (locality-blind) -----------------------------
 // connect(peer) → uniform Channel, regardless of where the peer is. The

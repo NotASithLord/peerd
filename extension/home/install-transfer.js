@@ -1,5 +1,6 @@
 // @ts-check
 import m from '/vendor/mithril/mithril.js';
+import { bytesLabel } from './discover-model.js';
 
 /** @param {any} attempt */
 export const transferLabel = (attempt) => {
@@ -7,6 +8,9 @@ export const transferLabel = (attempt) => {
   if (attempt?.phase === 'cancelling') return 'Cancelling. Waiting for the install to stop…';
   if (attempt?.phase === 'unknown') return 'The install outcome is not confirmed. Check your Library before trying again.';
   const progress = attempt?.progress;
+  if (progress?.phase === 'bytes') return Number.isSafeInteger(progress.done) && Number.isSafeInteger(progress.total)
+      && progress.done >= 0 && progress.total > 0 && progress.done <= progress.total
+    ? `Downloading and checking files: ${bytesLabel(progress.done)} of ${bytesLabel(progress.total)}.` : 'Downloading and checking files…';
   if (progress?.phase === 'chunk') return Number.isSafeInteger(progress.done) && Number.isSafeInteger(progress.total)
       && progress.done >= 0 && progress.total > 0 && progress.done <= progress.total
     ? `Downloading and checking files: ${progress.done} of ${progress.total} pieces.` : 'Downloading and checking files…';
@@ -22,6 +26,7 @@ export const InstallTransfer = (vnode) => {
   const { send, ...target } = vnode.attrs;
   let dead = false; let busy = false; let revision = 0;
   /** @type {any} */ let attempt = null;
+  /** @type {string|null} */ let attemptId = null;
   let issue = '';
   /** @type {ReturnType<typeof setTimeout>|undefined} */ let timer;
   const redraw = () => { if (!dead) m.redraw(); };
@@ -30,7 +35,12 @@ export const InstallTransfer = (vnode) => {
     try {
       if (!busy) {
         const reply = await send({ type: 'dweb/base/install-status', ...target });
-        if (!dead && epoch === revision) attempt = reply?.ok === true ? reply.attempt : null;
+        if (!dead && epoch === revision) {
+          const next = reply?.ok === true ? reply.attempt : null;
+          if (next && (typeof next.id !== 'string' || !next.id || next.id.length > 64 || attemptId && next.id !== attemptId)) {
+            attempt = null; issue = 'The install status changed. Check your Library before trying again.';
+          } else { attemptId ??= next?.id ?? null; attempt = next; }
+        }
       }
     } catch { if (!dead && epoch === revision) attempt = null; }
     finally {

@@ -32,6 +32,7 @@ import { createSelfDeviceCoordinator } from './self/coordinator.js';
 import { createSelfDeviceMesh } from './self/mesh.js';
 import { createSyncSource, createSyncReceiver } from './self/host.js';
 import { loadCoordinatorInputs } from './self/custody.js';
+import { createFileTreeContent, FILE_TREE_FORMAT, loadFileTreeRecord } from './content/file-tree.js';
 
 // Protocol phase. Phase 1 = rooms & live collaboration: N-peer rooms,
 // topic gossip + sync, the dwapp bridge, the commons. Research-grade; may
@@ -63,6 +64,10 @@ export const createDwebClient = () => {
       did: identityPromise ? (await identityPromise).did : null,
     }),
     ensureIdentity,
+    createFileTreeContent, FILE_TREE_FORMAT,
+    /** @param {string} hash */
+    loadFileTreeRecord: async hash => loadFileTreeRecord({ hash,
+      directory: await (await navigator.storage.getDirectory()).getDirectoryHandle('peerd-file-trees') }),
 
     // --- Phase 1 ---------------------------------------------------------
     identityMaterial: loadIdentityMaterial,
@@ -92,8 +97,10 @@ export const createDwebClient = () => {
     // Host a dwapp's bridge. The app-tab passes `frame` (the iframe) and gets
     // the default iframe transport; an offscreen host can pass `transport`
     // directly (an SW relay) to run the same bridge there (S1).
+    /** @param {Omit<Parameters<typeof createDwebBridge>[0],'transport'> &
+     * {frame?:HTMLIFrameElement,transport?:Parameters<typeof createDwebBridge>[0]['transport']}} options */
     createAppBridge: ({ frame, transport, ...rest }) =>
-      createDwebBridge({ transport: transport ?? iframeTransport(frame), ...rest }),
+      createDwebBridge({ transport: transport ?? iframeTransport(/** @type {HTMLIFrameElement} */ (frame)), ...rest }),
 
     // Join the always-on base network: connect to the lobby and assemble the
     // base host on its mesh. Returns { base, room, close } — the offscreen doc

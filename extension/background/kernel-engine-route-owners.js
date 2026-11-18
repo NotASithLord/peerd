@@ -74,6 +74,7 @@ export const makeKernelArtifactRoutes = (deps) => {
       const appClient = {
         ...live.appClient,
         create: trackKernelEffect(live.appClient.create.bind(live.appClient), state, canWrite),
+        ...(live.appClient.createFileTree ? { createFileTree: trackKernelEffect(live.appClient.createFileTree.bind(live.appClient), state, canWrite) } : {}),
       };
       const jsRegistry = {
         ...live.jsRegistry,

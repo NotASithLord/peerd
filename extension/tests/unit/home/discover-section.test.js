@@ -11,6 +11,7 @@ import { packagedStarter } from '/shared/starter-catalog.js';
 import { discoveryAddress } from '/home/discovery-address.js';
 import { createEffects, shortKey } from '/home/discover-model.js';
 import { DiscoverSection } from '/home/discover-section.js';
+import { transferLabel } from '/home/install-transfer.js';
 
 /** @typedef {import('/home/discover-model.js').DwebApp} DwebApp */
 /** @typedef {import('/home/discover-section.js').Attrs} Attrs */
@@ -235,7 +236,7 @@ describe('home.discover start list', () => {
         'Paste the link they shared. You can look at the app before you install it. This needs the peer network.']) {
         expect(text(view.root)).toContain(line);
       }
-      expect(text(el(view.root, '.disc-note-box'))).toBe('Apps run in their own tab and cannot reach the internet by themselves. You can remove an app from your Library at any time.');
+      expect(text(el(view.root, '.disc-note-box'))).toBe('Apps run in their own browser tab. You can remove an app from your Library at any time.');
       expect(button(view.root, `Try ${packagedStarter('csv-lab')?.name}`)).toBeTruthy();
       const enable = el(view.root, '[data-network-choice="enable"]');
       expect([enable.textContent, enable.getAttribute('aria-label')]).toEqual(['Turn on', 'Turn on the peer network']);
@@ -1169,7 +1170,7 @@ describe('home.discover app page', () => {
       expect(el(know, 'h3').id).toBe(know.getAttribute('aria-labelledby') ?? '');
       expect(safety()).toEqual([
         `Made by ${shortKey(ANA)}. When you install it, peerd checks that every file is exactly what its maker shared. Nobody reviewed it for safety.`,
-        'It runs in its own tab and cannot reach the internet by itself.',
+        'It runs in its own browser tab.',
         'You can remove it from your Library at any time.',
       ]);
       expect(text(el(view.root, '.disc-panel-cta .disc-footnote'))).toBe('Sharing means other people can get this app from you while your peer network is on.');
@@ -2229,7 +2230,7 @@ describe('home.discover the app says it', () => {
     const view = mount({ send: host.send }, { keepReceipt: true });
     try {
       await settle();
-      await click(view.root, 'Check again');
+      await until(() => !!button(view.root, 'Open'));
       expect(button(panel(view.root), 'Open')?.disabled).toBe(false);
       expect(chips(view.root)).toEqual([['Comes with instructions for peerd', false]]);
       expect(text(el(view.root, '.disc-says .disc-footnote'))).toBe('From the app’s own files, checked when peerd installed it.');
@@ -2862,11 +2863,90 @@ describe('home.discover suggestions', () => {
   });
 });
 
+describe('home.discover live transfer', () => {
+  it('labels byte counts without treating them as pieces', () => {
+    expect(transferLabel({ progress: { phase: 'bytes', done: 16, total: 32 } })).toBe('Downloading and checking files: 16 bytes of 32 bytes.');
+    expect(transferLabel({ progress: { phase: 'bytes', done: 33, total: 32 } })).toBe('Downloading and checking files…');
+    expect(transferLabel({ progress: { phase: 'chunk', done: 1, total: 2 } })).toBe('Downloading and checking files: 1 of 2 pieces.');
+  });
+
+  it('keeps the same transfer after the UI deadline and accepts only a catalog receipt', async () => {
+    const app = card('live', 'Live app', ANA, { version_id: 'a'.repeat(64) });
+    const install = deferred();
+    const host = fakeHost({ heard: [app] }, {
+      'dweb/base/install': () => install.promise,
+      'dweb/base/install-status': () => ({ ok: true, attempt: { id: 'original', phase: 'retrieving', cancellable: true,
+        progress: { phase: 'bytes', done: 16, total: 32 } } }),
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle(); await openTile(view.root, 'live'); await click(view.root, 'Install and share');
+      await until(() => !!button(view.root, 'Cancel'));
+      const transfer = el(view.root, '.disc-transfer');
+      install.reject(new Error('renderer deadline')); await settle();
+      expect(el(view.root, '.disc-transfer')).toBe(transfer);
+      expect(text(transfer)).toContain('16 bytes of 32 bytes');
+      expect(text(panel(view.root))).toContain(UNKNOWN_INSTALL);
+      await focusPoll();
+      expect(button(view.root, 'Try again')).toBe(undefined);
+      expect(button(view.root, 'Install and share')).toBe(undefined);
+      host.state.library = [local('local-live', app)]; await focusPoll();
+      expect(text(panel(view.root))).toContain('Installed. Live app is now in your Library.');
+      expect(view.root.querySelector('.disc-transfer')).toBe(null);
+      expect(host.count('dweb/base/install')).toBe(1);
+    } finally { install.resolve({ ok: false }); view.close(); }
+  });
+
+  it('cancels only the observed attempt after a UI deadline and keeps an absent outcome unknown', async () => {
+    const app = card('cancel-live', 'Live app', ANA, { version_id: 'a'.repeat(64) });
+    const install = deferred();
+    let live = true;
+    const host = fakeHost({ heard: [app] }, {
+      'dweb/base/install': () => install.promise,
+      'dweb/base/install-status': () => ({ ok: true, attempt: live ? { id: 'original', phase: 'retrieving', cancellable: true,
+        progress: { phase: 'bytes', done: 16, total: 32 } } : null }),
+      'dweb/base/cancel-install': () => { live = false; return { ok: true, phase: 'cancelling' }; },
+    });
+    const view = mount({ send: host.send });
+    try {
+      await settle(); await openTile(view.root, 'cancel-live'); await click(view.root, 'Install and share');
+      await until(() => !!button(view.root, 'Cancel'));
+      install.reject(new Error('renderer deadline')); await settle(); await click(view.root, 'Cancel');
+      expect(host.calls.find(call => call.type === 'dweb/base/cancel-install')?.attemptId).toBe('original');
+      await until(() => text(el(view.root, '.disc-transfer')).includes('Waiting for install status'));
+      await focusPoll();
+      expect(text(panel(view.root))).toContain(UNKNOWN_INSTALL);
+      expect(button(view.root, 'Try again')).toBe(undefined);
+      expect(host.count('dweb/base/install')).toBe(1);
+      expect(host.count('dweb/base/cancel-install')).toBe(1);
+    } finally { install.resolve({ ok: false }); view.close(); }
+  });
+});
+
 describe('home.discover share link', () => {
   const address = formatDwappUri({ did: ANA, hash: 'a'.repeat(64) });
   const target = immutableAppRoot(address);
   const summary = { ...target, name: 'Signed app', decodedBytes: 3, fileCount: 1, entryFile: 'index.html', containsWasm: false };
   const peerApp = card('peer', 'Peer app', BOB);
+
+  it('reconciles a pending link on the catalog poll only for the exact signed root', async () => {
+    sessionStorage.setItem(KEY, address);
+    const host = fakeHost();
+    const view = mount({ send: host.send }, { keepReceipt: true });
+    try {
+      await settle();
+      for (const drift of [{ hash: 'b'.repeat(64) }, { publisher: BOB }, { uri: `peerd://${ANA}/${'b'.repeat(64)}` }]) {
+        host.state.library = [{ id: 'other', dweb: { uri: target.uri, hash: target.hash, publisher: target.publisher, ...drift } }];
+        await focusPoll(); expect(button(view.root, 'Open')).toBe(undefined);
+        expect(sessionStorage.getItem(KEY)).toBe(address);
+      }
+      host.state.library = [{ id: 'exact', dweb: { uri: target.uri, hash: target.hash, publisher: target.publisher } }];
+      await focusPoll();
+      expect(button(view.root, 'Open')?.disabled).toBe(false);
+      expect(sessionStorage.getItem(KEY)).toBe(null);
+      expect(host.writes()).toEqual([]);
+    } finally { view.close(); sessionStorage.removeItem(KEY); }
+  });
 
   it('rejects file paths, drops a late inspection, rejects a mismatched summary, and keeps inspect, install and open separate', async () => {
     const late = deferred();

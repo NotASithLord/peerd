@@ -41,6 +41,7 @@ class ChunkPartError extends Error {
  * @typedef {{
  *   getManifest: (hash: string) => any,
  *   getChunk: (chunkHash: string) => (Uint8Array | null | undefined),
+ *   readChunk?: (chunkHash: string) => (Uint8Array | null | undefined | Promise<Uint8Array|null>),
  * }} ContentStore
  * @typedef {{ send: (m: ContentMsg, options?: import('../transport/outgoing.js').SendOptions) => void | Promise<void>, setHandler: (h: ((msg: ContentMsg) => boolean | void) | null) => void, onClose?: (cb: () => void) => (() => void) }} ContentChannel
  */
@@ -61,7 +62,7 @@ export const createContentResponder = ({ store, budget = contentServiceBudget })
         return;
       }
       case 'CHUNK_REQ': {
-        const bytes = store.getChunk(msg.hash);
+        const bytes = await (store.readChunk ?? store.getChunk)(msg.hash);
         if (typeof msg.requestId === 'string' && msg.requestId.length > 0 && msg.requestId.length <= 64) {
           if (!bytes) { await send({ t: 'NOCHUNK', hash: msg.hash, requestId: msg.requestId }); return; }
           for (let offset = 0; offset < bytes.length; offset += CHUNK_PART_BYTES) {

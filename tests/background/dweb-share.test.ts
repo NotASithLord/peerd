@@ -17,6 +17,42 @@ const shareSuccess = (message: any, value: any) => ({
 });
 
 describe('identity-bound dweb share', () => {
+  test.each(['success', 'metadata failure', 'lost response'])('file trees retain transaction custody after %s', async outcome => {
+    const hash = 'f9371641c43057cb462621a327a54f7d24ea4df5dcf3827d33a2d6b94d90c84b';
+    const record = { name: 'Imported game', entryFile: 'index.html',
+      fileTree: { hash, storageKey: '00000000-0000-0000-0000-000000000001', fileCount: 2, totalBytes: 40259108 },
+      dweb: { hash, uri: `peerd://did:key:zOriginal/${hash}`, publisher: 'did:key:zOriginal', slug: 'original', seq: 1 } };
+    const messages: Record<string, unknown>[] = [], patches: Record<string, unknown>[] = [];
+    const share = makeDwebShare({
+      enabled: true, active: () => true, withDwebPublication,
+      withIdentityMutation: makeLane(), withAppLifecycle,
+      appRegistry: { get: async () => record, update: async (_id, patch) => {
+        if (outcome === 'metadata failure') throw new Error('storage refused');
+        patches.push(patch); return { id: 'app-1' };
+      } },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async message => {
+        messages.push(message);
+        if (message.type === 'dweb/base-host/share-app') {
+          if (outcome === 'lost response') throw new Error('response lost');
+          return shareSuccess(message, { ok: true, ...record.dweb, local: false });
+        }
+        return { ok: true, committed: true, restored: true };
+      },
+    });
+    const result = await share('app-1', undefined);
+    expect(messages[0]).toMatchObject({ type: 'dweb/base-host/share-app', fileTree: record.fileTree, sourceDweb: record.dweb });
+    expect(messages[1]?.transactionId).toBe(messages[0]?.transactionId);
+    if (outcome === 'success') {
+      expect(result.ok).toBe(true);
+      expect(patches[0]).toMatchObject({ shared: true, dweb: { publisher: record.dweb.publisher, hash, local: false } });
+      expect(messages[1]?.type).toBe('dweb/base-host/commit-share');
+    } else {
+      expect(result.ok).toBe(false);
+      expect(messages[1]?.type).toBe('dweb/base-host/rollback-share');
+    }
+  });
+
   test('reports a committed local share as partial failure when peer forwarding is refused', async () => {
     const messages: any[] = [];
     const patches: any[] = [];

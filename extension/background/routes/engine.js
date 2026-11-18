@@ -950,7 +950,7 @@ export const makeEngineRoutes = (deps) => {
     // why staged in OPFS: Home writes the prepared files to a private folder
     // and sends only its id, because one message cannot carry a game near the
     // App cap. The App client applies every App path, size and manifest rule.
-    'apps/import-files': async ({ uploadId, name } = {}) => {
+    'apps/import-files': async ({ uploadId, name, format } = {}) => {
       if (!APP_FILE_UPLOAD_ENABLED) return { ok: false, error: 'app-file-upload-unavailable' };
       if (typeof uploadId !== 'string' || !/^[0-9a-f-]{36}$/.test(uploadId)) {
         return { ok: false, error: 'uploadId-required' };
@@ -959,6 +959,15 @@ export const makeEngineRoutes = (deps) => {
       try {
         if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
         if (typeof name !== 'string' || !name.trim()) return { ok: false, error: 'name-required' };
+        if (format === 'file-tree-v1') {
+          if (!DWEB_ENABLED || settingsStore.get().dwebEnabled !== true) return { ok: false, error: 'Enable the peer network before importing this game.' };
+          const stagedTree = await browser.runtime.sendMessage({ type: 'dweb/base-host/stage-file-tree', uploadId });
+          if (!stagedTree?.ok) return stagedTree ?? { ok: false, error: 'Game import failed.' };
+          const record = await appClient.createFileTree({ name, tree: stagedTree.tree });
+          auditLog.append({ type: 'artifact_imported', details: { kind: 'app', id: record.id, name: record.name } }).catch(() => {});
+          pushState();
+          return { ok: true, kind: 'app', id: record.id, name: record.name };
+        }
         /** @type {Record<string, Uint8Array>} */
         const files = Object.create(null);
         for (const { path } of await staged.list()) {

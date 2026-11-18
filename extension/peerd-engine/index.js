@@ -44,6 +44,7 @@ export { linkSingleModuleWorker, linkSingleModuleWorkerDetailed } from './single
 
 // --- Editor (CodeMirror + file tree + OPFS, used by Notebook & App tabs) ---
 export { createEditor } from './editor.js';
+export { parseAppRequest, validateAppHttpRoutes } from './app-http.js';
 
 // --- OPFS helpers (rooted; usable in any extension context) ---
 export { opfsHelpers } from './opfs.js';

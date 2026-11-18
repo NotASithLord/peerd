@@ -8,9 +8,8 @@
 // possession is structurally impossible because the serve path consults
 // the announce set before returning any byte.
 //
-// PHASE 0: in-memory. The same surface backs OPFS (chunk bytes) + IDB
-// (manifest index, announce set) later (ARCHITECTURE §9) by swapping the
-// Maps for injected stores — no caller change.
+// Default bytes stay in memory. Registered disk readers hold metadata only.
+// Both paths use the same announce set.
 
 /**
  * A built bundle as the store holds it: the manifest commits to an ordered
@@ -25,6 +24,9 @@ export const createContentStore = () => {
   const manifests = new Map(); // contentHash -> manifest
   /** @type {Map<string, Uint8Array>} */
   const chunkData = new Map(); // chunkHash -> Uint8Array
+  /** @type {Map<string, (hash:string)=>Promise<Uint8Array|null>>} */
+  const chunkReaders = new Map();
+  let generation = 0;
   /** @type {Set<string>} */
   const announced = new Set(); // contentHash
   /** @type {Map<string, number>} */
@@ -62,6 +64,7 @@ export const createContentStore = () => {
   /** @param {string} hash */
   const unannounce = (hash) => {
     if (!announced.has(hash)) return false;
+    generation++;
     announced.delete(hash);
     const manifest = manifests.get(hash);
     if (manifest) {
@@ -69,7 +72,9 @@ export const createContentStore = () => {
       manifests.delete(hash);
       // OPFS/App Git remains the durable local copy. Keeping unannounced bundle
       // bytes here only creates an unbounded version-by-version memory leak.
-      for (const chunk of manifest.chunks) if (!serveable.has(chunk.hash)) chunkData.delete(chunk.hash);
+      for (const chunk of manifest.chunks) if (!serveable.has(chunk.hash)) {
+        chunkData.delete(chunk.hash); chunkReaders.delete(chunk.hash);
+      }
     }
     return true;
   };
@@ -84,8 +89,15 @@ export const createContentStore = () => {
     return hash;
   };
 
-  return {
+  const store = {
     publish,
+    // why: disk-backed content registers metadata without granting publication.
+    /** @param {{manifest:StoredManifest,hash:string,readChunk:(hash:string)=>Promise<Uint8Array|null>}} source */
+    register({ manifest, hash, readChunk }) {
+      if (manifests.has(hash)) return;
+      manifests.set(hash, structuredClone(manifest));
+      for (const chunk of manifest.chunks) chunkReaders.set(chunk.hash, readChunk);
+    },
     announce,
     unannounce,
     announcedHashes: () => [...announced],
@@ -96,5 +108,15 @@ export const createContentStore = () => {
     getManifest: (hash) => (announced.has(hash) ? manifests.get(hash) : null),
     /** @param {string} chunkHash */
     getChunk: (chunkHash) => (serveable.has(chunkHash) ? chunkData.get(chunkHash) : null),
+    /** @param {string} chunkHash @returns {Uint8Array|null|undefined|Promise<Uint8Array|null>} */
+    readChunk: (chunkHash) => {
+      if (!serveable.has(chunkHash)) return null;
+      if (chunkData.has(chunkHash)) return store.getChunk(chunkHash);
+      const read = chunkReaders.get(chunkHash), current = generation;
+      // why: revocation during disk IO must refuse the completed read.
+      return read ? read(chunkHash).then(bytes => generation === current && serveable.has(chunkHash)
+        && chunkReaders.get(chunkHash) === read ? bytes : null) : null;
+    },
   };
+  return store;
 };

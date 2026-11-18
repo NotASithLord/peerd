@@ -31,6 +31,7 @@ import { chunkBytes, sha256hex as sha256ChunkHex } from './content/chunk.js';
 import { createRoutedContentChannel } from './content/routed.js';
 import { RETRIEVAL_CONCURRENCY } from './transport/retrieval-protocol.js';
 import { swarmFetch } from './content/swarm.js';
+import { createFileTreeContent } from './content/file-tree.js';
 import { formatPeerdUri, parsePeerdUri } from './content/uri.js';
 import { concat, utf8, toHex } from '/shared/bundle/bytes.js';
 import { createLibrary } from './apps/library.js';
@@ -55,6 +56,7 @@ const subMsgTopic = (id) => `dwapp/${id}/msg`;            // a sub-protocol's go
  * @param {{ identity: import('./transport/mesh.js').Identity, mesh: any,
  *   meta?: () => any, dial?: any, audit?: import('./transport/mesh.js').AuditFn,
  *   now?: () => number, maxBundleBytes?: number, discoveryEnabled?: ()=>boolean, localRecoveryPending?: ()=>boolean, userBlocked?: (did:string)=>boolean,
+ *   getFileTreeDirectory?:()=>Promise<FileSystemDirectoryHandle>,
  *   discoveryDisseminationProfile?: typeof import('./apps/discovery.js').DISCOVERY_BOUNDED_PROFILE | null,
  *   admitDwappMeta?: ((candidate: { dwappId: string, publisher: string, seq: number, versionId: string }) => Promise<boolean>) | null }} opts
  */
@@ -62,6 +64,7 @@ export const createBaseNetwork = async ({
   identity, mesh, meta = () => ({}), dial = null, audit = null,
   now = Date.now, maxBundleBytes = MAX_BUNDLE_BYTES, admitDwappMeta = null, userBlocked = () => false, discoveryEnabled = () => true, localRecoveryPending = () => false,
   discoveryDisseminationProfile = null,
+  getFileTreeDirectory = async () => (await navigator.storage.getDirectory()).getDirectoryHandle('peerd-file-trees', { create: true }),
 }) => {
   // why: reject unsupported local rollout settings before acquiring node
   // listeners or transport resources that a rejected constructor cannot close.
@@ -71,6 +74,8 @@ export const createBaseNetwork = async ({
   dlog('base', `assembling base network for ${(identity.did || '').slice(-8)} on lobby "${BASE_TOPIC}"`);
   const node = await createPeerNode({ identity, mesh, meta, dial, audit, now });
   let closed = false;
+  /** @type {ReturnType<typeof createFileTreeContent>|null} */
+  let activeFileTrees = null;
   /** @type {ReturnType<typeof setInterval> | null} */
   let maintenanceTimer = null;
   /** @type {Map<string, number>} */
@@ -113,10 +118,14 @@ export const createBaseNetwork = async ({
   };
   /** @param {string} hash */
   const revokeProvider = (hash) => {
-    for (const ac of providerAttempts.get(hash) ?? []) ac.abort();
-    providerRenewals.delete(hash);
-    providerTopologies.delete(hash);
-    return node.content.unannounce(hash);
+    const previous = activeFileTrees ? node.content.announcedHashes() : [];
+    const treeChanged = activeFileTrees?.unannounce(hash) ?? false;
+    const removed = treeChanged ? previous.filter(member => !node.content.isAnnounced(member)) : [hash];
+    for (const member of removed) {
+      for (const ac of providerAttempts.get(member) ?? []) ac.abort();
+      providerRenewals.delete(member); providerTopologies.delete(member);
+    }
+    return node.content.unannounce(hash) || treeChanged;
   };
 
   // --- discovery: the metadata plane (PROPAGATION.md) -----------------------
@@ -382,8 +391,8 @@ export const createBaseNetwork = async ({
 
   // Fetch only on request. Prefer the named publisher while qualifying other
   // linked seeders concurrently; unrelated neighbors never delay useful chunks.
-  /** @param {string} uri @param {{ timeoutMs?: number, onProgress?: (p: any) => void, signal?: AbortSignal, expectedRuntime?: {value:unknown} }} [opts] */
-  const fetchAllowedApp = async (uri, { timeoutMs = 15_000, onProgress, signal: callerSignal, expectedRuntime } = {}) => {
+  /** @param {string} uri @param {{ timeoutMs?: number, onProgress?: (p: any) => void, signal?: AbortSignal, expectedRuntime?: {value:unknown},acceptManifest?:(manifest:import('./content/file-tree.js').ContentManifest)=>void|Promise<void>,providers?:string[] }} [opts] */
+  const fetchAllowedApp = async (uri, { timeoutMs = 15_000, onProgress, signal: callerSignal, expectedRuntime, acceptManifest: acceptContent, providers: providerHints = [] } = {}) => {
     /** @type {Array<{release:()=>void}>} */
     const leases = [];
     const traversal = dial?.createTraversal?.({signal:callerSignal});
@@ -396,9 +405,10 @@ export const createBaseNetwork = async ({
         return dial?.retrieval?createRoutedContentChannel({isAllowed:()=>!closed&&!isBlocked(did),
           read:(kind,hash,signal,onPart)=>dial.retrieval.read(did,{kind,hash},signal,onPart)}):null;
       };
-      const acceptManifest = (/** @type {any} */ manifest) => {
+      const acceptManifest = async (/** @type {import('./content/file-tree.js').ContentManifest} */ manifest) => {
         if (expectedRuntime) assertAppRuntimeAgreement(expectedRuntime.value, manifest.meta?.runtime);
         assertAppRuntime(manifest.meta?.runtime);
+        await acceptContent?.(manifest);
       };
       /** @type {string | null | undefined} */
       let publisher = null;
@@ -416,11 +426,11 @@ export const createBaseNetwork = async ({
         if (manifest.publisher !== publisher) throw new Error('local manifest publisher mismatch');
         assertBundleWithinLimits(manifest);
         if (!(await verifyManifest(manifest)).ok) throw new Error('local manifest signature invalid');
-        acceptManifest(manifest);
-        const chunks = manifest.chunks.map((/** @type {{hash:string}} */ chunk) => {
-          const bytes = node.content.getChunk(chunk.hash);
+        await acceptManifest(/** @type {import('./content/file-tree.js').ContentManifest} */ (manifest));
+        const chunks = await Promise.all(manifest.chunks.map(async (/** @type {{hash:string}} */ chunk) => {
+          const bytes = await node.content.readChunk(chunk.hash);
           return bytes instanceof Uint8Array ? new Uint8Array(bytes) : null;
-        });
+        }));
         for (const [index, chunk] of chunks.entries()) {
           if (!(chunk instanceof Uint8Array)) throw new Error('local bundle chunk unavailable');
           // assertBundleWithinLimits checked sizes; the generic content store
@@ -460,8 +470,8 @@ export const createBaseNetwork = async ({
       const fetchProviders = (/** @type {string[]} */ providers) => swarmFetch({uri,providers,channelFor,timeoutMs,onProgress,
         signal:callerSignal,isAllowed,acceptManifest,
         alpha:dial?.retrieval&&providers.some(did=>!node.mesh.hasLink(did))?RETRIEVAL_CONCURRENCY:undefined});
-      const preferred = [...new Set([...(publisher ? [publisher] : []), ...linked])];
-      if (linked.length) {
+      const preferred = [...new Set([...(publisher ? [publisher] : []), ...providerHints.slice(0, 32), ...linked])];
+      if (linked.length || providerHints.length) {
         try { return await fetchProviders(preferred); }
         catch (e) { callerSignal?.throwIfAborted(); if (e instanceof AppRuntimeError) throw e; dlog('base', `linked seeder fetch failed (${/** @type {{ message?: string }} */ (e)?.message ?? String(e)}); trying DHT providers (bounded)`); }
       }
@@ -516,7 +526,7 @@ export const createBaseNetwork = async ({
     } finally { for (const lease of leases) lease.release(); traversal?.close(); }
   };
 
-  /** @param {string} uri @param {{timeoutMs?:number,onProgress?:(p:any)=>void,signal?:AbortSignal,expectedRuntime?:{value:unknown}}} [options] */
+  /** @param {string} uri @param {{timeoutMs?:number,onProgress?:(p:any)=>void,signal?:AbortSignal,expectedRuntime?:{value:unknown},acceptManifest?:(manifest:import('./content/file-tree.js').ContentManifest)=>void|Promise<void>,providers?:string[]}} [options] */
   const fetchApp = async (uri, options) => {
     options?.signal?.throwIfAborted();
     const { did, hash } = parsePeerdUri(uri);
@@ -549,6 +559,36 @@ export const createBaseNetwork = async ({
     }
     return result;
   };
+
+  /** @type {Promise<ReturnType<typeof createFileTreeContent>>|null} */
+  let fileTrees = null;
+  const getFileTrees = () => {
+    if (closed) throw new Error('base network closed');
+    fileTrees ??= getFileTreeDirectory().then(directory => {
+      activeFileTrees = createFileTreeContent({ directory, identity, content: node.content,
+        now, isAllowed: () => !closed, acceptRoot: manifest => { assertAppRuntime(manifest.meta?.runtime); } });
+      return activeFileTrees;
+    })
+      .catch(error => { fileTrees = null; throw error; });
+    return fileTrees;
+  };
+  /** @param {Parameters<ReturnType<typeof createFileTreeContent>['stage']>[0]} options */
+  const stageFileTree = async options => (await getFileTrees()).stage(options);
+  /** @param {string} hash */
+  const loadFileTree = async hash => (await getFileTrees()).load(hash);
+  /** @param {string} hash */
+  const announceFileTree = async hash => {
+    const record = await (await getFileTrees()).announce(hash);
+    void announceProvider(record.uri).catch(() => {});
+    return record;
+  };
+  /** @param {string} hash */
+  const unannounceFileTree = async hash => {
+    await getFileTrees(); return revokeProvider(hash);
+  };
+  /** @param {{uri:string,signal?:AbortSignal,onProgress?:(progress:import('./content/file-tree.js').TreeProgress)=>void,timeoutMs?:number,expectedRuntime?:{value:unknown}}} options */
+  const fetchFileTree = async ({ uri, expectedRuntime, ...options }) => (await getFileTrees()).fetch({ uri, ...options,
+    fetchSegment: (address, request) => fetchApp(address, { ...request, ...(address === uri ? { expectedRuntime } : {}) }) });
 
   // --- a ROOM: the full feed / presence / dm / content surface a dwapp expects,
   // composed over the SHARED base mesh by NAMESPACING every topic to dwapp/<id>/.
@@ -689,6 +729,7 @@ export const createBaseNetwork = async ({
     // mesh.serveContent), so this just rides ch=2 over the always-on lobby.
     publishApp,
     fetchApp,
+    stageFileTree, loadFileTree, announceFileTree, unannounceFileTree, fetchFileTree,
     // Stop sharing/seeding a deleted app: unannounce its bytes + drop our card.
     unshareApp,
     unpublishMeta,

@@ -246,10 +246,13 @@ const opfsForApp = (appId, beforeMutation = () => {}) =>
  * @param {(ownerSessionId:string,record:any)=>Promise<string>} [deps.resolveOwnerRoot]
  * @param {ReturnType<typeof import('/peerd-engine/repository.js').createRepositoryService>} deps.repositories
  * @param {Pick<typeof import('/peerd-egress/background.js').idb, 'del'>} [deps.idb]
+ * @param {(record:import('/peerd-engine/app-registry.js').AppRecord,focus:boolean)=>Promise<unknown>} [deps.openFileTree]
+ * @param {(record:import('/peerd-engine/app-registry.js').AppRecord)=>Promise<void>} [deps.closeFileTree]
  */
 export const createAppClient = ({
   registry, tracker, beforeOpfsMutation = () => {}, onManifestMutation = () => {},
   resolveOwnerRoot = async (ownerSessionId) => ownerSessionId, repositories, idb,
+  openFileTree, closeFileTree,
   opfsForApp: openAppOpfs = opfsForApp,
 }) => {
   if (typeof repositories?.coordinate !== 'function') {
@@ -487,6 +490,22 @@ export const createAppClient = ({
       throwAppRollbackResult(error, cleanup);
     }
     return record;
+  };
+
+  /** @param {{appId?:string,name:string,tree:{hash:string,uri:string,storageKey:string,entry:string,publisher:string,totalBytes:number,fileCount:number},source?:'imported'|'dweb',dweb?:Record<string,unknown>}} options */
+  const createFileTree = async ({ appId, name, tree, source = 'imported', dweb }) => {
+    if (!name.trim() || !/^[a-f0-9]{64}$/.test(tree.hash) || !/^[a-f0-9-]{36}$/.test(tree.storageKey)
+      || !Number.isSafeInteger(tree.totalBytes) || tree.totalBytes < 0 || tree.totalBytes > 16_000_000_000
+      || !Number.isSafeInteger(tree.fileCount) || tree.fileCount < 1 || tree.fileCount > 4096) throw new Error('Invalid game release.');
+    validateAppPath(tree.entry);
+    if (appId && await registry.get(appId)) throw new Error('An App already uses this id.');
+    await beforeOpfsMutation();
+    // why: the signed file tree is durable before it enters the catalog.
+    return registry.create({ ...(appId ? { id: appId } : {}), name: name.trim().slice(0, 80), source,
+      entryFile: tree.entry, fileKinds: {}, fileTree: { hash: tree.hash, storageKey: tree.storageKey,
+        totalBytes: tree.totalBytes, fileCount: tree.fileCount },
+      ...(source === 'dweb' ? { dweb: { ...dweb, uri: tree.uri, publisher: tree.publisher,
+        hash: tree.hash, version_id: tree.hash } } : {}) });
   };
 
   /** Clone a repository and instantiate the validated peerd.json contract.
@@ -988,6 +1007,11 @@ export const createAppClient = ({
     const id = await resolveId({ sessionId, appId });
     const record = await registry.get(id);
     if (!record) throw new Error(`app not found: ${id}`);
+    if (record.fileTree) {
+      if (!openFileTree) throw new Error('The browser game host is unavailable.');
+      await openFileTree(record, focus);
+      return id;
+    }
     // The App tab asks the SW to attach a manifest-defined actor during boot.
     // Carry a durable, explicit owner into that handshake; actor minting must
     // never consult whichever chat happens to be active at tab-ready time.
@@ -1024,6 +1048,25 @@ export const createAppClient = ({
     // metadata delete.
     await beforeOpfsMutation();
     await withMutation(appId, async () => {
+      if (rec.fileTree) {
+        if (!closeFileTree) throw new Error('The browser game host cannot close this game.');
+        await closeFileTree(rec);
+        const others = (await registry.list()).filter(other => other.id !== appId);
+        const paths = [
+          ...(others.some(other => other.fileTree?.storageKey === rec.fileTree?.storageKey) ? [] : [rec.fileTree.storageKey]),
+          ...(others.some(other => other.fileTree?.hash === rec.fileTree?.hash) ? [] : [`${rec.fileTree.hash}.json`]),
+        ];
+        if (paths.length) {
+          const root = await navigator.storage.getDirectory();
+          const trees = await root.getDirectoryHandle('peerd-file-trees', { create: true });
+          for (const path of paths) {
+            try { await trees.removeEntry(path, { recursive: true }); }
+            catch (error) { if (/** @type {{name?:string}} */ (error)?.name !== 'NotFoundError') throw error; }
+          }
+        }
+        await registry.delete(appId);
+        return;
+      }
       await tracker.closeTab(appId);
       await new Promise((r) => setTimeout(r, 100));
       // Every App now owns a separate peerd-git/app/<id> DAG and remote
@@ -1106,7 +1149,7 @@ export const createAppClient = ({
 
   return {
     resolveId,
-    create, createFromGit, update,
+    create, createFileTree, createFromGit, update,
     writeFile, writeFiles, compareAndWriteFile, readFile, readFileBytes, replaceFiles, listFiles, deleteFile,
     replaceVersionedFilesUnlocked,
     snapshotFiles, snapshotFilesBase64,

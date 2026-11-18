@@ -105,6 +105,22 @@ export const createKernelEngineLive = async (deps) => {
     onManifestMutation: deps.onAppManifestMutation,
     resolveOwnerRoot: deps.resolveAppOwnerRoot,
     repositories: deps.repositories,
+    openFileTree: (record, focus) => {
+      if (!record.fileTree) throw new Error('Game release is missing.');
+      return deps.browser.tabs.create({
+        url: deps.browser.runtime.getURL(`/engine-tabs/game-tab/index.html#${encodeURIComponent(record.id)}/${record.fileTree.hash}`),
+        active: focus,
+      });
+    },
+    closeFileTree: async record => {
+      const host = deps.browser.runtime.getURL('/engine-tabs/game-tab/index.html');
+      const origin = `https://${record.id}.localhost/`;
+      const tabs = await deps.browser.tabs.query({ url: [`${host}*`, `${origin}*`] });
+      const ids = tabs.filter((/** @type {{url?:string}} */ tab) => tab.url?.startsWith(origin)
+        || tab.url?.startsWith(`${host}#${encodeURIComponent(record.id)}/`))
+        .map((/** @type {{id?:number}} */ tab) => tab.id).filter((/** @type {unknown} */ id) => typeof id === 'number');
+      if (ids.length) await deps.browser.tabs.remove(ids);
+    },
   });
   const policy = await deps.denylist.ready();
   if (!policy?.ok) {

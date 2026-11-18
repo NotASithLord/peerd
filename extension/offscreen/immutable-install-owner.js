@@ -19,9 +19,12 @@ export const createImmutableInstallOwner = () => {
     const control = {
       signal: controller.signal,
       progress: (/** @type {any} */ value) => {
-        if (attempt.phase !== 'retrieving' || !['locating', 'connecting', 'manifest', 'chunk', 'verifying'].includes(value?.phase)) return;
-        const counts = value.phase === 'chunk' && Number.isSafeInteger(value.done) && Number.isSafeInteger(value.total)
-          && value.done >= 0 && value.total > 0 && value.done <= value.total ? { done: value.done, total: value.total } : {};
+        if (attempt.phase !== 'retrieving' || !['locating', 'connecting', 'manifest', 'chunk', 'bytes', 'verifying'].includes(value?.phase)) return;
+        const counted = Number.isSafeInteger(value.done) && Number.isSafeInteger(value.total)
+          && value.done >= 0 && value.total > 0 && value.done <= value.total;
+        if (value.phase === 'bytes' && (!counted || attempt.progress.phase === 'bytes'
+          && (value.total !== attempt.progress.total || value.done < (attempt.progress.done ?? 0)))) return;
+        const counts = ['chunk', 'bytes'].includes(value.phase) && counted ? { done: value.done, total: value.total } : {};
         attempt.progress = { phase: value.phase, ...counts };
       },
       beginCommit: () => {

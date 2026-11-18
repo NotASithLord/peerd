@@ -62,9 +62,11 @@ export const createKernelSemanticAuthority = ({
     const claim = typeof sessionId === 'string' ? sessionId
       : typeof app.ownerSessionId === 'string' ? app.ownerSessionId : null;
     const owner = await resolveLaunchOwner(claim);
-    const url = `${appTabUrl}#${payload.appId}?owner=${encodeURIComponent(owner)}`;
+    const target = app.fileTree ? new URL('../game-tab/index.html', appTabUrl).href : appTabUrl;
+    const url = app.fileTree ? `${target}#${encodeURIComponent(payload.appId)}/${app.fileTree.hash}`
+      : `${target}#${payload.appId}?owner=${encodeURIComponent(owner)}`;
     // why: tabs.query omits fragments. Match the full owner URL after App ID validation.
-    const existing = (await browser?.tabs?.query?.({ url: `${appTabUrl}*` }) ?? []).find((/** @type {any} */ tab) => tab.url === url);
+    const existing = (await browser?.tabs?.query?.({ url: `${target}*` }) ?? []).find((/** @type {{url?:string,id?:number}} */ tab) => tab.url === url);
     if (typeof existing?.id === 'number') await browser.tabs.update(existing.id, { active: true });
     else await browser?.tabs?.create?.({ url, active: true });
     await appCatalog.setDefaultForSession(owner, payload.appId);
