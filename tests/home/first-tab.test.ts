@@ -4,10 +4,12 @@ import { join } from 'node:path';
 import {
   INITIAL_PRESENCE,
   clearReply,
+  firstTabAutoDue,
   firstTabHintVisible,
-  firstTabKeptVisible,
-  firstTabOfferPatch,
-  firstTabOfferVisible,
+  firstTabNoticeVisible,
+  firstTabPatch,
+  firstTabsToClose,
+  homeFirstTabInput,
   nextPresence,
   presenceAfterPortLoss,
   presenceIcon,
@@ -22,7 +24,7 @@ const at = (presence: Presence, now: { streaming: boolean, sessionId?: string|nu
 const working = at(INITIAL_PRESENCE, { streaming: true, hidden: true });
 const svg = (href: string) => decodeURIComponent(href.replace(/^data:image\/svg\+xml,/, ''));
 
-describe('first tab: the one-time offer', () => {
+describe('first tab: the one-time turn-on', () => {
   test('setup is pending during onboarding, or while a network choice is owed where the network ships', () => {
     expect(setupPending({ profile: { onboardingComplete: false } }, false)).toBe(true);
     expect(setupPending({ profile: { onboardingComplete: true }, settings: { dwebChoiceMade: false } }, true)).toBe(true);
@@ -33,25 +35,71 @@ describe('first tab: the one-time offer', () => {
     expect(setupPending(null, true)).toBe(false);
   });
 
-  test('shows only in the Home that saw setup finish, and only until it is answered', () => {
+  test('is due only on the surface that saw setup finish, once that surface is ready, and one time', () => {
     const settings = { firstTabEnabled: false, firstTabOffered: false };
-    expect(firstTabOfferVisible({ sawSetup: true, answered: false, settings })).toBe(true);
-    // Existing users and every Home opened after setup never see it.
-    expect(firstTabOfferVisible({ sawSetup: false, answered: false, settings })).toBe(false);
-    expect(firstTabOfferVisible({ sawSetup: true, answered: true, settings })).toBe(false);
-    expect(firstTabOfferVisible({ sawSetup: true, answered: false, settings: { ...settings, firstTabOffered: true } })).toBe(false);
-    expect(firstTabOfferVisible({ sawSetup: true, answered: false, settings: { ...settings, firstTabEnabled: true } })).toBe(false);
+    const due = { sawSetup: true, ready: true, phase: 'idle' as const, settings };
+    expect(firstTabAutoDue(due)).toBe(true);
+    // Existing users and every surface opened after setup get nothing.
+    expect(firstTabAutoDue({ ...due, sawSetup: false })).toBe(false);
+    expect(firstTabAutoDue({ ...due, ready: false })).toBe(false);
+    for (const phase of ['turning', 'on', 'failed', 'done'] as const) {
+      expect(firstTabAutoDue({ ...due, phase })).toBe(false);
+    }
+    // Another surface did it, or the profile has its answer from an older version.
+    expect(firstTabAutoDue({ ...due, settings: { ...settings, firstTabOffered: true } })).toBe(false);
+    expect(firstTabAutoDue({ ...due, settings: { ...settings, firstTabEnabled: true } })).toBe(false);
   });
 
-  test('"Keep it" turns the setting on; "Not now" only records the answer', () => {
-    expect(firstTabOfferPatch('keep')).toEqual({ firstTabEnabled: true, firstTabOffered: true });
-    expect(firstTabOfferPatch('later')).toEqual({ firstTabOffered: true });
+  test('on Home only onboarding counts as setup, and only a kernel snapshot makes Home ready', () => {
+    const none = { firstTabEnabled: false, firstTabOffered: false };
+    const due = (input: ReturnType<typeof homeFirstTabInput>) => firstTabAutoDue({ ...input, phase: 'idle' });
+    // A new profile: onboarding shows, then setup ends.
+    const onboarding = homeFirstTabInput(
+      { hydrated: true, profile: { onboardingComplete: false }, settings: { ...none, dwebChoiceMade: false } }, true, false);
+    expect(onboarding).toMatchObject({ sawSetup: true, ready: false });
+    const finished = { hydrated: true, profile: { onboardingComplete: true }, settings: { ...none, dwebChoiceMade: true } };
+    expect(due(homeFirstTabInput(finished, true, onboarding.sawSetup))).toBe(true);
+    // An existing profile that owes only the network choice gets no turn-on.
+    const owes = homeFirstTabInput(
+      { hydrated: true, profile: { onboardingComplete: true }, settings: { ...none, dwebChoiceMade: false } }, true, false);
+    expect(owes).toMatchObject({ sawSetup: false, ready: false });
+    expect(due(homeFirstTabInput(finished, true, owes.sawSetup))).toBe(false);
+    // After a port loss Home has default state with no first tab keys. That is not ready.
+    const beforeSnapshot = homeFirstTabInput(
+      { hydrated: false, profile: { onboardingComplete: true }, settings: {} }, true, true);
+    expect(beforeSnapshot).toMatchObject({ sawSetup: true, ready: false });
+    expect(due(beforeSnapshot)).toBe(false);
+    // Default state never counts as onboarding.
+    expect(homeFirstTabInput({ hydrated: false, profile: { onboardingComplete: false } }, true, false).sawSetup).toBe(false);
+    expect(homeFirstTabInput(null, true, false)).toMatchObject({ sawSetup: false, ready: false });
   });
 
-  test('in the side panel, the line after "Keep it" stays until the chat starts', () => {
-    expect(firstTabKeptVisible({ kept: true, messages: 0 })).toBe(true);
-    expect(firstTabKeptVisible({ kept: true, messages: 1 })).toBe(false);
-    expect(firstTabKeptVisible({ kept: false, messages: 0 })).toBe(false);
+  test('the turn-on records that the profile had it; "Turn off" keeps that record', () => {
+    expect(firstTabPatch(true)).toEqual({ firstTabEnabled: true, firstTabOffered: true });
+    expect(firstTabPatch(false)).toEqual({ firstTabEnabled: false });
+  });
+
+  test('the notice shows after the turn-on or its failure, until the chat starts', () => {
+    expect(firstTabNoticeVisible({ phase: 'on', messages: 0 })).toBe(true);
+    expect(firstTabNoticeVisible({ phase: 'failed', messages: 0 })).toBe(true);
+    expect(firstTabNoticeVisible({ phase: 'on', messages: 1 })).toBe(false);
+    for (const phase of ['idle', 'turning', 'done'] as const) {
+      expect(firstTabNoticeVisible({ phase, messages: 0 })).toBe(false);
+    }
+  });
+
+  test('"Turn off" closes the pinned Home tabs, never the tab that shows the notice or another page', () => {
+    const home = 'chrome-extension://id/home/home.html';
+    const tabs = [
+      { id: 1, pinned: true, url: `${home}#chat` },
+      { id: 2, pinned: true, url: home },
+      { id: 3, pinned: true, pendingUrl: home },
+      { id: 4, pinned: false, url: home },
+      { id: 5, pinned: true, url: 'https://example.com/' },
+      { pinned: true, url: home },
+    ];
+    expect(firstTabsToClose(tabs, home, 1)).toEqual([2, 3]);
+    expect(firstTabsToClose(tabs, home)).toEqual([1, 2, 3]);
   });
 
   test('with chat in the side panel, a pinned Home tab shows the apps, other Home tabs show Actors', () => {

@@ -36,10 +36,10 @@ import { ActorIsolationBanner } from '../sidepanel/components/actor-isolation-ba
 import { VaultGate } from '../sidepanel/components/vault-gate-lazy.js';
 import { peerNotifications } from '/shared/peer-notifications.js';
 import {
-  INITIAL_PRESENCE, clearReply, firstTabHintVisible, firstTabOfferVisible, nextPresence,
+  INITIAL_PRESENCE, clearReply, firstTabHintVisible, homeFirstTabInput, nextPresence,
   presenceAfterPortLoss, presenceIcon, presenceTitle, setupPending, viewBesidePanel,
 } from './first-tab.js';
-import { FirstTabHint, FirstTabOffer } from './first-tab-prompts.js';
+import { FirstTabHint, closeFirstTabs, makeFirstTabAuto } from './first-tab-prompts.js';
 
 /** @typedef {import('./library-section.js').Send} Send */
 
@@ -210,8 +210,7 @@ const toggleChatList = () => {
 // A pinned tab shows only its icon, so Home's icon and title show what peerd
 // is doing. why outside Mithril: a hidden tab gets no animation frame, so a
 // view hook would not run until the user came back.
-let sawSetup = false;        // this document showed the first-run gate
-let offerAnswered = false;
+let sawSetup = false;        // this document showed onboarding
 let presenceState = INITIAL_PRESENCE;
 let shownPresence = INITIAL_PRESENCE.presence;
 const idleTitle = document.title;
@@ -228,23 +227,40 @@ const dismissHint = () => {
   m.redraw.sync();
   focusActiveContent();
 };
-// After "Keep it" this tab is pinned. Read it again, so the hint shows here.
-const answerOffer = () => {
-  offerAnswered = true;
-  m.redraw.sync();
-  focusActiveContent();
-  readHomeTab();
-};
-// "Keep it" makes this tab the pinned one at the start, so the user sees the
-// result here, and the kernel adds a tab only to the other windows.
+// The turn-on makes this tab the pinned one at the start, so the user sees
+// the result here, and the kernel adds a tab only to the other windows.
+let pinnedByTurnOn = false;
 const pinThisTab = async () => {
   try {
     const tab = await browser.tabs.getCurrent();
     if (typeof tab?.id !== 'number') return;
+    pinnedByTurnOn = tab.pinned !== true;
     await browser.tabs.update(tab.id, { pinned: true });
     await browser.tabs.move(tab.id, { index: 0 });
   } catch { /* the kernel adds a pinned tab instead */ }
 };
+// "Turn off" in the notice takes back what the turn-on did: this tab is a
+// normal tab again, and the pinned Home tabs of the other windows close.
+const unpinThisTab = async () => {
+  const tab = await browser.tabs.getCurrent();
+  if (pinnedByTurnOn && typeof tab?.id === 'number') await browser.tabs.update(tab.id, { pinned: false });
+  pinnedByTurnOn = false;
+};
+const closeOtherFirstTabs = async () => closeFirstTabs(
+  browser.tabs, browser.runtime.getURL('home/home.html'), (await browser.tabs.getCurrent())?.id);
+const firstTabAuto = makeFirstTabAuto({
+  // why the wrapper: `send` is declared further down in this module.
+  send: (message) => send(message),
+  pinFirst: pinThisTab,
+  unpin: unpinThisTab,
+  closeTabs: closeOtherFirstTabs,
+  // This tab is pinned now, or a normal tab again. Read it, so the hint follows.
+  onChange: () => readHomeTab(),
+  afterClose: () => {
+    m.redraw.sync();
+    focusActiveContent();
+  },
+});
 // why tell the other Home tabs: each window can have its own pinned Home, and
 // the user saw the reply once they look at any of them.
 const markLooked = () => {
@@ -306,7 +322,9 @@ const handlePortMessage = (msg) => {
   if (next === currentState) return msg.type === 'state';
   currentState = next;
   if (msg.type === 'state') { booted = true; }
-  if (setupPending(currentState, DWEB_ENABLED)) sawSetup = true;
+  const firstTabInput = homeFirstTabInput(currentState, DWEB_ENABLED, sawSetup);
+  sawSetup = firstTabInput.sawSetup;
+  firstTabAuto.note(firstTabInput);
   refreshPresence();
   redrawForRuntimeMessage(m.redraw, msg);
   return true;
@@ -961,8 +979,9 @@ const HomeApp = {
     }
 
     const showDweb = DWEB_ENABLED && currentState.settings?.dwebEnabled;
-    const hintShown = firstTabHintVisible({ pinned: homeTab?.pinned, seen: hintSeen });
-    const offerShown = firstTabOfferVisible({ sawSetup, answered: offerAnswered, settings: currentState.settings });
+    const firstTabNotice = firstTabAuto.view();
+    // One prompt at a time: the hint waits for the notice to go.
+    const hintShown = !firstTabNotice && firstTabHintVisible({ pinned: homeTab?.pinned, seen: hintSeen });
     const items = navItems(showDweb);
     // Keep activeView valid if it vanished from the rail (dweb switched off, or the
     // side panel took Chat). Fall back to the FIRST available item, which is
@@ -1023,7 +1042,7 @@ const HomeApp = {
         rail,
         m('main.home-content', { class: `home-content--${activeView}` }, [
           hintShown ? m(FirstTabHint, { onDismiss: dismissHint }) : null,
-          offerShown ? m(FirstTabOffer, { send, onAnswered: answerOffer, beforeKeep: pinThisTab }) : null,
+          firstTabNotice,
           // System notices (/init progress, the grant-debugger nudge) — the SW
           // broadcasts these to every surface (DESIGN-12), so home must render
           // them too, not just the side panel's App.
@@ -1042,7 +1061,7 @@ const HomeApp = {
               ])
             : null,
           // why hold the nudges: one first-run card at a time.
-          content(showDweb, hintShown || offerShown),
+          content(showDweb, hintShown || !!firstTabNotice),
         ]),
       ]),
       // The agent's permission prompt — broadcast to every open surface

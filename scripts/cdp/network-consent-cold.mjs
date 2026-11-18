@@ -601,6 +601,31 @@ export async function runColdConsent({ reportPath = REPORT, launch = launchPeerd
       check('personal setup completes', !!await waitFor(async () =>
         (await rpc(ctx.page, { type: 'state/get' }))?.state?.profile?.onboardingComplete === true,
       { budgetMs: 20_000, pollMs: 50 }));
+      // A new profile finished setup on this Home, so peerd turns the first tab
+      // on with no question. "Turn off" must take back all of it.
+      const firstTab = async () => {
+        const settings = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings;
+        return {
+          enabled: settings?.firstTabEnabled, offered: settings?.firstTabOffered,
+          tab: await evalIn(ctx.page, 'chrome.tabs.getCurrent().then((tab) => ({ pinned: tab.pinned, index: tab.index }))', true),
+          notice: await evalIn(ctx.page, 'document.querySelector(".first-tab-offer h2")?.textContent ?? null'),
+          hint: await evalIn(ctx.page, '!!document.querySelector(".first-tab-hint")'),
+        };
+      };
+      const turnedOn = await waitFor(async () => {
+        const now = await firstTab();
+        return now.enabled === true && now.tab?.pinned === true && now.notice ? now : null;
+      }, { budgetMs: 20_000, pollMs: 100 });
+      check('after setup, Home turns the first tab on, pins this tab first and says so',
+        turnedOn?.offered === true && turnedOn.tab.index === 0 && turnedOn.hint === false
+          && turnedOn.notice === 'peerd is now the first tab in every window.', turnedOn ?? await firstTab());
+      await click(ctx.page, '.first-tab-off');
+      const turnedOff = await waitFor(async () => {
+        const now = await firstTab();
+        return now.enabled === false && now.tab?.pinned === false && !now.notice ? now : null;
+      }, { budgetMs: 20_000, pollMs: 100 });
+      check('"Turn off" turns the setting off, keeps the record and makes this tab a normal tab again',
+        turnedOff?.offered === true && turnedOff.hint === false, turnedOff ?? await firstTab());
       await observer.barrier(); assertNoTransport(evidence.events, 'Not now');
       evidence.phase = 'reload-off'; persist();
       await ctx.page.send('Page.reload', { ignoreCache: true });

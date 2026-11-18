@@ -62,7 +62,7 @@ const closeNewTabs = (page, before, windows = []) => evalIn(page, `(async () => 
   const tabs = await chrome.tabs.query({});
   await Promise.all(tabs.filter((tab) => !before.has(tab.id)).map((tab) => chrome.tabs.remove(tab.id).catch(() => {})));
 })()`, true);
-// Put back what the harness set up: the setting off and the offer answered.
+// Put back what the harness set up: the setting off and its record written.
 const resetFirstTab = (page) => rpc(page, {
   type: 'settings/update', patch: { firstTabEnabled: false, firstTabOffered: true },
 });
@@ -332,103 +332,83 @@ export const FIRST_TAB_STATES = [
     },
   },
 
-  // --- visual: the one-time offer, after the last setup step ---------------
+  // --- visual: an existing profile gets no turn-on; the notice on Home -----
   // An existing profile that still owes its network choice gets that one setup
-  // step on Home. Answering it lifts the gate in the same document, which is
-  // what makes Home offer the first tab. The chat view on a laptop-sized window
-  // scrolls to its composer, so the offer must stay in view.
+  // step on Home. That is not setup with this version, so Home turns nothing
+  // on. network-consent-cold.mjs drives the turn-on itself, through the real
+  // onboarding of a new profile. Here the notice is render only, for its look.
   {
-    name: 'home-first-tab-offer', kind: 'visual', phase: 'post-unlock',
-    responder: () => ({ sse: sseText('noted') }),
+    name: 'home-first-tab-notice', kind: 'visual', phase: 'post-unlock',
+    responder: null,
     async run(ctx, rec) {
       if (absentOnBase(rec, 'home/first-tab-prompts.js')) return;
       const networkShips = await evalIn(ctx.page, `import('/shared/channel-config.js').then((config) => config.DWEB_ENABLED)`, true);
       if (!networkShips) {
-        rec.observe('first tab offer', { skipped: 'this build has no network step to finish' });
+        rec.observe('first tab notice', { skipped: 'this build has no network step to finish' });
         return;
       }
-      const before = await tabIds(ctx.page);
       const panelUrl = await evalIn(ctx.page, 'location.href');
-      // why: the voice card must be able to show here, and later states keep theirs.
-      const voiceDismissed = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings?.voiceOnboardingDismissed === true;
       let page = null;
       try {
+        // An existing profile that owes its network choice and never had the first tab.
         const reset = await rpc(ctx.page, {
-          type: 'settings/reset', keys: ['dwebEnabled', 'firstTabEnabled', 'firstTabOffered', 'voiceOnboardingDismissed'],
+          type: 'settings/reset', keys: ['dwebEnabled', 'firstTabEnabled', 'firstTabOffered'],
         });
         if (reset?.ok !== true) throw new Error(`fixture reset failed: ${JSON.stringify(reset)}`);
-        await evalIn(ctx.page, `localStorage.removeItem(${JSON.stringify(HINT_KEY)})`);
         await releasePanel(ctx);
         page = await openWidePage(ctx, 'home/home.html#chat', { ready: '[data-network-choice="skip"]', metrics: LAPTOP });
+        await page.send('Page.bringToFront');
         await clickAndRedraw(page, '[data-network-choice="skip"]');
-        const offer = await waitFor(() => evalIn(page, `(() => {
-          const section = document.querySelector('.home-shell .first-tab-offer');
-          return section && document.querySelector('.input-bar textarea') ? {
+        const lifted = await waitFor(() => evalIn(page, `!!document.querySelector('.input-bar textarea')`),
+          { budgetMs: 10_000, pollMs: 80 });
+        if (!lifted) throw new Error('the network choice did not lift the gate');
+        // why the wait: a turn-on would start with the state that lifts the gate.
+        await sleep(1_500);
+        const saved = (await rpc(page, { type: 'state/get' }))?.state?.settings;
+        const quiet = {
+          firstTabEnabled: saved?.firstTabEnabled, firstTabOffered: saved?.firstTabOffered,
+          pinned: await evalIn(page, `chrome.tabs.getCurrent().then((tab) => tab.pinned)`, true),
+          notice: await evalIn(page, `!!document.querySelector('.first-tab-offer')`),
+        };
+        rec.check('an existing profile that owes only its network choice gets no turn-on, no pinned tab and no notice',
+          JSON.stringify(quiet) === JSON.stringify({
+            firstTabEnabled: false, firstTabOffered: false, pinned: false, notice: false }), JSON.stringify(quiet));
+
+        const shown = await evalIn(page, `(async () => {
+          const { default: m } = await import('/vendor/mithril/mithril.js');
+          const { makeFirstTabAuto } = await import('/home/first-tab-prompts.js');
+          const host = document.createElement('div');
+          host.id = 'e2e-first-tab-notice';
+          document.querySelector('.home-content').prepend(host);
+          const auto = makeFirstTabAuto({ send: async () => ({ ok: true }) });
+          m.mount(host, { view: () => auto.view() });
+          auto.note({ sawSetup: true, ready: true, settings: { firstTabEnabled: false, firstTabOffered: false } });
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          m.redraw.sync();
+          const section = host.querySelector('.first-tab-offer');
+          return section ? {
             name: document.getElementById(section.getAttribute('aria-labelledby'))?.textContent,
             text: [...section.querySelectorAll('p')].map((p) => p.textContent),
             buttons: [...section.querySelectorAll('button')].map((button) => button.textContent),
           } : null;
-        })()`), { budgetMs: 10_000, pollMs: 80 });
-        rec.check('after the last setup step, Home offers the first tab in plain words',
-          offer?.name === 'Keep peerd as the first tab?'
-            && JSON.stringify(offer.text) === JSON.stringify([
-              'It stays at the start of your tabs in every window, so peerd is one click away.',
-              'You can turn this on later in Settings.',
-            ])
-            && JSON.stringify(offer.buttons) === JSON.stringify(['Keep it', 'Not now']), JSON.stringify(offer));
-        // The composer takes focus at the bottom of the chat and scrolls it.
-        await sleep(800);
-        const placed = await inView(page, '.first-tab-offer');
-        rec.check('on a laptop-sized window the offer stays in view while the chat scrolls',
-          placed?.visible === true, JSON.stringify(placed));
-        rec.check('one first-run card at a time: no voice card under the offer',
-          await evalIn(page, `!document.querySelector('.chat-view .onboarding-card')`), '');
-        await rec.visualPage('home-first-tab-offer', page);
-
-        const thisTab = await evalIn(page, `chrome.tabs.getCurrent().then((tab) => tab.id)`, true);
-        await clickAndRedraw(page, '.first-tab-keep');
-        const kept = await waitFor(async () => {
-          const view = await evalIn(page, `(async () => {
-            const tab = await chrome.tabs.getCurrent();
-            const home = chrome.runtime.getURL('home/home.html');
-            const homes = (await chrome.tabs.query({ windowId: tab.windowId }))
-              .filter((item) => (item.url || item.pendingUrl || '').startsWith(home));
-            return {
-              offer: !!document.querySelector('.first-tab-offer'),
-              hint: !!document.querySelector('.first-tab-hint'),
-              homes: homes.map((item) => ({ id: item.id, index: item.index, pinned: item.pinned })),
-            };
-          })()`, true);
-          return !view.offer && view.hint ? view : null;
-        }, { budgetMs: 10_000, pollMs: 100 });
-        rec.check('"Keep it" pins this Home tab at the start, with no second Home tab in this window',
-          JSON.stringify(kept?.homes) === JSON.stringify([{ id: thisTab, index: 0, pinned: true }]), JSON.stringify(kept));
-        rec.check('the result shows here: the hint says where peerd lives', kept?.hint === true, JSON.stringify(kept));
-        const state = await rpc(page, { type: 'state/get' });
-        rec.check('"Keep it" saves the answer and turns the setting on',
-          state?.state?.settings?.firstTabEnabled === true && state.state.settings.firstTabOffered === true,
-          JSON.stringify(state?.state?.settings));
-        const focused = await focusInContent(page);
-        rec.check('keyboard focus moves into the page once the offer closes', !!focused, String(focused));
-        await clickAndRedraw(page, '.first-tab-hint-ok');
-        const voice = await waitFor(() => evalIn(page, `!!document.querySelector('.chat-view .onboarding-card')`),
-          { budgetMs: 5_000, pollMs: 80 });
-        rec.check('once no first-run prompt is left, the voice card shows', !!voice);
+        })()`, true);
+        rec.check('the notice says in plain words what changed and where to change it',
+          shown?.name === 'peerd is now the first tab in every window.'
+            && JSON.stringify(shown.text) === JSON.stringify(['You can change this in Settings.'])
+            && JSON.stringify(shown.buttons) === JSON.stringify(['Got it', 'Turn off']), JSON.stringify(shown));
+        await rec.visualPage('home-first-tab-notice', page);
       } finally {
         try { page?.close(); } catch { /* */ }
         await restorePanel(ctx, panelUrl).catch(() => {});
-        await rpc(ctx.page, { type: 'settings/update', patch: { voiceOnboardingDismissed: voiceDismissed } }).catch(() => {});
         await resetFirstTab(ctx.page).catch(() => {});
         await rpc(ctx.page, { type: 'settings/update', patch: { dwebEnabled: false } }).catch(() => {});
-        await evalIn(ctx.page, `localStorage.removeItem(${JSON.stringify(HINT_KEY)})`).catch(() => {});
-        await closeNewTabs(ctx.page, before).catch(() => {});
       }
     },
   },
 
-  // --- visual: the offer's error line, rendered on the real Home page ------
+  // --- visual: the notice's error line, rendered on the real Home page -----
   {
-    name: 'home-first-tab-offer-error', kind: 'visual', phase: 'post-unlock',
+    name: 'home-first-tab-notice-error', kind: 'visual', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) {
       if (absentOnBase(rec, 'home/first-tab-prompts.js')) return;
@@ -437,22 +417,29 @@ export const FIRST_TAB_STATES = [
       try {
         const shown = await evalIn(page, `(async () => {
           const { default: m } = await import('/vendor/mithril/mithril.js');
-          const { FirstTabOffer } = await import('/home/first-tab-prompts.js');
+          const { makeFirstTabAuto } = await import('/home/first-tab-prompts.js');
           const content = document.querySelector('.home-content');
           const host = document.createElement('div');
-          host.id = 'e2e-first-tab-offer';
+          host.id = 'e2e-first-tab-notice';
           content.prepend(host);
-          m.mount(host, { view: () => m(FirstTabOffer, {
-            send: async () => ({ ok: false, error: 'kernel-route-unauthorized' }), onAnswered: () => {},
-          }) });
-          host.querySelector('.first-tab-keep').click();
+          let sends = 0;
+          const auto = makeFirstTabAuto({
+            send: async () => { sends += 1; return { ok: false, error: 'kernel-route-unauthorized' }; },
+          });
+          m.mount(host, { view: () => auto.view() });
+          const newProfile = { sawSetup: true, ready: true, settings: { firstTabEnabled: false, firstTabOffered: false } };
+          auto.note(newProfile);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          auto.note(newProfile);
           await new Promise((resolve) => setTimeout(resolve, 50));
           m.redraw.sync();
-          return host.querySelector('p.error')?.textContent ?? null;
+          return { text: host.querySelector('p.error')?.textContent ?? null, sends,
+            buttons: [...host.querySelectorAll('button')].map((button) => button.textContent) };
         })()`, true);
-        rec.check('a refused "Keep it" says what failed, then what to do',
-          shown === 'peerd could not turn this on. Try again, or turn it on in Settings.', String(shown));
-        await rec.visualPage('home-first-tab-offer-error', page);
+        rec.check('a refused turn-on says what failed, then what to do, and peerd does not try again',
+          shown?.text === 'peerd could not turn this on. Turn it on in Settings.' && shown.sends === 1
+            && JSON.stringify(shown.buttons) === JSON.stringify(['Got it']), JSON.stringify(shown));
+        await rec.visualPage('home-first-tab-notice-error', page);
       } finally { try { page.close(); } catch { /* */ } }
     },
   },
@@ -562,10 +549,10 @@ export const FIRST_TAB_STATES = [
     },
   },
 
-  // --- functional: the live panel that showed the first vault setup asks once
+  // --- functional: the live panel that showed the first vault setup turns it on once
   // The harness set the vault up in this panel, through the vault shell, and
   // run-e2e-verify.mjs runs this state before any state reloads the panel.
-  // A keyboard answer must leave focus where the user types next.
+  // A keyboard "Turn off" must leave focus where the user types next.
   {
     name: 'sidepanel-first-tab-first-run', kind: 'functional', phase: 'post-unlock',
     responder: null,
@@ -574,20 +561,36 @@ export const FIRST_TAB_STATES = [
       const enter = (type) => ctx.page.send('Input.dispatchKeyEvent', {
         type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, ...(type === 'keyDown' ? { text: '\r' } : {}),
       });
+      const before = await tabIds(ctx.page);
+      const everyWindow = async (count) => {
+        const windows = await windowsWithTabs(ctx.page);
+        return windows.length > 0 && windows.every((window) => pinnedHomes(window).length === count) ? windows : null;
+      };
       try {
         const marked = await evalIn(ctx.page, 'document.documentElement.dataset.peerdFirstSetup ?? null');
         rec.check('this panel showed the first vault setup', marked === 'true', String(marked));
+        // The harness wrote the record during setup. Without it, this is a new profile.
         const reset = await rpc(ctx.page, { type: 'settings/update', patch: { firstTabOffered: false } });
         if (reset?.ok !== true) throw new Error(`fixture reset failed: ${JSON.stringify(reset)}`);
-        const offer = await waitFor(() => evalIn(ctx.page, `(() => {
+        const notice = await waitFor(() => evalIn(ctx.page, `(() => {
           const section = document.querySelector('.app-shell .body > .first-tab-offer');
-          return section && section.parentElement.firstElementChild === section
-            ? document.getElementById(section.getAttribute('aria-labelledby'))?.textContent ?? null : null;
+          return section && section.parentElement.firstElementChild === section ? {
+            name: document.getElementById(section.getAttribute('aria-labelledby'))?.textContent ?? null,
+            buttons: [...section.querySelectorAll('button')].map((button) => button.textContent),
+          } : null;
         })()`), { budgetMs: 10_000, pollMs: 80 });
-        rec.check('once peerd can answer, the panel offers the first tab at the top of the chat',
-          offer === 'Keep peerd as the first tab?', String(offer));
-        await evalIn(ctx.page, `document.querySelector('.first-tab-offer .first-tab-later')?.focus()`);
-        const before = await evalIn(ctx.page, 'document.activeElement?.textContent ?? null');
+        rec.check('once peerd can answer, the panel turns the first tab on and says so at the top of the chat',
+          notice?.name === 'peerd is now the first tab in every window.'
+            && JSON.stringify(notice.buttons) === JSON.stringify(['Got it', 'Turn off']), JSON.stringify(notice));
+        const on = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings;
+        rec.check('with no question, the setting is on and the profile has its record',
+          on?.firstTabEnabled === true && on.firstTabOffered === true,
+          JSON.stringify({ firstTabEnabled: on?.firstTabEnabled, firstTabOffered: on?.firstTabOffered }));
+        const covered = await waitFor(() => everyWindow(1), { budgetMs: 10_000, pollMs: 100 });
+        rec.check('every open window gets one pinned Home tab', !!covered,
+          JSON.stringify(covered ?? await windowsWithTabs(ctx.page)));
+        await evalIn(ctx.page, `document.querySelector('.first-tab-offer .first-tab-off')?.focus()`);
+        const focusedOn = await evalIn(ctx.page, 'document.activeElement?.textContent ?? null');
         await enter('keyDown');
         await enter('keyUp');
         const landed = await waitFor(() => evalIn(ctx.page, `(() => {
@@ -595,28 +598,36 @@ export const FIRST_TAB_STATES = [
           return !document.querySelector('.first-tab-offer') && active?.matches('.input-bar textarea')
             ? active.getAttribute('aria-label') ?? 'textarea' : null;
         })()`), { budgetMs: 5_000, pollMs: 50 });
-        rec.check('"Not now" by keyboard hides the offer and puts focus in the composer',
-          before === 'Not now' && !!landed, JSON.stringify({ before, landed,
+        rec.check('"Turn off" by keyboard hides the notice and puts focus in the composer',
+          focusedOn === 'Turn off' && !!landed, JSON.stringify({ focusedOn, landed,
             active: landed ?? await evalIn(ctx.page, `document.activeElement?.tagName ?? null`) }));
         const saved = await waitFor(async () => {
           const settings = (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings;
-          return settings?.firstTabOffered === true ? settings : null;
+          return settings?.firstTabEnabled === false ? settings : null;
         }, { budgetMs: 5_000, pollMs: 100 });
-        rec.check('"Not now" saves the answer and leaves the setting off',
-          !!saved && saved.firstTabEnabled === false, JSON.stringify(saved
+        rec.check('"Turn off" turns the setting off and keeps the record',
+          !!saved && saved.firstTabOffered === true, JSON.stringify(saved
             ? { firstTabOffered: saved.firstTabOffered, firstTabEnabled: saved.firstTabEnabled } : null));
+        const cleared = await waitFor(() => everyWindow(0), { budgetMs: 5_000, pollMs: 100 });
+        rec.check('"Turn off" closes the pinned Home tabs that came with the turn-on', !!cleared,
+          JSON.stringify(cleared ?? await windowsWithTabs(ctx.page)));
+        // The settings are as before the turn-on, but the record is there.
+        await sleep(1_000);
+        rec.check('peerd does not turn it on again', await evalIn(ctx.page, `!document.querySelector('.first-tab-offer')`)
+          && (await rpc(ctx.page, { type: 'state/get' }))?.state?.settings?.firstTabEnabled === false, '');
       } finally {
         await resetFirstTab(ctx.page).catch(() => {});
+        await closeNewTabs(ctx.page, before).catch(() => {});
       }
     },
   },
 
-  // --- visual: the offer in the side panel, where most people set peerd up --
-  // The two panel screens, as a render fixture: the real panel App with the
-  // real offer over the live panel, then taken away. The live panel's own
-  // offer is driven by sidepanel-first-tab-first-run.
+  // --- visual: the notice in the side panel, where most people set peerd up --
+  // The panel screen, as a render fixture: the real panel App with the real
+  // notice over the live panel, then closed. The live panel's own turn-on is
+  // driven by sidepanel-first-tab-first-run.
   {
-    name: 'sidepanel-first-tab-offer', kind: 'visual', phase: 'post-unlock',
+    name: 'sidepanel-first-tab-notice', kind: 'visual', phase: 'post-unlock',
     responder: null,
     async run(ctx, rec) {
       if (absentOnBase(rec, 'home/first-tab-prompts.js')) return;
@@ -631,46 +642,41 @@ export const FIRST_TAB_STATES = [
           const state = { ...live, session: { ...live.session, messages: [] },
             settings: { ...live.settings, firstTabEnabled: false, firstTabOffered: false, voiceOnboardingDismissed: false } };
           const sent = [];
+          // why no tabs: this fixture must not close the tabs of the real browser.
           const prompt = makePanelFirstTab({ send: async (message) => { sent.push(message); return { ok: true }; } });
-          const shown = { prompt: true };
           const host = document.createElement('div');
           host.id = 'e2e-first-tab-panel';
           host.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:var(--bg);overflow:auto;';
           document.body.append(host);
           m.mount(host, { view: () => m(App, {
             state, send: async () => ({ ok: true }), voiceManager: null, uiActions: {}, view: 'chat',
-            optionsActive: false, firstTabPrompt: shown.prompt ? prompt.view(state) : null,
+            optionsActive: false, firstTabPrompt: prompt.view(state),
           }) });
-          globalThis.__e2eFirstTab = { m, host, sent, shown };
+          prompt.note(state);
+          globalThis.__e2eFirstTab = { m, host };
           await new Promise((resolve) => setTimeout(resolve, 300));
           m.redraw.sync();
-          const offer = host.querySelector('.body > .first-tab-offer');
+          const notice = host.querySelector('.body > .first-tab-offer');
           return {
-            offer: !!offer, first: host.querySelector('.body')?.firstElementChild === offer,
-            voice: !!host.querySelector('.chat-view .onboarding-card'),
+            notice: notice?.querySelector('h2')?.textContent ?? null,
+            first: !!notice && host.querySelector('.body')?.firstElementChild === notice,
+            voice: !!host.querySelector('.chat-view .onboarding-card'), sent,
           };
         })()`, true);
-        rec.check('the panel shows the offer at the top of the chat, and no voice card under it',
-          mounted?.offer === true && mounted.first === true && mounted.voice === false, JSON.stringify(mounted));
-        await rec.visual('sidepanel-first-tab-offer');
-        const kept = await evalIn(ctx.page, `(async () => {
-          const { m, host, sent } = globalThis.__e2eFirstTab;
-          host.querySelector('.first-tab-keep').click();
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          m.redraw.sync();
-          return { line: host.querySelector('.first-tab-kept')?.textContent ?? null, sent };
-        })()`, true);
-        rec.check('after "Keep it" the panel says what changed in one line',
-          kept?.line === 'peerd is now the first tab in every window.'
-            && kept.sent?.[0]?.patch?.firstTabEnabled === true, JSON.stringify(kept));
-        await rec.visual('sidepanel-first-tab-kept');
+        rec.check('the panel turns it on, then shows the notice at the top of the chat, and no voice card under it',
+          mounted?.notice === 'peerd is now the first tab in every window.' && mounted.first === true
+            && mounted.voice === false && mounted.sent?.length === 1
+            && mounted.sent[0]?.patch?.firstTabEnabled === true && mounted.sent[0].patch.firstTabOffered === true,
+          JSON.stringify(mounted));
+        await rec.visual('sidepanel-first-tab-notice');
         const voice = await evalIn(ctx.page, `(() => {
-          const { m, host, shown } = globalThis.__e2eFirstTab;
-          shown.prompt = false;
+          const { m, host } = globalThis.__e2eFirstTab;
+          host.querySelector('.first-tab-ok').click();
           m.redraw.sync();
-          return !!host.querySelector('.chat-view .onboarding-card');
+          return { notice: !!host.querySelector('.first-tab-offer'), voice: !!host.querySelector('.chat-view .onboarding-card') };
         })()`);
-        rec.check('with no first tab prompt, the same panel shows the voice card', voice === true, String(voice));
+        rec.check('after "Got it", the same panel shows the voice card',
+          voice?.notice === false && voice.voice === true, JSON.stringify(voice));
       } finally {
         await evalIn(ctx.page, `(() => {
           const holder = globalThis.__e2eFirstTab;

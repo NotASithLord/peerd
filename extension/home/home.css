@@ -766,7 +766,7 @@
 }
 .home-panel-bar button { margin-left: auto; }
 
-/* "Keep peerd as the first tab": the one-time offer after onboarding (its
+/* "Keep peerd as the first tab": the one-time notice after onboarding (its
    look is in styles.css, shared with the side panel) and the one-time hint
    in the pinned tab (a dark card, as in the design). Both sit above the
    content. why sticky: the content scrolls, for example when the chat

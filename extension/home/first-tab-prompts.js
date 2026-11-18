@@ -1,101 +1,133 @@
 // @ts-check
 // home/first-tab-prompts.js - the one-time prompts for "Keep peerd as the
-// first tab": the offer after the first setup, and the hint in the pinned tab.
-// The rules are in first-tab.js; home.js and the side panel decide when each
-// one shows.
+// first tab": the turn-on after the first setup with its notice, and the hint
+// in the pinned tab. The rules are in first-tab.js; home.js and the side panel
+// decide when each one shows.
 
 import m from '/vendor/mithril/mithril.js';
 import { composerForState } from '/sidepanel/provider-readiness.js';
-import { firstTabKeptVisible, firstTabOfferPatch, firstTabOfferVisible } from './first-tab.js';
+import {
+  firstTabAutoDue, firstTabNoticeVisible, firstTabPatch, firstTabsToClose,
+} from './first-tab.js';
 
 /** @typedef {(message: { type: string, patch: Record<string, boolean> }) => Promise<unknown>} Send */
-/** @typedef {'keep'|'later'} Answer */
+/** @typedef {{ firstTabEnabled?: unknown, firstTabOffered?: unknown }} FirstTabSettings */
+/**
+ * @typedef {{ query: (query: { pinned: boolean }) => Promise<{ id?: number, pinned?: boolean,
+ *   url?: string, pendingUrl?: string }[]>, remove: (ids: number[]) => Promise<unknown> }} TabsApi
+ */
 
 /**
- * "Keep it" turns the setting on, and the kernel then adds the tabs. "Not now"
- * only records the answer. Either answer hides the offer for good.
+ * Close the pinned Home tabs, all but the tab `keepId`.
+ * @param {TabsApi} tabs @param {string} homeUrl @param {number} [keepId]
  */
-export const FirstTabOffer = () => {
+export const closeFirstTabs = async (tabs, homeUrl, keepId) => {
+  const ids = firstTabsToClose(await tabs.query({ pinned: true }), homeUrl, keepId);
+  if (ids.length) await tabs.remove(ids);
+};
+
+/**
+ * After the first setup, peerd turns the first tab on by itself, once. The
+ * kernel then adds the tabs. A notice says what changed. "Turn off" turns the
+ * setting off and takes the tabs back; "Got it" only closes the notice.
+ * @param {Object} deps
+ * @param {Send} deps.send
+ * @param {() => Promise<void>} [deps.pinFirst] runs before the setting (Home pins its own tab)
+ * @param {() => Promise<void>} [deps.unpin] takes back what pinFirst did
+ * @param {() => Promise<void>} [deps.closeTabs] closes the tabs that the kernel added
+ * @param {() => void} [deps.onChange] runs after the turn-on, and after "Turn off"
+ * @param {() => void} [deps.afterClose] runs once the notice closed (the surface moves focus)
+ */
+export const makeFirstTabAuto = ({
+  send, pinFirst, unpin, closeTabs, onChange = () => {}, afterClose = () => {},
+}) => {
+  /** @type {import('./first-tab.js').FirstTabPhase} */
+  let phase = 'idle';
   let busy = false;
-  let failed = false;
-  /**
-   * @param {Send} send @param {(answer: Answer) => void} onAnswered
-   * @param {(() => Promise<void>) | undefined} beforeKeep
-   */
-  const keep = async (send, onAnswered, beforeKeep) => {
-    busy = true;
-    failed = false;
-    /** @type {unknown} */
-    let reply = null;
+  let offFailed = false;
+  /** @param {boolean} on */
+  const update = async (on) => {
     try {
-      await beforeKeep?.();
-      reply = await send({ type: 'settings/update', patch: firstTabOfferPatch('keep') });
-    } catch { reply = null; }
-    busy = false;
-    if (/** @type {{ ok?: unknown } | null} */ (reply)?.ok === true) onAnswered('keep');
-    else failed = true;
+      const reply = await send({ type: 'settings/update', patch: firstTabPatch(on) });
+      return /** @type {{ ok?: unknown } | null} */ (reply)?.ok === true;
+    } catch { return false; }
+  };
+  /** @param {(() => Promise<void>) | undefined} step */
+  const attempt = async (step) => { try { await step?.(); } catch { /* the tabs stay */ } };
+  const turnOn = async () => {
+    await attempt(pinFirst);
+    phase = await update(true) ? 'on' : 'failed';
+    // why: a failed turn-on must not leave the tab that pinFirst pinned.
+    if (phase === 'failed') await attempt(unpin);
+    onChange();
     m.redraw();
   };
-  /** @param {Send} send @param {(answer: Answer) => void} onAnswered */
-  const later = (send, onAnswered) => {
-    onAnswered('later');
-    void send({ type: 'settings/update', patch: firstTabOfferPatch('later') }).catch(() => {});
+  const close = () => { phase = 'done'; afterClose(); };
+  const turnOff = async () => {
+    busy = true;
+    offFailed = false;
+    const off = await update(false);
+    busy = false;
+    if (off) {
+      await attempt(unpin);
+      await attempt(closeTabs);
+      onChange();
+      close();
+    } else offFailed = true;
+    m.redraw();
   };
   return {
     /**
-     * @param {{ attrs: { send: Send, onAnswered: (answer: Answer) => void,
-     *   beforeKeep?: () => Promise<void> } }} vnode
+     * Each new state comes here. why the phase changes at once: the turn-on
+     * runs one time, whatever number of states come while it runs.
+     * @param {{ sawSetup: boolean, ready: boolean, settings?: FirstTabSettings | null }} input
      */
-    view: ({ attrs: { send, onAnswered, beforeKeep } }) =>
-      m('section.first-tab-offer', { 'aria-labelledby': 'first-tab-offer-title' }, [
-        m('.first-tab-offer-text', [
-          m('h2#first-tab-offer-title', 'Keep peerd as the first tab?'),
-          m('p', 'It stays at the start of your tabs in every window, so peerd is one click away.'),
-          m('p', 'You can turn this on later in Settings.'),
-          failed ? m('p.error', { role: 'alert' },
-            'peerd could not turn this on. Try again, or turn it on in Settings.') : null,
+    note: ({ sawSetup, ready, settings }) => {
+      if (!firstTabAutoDue({ sawSetup, ready, phase, settings })) return;
+      phase = 'turning';
+      void turnOn();
+    },
+    /** @param {{ messages?: number }} [input] */
+    view: ({ messages = 0 } = {}) => !firstTabNoticeVisible({ phase, messages }) ? null
+      : m('section.first-tab-offer', { 'aria-labelledby': 'first-tab-offer-title' }, [
+        m('.first-tab-offer-text', { role: 'status' }, phase === 'failed' ? [
+          m('h2#first-tab-offer-title', 'Keep peerd as the first tab'),
+          m('p.error', 'peerd could not turn this on. Turn it on in Settings.'),
+        ] : [
+          m('h2#first-tab-offer-title', 'peerd is now the first tab in every window.'),
+          m('p', 'You can change this in Settings.'),
+          offFailed ? m('p.error', { role: 'alert' },
+            'peerd could not turn this off. Turn it off in Settings.') : null,
         ]),
         m('.first-tab-offer-actions', [
-          m('button.first-tab-keep', {
-            type: 'button', disabled: busy, onclick: () => keep(send, onAnswered, beforeKeep),
-          }, busy ? 'Saving…' : 'Keep it'),
-          m('button.secondary.first-tab-later', {
-            type: 'button', disabled: busy, onclick: () => later(send, onAnswered),
-          }, 'Not now'),
+          m('button.first-tab-ok', { type: 'button', disabled: busy, onclick: close }, 'Got it'),
+          phase === 'on' ? m('button.secondary.first-tab-off', {
+            type: 'button', disabled: busy, onclick: turnOff,
+          }, busy ? 'Saving…' : 'Turn off') : null,
         ]),
       ]),
   };
 };
 
-/** The side panel's answer to "Keep it": the new tabs open out of sight. */
-export const FirstTabKept = {
-  view: () => m('p.first-tab-kept', { role: 'status' }, 'peerd is now the first tab in every window.'),
-};
-
 /**
- * The side panel asks too, because most people set peerd up there. It asks
- * once, in the panel that showed the first vault setup, and only when peerd
- * can answer, so it never stacks on the provider setup.
- * @param {{ send: Send, afterAnswer?: () => void }} deps
- *   afterAnswer - runs once the offer has its answer (the panel moves focus)
+ * The side panel does it too, because most people set peerd up there. It does
+ * it once, in the panel that showed the first vault setup, and only when peerd
+ * can answer, so the notice never stacks on the provider setup.
+ * @param {{ send: Send, tabs?: TabsApi, homeUrl?: string, afterClose?: () => void }} deps
+ *   afterClose - runs once the notice closed (the panel moves focus)
  */
-export const makePanelFirstTab = ({ send, afterAnswer = () => {} }) => {
-  let answered = false;
-  let kept = false;
-  /** @param {Answer} answer */
-  const onAnswered = (answer) => { answered = true; kept = answer === 'keep'; afterAnswer(); };
+export const makePanelFirstTab = ({ send, tabs, homeUrl, afterClose }) => {
+  const auto = makeFirstTabAuto({
+    send, afterClose,
+    closeTabs: tabs && homeUrl ? () => closeFirstTabs(tabs, homeUrl) : undefined,
+  });
   return {
-    /**
-     * @param {{ settings?: Record<string, unknown> | null,
-     *   session?: { messages?: unknown[] } | null }} state
-     */
-    view: (state) => {
-      if (firstTabKeptVisible({ kept, messages: state.session?.messages?.length ?? 0 })) {
-        return m(FirstTabKept);
-      }
-      return firstTabOfferVisible({ sawSetup: true, answered, settings: state.settings })
-        && composerForState(state).canSend ? m(FirstTabOffer, { send, onAnswered }) : null;
-    },
+    /** @param {{ settings?: Record<string, unknown> | null }} state */
+    note: (state) => auto.note({
+      sawSetup: true, ready: composerForState(state).canSend, settings: state.settings,
+    }),
+    /** @param {{ session?: { messages?: unknown[] } | null }} state */
+    view: (state) => auto.view({ messages: state.session?.messages?.length ?? 0 }),
   };
 };
 

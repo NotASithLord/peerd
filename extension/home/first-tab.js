@@ -1,8 +1,8 @@
 // @ts-check
 // home/first-tab.js - pure rules for "Keep peerd as the first tab": the
-// one-time offer after the first setup (on Home or in the side panel), the
-// one-time hint in the pinned tab, and the live state that Home's tab icon
-// and title show.
+// one-time turn-on after the first setup (on Home or in the side panel) and
+// its notice, the one-time hint in the pinned tab, and the live state that
+// Home's tab icon and title show.
 //
 // A pinned tab shows only its icon, so the icon carries the state: a ring
 // while peerd works, and a dot when a reply came while you were elsewhere.
@@ -27,25 +27,69 @@ export const setupPending = (state, dwebEnabled) =>
   || dwebEnabled && state?.settings?.dwebChoiceMade === false;
 
 /**
- * The offer shows once: on the surface that saw setup finish, until the user
- * answers it there or the settings say it was answered.
- * @param {{ sawSetup: boolean, answered: boolean,
- *   settings?: { firstTabEnabled?: unknown, firstTabOffered?: unknown } | null }} input
+ * The one-time turn-on, on one surface: not started, turning on, on with its
+ * notice, failed with its notice, or closed.
+ * @typedef {'idle'|'turning'|'on'|'failed'|'done'} FirstTabPhase
  */
-export const firstTabOfferVisible = ({ sawSetup, answered, settings }) => sawSetup && !answered
-  && settings?.firstTabOffered !== true && settings?.firstTabEnabled !== true;
 
 /**
- * In the side panel, "Keep it" opens the new tabs out of sight, so one line
- * says what changed. It goes once the chat starts.
- * @param {{ kept: boolean, messages: number }} input
+ * peerd turns the first tab on once: on the surface that saw setup finish,
+ * when that surface is ready, and only while the settings say that no surface
+ * did it and the user did not turn it on.
+ * @param {{ sawSetup: boolean, ready: boolean, phase: FirstTabPhase,
+ *   settings?: { firstTabEnabled?: unknown, firstTabOffered?: unknown } | null }} input
  */
-export const firstTabKeptVisible = ({ kept, messages }) => kept && messages === 0;
+export const firstTabAutoDue = ({ sawSetup, ready, phase, settings }) => sawSetup && ready
+  && phase === 'idle' && settings?.firstTabOffered !== true && settings?.firstTabEnabled !== true;
 
-/** @param {'keep'|'later'} answer @returns {Record<string, boolean>} */
-export const firstTabOfferPatch = (answer) => answer === 'keep'
+/**
+ * What Home tells the turn-on. Only onboarding counts as setup here: an
+ * existing profile that owes only the network choice did not go through setup
+ * with this version. Before the kernel sends its snapshot, Home knows nothing
+ * about the profile, so it is not ready.
+ * @param {{ hydrated?: unknown, profile?: { onboardingComplete?: unknown } | null,
+ *   settings?: { dwebChoiceMade?: unknown, firstTabEnabled?: unknown,
+ *   firstTabOffered?: unknown } | null } | null | undefined} state
+ * @param {boolean} dwebEnabled
+ * @param {boolean} sawOnboarding an earlier state of this Home showed onboarding
+ */
+export const homeFirstTabInput = (state, dwebEnabled, sawOnboarding) => {
+  const hydrated = state?.hydrated === true;
+  return {
+    sawSetup: sawOnboarding || hydrated && state?.profile?.onboardingComplete === false,
+    ready: hydrated && !setupPending(state, dwebEnabled),
+    settings: state?.settings,
+  };
+};
+
+/**
+ * The new tabs can open out of sight, so a notice says what changed, or that
+ * the turn-on failed. It goes once the chat starts.
+ * @param {{ phase: FirstTabPhase, messages: number }} input
+ */
+export const firstTabNoticeVisible = ({ phase, messages }) =>
+  (phase === 'on' || phase === 'failed') && messages === 0;
+
+/**
+ * The turn-on also records that this profile had it. "Turn off" keeps that
+ * record, so peerd does not turn it on again.
+ * @param {boolean} on @returns {Record<string, boolean>}
+ */
+export const firstTabPatch = (on) => on
   ? { firstTabEnabled: true, firstTabOffered: true }
-  : { firstTabOffered: true };
+  : { firstTabEnabled: false };
+
+/**
+ * "Turn off" in the notice closes the pinned Home tabs that came with the
+ * turn-on. The tab that shows the notice stays open.
+ * @param {{ id?: number, pinned?: boolean, url?: string, pendingUrl?: string }[]} tabs
+ * @param {string} homeUrl @param {number} [keepId]
+ * @returns {number[]}
+ */
+export const firstTabsToClose = (tabs, homeUrl, keepId) => tabs
+  .filter((tab) => tab.pinned === true && tab.id !== keepId
+    && (tab.url || tab.pendingUrl || '').startsWith(homeUrl))
+  .flatMap((tab) => typeof tab.id === 'number' ? [tab.id] : []);
 
 /**
  * The hint shows in a pinned Home tab until the user says "Got it".

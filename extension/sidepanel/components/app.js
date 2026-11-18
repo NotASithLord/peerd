@@ -91,7 +91,7 @@ export const App = {
       actorIsolation,
       m('.body', unlocked
         ? [
-            // The one-time "Keep peerd as the first tab" offer (sidepanel.js).
+            // The one-time "Keep peerd as the first tab" notice (sidepanel.js).
             view === 'chat' ? firstTabPrompt : null,
             view === 'chat'   ? m(ChatView, {
               state, send, voiceManager, uiActions, surface: 'sidepanel', activeTabStatus,

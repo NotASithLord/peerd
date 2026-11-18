@@ -1451,8 +1451,8 @@ export async function unlockAndReady(page, { provider = 'ollama', model = 'qwen3
   if (!vault?.ok) throw new Error('vault/initialize failed: ' + JSON.stringify(vault));
   log('vault initialized + unlocked');
   await rpc(page, { type: 'onboarding/complete', peerName: 'peerd', facts: null });
-  // why answer the first tab offer here: the panel that saw the vault setup
-  // asks once, and the harness finishes first-run setup for every state.
+  // why write the first tab record here: the panel that saw the vault setup
+  // turns the first tab on once, and it must not add pinned tabs to every state.
   const upd = await rpc(page, {
     type: 'settings/update', patch: { providerName: provider, providerModel: model, firstTabOffered: true },
   });

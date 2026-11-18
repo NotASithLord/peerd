@@ -34,13 +34,13 @@ import { eventBelongsToSidepanelWindow, focusBrowserTab } from './tab-context.js
 let currentState = INITIAL_STATE;
 
 // "Keep peerd as the first tab": the panel that showed the first vault setup
-// offers it once (home/first-tab-prompts.js). The vault shell shows that setup
+// turns it on once (home/first-tab-prompts.js). The vault shell shows that setup
 // before this module loads, and marks the page; the vault gate here shows it
 // after a vault reset. why a lazy import: only a first run needs it, so the
 // panel's first paint stays as it was.
-/** @type {{ view: (state: ChatState) => unknown } | null} */
+/** @type {{ note: (state: ChatState) => void, view: (state: ChatState) => unknown } | null} */
 let firstTab = null;
-// The answer removes the button that had focus. why the composer: a keyboard
+// The notice's buttons remove the button that had focus. why the composer: a keyboard
 // user goes on from there, as on Home.
 const focusComposer = () => {
   m.redraw.sync();
@@ -48,13 +48,19 @@ const focusComposer = () => {
   if (composer instanceof HTMLElement) composer.focus();
 };
 const noteFirstRun = () => {
-  if (firstTab || !currentState.hydrated) return;
+  if (firstTab) { firstTab.note(currentState); return; }
+  if (!currentState.hydrated) return;
   if (currentState.vault?.initialized !== false
     && document.documentElement.dataset.peerdFirstSetup !== 'true') return;
-  firstTab = { view: () => null };
+  firstTab = { note: () => {}, view: () => null };
   import('/home/first-tab-prompts.js')
     .then(({ makePanelFirstTab }) => {
-      firstTab = makePanelFirstTab({ send, afterAnswer: focusComposer });
+      const prompt = makePanelFirstTab({
+        send, tabs: browser.tabs, homeUrl: browser.runtime.getURL('home/home.html'),
+        afterClose: focusComposer,
+      });
+      firstTab = prompt;
+      prompt.note(currentState);
       m.redraw();
     })
     .catch(() => { /* the switch in Settings stays */ });
