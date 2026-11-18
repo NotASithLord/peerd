@@ -35,6 +35,8 @@ import { AppRoomAuthorityChangedError, createAppRoomAuthority } from '/offscreen
 import { requireAppRoomSnapshot } from '/offscreen/app-room-snapshot.js';
 import { createDwebReseedNotifier } from '/offscreen/dweb-reseed-notifier.js';
 import { runDwebReseedPublication } from '/offscreen/dweb-reseed-publication.js';
+import { GAME_ROOM_PREFIX, gameNetProtocol } from '/shared/game-net.js';
+import { closeGameRooms, openGameRoom } from './game-net.js';
 import { readFileTreeUpload } from '/peerd-engine/app-upload.js';
 
 /** @param {{hash:string,uri:string,storageKey:string,manifest:{publisher:string},index:{entry:string,files:Array<{size:number}>}}} tree */
@@ -432,6 +434,7 @@ const baseLifecycle = makeStartStopBarrier({
     // The self-device coordinator rides this mesh; it must let go of its
     // rooms before the network under it disappears.
     try { await selfHost.stop(); } catch { /* best-effort teardown */ }
+    if (handle === candidate) closeGameRooms();
     candidate.close();
     if (handle !== candidate) return;
     // Once close succeeds the identity is no longer live. Listener cleanup is
@@ -791,6 +794,8 @@ const handleRoomOp = async (msg) => {
 /** @param {any} msg @param {()=>boolean} [current] */
 const handleRoomOpUnlocked = async (msg, current = () => true) => {
   const { op, roomId } = msg;
+  if (typeof roomId !== 'string') return { ok: false, error: 'dweb-room-id-invalid' };
+  if (roomId.trim().startsWith(GAME_ROOM_PREFIX)) return { ok: false, error: 'reserved-room' };
   if (typeof msg.expectedHostEpoch === 'string'
       && msg.expectedHostEpoch !== activeFeatureHostEpoch) {
     return { ok: false, error: 'dweb-host-generation-changed' };
@@ -1375,6 +1380,40 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
           if (typeof msg.appId !== 'string' || !msg.appId) throw new Error('appId-required');
           sendResponse(await roomAuthority().rotate(msg.appId, msg.appGeneration,
             () => purgeAppRoomOwners(msg.appId)));
+          return;
+        }
+        case 'dweb/base-host/game-descriptor': {
+          const client = await loadDweb();
+          if (!client.loadFileTreeRecord) { sendResponse({ ok: false, error: 'unsupported' }); return; }
+          const tree = await client.loadFileTreeRecord(msg.hash);
+          if (tree.hash !== msg.hash || tree.storageKey !== msg.storageKey
+              || typeof tree.manifest.publisher !== 'string') {
+            sendResponse({ ok: false, error: 'game-release-changed' });
+            return;
+          }
+          const file = tree.index.files.find(entry => entry.path === 'peerd-host.json');
+          let protocol = null;
+          if (file && file.size <= 32_768) {
+            const config = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
+              await tree.read(file.path, 0, file.size)));
+            if (config?.v === 1) protocol = gameNetProtocol(config.net);
+          }
+          sendResponse(protocol === null ? { ok: false, error: 'no-net' }
+            : { ok: true, protocol, publisher: tree.manifest.publisher });
+          return;
+        }
+        case 'dweb/base-host/game-room': {
+          const epoch = activeFeatureHostEpoch;
+          const h = await start();
+          if (!epoch || epoch !== activeFeatureHostEpoch || h !== handle) {
+            sendResponse({ ok: false, error: 'game-host-changed' });
+            return;
+          }
+          sendResponse(await openGameRoom({
+            world: msg.world, roomId: msg.roomId, owner: msg.owner, epoch,
+            openRoom: h.base.openRoom,
+            isOnline: () => h.room?.rendezvous?.() === 'up' || h.base.peers().length > 0,
+          }));
           return;
         }
         case 'dweb/base-host/room': { sendResponse(await handleRoomOp(msg)); return; }

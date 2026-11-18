@@ -3,6 +3,9 @@
 import { createAppRegistry, parseAppRequest, validateAppHttpRoutes } from '/peerd-engine/index.js';
 import { idb } from '/peerd-egress/index.js';
 import { loadDweb } from '/shared/dweb-loader.js';
+import { gameNetProtocol } from '/shared/game-net.js';
+import { GAME_NET_BINDING } from './game-net-page.js';
+import { createGameNet } from './game-net-host.js';
 import { gameCsp, gameStartScript, passesToNetwork } from './game-network.js';
 
 const title = /** @type {HTMLElement} */ (document.getElementById('title'));
@@ -14,6 +17,7 @@ const abort = new AbortController();
 /** @type {number | null} */ let gameTabId = null;
 let attached = false, closed = false;
 let requests = Promise.resolve();
+/** @type {ReturnType<typeof createGameNet>|null} */ let gameNet = null;
 
 const registry = createAppRegistry({ storage: {
   get: async key => (await idb.get('apps', key))?.value,
@@ -25,6 +29,7 @@ const closeGame = async (message = 'Game closed.') => {
   if (closed) return;
   closed = true;
   abort.abort();
+  gameNet?.close();
   title.textContent = 'Game closed';
   status.textContent = message;
   closeButton.disabled = true;
@@ -54,7 +59,9 @@ let serve = null;
 let passes = null;
 /** @param {chrome.debugger.Debuggee} source @param {string} method @param {object | undefined} parameters */
 const onEvent = (source, method, parameters) => {
-  if (source.tabId !== gameTabId || method !== 'Fetch.requestPaused') return;
+  if (source.tabId !== gameTabId) return;
+  if (method === 'Runtime.bindingCalled') { gameNet?.onBinding(parameters); return; }
+  if (method !== 'Fetch.requestPaused') return;
   const request = /** @type {PausedRequest} */ (parameters);
   // why: a network call must not wait behind file reads, and a call that the page aborted must not close the game.
   if (!closed && serve && location.hash === binding && passes?.(request)) {
@@ -90,13 +97,15 @@ const openGame = async () => {
   const tree = await client.loadFileTreeRecord(hash);
   if (tree.hash !== hash || tree.storageKey !== record.fileTree.storageKey) throw new Error('Installed game tree changed');
   const index = { ...tree.index, httpRoutes: validateAppHttpRoutes(undefined) };
+  let protocol = null;
   const descriptor = index.files.find((/** @type {{path:string,size:number}} */ file) => file.path === 'peerd-host.json');
   if (descriptor) {
     if (descriptor.size > 32_768) throw new Error('Game host descriptor too large');
     const config = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
       await tree.read(descriptor.path, 0, descriptor.size, { signal: abort.signal })));
-    if (!config || config.v !== 1 || Object.keys(config).some(key => !['v', 'httpRoutes'].includes(key))) throw new Error('Game host descriptor invalid');
+    if (!config || config.v !== 1 || Object.keys(config).some(key => !['v', 'httpRoutes', 'net'].includes(key))) throw new Error('Game host descriptor invalid');
     index.httpRoutes = validateAppHttpRoutes(config.httpRoutes);
+    protocol = gameNetProtocol(config.net);
   }
   const origin = `https://${appId}.localhost`;
   // why: the user sets this in the Library. The signed game files cannot set it.
@@ -116,9 +125,12 @@ const openGame = async () => {
         if (chunk.byteLength !== length) throw new Error('Game file read incomplete');
         bytes.set(chunk, offset);
       }
-      // why: bounded codec slices avoid the function argument limit for large WASM files.
-      for (let offset = 0; offset < bytes.length; offset += 65_536) body += String.fromCharCode(...bytes.subarray(offset, offset + 65_536));
-      body = btoa(body);
+      if (typeof bytes.toBase64 === 'function') body = bytes.toBase64();
+      else {
+        // why: bounded codec slices avoid the function argument limit for large WASM files.
+        for (let offset = 0; offset < bytes.length; offset += 65_536) body += String.fromCharCode(...bytes.subarray(offset, offset + 65_536));
+        body = btoa(body);
+      }
     }
     abort.signal.throwIfAborted();
     await chrome.debugger.sendCommand(source, 'Fetch.fulfillRequest', {
@@ -147,6 +159,15 @@ const openGame = async () => {
   // The start script removes SharedWorker, and WebRTC when the switch is off, before game code runs.
   await chrome.debugger.sendCommand({ tabId: tab.id }, 'Page.enable');
   await chrome.debugger.sendCommand({ tabId: tab.id }, 'Page.addScriptToEvaluateOnNewDocument', { source: gameStartScript(networkAllowed) });
+  if (protocol !== null) {
+    gameNet = createGameNet({ tabId: tab.id, origin, appId, hash });
+    try { await gameNet.start(); }
+    catch {
+      gameNet.close();
+      gameNet = null;
+      await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.removeBinding', { name: GAME_NET_BINDING }).catch(() => {});
+    }
+  }
   abort.signal.throwIfAborted();
   const entry = index.entry.split('/').map(encodeURIComponent).join('/');
   await chrome.tabs.update(tab.id, { url: `${origin}/${entry}` });

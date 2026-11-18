@@ -2,6 +2,8 @@
 // Expose one consent-bound room to one opaque App frame.
 // why: The App can use its did, but it never receives identity key material.
 
+import { GAME_ROOM_PREFIX } from '/shared/game-net.js';
+
 const GRANTS_KEY = 'dweb.grants.v1';
 const ROOM_COMPENSATION_PREFIX = 'dweb.room-compensation.v1';
 
@@ -398,7 +400,7 @@ export const createDwebBridge = ({
       if (typeof rid !== 'string' || !rid.trim()) throw new Error('roomId required');
       const id = rid.trim();
       if (id.length > 64) throw new Error('room name too long (max 64 chars)');
-      if (id === '__proto__' || id === 'constructor' || id === 'toString') throw new Error('reserved room name');
+      if (id.startsWith(GAME_ROOM_PREFIX) || id === '__proto__' || id === 'constructor' || id === 'toString') throw new Error('reserved room name');
       await reconcileCompensation();
       if (!(await consent(id, request))) throw new Error('denied');
       if (isCancelled(request)) throw new Error('cancelled');

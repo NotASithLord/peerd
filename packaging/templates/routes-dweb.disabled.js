@@ -59,6 +59,7 @@ export const makeDwebRoutes = (deps) => {
     'dweb/base/install': disabled,
     'dweb/base/updates': disabled,
     'dweb/base/update-app': disabled,
+    'dweb/game/room': async () => ({ ok: false, error: 'unsupported' }),
     'dweb/base/room': disabled,
     'dweb/distributed/info': disabled,
   };

@@ -6,6 +6,7 @@ import { withDeadline } from '/shared/cold-util.js';
 import { policyDid } from '/shared/peer-policy.js';
 import { finiteEffectReceiptFields } from '../host-effect-verdict.js';
 import { appReleaseDescriptorMatches } from '/shared/app-dweb-identity.js';
+import { GAME_ROOM_PREFIX, gameWorld } from '/shared/game-net.js';
 import { verifiedDeclaration } from '/shared/app-declaration.js';
 
 /**
@@ -820,6 +821,45 @@ export const makeDwebRoutes = (deps) => {
         return reply;
       }));
     },
+    /** @param {{appId?:unknown,hash?:unknown}} msg @param {import('webextension-polyfill').Runtime.MessageSender & {documentId?:string}} sender */
+    'dweb/game/room': async (msg = {}, sender = {}) => {
+      if (!DWEB_ENABLED) return refuse('unsupported');
+      const { appId, hash } = msg;
+      if (typeof appId !== 'string' || !/^app-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?$/.test(appId)
+          || typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)) return refuse('game-owner-mismatch');
+      const url = browser.runtime.getURL(`/engine-tabs/game-tab/index.html#${appId}/${hash}`);
+      if (sender.id !== browser.runtime.id || sender.url !== url || sender.tab?.url !== url
+          || sender.frameId !== 0 || typeof sender.tab?.id !== 'number'
+          || typeof sender.documentId !== 'string' || !sender.documentId) return refuse('game-owner-mismatch');
+      try {
+        await ensureSettingsReady();
+        if (!settingsStore.get().dwebEnabled) return refuse('peer-network-off');
+        if (vault.isLocked()) return refuse('locked');
+        return await withReadyPublication(async (current) => {
+          const record = await appRegistry.get(appId);
+          if (record?.id !== appId || record.fileTree?.hash !== hash) return refuse('game-release-changed');
+          if (!record.dweb?.dwapp_id) return refuse('not-published');
+          // why: only the offscreen host can load the file-tree client.
+          const declaration = /** @type {{ok?:boolean,error?:string,protocol?:number,publisher?:string}} */ (
+            await browser.runtime.sendMessage({
+              type: 'dweb/base-host/game-descriptor', hash, storageKey: record.fileTree.storageKey,
+            }));
+          if (!declaration?.ok) return refuse(declaration?.error ?? 'no-net');
+          if (typeof declaration.protocol !== 'number' || typeof declaration.publisher !== 'string') return refuse('no-net');
+          const world = await gameWorld(record.dweb, { hash, publisher: declaration.publisher }, declaration.protocol);
+          if (!world) return refuse('not-published');
+          const latest = await appRegistry.get(appId);
+          if (latest?.fileTree?.hash !== hash || latest?.dweb?.publisher !== record.dweb.publisher
+              || latest?.dweb?.dwapp_id !== record.dweb.dwapp_id) return refuse('game-release-changed');
+          const generation = publicationClaim(current);
+          if (generation == null) return custodyChanged();
+          return browser.runtime.sendMessage({
+            type: 'dweb/base-host/game-room', ...world, owner: sender.documentId,
+            publicationGeneration: generation,
+          });
+        });
+      } catch (error) { return failureResult(error); }
+    },
     // A dwapp room op (join/leave/publish/subscribe/dm/presence/history/…) uses one
     // thin relay to the offscreen base host. Events flow back to the app-tab
     // directly as `dweb/base-room/event` runtime messages, so the SW only
@@ -852,6 +892,7 @@ export const makeDwebRoutes = (deps) => {
         bridgeAppId, bridgeAppHash, bridgeAppForked, bridgeAppGeneration,
         ...args
       } = msg;
+      if (typeof args.roomId === 'string' && args.roomId.trim().startsWith(GAME_ROOM_PREFIX)) return refuse('reserved-room');
       if (bridgeAppId !== appId || !Number.isSafeInteger(bridgeAppGeneration)
           || bridgeAppGeneration < 0) return refuse('app-identity-changed');
       if (args.op !== 'leave') {

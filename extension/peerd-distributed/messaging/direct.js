@@ -49,6 +49,16 @@ export const createDirect = ({ mesh }) => {
       if (!await mesh.send(toDid, env)) throw new Error(`no direct link to ${(toDid || '').slice(-8)}`);
       return { id: env.id, ts: env.ts };
     },
+    /** @param {string[]} recipients @param {unknown} data @param {AbortSignal} signal */
+    async sendMany(recipients, data, signal) {
+      if (!recipients.length || signal.aborted) return 0;
+      try {
+        const env = await mesh.sign(3, MSG, { data });
+        if (signal.aborted) return 0;
+        const results = await Promise.allSettled(recipients.map(did => mesh.send(did, env, { signal })));
+        return results.filter(result => result.status === 'fulfilled' && result.value === true).length;
+      } catch { return 0; }
+    },
     /** @param {(msg: DirectMsg) => void} cb */
     onMessage(cb) { subs.add(cb); return () => subs.delete(cb); },
     close() { off(); subs.clear(); },

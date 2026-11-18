@@ -92,6 +92,7 @@ export const makeKernelDwebAdmission = (gates) => (
   /** @type {string} */ route, /** @type {any} */ message, /** @type {any} */ sender,
 ) => {
   if (DWEB_OFFSCREEN_ROUTES.has(route)) return gates.offscreen?.(sender, message) === true;
+  if (route === 'dweb/game/room') return gates.game?.(sender, message) === true;
   if (DWEB_APP_ROUTES.has(route)) return gates.app?.(sender, message) === true;
   if (route === 'dweb/distributed/info') {
     return gates.home?.(sender, message) === true || gates.notebook?.(sender, message) === true;
@@ -283,6 +284,9 @@ export const createKernelExecutableControl = (deps) => {
     offscreen: owns.offscreen,
     app: (sender, message) => typeof message?.appId === 'string'
       ? owns.app(sender, message.appId) : ownsTab(sender, paths.app),
+    game: (sender, message) => typeof message?.appId === 'string' && typeof message?.hash === 'string'
+      && sender?.frameId === 0
+      && ownsTab(sender, new URL('../game-tab/index.html', paths.app).href, `${message.appId}/${message.hash}`),
     home: owns.home,
     notebook: (sender) => ownsTab(sender, paths.notebook),
   });

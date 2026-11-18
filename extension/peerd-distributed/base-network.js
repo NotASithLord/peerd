@@ -155,7 +155,7 @@ export const createBaseNetwork = async ({
   /**
    * @typedef {{
    *   onMsg: Set<(arg: { from: string, data: any }) => void>,
-   *   onDirect: Set<(arg: { from: string, data: any }) => void>,
+   *   onDirect: Set<(arg: { from: string, data: unknown, ts:number }) => void>,
    *   onPeerCbs: Set<(arg: { did: string }) => void>,
    *   peers: Map<string, number>,
    * }} Sub
@@ -164,9 +164,9 @@ export const createBaseNetwork = async ({
   const subs = new Map(); // protoId -> { onMsg:Set, onDirect:Set, peers:Map<did,ts> }
   // The lobby's single direct channel carries every sub-protocol's 1:1 traffic,
   // tagged with `proto`; route each frame to the right sub-protocol's handlers.
-  node.direct.onMessage((/** @type {{ from: string, data: any }} */ { from, data }) => {
+  node.direct.onMessage((/** @type {{ from: string, data: {proto?:string,payload?:unknown}, ts:number }} */ { from, data, ts }) => {
     const s = data?.proto && subs.get(data.proto);
-    if (s) for (const cb of s.onDirect) cb({ from, data: data.payload });
+    if (s) for (const cb of s.onDirect) cb({ from, data: data.payload, ts });
   });
   // PEER_ON_DWAPP keeps each sub-protocol's membership view fresh.
   node.gossip.subscribe(T_ON, (/** @type {{ from: string, data: any }} */ { from, data }) => {
@@ -199,7 +199,9 @@ export const createBaseNetwork = async ({
       send: (toDid, payload) => node.direct.send(toDid, { proto: id, payload }),
       /** @param {(arg: { from: string, data: any }) => void} cb */
       onMessage: (cb) => { sub.onMsg.add(cb); return () => sub.onMsg.delete(cb); },
-      /** @param {(arg: { from: string, data: any }) => void} cb */
+      /** @param {string[]} recipients @param {unknown} payload @param {AbortSignal} signal */
+      sendMany: (recipients, payload, signal) => node.direct.sendMany(recipients, { proto: id, payload }, signal),
+      /** @param {(arg: { from: string, data: unknown, ts:number }) => void} cb */
       onDirect: (cb) => { sub.onDirect.add(cb); return () => sub.onDirect.delete(cb); },
       /** @param {(arg: { did: string }) => void} cb */
       onPeer: (cb) => { sub.onPeerCbs.add(cb); return () => sub.onPeerCbs.delete(cb); },
@@ -633,7 +635,11 @@ export const createBaseNetwork = async ({
         history: (topic) => node.sync.history(ns(topic)),
       },
       // 1:1 direct, proto-tagged so a message never crosses into another room
-      direct: { send: sub.send, onMessage: sub.onDirect },
+      direct: { send: sub.send, sendMany: sub.sendMany, onMessage: sub.onDirect },
+      linkedMembers: () => {
+        const linked = new Set(mesh.peers().map((/** @type {{did:string}} */ peer) => peer.did));
+        return presence.list().map(({ did }) => ({ did, linked: linked.has(did) }));
+      },
       status: () => ({ joined: id, did: identity.did, present: presence.list().length }),
       leave: () => { presence.close(); sub.leave(); dlog('base', `room "${id}" left`); },
     });
