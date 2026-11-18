@@ -299,6 +299,8 @@ export const makeKernelRouteProvenance = ({
     'dweb/app-authority-generations'], offscreenUi);
   add(['voice/permission-result'], micUi);
   add(['contacts/list', 'contacts/set', 'contacts/forget'], homeUi);
+  // why: only the Library in Home can give a game internet access.
+  add(['apps/network'], homeUi);
   add([
     'session/get', 'session/setModel', 'session/contextSnapshots', 'commands/list',
     'onboarding/complete',

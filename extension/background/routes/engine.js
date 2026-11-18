@@ -621,6 +621,23 @@ export const makeEngineRoutes = (deps) => {
         return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
       }
     },
+    // why: only the Home document reaches this route. The change closes the game.
+    'apps/network': async ({ appId, allowed }) => {
+      if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
+      if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };
+      if (typeof allowed !== 'boolean') return { ok: false, error: 'allowed-boolean-required' };
+      try {
+        const result = await appClient.setNetworkAllowed(appId, allowed);
+        if (!result) return { ok: false, error: 'app-not-found' };
+        auditLog.append({
+          type: allowed ? 'permission_granted' : 'permission_revoked',
+          details: { kind: 'app-network', id: appId, name: result.app.name },
+        }).catch(() => {});
+        return { ok: true, app: result.app, closed: result.closed };
+      } catch (e) {
+        return { ok: false, error: /** @type {{ message?: string }} */ (e)?.message ?? String(e) };
+      }
+    },
     'apps/rename': async ({ appId, name }) => {
       if (vault.isLocked()) return { ok: false, error: 'vault-locked' };
       if (typeof appId !== 'string') return { ok: false, error: 'appId-required' };

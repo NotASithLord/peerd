@@ -149,7 +149,10 @@ export const LibraryUpload = {
       state.error ? m('p.error', { role: 'alert' }, state.error) : null,
       prepared ? m('.library-upload-review', [
         m('p.library-upload-name', m('strong', prepared.name)),
-        m('p', 'Runs offline in its own tab.'),
+        // why: only a large game has the internet access setting in the Library.
+        m('p', prepared.format === 'file-tree-v1'
+          ? 'Runs in its own tab with no internet access. You can allow internet access for this game later in your Library.'
+          : 'Runs offline in its own tab.'),
         m('p.muted', 'These files came from your computer. peerd did not check who made them.'),
         prepared.problems.length
           ? m('ul.library-upload-problems', { role: 'alert' }, prepared.problems.map((problem) => m('li', problem.message)))

@@ -936,4 +936,28 @@ describe('identity-bound dweb share', () => {
       dweb: { hash: 'old', local: true, pending_unserve_hashes: ['older', 'new'] },
     }]);
   });
+
+  test('a shared game does not carry its internet access setting', async () => {
+    const hash = 'f9371641c43057cb462621a327a54f7d24ea4df5dcf3827d33a2d6b94d90c84b';
+    const record = { name: 'Imported game', entryFile: 'index.html', networkAllowed: true,
+      fileTree: { hash, storageKey: '00000000-0000-0000-0000-000000000001', fileCount: 2, totalBytes: 40259108 },
+      dweb: { hash, uri: `peerd://did:key:zOriginal/${hash}`, publisher: 'did:key:zOriginal', slug: 'original', seq: 1 } };
+    const messages: Record<string, unknown>[] = [], patches: Record<string, unknown>[] = [];
+    const share = makeDwebShare({
+      enabled: true, active: () => true, withDwebPublication,
+      withIdentityMutation: makeLane(), withAppLifecycle,
+      appRegistry: { get: async () => record, update: async (_id, patch) => { patches.push(patch); return { id: 'app-1' }; } },
+      prepareRuntime: async () => ({ ok: true }),
+      sendMessage: async message => {
+        messages.push(message);
+        return message.type === 'dweb/base-host/share-app'
+          ? shareSuccess(message, { ok: true, ...record.dweb, local: false })
+          : { ok: true, committed: true, restored: true };
+      },
+    });
+    expect((await share('app-1', undefined)).ok).toBe(true);
+    expect(messages[0]).toMatchObject({ type: 'dweb/base-host/share-app', fileTree: record.fileTree });
+    expect(JSON.stringify(messages)).not.toContain('networkAllowed');
+    expect(JSON.stringify(patches)).not.toContain('networkAllowed');
+  });
 });

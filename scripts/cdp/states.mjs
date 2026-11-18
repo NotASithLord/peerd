@@ -45,6 +45,7 @@ import { WASMER_STATE } from './wasmer-state.mjs';
 import { STARTER_VISUAL_STATES, discoverSurface } from './starter-visuals.mjs';
 import { APP_RUNTIME_STATES } from './app-runtime-state.mjs';
 import { APP_FILE_SERVER_STATE, GAME_WASM } from './app-file-server-state.mjs';
+import { GAME_NETWORK_STATE } from './game-network-state.mjs';
 import { PERF_CHAT_NOTEBOOK_STATES } from './perf-chat-notebook-state.mjs';
 import { CHAT_ONBOARDING_STATES } from './chat-onboarding-state.mjs';
 import { HOME_SETTINGS_STATES } from './home-settings-state.mjs';
@@ -771,6 +772,7 @@ export const STATES = [
   ...PEER_NETWORK_STATUS_STATES,
   ...APP_RUNTIME_STATES,
   APP_FILE_SERVER_STATE,
+  GAME_NETWORK_STATE,
   ...PERF_CHAT_NOTEBOOK_STATES,
   ...CHAT_ONBOARDING_STATES,
   ...HOME_SETTINGS_STATES,

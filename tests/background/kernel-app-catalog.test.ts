@@ -107,4 +107,24 @@ describe('native kernel App catalog', () => {
     expect(idb.row.value.apps.a).toMatchObject({ name: 'Rich rename', favorite: true });
     expect(idb.row.value.sessionDefaults['other-chat']).toBe('b');
   });
+
+  test('sets game internet access on the cold path and the live path, and refuses a value that is not a boolean', async () => {
+    const idb = makeIdb();
+    const catalog = createKernelAppCatalog({ idb, now: () => 99 });
+    expect(await catalog.setNetworkAllowed('a', true)).toMatchObject({ id: 'a', networkAllowed: true });
+    expect(idb.row.value.apps.a.networkAllowed).toBe(true);
+    expect(() => catalog.setNetworkAllowed('b', 'yes' as unknown as boolean)).toThrow('app-network-allowed-invalid');
+    expect(idb.row.value.apps.b).not.toHaveProperty('networkAllowed');
+    expect(await catalog.setNetworkAllowed('missing', true)).toBeNull();
+    await catalog.bindLiveRegistry(async () => createAppRegistry({
+      storage: {
+        get: async () => (await idb.get('apps', 'apps.v1'))?.value,
+        set: async (_key: string, value: unknown) => idb.put('apps', { key: 'apps.v1', value }),
+      },
+    }));
+    expect(await catalog.setNetworkAllowed('a', false)).toMatchObject({ id: 'a', networkAllowed: false });
+    expect(await catalog.setNetworkAllowed('b', true)).toMatchObject({ id: 'b', networkAllowed: true });
+    expect(() => catalog.setNetworkAllowed('b', 1 as unknown as boolean)).toThrow('app-network-allowed-invalid');
+    expect(idb.row.value.apps).toMatchObject({ a: { networkAllowed: false }, b: { networkAllowed: true } });
+  });
 });

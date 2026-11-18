@@ -30,7 +30,7 @@ export const KERNEL_REPOSITORY_ROUTE_NAMES = Object.freeze(
 );
 
 export const KERNEL_SEMANTIC_OWNER_ROUTE_NAMES = Object.freeze([
-  ...'actor-isolation/retry actor/spawn agent/send agent/stop actors/count actors/overview app/get-meta apps/favorite apps/list apps/open apps/rename contacts/forget contacts/list contacts/set memory/delete memory/deleteAll memory/export memory/suggestions memory/suggestions/approve memory/suggestions/dismiss memory/write provider/status skills/list skills/remove skills/setEnabled provider/test models/options openrouter/models local-model/catalog local-model/init local-model/probe local-model/status'.split(' '),
+  ...'actor-isolation/retry actor/spawn agent/send agent/stop actors/count actors/overview app/get-meta apps/favorite apps/list apps/network apps/open apps/rename contacts/forget contacts/list contacts/set memory/delete memory/deleteAll memory/export memory/suggestions memory/suggestions/approve memory/suggestions/dismiss memory/write provider/status skills/list skills/remove skills/setEnabled provider/test models/options openrouter/models local-model/catalog local-model/init local-model/probe local-model/status'.split(' '),
   ...KERNEL_REPOSITORY_ROUTE_NAMES,
   ...'session/archive session/debugBundle session/reset session/switch'.split(' '),
 ]);

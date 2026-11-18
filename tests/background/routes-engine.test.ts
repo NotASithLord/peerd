@@ -1126,6 +1126,47 @@ describe('app/vm meta + apps Library', () => {
     const r = makeEngineRoutes(baseDeps());
     expect(await r['apps/favorite']({ appId: 'a1', favorite: 'yes' })).toEqual({ ok: false, error: 'favorite-boolean-required' });
   });
+  test('apps/network refuses a locked vault and bad input before any write', async () => {
+    const calls: unknown[] = [];
+    const appClient = { setNetworkAllowed: async (...args: unknown[]) => { calls.push(args); return null; } };
+    const locked = makeEngineRoutes(baseDeps({ vault: { isLocked: () => true }, appClient }));
+    expect(await locked['apps/network']({ appId: 'a1', allowed: true })).toEqual({ ok: false, error: 'vault-locked' });
+    const r = makeEngineRoutes(baseDeps({ appClient }));
+    expect(await r['apps/network']({ allowed: true })).toEqual({ ok: false, error: 'appId-required' });
+    expect(await r['apps/network']({ appId: 'a1', allowed: 'yes' })).toEqual({ ok: false, error: 'allowed-boolean-required' });
+    expect(await r['apps/network']({ appId: 'a1' })).toEqual({ ok: false, error: 'allowed-boolean-required' });
+    expect(calls).toEqual([]);
+  });
+  test('apps/network writes no audit entry when the write fails', async () => {
+    const audit: unknown[] = [];
+    const auditLog = { append: async (event: unknown) => { audit.push(event); } };
+    const missing = makeEngineRoutes(baseDeps({ auditLog, appClient: { setNetworkAllowed: async () => null } }));
+    expect(await missing['apps/network']({ appId: 'gone', allowed: true })).toEqual({ ok: false, error: 'app-not-found' });
+    const small = makeEngineRoutes(baseDeps({ auditLog,
+      appClient: { setNetworkAllowed: async () => { throw new Error('network-unsupported'); } } }));
+    expect(await small['apps/network']({ appId: 'a1', allowed: true })).toEqual({ ok: false, error: 'network-unsupported' });
+    expect(audit).toEqual([]);
+  });
+  test('apps/network sets the flag, reports the close, and audits each change', async () => {
+    const audit: unknown[] = [];
+    const calls: unknown[] = [];
+    const r = makeEngineRoutes(baseDeps({
+      auditLog: { append: async (event: unknown) => { audit.push(event); } },
+      appClient: { setNetworkAllowed: async (appId: string, allowed: boolean) => {
+        calls.push([appId, allowed]);
+        return { app: { id: appId, name: 'Racer', networkAllowed: allowed }, closed: allowed };
+      } },
+    }));
+    expect(await r['apps/network']({ appId: 'a1', allowed: true }))
+      .toEqual({ ok: true, app: { id: 'a1', name: 'Racer', networkAllowed: true }, closed: true });
+    expect(await r['apps/network']({ appId: 'a1', allowed: false }))
+      .toEqual({ ok: true, app: { id: 'a1', name: 'Racer', networkAllowed: false }, closed: false });
+    expect(calls).toEqual([['a1', true], ['a1', false]]);
+    expect(audit).toEqual([
+      { type: 'permission_granted', details: { kind: 'app-network', id: 'a1', name: 'Racer' } },
+      { type: 'permission_revoked', details: { kind: 'app-network', id: 'a1', name: 'Racer' } },
+    ]);
+  });
   test('apps/rename trims + caps the name', async () => {
     const r = makeEngineRoutes(baseDeps());
     const res = await r['apps/rename']({ appId: 'a1', name: '  Renamed  ' });

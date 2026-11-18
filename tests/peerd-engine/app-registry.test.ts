@@ -91,4 +91,27 @@ describe('createAppRegistry', () => {
     expect(snap.currentId).toBe(a.id);
     expect(snap.apps).toHaveLength(2);
   });
+
+  test('internet access is off at create and only an update with a boolean sets it', async () => {
+    const reg = createAppRegistry({ storage: createStorageStub() });
+    const tree = { hash: 'a'.repeat(64), storageKey: '00000000-0000-0000-0000-000000000001', totalBytes: 10, fileCount: 1 };
+    const created = await reg.create({ name: 'game', fileTree: tree, networkAllowed: true } as Parameters<typeof reg.create>[0]);
+    expect(created).not.toHaveProperty('networkAllowed');
+    expect(await reg.update(created.id, { networkAllowed: 'yes' } as unknown as { networkAllowed: boolean }))
+      .not.toHaveProperty('networkAllowed');
+    expect((await reg.update(created.id, { networkAllowed: true }))?.networkAllowed).toBe(true);
+    expect((await reg.update(created.id, { name: 'renamed' }))?.networkAllowed).toBe(true);
+    expect((await reg.update(created.id, { networkAllowed: false }))?.networkAllowed).toBe(false);
+  });
+
+  test('an app that the user adds again starts with internet access off', async () => {
+    const reg = createAppRegistry({ storage: createStorageStub() });
+    const tree = { hash: 'a'.repeat(64), storageKey: '00000000-0000-0000-0000-000000000001', totalBytes: 10, fileCount: 1 };
+    const first = await reg.create({ name: 'game', fileTree: tree });
+    await reg.update(first.id, { networkAllowed: true });
+    await reg.delete(first.id);
+    const second = await reg.create({ name: 'game', fileTree: tree });
+    expect(second.id).not.toBe(first.id);
+    expect(second).not.toHaveProperty('networkAllowed');
+  });
 });

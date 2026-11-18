@@ -203,4 +203,96 @@ describe('sealed App semantic routes', () => {
     await expect(pending).resolves.toMatchObject({ ok: true, app: { name: 'Next' } });
     expect(state.tabs).toEqual([]);
   });
+
+  const makeNetworkState = () => {
+    const host = 'chrome-extension://id/engine-tabs/game-tab/index.html';
+    const apps: Record<string, { id: string, name: string, fileTree?: object, networkAllowed?: boolean }> = {
+      'app-game': { id: 'app-game', name: 'Racer', fileTree: { hash: 'f'.repeat(64) } },
+      'app-small': { id: 'app-small', name: 'Small' },
+    };
+    const openTabs = [
+      { id: 1, url: `${host}#app-game/${'f'.repeat(64)}` },
+      { id: 2, url: 'https://app-game.localhost/index.html' },
+      { id: 3, url: `${host}#app-other/${'e'.repeat(64)}` },
+      { id: 4, url: 'https://app-other.localhost/index.html' },
+    ];
+    const audit: unknown[] = [];
+    const removed: number[][] = [];
+    const authority = createKernelSemanticAuthority({
+      idb: {}, kv: {}, ready: Promise.resolve(),
+      auditLog: { append: async (event: unknown) => { audit.push(event); } },
+      vault: { isLocked: () => false, getSecret: async () => null },
+      appCatalog: {
+        get: async (id: string) => apps[id] ?? null,
+        setNetworkAllowed: async (id: string, allowed: boolean) => apps[id]
+          ? (apps[id] = { ...apps[id], networkAllowed: allowed }) : null,
+      },
+      browser: { tabs: {
+        query: async () => openTabs,
+        remove: async (ids: number[]) => { removed.push(ids); },
+      } },
+      appTabUrl: 'chrome-extension://id/engine-tabs/app-tab/index.html',
+    });
+    return { apps, audit, removed, authority, run: semanticCaller(authority) };
+  };
+
+  test('game internet access writes the flag, audits it, and closes only that game', async () => {
+    const state = makeNetworkState();
+    await expect(state.run('apps/network', { appId: 'app-game', allowed: true })).resolves.toEqual({
+      ok: true, closed: true, app: { id: 'app-game', name: 'Racer', fileTree: { hash: 'f'.repeat(64) }, networkAllowed: true },
+    });
+    await expect(state.run('apps/network', { appId: 'app-game', allowed: false }))
+      .resolves.toMatchObject({ ok: true, closed: true, app: { networkAllowed: false } });
+    expect(state.removed).toEqual([[1, 2], [1, 2]]);
+    expect(state.audit).toEqual([
+      { type: 'permission_granted', details: { kind: 'app-network', id: 'app-game', name: 'Racer' } },
+      { type: 'permission_revoked', details: { kind: 'app-network', id: 'app-game', name: 'Racer' } },
+    ]);
+  });
+
+  test('game internet access refuses bad input, a small app, and an unknown app with no effect', async () => {
+    const state = makeNetworkState();
+    await expect(state.run('apps/network', { appId: 'app-game', allowed: 'yes' }))
+      .resolves.toEqual({ ok: false, error: 'allowed-boolean-required' });
+    await expect(state.run('apps/network', { allowed: true }))
+      .resolves.toEqual({ ok: false, error: 'appId-required' });
+    await expect(state.run('apps/network', { appId: 'app-small', allowed: true }))
+      .resolves.toEqual({ ok: false, error: 'network-unsupported' });
+    await expect(state.run('apps/network', { appId: 'app-missing', allowed: true }))
+      .resolves.toEqual({ ok: false, error: 'app-not-found' });
+    expect(state.apps['app-small']).not.toHaveProperty('networkAllowed');
+    expect(state.audit).toEqual([]);
+    expect(state.removed).toEqual([]);
+  });
+
+  test('game internet access is bound to the app that the request names', async () => {
+    const state = makeNetworkState();
+    const context = {
+      authority: { target: 'semantic:apps/network:first-party', instanceId: 'app-game' },
+      outerPayload: { message: { appId: 'app-game' } },
+    };
+    await expect(state.authority.handle('semantic.apps.network', { appId: 'app-small', allowed: true }, context))
+      .resolves.toEqual({ ok: false, code: 'semantic-app-target-denied', outcomeKnown: true });
+    await expect(state.authority.handle('semantic.apps.network', { appId: 'app-game', allowed: true }, {
+      ...context, authority: { target: 'semantic:apps/favorite:first-party', instanceId: 'app-game' },
+    })).resolves.toEqual({ ok: false, code: 'semantic-kernel-operation-denied', outcomeKnown: true });
+    expect(state.apps['app-game']).not.toHaveProperty('networkAllowed');
+    expect(state.audit).toEqual([]);
+  });
+
+  test('a failed tab close keeps the change and reports closed: false', async () => {
+    const state = makeNetworkState();
+    const authority = createKernelSemanticAuthority({
+      idb: {}, kv: {}, ready: Promise.resolve(), auditLog: { append: async () => {} },
+      vault: { isLocked: () => false, getSecret: async () => null },
+      appCatalog: {
+        get: async (id: string) => state.apps[id] ?? null,
+        setNetworkAllowed: async (id: string, allowed: boolean) => (state.apps[id] = { ...state.apps[id], networkAllowed: allowed }),
+      },
+      browser: { tabs: { query: async () => { throw new Error('tabs unavailable'); } } },
+      appTabUrl: 'chrome-extension://id/engine-tabs/app-tab/index.html',
+    });
+    await expect(semanticCaller(authority)('apps/network', { appId: 'app-game', allowed: true }))
+      .resolves.toMatchObject({ ok: true, closed: false, app: { networkAllowed: true } });
+  });
 });

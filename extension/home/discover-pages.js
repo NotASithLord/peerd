@@ -400,7 +400,7 @@ export const safetyLines = ({ maker, checked, action = 'install', mine = false, 
   return m('section.disc-section.disc-safety', { 'aria-labelledby': SAFETY_TITLE }, [
     m('h3.type-label-strong', { id: SAFETY_TITLE }, 'What to know'),
     safetyRow('key', mine ? own : [...made, ...check, ' Nobody reviewed it for safety.']),
-    safetyRow('lock', 'It runs in its own browser tab.'),
+    safetyRow('lock', 'It runs in its own browser tab. It starts with no internet access.'),
     safetyRow('globe', 'You can remove it from your Library at any time.'),
   ]);
 };

@@ -33,6 +33,18 @@ export const dispatchAppSemanticRoute = async (route, message, options) => {
     return app?.ok === false ? app
       : app ? { ok: true, app } : { ok: false, error: 'app-not-found' };
   }
+  if (route === 'apps/network') {
+    if (typeof message?.appId !== 'string') return { ok: false, error: 'appId-required' };
+    if (typeof message.allowed !== 'boolean') {
+      return { ok: false, error: 'allowed-boolean-required' };
+    }
+    const result = mutation(await call('semantic.apps.network', {
+      appId: message.appId, allowed: message.allowed,
+    }), 'app-network-outcome-unknown', 'the internet access change');
+    return result?.ok === false ? result
+      : result ? { ok: true, app: result.app, closed: result.closed }
+        : { ok: false, error: 'app-not-found' };
+  }
   if (route === 'apps/rename') {
     if (typeof message?.appId !== 'string') return { ok: false, error: 'appId-required' };
     if (typeof message.name !== 'string' || !message.name.trim()) {

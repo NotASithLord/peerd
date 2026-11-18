@@ -60,6 +60,7 @@ const STORAGE_KEY = 'apps.v1';
  *   shared?: boolean,
  *   syncContentHash?: string,
  *   fileTree?: {hash:string,storageKey:string,totalBytes:number,fileCount:number},
+ *   networkAllowed?: boolean,
  * }} AppRecord
  */
 
@@ -131,6 +132,9 @@ export const createAppRegistry = (deps) => {
       // un-share-on-delete path. A plain (non-dwapp) app can be shared too, so this
       // is the only on-record signal that the bytes are out on the network.
       if (typeof patch.shared === 'boolean') next.shared = patch.shared;
+      // why: only the user sets internet access, after create. No create path
+      // reads it, so a shared or imported app always starts with it off.
+      if (typeof patch.networkAllowed === 'boolean') next.networkAllowed = patch.networkAllowed;
       // dweb versioning slot: MERGE (don't replace) so sharing/installing/updating
       // an app can amend its version identity (slug, dwapp_id, version_id, seq, uri)
       // without dropping the provenance fields. why merge not assign: an update

@@ -167,6 +167,12 @@ export const createKernelAppCatalog = ({
     patch: (appId, patch) => patchApp(appId, patch),
     /** @param {string} appId @param {boolean} favorite */
     setFavorite: (appId, favorite) => patchApp(appId, { favorite }),
+    /** @param {string} appId @param {boolean} allowed */
+    setNetworkAllowed: (appId, allowed) => {
+      // why: the cold path merges a patch with no field check.
+      if (typeof allowed !== 'boolean') throw new TypeError('app-network-allowed-invalid');
+      return patchApp(appId, { networkAllowed: allowed });
+    },
     /** @param {string} appId @param {string} name */
     setName: (appId, name) => patchApp(appId, { name }),
     /** @param {string} appId @param {string} entryFile */

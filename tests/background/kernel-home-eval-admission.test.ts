@@ -184,3 +184,20 @@ test.each(['chrome-extension', 'moz-extension'])('%s admitted Home handlers pres
     capability: { status: 'available' } }, h.home)).toEqual(refusal);
   expect(probes).toEqual([[]]);
 });
+
+test.each(['chrome-extension', 'moz-extension'])('%s only the Home document can change game internet access', async (scheme) => {
+  const h = fixture(scheme);
+  const invoke = h.bind();
+  const message = { type: 'apps/network', appId: 'app-game', allowed: true };
+  expect(await invoke(message, h.home)).toEqual({ ok: true });
+  expect(h.calls).toEqual([message]);
+  for (const sender of [
+    h.panel, h.options, h.evalSender,
+    h.tab(`${h.origin}engine-tabs/game-tab/index.html#app-game/${'f'.repeat(64)}`),
+    h.tab(`${h.target.appTabUrl}#app-game`),
+    h.tab(h.target.offscreenUrl), { id: 'runtime', url: h.target.offscreenUrl },
+    h.tab('https://app-game.localhost/index.html'),
+    { id: 'other-extension', url: `${h.target.homeUrl}#chat`, tab: { id: 7 } },
+  ]) expect(await invoke(message, sender)).toMatchObject({ ok: false });
+  expect(h.calls).toHaveLength(1);
+});

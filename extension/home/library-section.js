@@ -35,6 +35,8 @@ import { LibraryUpload, createUploadState } from './library-upload.js';
  * @property {string} [source]
  * @property {boolean} [shared]
  * @property {any} [dweb]
+ * @property {object} [fileTree]
+ * @property {boolean} [networkAllowed]
  */
 
 // p·cyan e·red e·amber r·green d·magenta — each app's avatar gets ONE brand
@@ -198,6 +200,7 @@ export const LibrarySection = {
     vnode.state.renamingId = null;
     vnode.state.renameValue = '';
     vnode.state.armedDeleteId = null;
+    vnode.state.armedNetworkId = null;
     vnode.state.menuOpenId = null;     // the one open kebab (overflow) menu
     vnode.state.busyId = null;
     vnode.state.shareEditId = null;    // the app whose share dialog is open
@@ -235,7 +238,7 @@ export const LibrarySection = {
     // .closest keeps clicks inside the menu or on its trigger from closing it.
     vnode.state._onDocDown = (/** @type {MouseEvent} */ e) => {
       if (vnode.state.menuOpenId && !(/** @type {Element} */ (e.target)).closest('.library-menu, .library-kebab')) {
-        vnode.state.menuOpenId = null; vnode.state.armedDeleteId = null; m.redraw();
+        vnode.state.menuOpenId = null; vnode.state.armedDeleteId = null; vnode.state.armedNetworkId = null; m.redraw();
       }
     };
     document.addEventListener('mousedown', vnode.state._onDocDown);
@@ -325,6 +328,36 @@ export const LibrarySection = {
         m.redraw();
       }
     }).catch(() => { /* best-effort — no badge on failure */ });
+  },
+
+  /**
+   * @param {{ state: Record<string, unknown>, attrs: { send: Send } }} vnode
+   * @param {App} app
+   */
+  async toggleNetwork(vnode, app) {
+    const ui = vnode.state;
+    const next = !app.networkAllowed;
+    ui.armedNetworkId = null;
+    ui.error = null;
+    ui.notice = null;
+    // why: optimistic, the same as the favorite star. A failed write puts the state back.
+    app.networkAllowed = next;
+    m.redraw();
+    try {
+      const r = await vnode.attrs.send({ type: 'apps/network', appId: app.id, allowed: next });
+      if (!r?.ok) {
+        app.networkAllowed = !next;
+        recordMutationFailure(vnode, app, r, 'change internet access for this game');
+      } else if (r.closed === false) {
+        ui.error = 'peerd could not close the game. Close its tab, then open it again.';
+      } else {
+        // why: the route closes an open game, because a page keeps its old rules until it closes.
+        ui.notice = `Internet access is ${next ? 'on' : 'off'} for ${app.name}. If the game was open, peerd closed it. Open it again.`;
+      }
+    } catch (cause) {
+      app.networkAllowed = !next;
+      recordMutationFailure(vnode, app, cause, 'change internet access for this game', true);
+    } finally { m.redraw(); }
   },
 
   /**
@@ -951,6 +984,7 @@ export const LibrarySection = {
     const busy = ui.busyId === app.id || ui.unconfirmedApps.has(app.id);
     const renaming = ui.renamingId === app.id;
     const armed = ui.armedDeleteId === app.id;
+    const networkArmed = ui.armedNetworkId === app.id;
 
     const menuOpen = ui.menuOpenId === app.id;
     const expanded = ui.repositoryOpenId === app.id || ui.updateConflictId === app.id;
@@ -992,6 +1026,7 @@ export const LibrarySection = {
           m('.muted.library-meta', [
             fmtWhen(app.updatedAt),
             app.source && app.source !== 'local' ? ` · ${app.source}` : '',
+            app.fileTree && app.networkAllowed ? ' · Internet access on' : '',
           ]),
         ]),
         m('button.icon.library-star', {
@@ -1059,7 +1094,7 @@ export const LibrarySection = {
         m('button.icon.library-kebab', {
           'aria-haspopup': 'menu', 'aria-expanded': String(menuOpen), title: 'More actions', 'aria-label': `More actions for ${app.name}`,
           'data-library-action': 'more',
-          onclick: (/** @type {Event} */ e) => { e.stopPropagation(); ui.menuOpenId = menuOpen ? null : app.id; ui.armedDeleteId = null; },
+          onclick: (/** @type {Event} */ e) => { e.stopPropagation(); ui.menuOpenId = menuOpen ? null : app.id; ui.armedDeleteId = null; ui.armedNetworkId = null; },
         }, '⋯'),
         menuOpen
           ? m('.library-menu', {
@@ -1081,6 +1116,7 @@ export const LibrarySection = {
                 else if (e.key === 'Escape') {
                   ui.menuOpenId = null;
                   ui.armedDeleteId = null;
+                  ui.armedNetworkId = null;
                   m.redraw();
                   focusLibraryAction(app.id, 'more');
                 } else return;
@@ -1091,6 +1127,17 @@ export const LibrarySection = {
               m('button.library-menu-item', { role: 'menuitem', disabled: busy, onclick: () => { ui.menuOpenId = null; LibrarySection.startRename(vnode, app); } }, 'Rename'),
               m('button.library-menu-item', { role: 'menuitem', disabled: busy, onclick: () => LibrarySection.openRepository(vnode, app) }, 'History & Git'),
               m('button.library-menu-item', { role: 'menuitem', disabled: busy, onclick: () => { ui.menuOpenId = null; LibrarySection.exportApp(vnode, app); } }, 'Export'),
+              // why only a game: a small App runs under a fixed policy that no setting can open.
+              app.fileTree && networkArmed
+                ? m('.library-menu-note.muted', { style: 'padding:4px 10px; font-size:11px; line-height:1.35;' },
+                    'When this is on, this game can send and receive data over the internet, and other players can see your internet address. Turn it on only for a game you trust.')
+                : null,
+              !app.fileTree ? null
+                : app.networkAllowed
+                  ? m('button.library-menu-item', { role: 'menuitem', disabled: busy, onclick: () => { ui.menuOpenId = null; LibrarySection.toggleNetwork(vnode, app); } }, 'Turn off internet access')
+                  : networkArmed
+                    ? m('button.library-menu-item', { role: 'menuitem', disabled: busy, onclick: () => { ui.menuOpenId = null; LibrarySection.toggleNetwork(vnode, app); } }, 'Allow internet access?')
+                    : m('button.library-menu-item', { role: 'menuitem', disabled: busy, onclick: (/** @type {Event} */ e) => { e.stopPropagation(); ui.armedNetworkId = app.id; ui.armedDeleteId = null; } }, 'Allow internet access'),
               m('.library-menu-sep'),
               // Seeded (shared / installed dwapp) apps get a "you're seeding this"
               // note above the armed Delete — deleting un-shares it (stops serving
@@ -1102,7 +1149,7 @@ export const LibrarySection = {
               armed
                 ? m('button.library-menu-item.is-danger', { role: 'menuitem', onclick: () => { ui.menuOpenId = null; LibrarySection.confirmDelete(vnode, app); } },
                     isSeeded(app) ? 'Stop sharing & delete?' : 'Delete?')
-                : m('button.library-menu-item.is-danger', { role: 'menuitem', onclick: (/** @type {Event} */ e) => { e.stopPropagation(); ui.armedDeleteId = app.id; } }, 'Delete'),
+                : m('button.library-menu-item.is-danger', { role: 'menuitem', onclick: (/** @type {Event} */ e) => { e.stopPropagation(); ui.armedDeleteId = app.id; ui.armedNetworkId = null; } }, 'Delete'),
             ])
           : null,
       ]),

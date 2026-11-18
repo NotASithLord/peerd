@@ -38,6 +38,8 @@ const EVENT_META = {
   vault_locked:               { label: 'vault locked',          level: 'info' },
   provider_added:             { label: 'provider key set',      level: 'info' },
   mode_changed:               { label: 'permission changed',    level: 'info' },
+  permission_granted:         { label: 'internet access allowed', level: 'warn' },
+  permission_revoked:         { label: 'internet access turned off', level: 'ok' },
   session_started:            { label: 'session started',       level: 'info' },
   session_ended:              { label: 'session ended',         level: 'info' },
   auto_memory_suggested:      { label: 'memory suggested',      level: 'info' },

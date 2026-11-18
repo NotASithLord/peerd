@@ -2,6 +2,7 @@
 import m from '/vendor/mithril/mithril.js';
 import { describe, it, expect } from '../../framework.js';
 import { LibrarySection } from '/home/library-section.js';
+import { LibraryUpload, createUploadState } from '/home/library-upload.js';
 import { opfsHelpers } from '/peerd-engine/opfs.js';
 
 // Two apps, one favorited, distinct updatedAt so sort order is stable.
@@ -846,5 +847,125 @@ describe('home.library', () => {
       expect(names(root)).toEqual(['Snake Game', 'Calculator']);
       expect(root.textContent.includes('boom')).toBe(false);
     } finally { unmount(); }
+  });
+
+  // A large game has a file tree. Only such a game has the internet access setting.
+  const GAME = { id: 'app-game', name: 'Racer', tags: [], entryFile: 'index.html', favorite: false,
+    source: 'imported', thumbnail: null, updatedAt: 3000,
+    fileTree: { hash: 'f'.repeat(64), storageKey: '00000000-0000-0000-0000-000000000001', totalBytes: 10, fileCount: 1 } };
+  const NOTE = 'When this is on, this game can send and receive data over the internet, and other players can see your internet address. Turn it on only for a game you trust.';
+  /** @param {ParentNode} root @param {string} id */
+  const openMenu = async (root, id) => {
+    need(root, `.library-card[data-app-id="${id}"] .library-kebab`).click();
+    await flush();
+  };
+
+  it('only a game with a file tree has the internet access item', async () => {
+    const send = makeSend({ 'apps/list': () => ({ ok: true, apps: structuredClone([GAME, ...FIXTURE]) }) });
+    const { root, unmount } = await mountView(send);
+    try {
+      await openMenu(root, 'app-1');
+      expect(byText(root, '.library-menu-item', 'Allow internet access')).toBeFalsy();
+      await openMenu(root, 'app-1');
+      await openMenu(root, 'app-game');
+      expect(byText(root, '.library-menu-item', 'Allow internet access')).toBeTruthy();
+      expect(root.textContent.includes('Internet access on')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('allow internet access arms with a plain warning, then sends apps/network', async () => {
+    const send = makeSend({
+      'apps/list': () => ({ ok: true, apps: structuredClone([GAME, ...FIXTURE]) }),
+      'apps/network': (msg) => ({ ok: true, closed: true, app: { ...GAME, networkAllowed: msg.allowed } }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      await openMenu(root, 'app-game');
+      clickText(root, '.library-menu-item', 'Allow internet access');   // arms
+      await flush();
+      expect(send.calls.some((c) => c.type === 'apps/network')).toBe(false);
+      expect(need(root, '.library-menu-note').textContent).toBe(NOTE);
+      clickText(root, '.library-menu-item', 'Allow internet access?');  // confirms
+      await flush();
+      expect(send.calls.filter((c) => c.type === 'apps/network'))
+        .toEqual([{ type: 'apps/network', appId: 'app-game', allowed: true }]);
+      const card = need(root, '.library-card[data-app-id="app-game"]');
+      expect(need(card, '.library-meta').textContent).toContain(' · Internet access on');
+      expect(need(root, '.library-notice').textContent)
+        .toBe('Internet access is on for Racer. If the game was open, peerd closed it. Open it again.');
+      // Off needs one click.
+      await openMenu(root, 'app-game');
+      expect(byText(root, '.library-menu-item', 'Allow internet access')).toBeFalsy();
+      clickText(root, '.library-menu-item', 'Turn off internet access');
+      await flush();
+      expect(send.calls.filter((c) => c.type === 'apps/network').at(-1))
+        .toEqual({ type: 'apps/network', appId: 'app-game', allowed: false });
+      expect(need(card, '.library-meta').textContent.includes('Internet access on')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('closing the menu disarms allow internet access', async () => {
+    const send = makeSend({ 'apps/list': () => ({ ok: true, apps: structuredClone([GAME]) }) });
+    const { root, unmount } = await mountView(send);
+    try {
+      await openMenu(root, 'app-game');
+      clickText(root, '.library-menu-item', 'Allow internet access');
+      await flush();
+      await openMenu(root, 'app-game');   // closes
+      await openMenu(root, 'app-game');   // opens again
+      expect(byText(root, '.library-menu-item', 'Allow internet access?')).toBeFalsy();
+      expect(byText(root, '.library-menu-item', 'Allow internet access')).toBeTruthy();
+      expect(send.calls.some((c) => c.type === 'apps/network')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('a failed internet access change puts the state back and shows an error', async () => {
+    const send = makeSend({
+      'apps/list': () => ({ ok: true, apps: structuredClone([{ ...GAME, networkAllowed: true }]) }),
+      'apps/network': () => ({ ok: false, error: 'nope' }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      expect(need(root, '.library-meta').textContent).toContain(' · Internet access on');
+      await openMenu(root, 'app-game');
+      clickText(root, '.library-menu-item', 'Turn off internet access');
+      await flush();
+      expect(need(root, '.library-meta').textContent).toContain(' · Internet access on');
+      expect(root.textContent).toContain('Peerd could not change internet access for this game. Try again.');
+      expect(root.textContent.includes('nope')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('a game that did not close gets a plain instruction', async () => {
+    const send = makeSend({
+      'apps/list': () => ({ ok: true, apps: structuredClone([{ ...GAME, networkAllowed: true }]) }),
+      'apps/network': (msg) => ({ ok: true, closed: false, app: { ...GAME, networkAllowed: msg.allowed } }),
+    });
+    const { root, unmount } = await mountView(send);
+    try {
+      await openMenu(root, 'app-game');
+      clickText(root, '.library-menu-item', 'Turn off internet access');
+      await flush();
+      expect(need(root, 'p.error').textContent).toBe('peerd could not close the game. Close its tab, then open it again.');
+      expect(need(root, '.library-meta').textContent.includes('Internet access on')).toBe(false);
+    } finally { unmount(); }
+  });
+
+  it('the review of a large game says how to allow internet access', async () => {
+    const state = createUploadState();
+    state.prepared = /** @type {NonNullable<typeof state.prepared>} */ ({
+      format: 'file-tree-v1', name: 'Racer', entry: 'index.html', files: {}, fileCount: 1, totalBytes: 10,
+      fileDetails: [{ path: 'index.html', size: 10 }], fileKinds: {}, wasm: false, declaration: null,
+      excluded: [], problems: [], warnings: [],
+    });
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    m.mount(root, { view: () => m(LibraryUpload, { state, send: makeSend(), onAdded: () => {} }) });
+    try {
+      await flush();
+      const review = need(root, '.library-upload-review');
+      expect(review.textContent).toContain('Runs in its own tab with no internet access. You can allow internet access for this game later in your Library.');
+      expect(review.textContent.includes('Runs offline')).toBe(false);
+    } finally { m.mount(root, null); root.remove(); }
   });
 });

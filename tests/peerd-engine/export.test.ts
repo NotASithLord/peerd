@@ -243,3 +243,10 @@ test('App exports commit runtime declarations and enforce them on import', async
   } });
   await expect(openEnvelope(incompatible)).rejects.toThrow('Unsupported App runtime target');
 });
+
+test('an exported app does not carry its internet access setting', async () => {
+  const record = { name: 'Racer', entryFile: 'index.html', tags: [], networkAllowed: true };
+  const envelope = await buildAppExport({ record, files: APP_FILES });
+  expect(JSON.stringify(envelope)).not.toContain('networkAllowed');
+  expect((await openEnvelope(envelope)).meta).not.toHaveProperty('networkAllowed');
+});

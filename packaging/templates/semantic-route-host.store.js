@@ -40,6 +40,7 @@ const runtime = createSemanticDispatchRuntime({
   handlers: {
     'app/get-meta': apps('app/get-meta'),
     'apps/favorite': apps('apps/favorite'),
+    'apps/network': apps('apps/network'),
     'apps/open': apps('apps/open'),
     'apps/rename': apps('apps/rename'),
     'contacts/forget': contacts('contacts/forget'),

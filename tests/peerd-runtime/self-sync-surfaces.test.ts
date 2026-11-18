@@ -142,6 +142,17 @@ describe('apps projection', () => {
     expect(installed[0].name).toBe('Notes');
   });
 
+  test('the internet access setting of a game stays on this device', async () => {
+    const surface = await captureAppsSurface({
+      records: [{ id: 'local-1', networkAllowed: true }],
+      snapshotApp: async () => ({
+        name: 'Racer', entryFile: 'index.html', fileKinds: {}, files: { 'index.html': 'PGgxPg==' }, networkAllowed: true,
+      }),
+    });
+    expect(surface.apps).toHaveLength(1);
+    expect(JSON.stringify(surface)).not.toContain('networkAllowed');
+  });
+
   test('a failed live App snapshot makes the whole surface unavailable', async () => {
     const seen: string[] = [];
     await expect(captureAppsSurface({

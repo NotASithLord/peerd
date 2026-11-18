@@ -1170,7 +1170,7 @@ describe('home.discover app page', () => {
       expect(el(know, 'h3').id).toBe(know.getAttribute('aria-labelledby') ?? '');
       expect(safety()).toEqual([
         `Made by ${shortKey(ANA)}. When you install it, peerd checks that every file is exactly what its maker shared. Nobody reviewed it for safety.`,
-        'It runs in its own browser tab.',
+        'It runs in its own browser tab. It starts with no internet access.',
         'You can remove it from your Library at any time.',
       ]);
       expect(text(el(view.root, '.disc-panel-cta .disc-footnote'))).toBe('Sharing means other people can get this app from you while your peer network is on.');

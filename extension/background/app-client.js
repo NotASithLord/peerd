@@ -1038,6 +1038,24 @@ export const createAppClient = ({
     return id;
   };
 
+  /**
+   * Set internet access for one game, then close the game.
+   * why: the page policy is fixed at open, so a close is the only complete change.
+   * @param {string} appId @param {boolean} allowed
+   */
+  const setNetworkAllowed = async (appId, allowed) => {
+    const record = await registry.get(appId);
+    if (!record) return null;
+    if (!record.fileTree) throw new Error('network-unsupported');
+    const app = await registry.update(appId, { networkAllowed: allowed });
+    if (!app) return null;
+    let closed = false;
+    try {
+      if (closeFileTree) { await closeFileTree(record); closed = true; }
+    } catch {}
+    return { app, closed };
+  };
+
   /** @param {string} appId */
   const deleteApp = async (appId) => {
     const rec = await registry.get(appId);
@@ -1154,6 +1172,7 @@ export const createAppClient = ({
     replaceVersionedFilesUnlocked,
     snapshotFiles, snapshotFilesBase64,
     open,
+    setNetworkAllowed,
     delete: deleteApp,
     restoreVersion,
     checkoutBranch,

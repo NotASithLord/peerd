@@ -5,6 +5,8 @@ import {
 } from '../../extension/background/app-client.js';
 import { makeWriteGuard, StoreReadOnlyError } from '../../extension/peerd-runtime/lifecycle/write-guard.js';
 import { createAppDwebAuthority } from '../../extension/background/app-dweb-authority.js';
+import { createAppRegistry } from '../../extension/peerd-engine/app-registry.js';
+import { createStorageStub } from '../setup.ts';
 
 const blockedAppGuard = (reason: string) => {
   const guard = makeWriteGuard();
@@ -494,5 +496,53 @@ describe('App executable identity mutations', () => {
     expect(committed).toBe(true);
     expect(new TextDecoder().decode(files.get('index.html'))).toBe('release');
     expect(new TextDecoder().decode(files.get('data/state.json'))).toBe('{"local":true}');
+  });
+});
+
+describe('game internet access', () => {
+  const tree = { hash: 'a'.repeat(64), storageKey: '00000000-0000-0000-0000-000000000001',
+    totalBytes: 10, fileCount: 1, entry: 'index.html', uri: '', publisher: '' };
+  const makeClient = (closeFileTree?: (record: { id: string, networkAllowed?: boolean }) => Promise<void>) => {
+    const registry = createAppRegistry({ storage: createStorageStub() });
+    const client = createAppClient({
+      registry, repositories: testRepositories(), closeFileTree,
+      tracker: {}, opfsForApp: () => ({}),
+    } as unknown as Parameters<typeof createAppClient>[0]);
+    return { registry, client };
+  };
+
+  test('a new game has internet access off', async () => {
+    const { client } = makeClient();
+    const input: Parameters<typeof client.createFileTree>[0] & { networkAllowed: boolean } = { name: 'Racer', tree, networkAllowed: true };
+    const record = await client.createFileTree(input);
+    expect(record).not.toHaveProperty('networkAllowed');
+  });
+
+  test('the change is stored before the game closes', async () => {
+    const seen: unknown[] = [];
+    const { registry, client } = makeClient(async record => {
+      seen.push([record.id, record.networkAllowed, (await registry.get(record.id))?.networkAllowed]);
+    });
+    const record = await client.createFileTree({ name: 'Racer', tree });
+    const result = await client.setNetworkAllowed(record.id, true);
+    expect(result).toMatchObject({ closed: true, app: { id: record.id, networkAllowed: true } });
+    // The close receives the earlier record, and the store already holds the new value.
+    expect(seen).toEqual([[record.id, undefined, true]]);
+    expect((await client.setNetworkAllowed(record.id, false))?.app.networkAllowed).toBe(false);
+  });
+
+  test('a failed close keeps the change and reports it', async () => {
+    const { registry, client } = makeClient(async () => { throw new Error('tabs unavailable'); });
+    const record = await client.createFileTree({ name: 'Racer', tree });
+    expect(await client.setNetworkAllowed(record.id, true)).toMatchObject({ closed: false });
+    expect((await registry.get(record.id))?.networkAllowed).toBe(true);
+  });
+
+  test('an unknown app and a small app are refused with no write', async () => {
+    const { registry, client } = makeClient(async () => {});
+    expect(await client.setNetworkAllowed('app-missing', true)).toBeNull();
+    const small = await registry.create({ name: 'Small' });
+    await expect(client.setNetworkAllowed(small.id, true)).rejects.toThrow('network-unsupported');
+    expect(await registry.get(small.id)).not.toHaveProperty('networkAllowed');
   });
 });

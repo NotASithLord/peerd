@@ -311,7 +311,7 @@ describe('kernel semantic runtime', () => {
     const state = makeRuntime(true);
     for (const route of [
       'contacts/list', 'contacts/set', 'contacts/forget', 'memory/export',
-      'apps/list', 'apps/favorite', 'apps/open', 'apps/rename',
+      'apps/list', 'apps/favorite', 'apps/network', 'apps/open', 'apps/rename',
       'skills/list', 'skills/setEnabled', 'skills/remove',
     ]) {
       expect(await state.runtime.routes[route]({}, {}))

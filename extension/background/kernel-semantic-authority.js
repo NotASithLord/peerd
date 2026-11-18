@@ -20,6 +20,7 @@ const ROUTES = Object.freeze({
   'semantic.contacts.upsert': 'contacts/set',
   'semantic.contacts.remove': 'contacts/forget',
   'semantic.apps.favorite': 'apps/favorite',
+  'semantic.apps.network': 'apps/network',
   'semantic.apps.open': 'apps/open',
   'semantic.apps.reload': 'apps/rename',
   'semantic.apps.rename': 'apps/rename',
@@ -72,10 +73,36 @@ export const createKernelSemanticAuthority = ({
     await appCatalog.setDefaultForSession(owner, payload.appId);
     return true;
   };
+  const setNetwork = async (/** @type {{appId:string,allowed:unknown}} */ payload) => {
+    if (typeof payload.allowed !== 'boolean' || !appCatalog) return null;
+    const current = await appCatalog.get(payload.appId);
+    if (!current) return null;
+    if (!current.fileTree) return { ok: false, error: 'network-unsupported' };
+    const app = await appCatalog.setNetworkAllowed(payload.appId, payload.allowed);
+    if (!app) return null;
+    auditLog?.append?.({
+      type: payload.allowed ? 'permission_granted' : 'permission_revoked',
+      details: { kind: 'app-network', id: payload.appId, name: app.name },
+    })?.catch?.(() => {});
+    // why: the page policy is fixed at open, so close the host tab and the game tab.
+    let closed = false;
+    try {
+      const host = new URL('../game-tab/index.html', appTabUrl).href;
+      const origin = `https://${payload.appId}.localhost/`;
+      const tabs = await browser.tabs.query({ url: [`${host}*`, `${origin}*`] });
+      const ids = tabs.filter((/** @type {{url?:string}} */ tab) => tab.url?.startsWith(origin)
+        || tab.url?.startsWith(`${host}#${encodeURIComponent(payload.appId)}/`))
+        .map((/** @type {{id?:number}} */ tab) => tab.id).filter((/** @type {unknown} */ id) => typeof id === 'number');
+      if (ids.length) await browser.tabs.remove(ids);
+      closed = true;
+    } catch {}
+    return { app, closed };
+  };
   const calls = Object.freeze({
     'semantic.apps.favorite': (/** @type {any} */ payload) =>
       typeof payload.favorite === 'boolean' && appCatalog
         ? appCatalog.setFavorite(payload.appId, payload.favorite) : null,
+    'semantic.apps.network': setNetwork,
     'semantic.apps.open': openApp,
     'semantic.apps.reload': async (/** @type {any} */ payload) => {
       try { await reloadApp(payload.appId); } catch {}

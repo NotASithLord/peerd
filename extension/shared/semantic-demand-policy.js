@@ -12,6 +12,7 @@ export const SEMANTIC_DEMAND_MAX_CONCURRENT = 3;
 const POLICIES = Object.freeze({
   'app/get-meta': Object.freeze({ 'semantic.apps.set-entry': 1 }),
   'apps/favorite': Object.freeze({ 'semantic.apps.favorite': 1 }),
+  'apps/network': Object.freeze({ 'semantic.apps.network': 1 }),
   'apps/open': Object.freeze({ 'semantic.apps.open': 1 }),
   'apps/rename': Object.freeze({ 'semantic.apps.rename': 1, 'semantic.apps.reload': 1 }),
   'contacts/forget': Object.freeze({ 'semantic.contacts.remove': 1 }),

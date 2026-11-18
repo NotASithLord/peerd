@@ -3,6 +3,7 @@
 import { createAppRegistry, parseAppRequest, validateAppHttpRoutes } from '/peerd-engine/index.js';
 import { idb } from '/peerd-egress/index.js';
 import { loadDweb } from '/shared/dweb-loader.js';
+import { gameCsp, gameStartScript, passesToNetwork } from './game-network.js';
 
 const title = /** @type {HTMLElement} */ (document.getElementById('title'));
 const status = /** @type {HTMLElement} */ (document.getElementById('status'));
@@ -46,13 +47,20 @@ const onDetach = (source, reason) => {
 /** @param {number} tabId */
 const onRemoved = tabId => { if (tabId === gameTabId) void closeGame(); };
 
-/** @typedef {{requestId:string,request:{url:string,method:string,headers:Record<string,string>}}} PausedRequest */
+/** @typedef {{requestId:string,resourceType:string,request:{url:string,method:string,headers:Record<string,string>}}} PausedRequest */
 /** @type {((source:chrome.debugger.Debuggee,request:PausedRequest)=>Promise<void>) | null} */
 let serve = null;
+/** @type {((request:PausedRequest)=>boolean) | null} */
+let passes = null;
 /** @param {chrome.debugger.Debuggee} source @param {string} method @param {object | undefined} parameters */
 const onEvent = (source, method, parameters) => {
   if (source.tabId !== gameTabId || method !== 'Fetch.requestPaused') return;
   const request = /** @type {PausedRequest} */ (parameters);
+  // why: a network call must not wait behind file reads, and a call that the page aborted must not close the game.
+  if (!closed && serve && location.hash === binding && passes?.(request)) {
+    chrome.debugger.sendCommand(source, 'Fetch.continueRequest', { requestId: request.requestId }).catch(() => {});
+    return;
+  }
   // why: serial reads bound retained response bytes when a game starts many workers.
   requests = requests.then(async () => {
     try {
@@ -91,7 +99,10 @@ const openGame = async () => {
     index.httpRoutes = validateAppHttpRoutes(config.httpRoutes);
   }
   const origin = `https://${appId}.localhost`;
-  const csp = "sandbox allow-scripts allow-same-origin allow-pointer-lock; default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; media-src 'self' blob:; connect-src 'self'; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'";
+  // why: the user sets this in the Library. The signed game files cannot set it.
+  const networkAllowed = record.networkAllowed === true;
+  const csp = gameCsp(networkAllowed);
+  passes = request => passesToNetwork({ url: request.request.url, resourceType: request.resourceType, origin, networkAllowed });
   serve = async (source, request) => {
     const range = Object.entries(request.request.headers).find(([name]) => name.toLowerCase() === 'range')?.[1] ?? null;
     const response = parseAppRequest({ url: request.request.url, origin, index, method: request.request.method, range });
@@ -132,11 +143,15 @@ const openGame = async () => {
   // why: an App-owned saved service worker must not replace the verified host response.
   await chrome.debugger.sendCommand({ tabId: tab.id }, 'Network.enable');
   await chrome.debugger.sendCommand({ tabId: tab.id }, 'Network.setBypassServiceWorker', { bypass: true });
+  // why: this session does not see the requests of a shared worker, and the page policy does not stop WebRTC.
+  // The start script removes SharedWorker, and WebRTC when the switch is off, before game code runs.
+  await chrome.debugger.sendCommand({ tabId: tab.id }, 'Page.enable');
+  await chrome.debugger.sendCommand({ tabId: tab.id }, 'Page.addScriptToEvaluateOnNewDocument', { source: gameStartScript(networkAllowed) });
   abort.signal.throwIfAborted();
   const entry = index.entry.split('/').map(encodeURIComponent).join('/');
   await chrome.tabs.update(tab.id, { url: `${origin}/${entry}` });
   title.textContent = record.name;
-  status.textContent = 'The game is open in its own tab. Keep this page open while you play.';
+  status.textContent = `The game is open in its own tab. Keep this page open while you play. Internet access: ${networkAllowed ? 'on' : 'off'}.`;
 };
 
 void openGame().catch(error => closeGame(`Cannot open game: ${error instanceof Error ? error.message : String(error)}`));
