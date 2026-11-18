@@ -148,7 +148,7 @@ describe('kernel executable owner', () => {
     const gate = (name: string) => () => { called.push(name); return true; };
     const admit = makeKernelDwebAdmission({
       offscreen: gate('offscreen'), app: gate('app'), home: gate('home'),
-      notebook: gate('notebook'),
+      notebook: gate('notebook'), game: gate('game'),
     });
     for (const route of [
       'dweb/app-install', 'dweb/app-record-served', 'dweb/app-snapshot',
@@ -186,6 +186,10 @@ describe('kernel executable owner', () => {
     });
     expect(appOnly('dweb/audit', {}, sender)).toBe(true);
     expect(appOnly('dweb/base/start', {}, sender)).toBe(false);
+    expect(appOnly('dweb/game/room', {}, sender)).toBe(false);
+    called.length = 0;
+    expect(admit('dweb/game/room', {}, sender)).toBe(true);
+    expect(called).toEqual(['game']);
     expect(admit('legacy/semantic-route', {}, sender)).toBe(false);
   });
 

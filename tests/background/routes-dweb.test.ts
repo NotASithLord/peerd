@@ -2090,3 +2090,82 @@ test('install controls refuse missing attempt, disabled network and locked vault
     }
   }
 });
+
+describe('game room admission', () => {
+  const appId = 'app-game';
+  const hash = 'a'.repeat(64);
+  const extension = 'chrome-extension://peerd';
+  const url = `${extension}/engine-tabs/game-tab/index.html#${appId}/${hash}`;
+  const tab = { id: 41, url, index: 0, highlighted: true, active: true, pinned: false, incognito: false };
+  const sender = { id: 'peerd', frameId: 0, documentId: 'game-document', url, tab };
+  const request = { appId, hash };
+  const runtime = { id: 'peerd', getURL: (path: string) => extension + path };
+
+  test('requires the exact extension frame, app, tree and host document', async () => {
+    const { deps, sent } = baseDeps({ browser: { runtime } });
+    const route = makeDwebRoutes(deps)['dweb/game/room'];
+    for (const owner of [{}, { ...sender, id: 'other' }, { ...sender, frameId: 1 },
+      { ...sender, documentId: '' }, { ...sender, url: `${extension}/home/home.html` },
+      { ...sender, tab: { ...sender.tab, url: url.replace(hash, 'b'.repeat(64)) } }]) {
+      expect(await route(request, owner)).toMatchObject({ ok: false, error: 'game-owner-mismatch' });
+    }
+    expect(await route({ ...request, hash: 'b'.repeat(64) }, sender))
+      .toMatchObject({ ok: false, error: 'game-owner-mismatch' });
+    expect(await route({ ...request, appId: 'app-other' }, sender))
+      .toMatchObject({ ok: false, error: 'game-owner-mismatch' });
+    expect(sent).toEqual([]);
+  });
+
+  test('refuses unavailable, locked, changed and local games', async () => {
+    const cases = [
+      [ { DWEB_ENABLED: false }, 'unsupported' ],
+      [ { settingsStore: { get: () => ({ dwebEnabled: false }) } }, 'peer-network-off' ],
+      [ { vault: { isLocked: () => true } }, 'locked' ],
+      [ {}, 'game-release-changed' ],
+      [ { appRegistry: { get: async () => ({ id: appId, fileTree: { hash } }) } }, 'not-published' ],
+    ] as const;
+    for (const [patch, error] of cases) {
+      const { deps, sent } = baseDeps({ browser: { runtime }, ...patch });
+      expect(await makeDwebRoutes(deps)['dweb/game/room'](request, sender))
+        .toMatchObject({ ok: false, error });
+      expect(sent).toEqual([]);
+    }
+  });
+
+  test('derives the room from the verified tree and rejects a missing descriptor', async () => {
+    const publisher = 'publisher';
+    const record = { id: appId, fileTree: { hash, storageKey: 'tree' },
+      dweb: { hash, publisher, dwapp_id: 'b'.repeat(64) } };
+    const calls: Record<string, unknown>[] = [];
+    let declared = false;
+    const { deps } = baseDeps({
+      appRegistry: { get: async () => record },
+      browser: { runtime: { ...runtime, sendMessage: async (message: Record<string, unknown>) => {
+        calls.push(message);
+        if (message.type === 'dweb/base-host/game-descriptor') {
+          return declared ? { ok: true, publisher, protocol: 2 } : { ok: false, error: 'no-net' };
+        }
+        return { ok: true, channelId: 'channel' };
+      } } },
+    });
+    const route = makeDwebRoutes(deps)['dweb/game/room'];
+    const claim = { ...request, roomId: 'game.claimed-by-game' };
+    expect(await route(claim, sender)).toMatchObject({ ok: false, error: 'no-net' });
+    expect(calls).toHaveLength(1);
+    declared = true;
+    expect(await route(claim, sender)).toMatchObject({ ok: true, channelId: 'channel' });
+    expect(calls[2]).toMatchObject({
+      type: 'dweb/base-host/game-room', roomId: expect.stringMatching(/^game\.[a-f0-9]{40}$/), owner: sender.documentId,
+    });
+  });
+
+  test('refuses the game prefix on the App room route', async () => {
+    const { deps, sent } = baseDeps({
+      appTabTracker: { parseIdFromUrl: () => 'app-one', getTabId: () => 41 },
+    });
+    const app = { url: `${extension}/engine-tabs/app-tab/index.html#app-one`, documentId: 'app-document', tab };
+    expect(await makeDwebRoutes(deps)['dweb/base/room']({ appId: 'app-one', op: 'join', roomId: ' game.world ' }, app))
+      .toMatchObject({ ok: false, error: 'reserved-room' });
+    expect(sent).toEqual([]);
+  });
+});
