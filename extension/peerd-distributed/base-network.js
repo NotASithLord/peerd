@@ -675,6 +675,24 @@ export const createBaseNetwork = async ({
     announceProvider,
     refreshProviders,
     findProviders,
+    /** @param {Array<{uri:string,publisher?:string|null}>} apps */
+    knownSeederCounts: async (apps) => {
+      const online = new Set([
+        ...node.mesh.peers().map((/** @type {{did:string}} */ peer) => peer.did),
+        ...node.presence.list().map(peer => peer.did),
+      ]);
+      // why: Discover polls often. Use the signed claims that this node holds.
+      return Promise.all(apps.map(async ({ uri, publisher }) => {
+        const { hash, did } = parsePeerdUri(uri);
+        const maker = did ?? publisher ?? undefined;
+        const key = await contentKey(formatPeerdUri({ did: maker, hash }));
+        const remote = node.dht.cachedProviders(key)
+          .filter((/** @type {string} */ peer) => peer !== identity.did && online.has(peer) && !isBlocked(peer)).length;
+        const local = node.content.isAnnounced(hash)
+          && (!maker || node.content.getManifest(hash)?.publisher === maker);
+        return remote + Number(local);
+      }));
+    },
     seedApp,
 
     joinSubProtocol,

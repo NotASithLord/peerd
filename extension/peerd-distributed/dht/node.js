@@ -255,6 +255,8 @@ export const createDhtNode = ({ identity, selfId, store, providers = null, rpc, 
       return { key, stored: results.filter((r) => r.status === 'fulfilled' && r.value?.ok).length };
     },
 
+    /** @param {string} key */
+    cachedProviders: (key) => providers?.list(key) ?? [],
     // Preserve the public DID list while content fetchers retain dial hints.
     /** @param {string} key */
     findProviders: async (key) => (await findProviderContacts(key)).map((contact) => contact.did),

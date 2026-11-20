@@ -185,6 +185,35 @@ describe('base network — the always-on lobby + sub-protocols', () => {
 });
 
 
+test('Discover counts known online seeders for the exact version', async () => {
+  const blocked = new Set<string>();
+  const publisher = await spawn('publisher');
+  const seeder = await spawn('seeder');
+  const reader = await spawn('reader', { userBlocked: (did: string) => blocked.has(did) });
+  try {
+    await link(publisher, reader);
+    await link(seeder, reader);
+    const app = await publisher.base.publishApp({ name: 'Shared app', entry: 'index.html', files: { 'index.html': 'first version' } });
+    const other = await publisher.base.publishApp({ name: 'Shared app', entry: 'index.html', files: { 'index.html': 'second version' } });
+    const content = await publisher.base.fetchApp(app.uri);
+    await seeder.base.seedApp(content);
+    await publisher.base.announceProvider(app.uri);
+    await publisher.base.announceProvider(other.uri);
+    await seeder.base.announceProvider(app.uri);
+    expect(await reader.base.knownSeederCounts([app, other])).toEqual([2, 1]);
+    expect(await seeder.base.knownSeederCounts([app, other])).toEqual([1, 0]);
+    blocked.add(seeder.identity.did);
+    expect(await reader.base.knownSeederCounts([app])).toEqual([1]);
+    blocked.clear();
+    reader.mesh.removeLink(seeder.identity.did);
+    expect(await reader.base.knownSeederCounts([app])).toEqual([1]);
+    await seeder.base.unshareApp({ publisher: publisher.identity.did, hash: app.hash });
+    expect(await seeder.base.knownSeederCounts([app])).toEqual([0]);
+  } finally {
+    for (const peer of [publisher, seeder, reader]) peer.base.close();
+  }
+});
+
 describe('provider reachability and leases', () => {
   test('an unlinked newcomer fetches from a surviving seeder across publisher lease expiry', async () => {
     let clock = 1000;
