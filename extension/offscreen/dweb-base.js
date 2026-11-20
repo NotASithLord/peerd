@@ -1323,12 +1323,11 @@ export const handleDwebBaseMessage = (msg, sender, sendResponse) => {
         }
         // Discover: the bounded discovery Library (filled by the subscription plane).
         case 'dweb/base-host/heard': {
-          sendResponse({
-            ok: true,
-            apps: handle
-              ? handle.base.heardDwapps().map(discoveredAppFromRow).filter(Boolean)
-              : [],
-          });
+          const base = handle?.base;
+          const apps = base ? base.heardDwapps().map(discoveredAppFromRow).filter(Boolean) : [];
+          const counts = base ? await base.knownSeederCounts(apps) : [];
+          sendResponse({ ok: true, apps: apps.map((/** @type {{uri:string}} */ app, /** @type {number} */ index) =>
+            ({ ...app, knownSeeders: counts[index] })) });
           return;
         }
         // A dwapp room op (join/leave/publish/subscribe/dm/presence/…) uses the

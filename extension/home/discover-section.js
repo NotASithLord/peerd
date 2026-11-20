@@ -1243,6 +1243,7 @@ export const DiscoverSection = (initialVnode) => {
       meta: where ?? (row ? kbLabel(app.size) : makerMeta(makerOf(app.publisher), kbLabel(app.size))),
       description: app.description,
       error: rootAlert(f.id, true),
+      knownSeeders: offline ? undefined : app.knownSeeders,
       // why keyed by kind: a poll can turn a focused Open into Update, or
       // "Look at it" into Open. A new node drops the focus, so one key press
       // never runs an action the user did not choose.

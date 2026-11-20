@@ -329,6 +329,22 @@ describe('home.discover root states', () => {
     } finally { view.close(); }
   });
 
+  it('shows known seeders per app and updates the count on refresh', async () => {
+    const first = card('a', 'App A', ANA, { knownSeeders: 1 });
+    const second = card('b', 'App B', BOB, { knownSeeders: 0 });
+    const host = fakeHost({ heard: [first, second, card('c', 'App C', CARL)] });
+    const view = mount({ send: host.send });
+    try {
+      await settle();
+      expect(text(el(view.root, '[data-key="a"]'))).toContain('1 known seeder');
+      expect(text(el(view.root, '[data-key="b"]'))).toContain('0 known seeders');
+      expect(text(el(view.root, '[data-key="c"]')).includes('known seeder')).toBe(false);
+      host.state.heard = [{ ...first, knownSeeders: 2 }, second];
+      el(view.root, 'button.disc-refresh').click(); await settle();
+      expect(text(el(view.root, '[data-key="a"]'))).toContain('2 known seeders');
+    } finally { view.close(); }
+  });
+
   it('shows the connected, looking, empty and offline roots; Try again starts once', async () => {
     const two = [card('a', 'App A', ANA), card('b', 'App B', BOB)];
     const connected = fakeHost({ heard: two, linked: 1 });

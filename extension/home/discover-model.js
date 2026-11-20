@@ -7,7 +7,7 @@
 
 import { matchesWords, searchWords } from './explore-order.js';
 
-/** @typedef {{ dwapp_id?: string, uri?: string, name?: string, slug?: string, seq?: number, publisher?: string, from?: string, version_id?: string, description?: string, size?: number, includes_wasm?: boolean|null, runtimeCompatibility?: {status:string,message:string}, retrieval?: {outcome:string,observedAt:number,expiresAt:number}|null }} DwebApp */
+/** @typedef {{ dwapp_id?: string, uri?: string, name?: string, slug?: string, seq?: number, publisher?: string, from?: string, version_id?: string, description?: string, size?: number, knownSeeders?: number, includes_wasm?: boolean|null, runtimeCompatibility?: {status:string,message:string}, retrieval?: {outcome:string,observedAt:number,expiresAt:number}|null }} DwebApp */
 /** @typedef {{action:'install'|'update', versionId:string|null, seq:number|null, uri:string|null}} PendingTarget */
 /** What an app's own peerd.json asks of peerd (see verifiedDeclared). @typedef {{dweb:boolean, instructions:boolean, observeAct:boolean}} Declared */
 /** @typedef {{appId?:string, notice?:string, failure?:string}} LinkOutcome */

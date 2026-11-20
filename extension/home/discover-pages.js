@@ -96,18 +96,24 @@ const descriptionView = (description, selector) => {
   return line ? m(selector, line.missing ? { class: 'is-missing' } : { dir: 'auto' }, line.text) : null;
 };
 
+/** @param {unknown} count */
+const seederLabel = (count) => typeof count === 'number' && Number.isSafeInteger(count) && count >= 0
+  ? m('.type-small', `${count} known seeder${count === 1 ? '' : 's'}`)
+  : null;
+
 // why the error inside the tile or row: a line above a long grid or list sits
 // off screen for the tile the user clicked.
 /**
- * @param {{key:string, name:string, letter:string, tone:string, meta:unknown, description?:string,
+ * @param {{key:string, name:string, letter:string, tone:string, meta:unknown, knownSeeders?:number, description?:string,
  *   action:unknown, error?:unknown, onOpen?:()=>void}} props
  */
-export const tile = ({ key, name, letter, tone, meta, description, action, error, onOpen }) =>
+export const tile = ({ key, name, letter, tone, meta, knownSeeders, description, action, error, onOpen }) =>
   m('.disc-card.disc-tile', { key, 'data-key': key }, [
     letterAvatar({ letter, tone, variant: 'tile' }),
     m('.disc-tile-id', [
       nameView({ name, cls: '.type-heading.disc-tile-name', onOpen }),
       m('.type-small.disc-tile-meta', meta),
+      seederLabel(knownSeeders),
     ]),
     descriptionView(description, 'p.type-body-sm.disc-tile-desc'),
     m('.disc-actions', action),
@@ -115,15 +121,16 @@ export const tile = ({ key, name, letter, tone, meta, description, action, error
   ]);
 
 /**
- * @param {{key:string, name:string, letter:string, tone:string, meta:unknown, description?:string,
+ * @param {{key:string, name:string, letter:string, tone:string, meta:unknown, knownSeeders?:number, description?:string,
  *   action:unknown, error?:unknown, onOpen?:()=>void}} props
  */
-export const appRow = ({ key, name, letter, tone, meta, description, action, error, onOpen }) =>
+export const appRow = ({ key, name, letter, tone, meta, knownSeeders, description, action, error, onOpen }) =>
   m('li.disc-app-row', { key, 'data-key': key }, [
     letterAvatar({ letter, tone, variant: 'row' }),
     m('.disc-app-row-id', [
       nameView({ name, cls: '.type-subheading', onOpen }),
       m('.type-small', meta),
+      seederLabel(knownSeeders),
       description ? m('.type-body-sm', { dir: 'auto' }, description) : null,
       error,
     ]),
