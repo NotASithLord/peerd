@@ -23,6 +23,7 @@ import {
 import { parseContributorProjection } from '/shared/contributor-channel.js';
 import { structuredClonePayloadBytes } from '/shared/structured-clone-size.js';
 import { ACTOR_LOOP_EVENT_BYTES } from '/shared/actor-channel-protocol.js';
+import { createEarlyAbortBuffer } from './early-aborts.js';
 
 const MAX_CONCURRENT = 4;
 let active = 0;
@@ -32,10 +33,9 @@ const liveWorkers = new Map();
 // actor/abort can beat actor/run while the offscreen command messages cross.
 // Keep a short, bounded tombstone so that ordering race cannot launch a Worker
 // after Stop. Run ids are SW-minted and never reused intentionally.
-/** @type {Map<string, number>} runId → expiry */
-const abortedEarly = new Map();
-const EARLY_ABORT_MAX = 64;
-const EARLY_ABORT_TTL_MS = 60_000;
+const earlyAborts = createEarlyAbortBuffer();
+const rememberEarlyAbort = earlyAborts.remember;
+const consumeEarlyAbort = earlyAborts.consume;
 const MIB = 1024 * 1024;
 const ACTOR_MODEL_MESSAGE_BYTES = 32 * MIB;
 const ACTOR_EFFECT_MESSAGE_BYTES = 20 * MIB;
@@ -47,6 +47,119 @@ const actorWorkerMessageLimit = (/** @type {unknown} */ type) =>
       ? ACTOR_RESULT_MESSAGE_BYTES
       : type === 'model-open-inference-request' || type === 'model-open-local-request'
         ? ACTOR_MODEL_MESSAGE_BYTES : ACTOR_EFFECT_MESSAGE_BYTES;
+
+// Table-driven exact-tool relay specs: maps worker `<name>-request` messages
+// to their SW authority route, semantic operation, forwarded fields, and
+// result-observation flag so every relay shares one audited forwarding path.
+/** @type {Readonly<Record<string, readonly any[]>>} */
+const EXACT_TOOL_RELAYS = Object.freeze({
+  'actor-spawn-sync-request': Object.freeze(['actor/spawn-sync', 'turn.actor.spawn-sync', ['task', 'allowRecursion', 'grantedToolNames', 'grantedOperations'], ['tools', 'maxSteps', 'maxDepth']]),
+  'actor-spawn-async-request': Object.freeze(['actor/spawn-async', 'turn.actor.spawn-async', ['task', 'allowRecursion', 'grantedToolNames', 'grantedOperations'], ['tools', 'maxSteps', 'maxDepth']]),
+  'actor-tasks-read-request': Object.freeze(['actor/tasks-read', 'turn.actor.tasks', []]),
+  'actor-task-cancel-request': Object.freeze(['actor/task-cancel', 'turn.actor.cancel', ['taskId']]),
+  'actor-message-deliver-request': Object.freeze(['actor/message-deliver', 'turn.actor.message', ['to', 'message', 'oneShot', 'awaitReply', 'degradeToAsync', 'awaitCapMs']]),
+  'pod-resolve-request': Object.freeze(['pod/resolve', 'turn.pod.resolve', ['podId'], [], ['command']]),
+  'pod-read-remote-request': Object.freeze(['pod/read-remote', 'turn.pod.read-remote', ['podId']]),
+  'pod-confirm-git-request': Object.freeze(['pod/confirm-git', 'turn.pod.confirm-git', ['op']]),
+  'pod-exec-request': Object.freeze(['pod/exec', 'turn.pod.exec', ['command', 'podId', 'timeoutMs', 'background', 'remoteGitGrant'], [], [], [], true]),
+  'pod-status-request': Object.freeze(['pod/status', 'turn.pod.status', ['podId', 'jobId', 'stream', 'offset', 'limit']]),
+  'pod-cancel-request': Object.freeze(['pod/cancel', 'turn.pod.cancel', ['podId', 'jobId']]),
+  'pod-read-file-request': Object.freeze(['pod/read-file', 'turn.pod.read-file', ['podId', 'path']]),
+  'pod-write-file-request': Object.freeze(['pod/write-file', 'turn.pod.write-file', ['podId', 'path', 'content'], [], [], [], true]),
+  'repository-read-pod-request': Object.freeze(['repository/read-pod', 'turn.repository.read-pod', ['podId']]),
+  'repository-destroy-pod-request': Object.freeze(['repository/destroy-pod', 'turn.repository.destroy-pod', ['podId'], [], [], [], true]),
+  'repository-read-status-request': Object.freeze(['repository/read-status', 'turn.repository.read-status', []]),
+  'repository-read-history-request': Object.freeze(['repository/read-history', 'turn.repository.read-history', ['depth']]),
+  'repository-read-remote-request': Object.freeze(['repository/read-remote', 'turn.repository.read-remote', []]),
+  'repository-read-diff-request': Object.freeze(['repository/read-diff', 'turn.repository.read-diff', ['from', 'to']]),
+  'repository-confirm-restore-request': Object.freeze(['repository/confirm-restore', 'turn.repository.confirm-restore', ['to']]),
+  'repository-checkpoint-request': Object.freeze(['repository/checkpoint', 'turn.repository.checkpoint', ['message'], [], [], [], true]),
+  'repository-branch-request': Object.freeze(['repository/branch', 'turn.repository.branch', ['name'], [], [], [], true]),
+  'repository-checkout-request': Object.freeze(['repository/checkout', 'turn.repository.checkout', ['name'], [], [], [], true]),
+  'repository-restore-request': Object.freeze(['repository/restore', 'turn.repository.restore', ['to'], [], [], [], true]),
+  'repository-confirm-remote-request': Object.freeze(['repository/confirm-remote', 'turn.repository.confirm-remote', ['op', 'target', 'branch'], [], ['url']]),
+  'repository-link-request': Object.freeze(['repository/link', 'turn.repository.link', ['url'], [], [], [], true]),
+  'repository-fetch-request': Object.freeze(['repository/fetch', 'turn.repository.fetch', ['target'], [], [], [], true]),
+  'repository-push-request': Object.freeze(['repository/push', 'turn.repository.push', ['target', 'branch'], [], [], [], true]),
+  'vm-read-request': Object.freeze(['vm/read', 'turn.vm.read', ['vmId']]),
+  'vm-list-request': Object.freeze(['vm/list', 'turn.vm.list', []]),
+  'vm-set-default-request': Object.freeze(['vm/set-default', 'turn.vm.set-default', ['vmId']]),
+  'vm-run-request': Object.freeze(['vm/run', 'turn.vm.run', ['command', 'timeoutMs', 'vmId'], [], [], [], true]),
+  'vm-import-file-request': Object.freeze(['vm/import-file', 'turn.vm.import-file', ['url', 'path', 'maxBytes'], [], [], [], true]),
+  'vm-write-text-file-request': Object.freeze(['vm/write-text-file', 'turn.vm.write-text-file', ['path', 'content'], [], [], [], true]),
+  'vm-destroy-request': Object.freeze(['vm/destroy', 'turn.vm.destroy', ['vmId'], [], [], [], true]),
+  'notebook-read-request': Object.freeze(['notebook/read', 'turn.notebook.read', ['notebookId']]),
+  'notebook-list-request': Object.freeze(['notebook/list', 'turn.notebook.list', []]),
+  'notebook-set-default-request': Object.freeze(['notebook/set-default', 'turn.notebook.set-default', ['notebookId']]),
+  'notebook-run-request': Object.freeze(['notebook/run', 'turn.notebook.run', ['code', 'timeoutMs', 'notebookId'], [], [], [], true]),
+  'notebook-write-file-request': Object.freeze(['notebook/write-file', 'turn.notebook.write-file', ['path', 'content', 'notebookId'], [], [], [], true]),
+  'notebook-read-file-request': Object.freeze(['notebook/read-file', 'turn.notebook.read-file', ['path', 'notebookId']]),
+  'notebook-destroy-request': Object.freeze(['notebook/destroy', 'turn.notebook.destroy', ['notebookId'], [], [], [], true]),
+  'app-update-request': Object.freeze(['app/update', 'turn.app.update', ['appId', 'name', 'html', 'tags', 'entryFile'], [], [], [], true]),
+  'app-open-request': Object.freeze(['app/open', 'turn.app.open', ['appId'], [], [], [], true]),
+  'app-search-request': Object.freeze(['app/search', 'turn.app.search', ['query']]),
+  'app-read-request': Object.freeze(['app/read', 'turn.app.read', ['appId']]),
+  'app-delete-request': Object.freeze(['app/delete', 'turn.app.delete', ['appId'], [], [], [], true]),
+  'app-write-file-request': Object.freeze(['app/write-file', 'turn.app.write-file', ['appId', 'path', 'content'], [], [], [], true]),
+  'app-read-file-request': Object.freeze(['app/read-file', 'turn.app.read-file', ['appId', 'path']]),
+  'app-list-files-request': Object.freeze(['app/list-files', 'turn.app.list-files', ['appId']]),
+  'app-delete-file-request': Object.freeze(['app/delete-file', 'turn.app.delete-file', ['appId', 'path'], [], [], [], true]),
+  'app-observe-request': Object.freeze(['app/observe', 'turn.app.observe', []]),
+  'app-act-request': Object.freeze(['app/act', 'turn.app.act', ['action', 'params'], [], [], [], true]),
+  'memory-read-scope-request': Object.freeze(['memory/read-scope', 'turn.memory.read-scope', ['scope']]),
+  'memory-read-subtree-request': Object.freeze(['memory/read-subtree', 'turn.memory.read-subtree', ['workspace', 'subpath']]),
+  'memory-write-request': Object.freeze(['memory/write', 'turn.memory.write', ['scope', 'body'], [], [], [], true]),
+  'todo-read-request': Object.freeze(['todo/read', 'turn.todo.read', []]),
+  'todo-replace-request': Object.freeze(['todo/replace', 'turn.todo.replace', ['version', 'todos'], [], [], [], true]),
+  'page-open-tab-request': Object.freeze(['page/open-tab', 'turn.page.open-tab', ['args'], [], [], [], true]),
+  'page-read-request': Object.freeze(['page/read', 'turn.page.read', ['args']]),
+  'page-snapshot-request': Object.freeze(['page/snapshot', 'turn.page.snapshot', ['args']]),
+  'page-read-state-request': Object.freeze(['page/read-state', 'turn.page.read-state', ['args']]),
+  'page-watch-changes-request': Object.freeze(['page/watch-changes', 'turn.page.watch-changes', ['args']]),
+  'page-query-dom-request': Object.freeze(['page/query-dom', 'turn.page.query-dom', ['args']]),
+  'page-navigate-request': Object.freeze(['page/navigate', 'turn.page.navigate', ['args'], [], [], [], true]),
+  'page-fill-request': Object.freeze(['page/fill', 'turn.page.fill', ['args'], [], [], [], true]),
+  'page-click-request': Object.freeze(['page/click', 'turn.page.click', ['args'], [], [], [], true]),
+  'page-login-request': Object.freeze(['page/login', 'turn.page.login', ['args'], [], [], [], true]),
+  'page-capture-foreground-request': Object.freeze(['page/capture-foreground', 'turn.page.capture-foreground', ['args']]),
+  'page-capture-owned-request': Object.freeze(['page/capture-owned', 'turn.page.capture-owned', ['args']]),
+  'resource-confirm-web-write-request': Object.freeze(['resource/confirm-web-write', 'turn.resource.confirm-web-write', ['url', 'method', 'headers', 'body'], [], [], [], true]),
+  'resource-request-web-text-request': Object.freeze(['resource/request-web-text', 'turn.resource.request-web-text', ['url', 'method', 'headers', 'body'], [], [], [], true]),
+  'resource-extract-markdown-request': Object.freeze(['resource/extract-markdown', 'turn.resource.extract-markdown', ['html', 'url']]),
+  'resource-extract-document-request': Object.freeze(['resource/extract-document', 'turn.resource.extract-document', ['url', 'format', 'engine']]),
+  'resource-spill-result-request': Object.freeze(['resource/spill-result', 'turn.resource.spill-result', ['url', 'format', 'text', 'producer', 'fenced', 'originLabel'], [], [], [], true]),
+  'resource-read-result-request': Object.freeze(['resource/read-result', 'turn.resource.read-result', ['key']]),
+  'site-client-read-request': Object.freeze(['site-client/read', 'turn.site-client.read', ['origin']]),
+  'site-client-run-request': Object.freeze(['site-client/run', 'turn.site-client.run', ['origin', 'timeoutMs'], ['code', 'mode', 'clientOperation', 'input', 'revision'], [], [], true]),
+  'site-client-commit-request': Object.freeze(['site-client/commit', 'turn.site-client.commit', ['origin'], ['auth', 'deriver', 'operations', 'validationCases'], ['summary', 'body'], ['endpoints'], true]),
+  'site-client-capture-start-request': Object.freeze(['site-client/capture-start', 'turn.site-client.capture-start', [], [], [], [], true]),
+  'site-client-capture-stop-request': Object.freeze(['site-client/capture-stop', 'turn.site-client.capture-stop', [], [], [], [], true]),
+  'execution-create-webvm-request': Object.freeze(['execution/create-webvm', 'turn.execution.create-webvm', ['plan'], [], [], [], true]),
+  'execution-create-notebook-request': Object.freeze(['execution/create-notebook', 'turn.execution.create-notebook', ['plan'], [], [], [], true]),
+  'execution-create-pod-request': Object.freeze(['execution/create-pod', 'turn.execution.create-pod', ['plan'], [], [], [], true]),
+  'execution-create-app-request': Object.freeze(['execution/create-app', 'turn.execution.create-app', ['plan'], [], [], [], true]),
+  'execution-run-script-request': Object.freeze(['execution/run-script', 'turn.execution.run-script', ['code', 'actors', 'provider', 'workspace', 'timeoutMs'], [], [], [], true]),
+  'execution-spill-script-request': Object.freeze(['execution/spill-script', 'turn.execution.spill-script', ['text', 'fenced', 'originLabel'], [], [], [], true]),
+  'editing-read-target-request': Object.freeze(['editing/read-target', 'turn.editing.read-target', ['kind', 'targetId', 'path']]),
+  'editing-write-target-request': Object.freeze(['editing/write-target', 'turn.editing.write-target', ['kind', 'targetId', 'path', 'content'], [], [], [], true]),
+  'introspection-actor-roster-request': Object.freeze(['introspection/actor-roster', 'turn.introspection.actor-roster', []]),
+  'introspection-provider-posture-request': Object.freeze(['introspection/provider-posture', 'turn.introspection.provider-posture', []]),
+  'introspection-storage-snapshot-request': Object.freeze(['introspection/storage-snapshot', 'turn.introspection.storage-snapshot', ['prefix']]),
+  'introspection-automatable-tabs-request': Object.freeze(['introspection/automatable-tabs', 'turn.introspection.automatable-tabs', []]),
+  'introspection-denylist-patterns-request': Object.freeze(['introspection/denylist-patterns', 'turn.introspection.denylist-patterns', []]),
+  'introspection-audit-entries-request': Object.freeze(['introspection/audit-entries', 'turn.introspection.audit-entries', []]),
+  'introspection-installed-skill-request': Object.freeze(['introspection/installed-skill', 'turn.introspection.installed-skill', ['name']]),
+  'schedule-read-routines-request': Object.freeze(['schedule/read-routines', 'turn.schedule.read-routines', []]),
+  'schedule-arm-confirmed-routine-request': Object.freeze(['schedule/arm-confirmed-routine', 'turn.schedule.arm-confirmed-routine', ['prompt', 'every', 'dailyAt', 'mode'], [], [], [], true]),
+  'schedule-cancel-routine-request': Object.freeze(['schedule/cancel-routine', 'turn.schedule.cancel-routine', ['id'], [], [], [], true]),
+  'dweb-discover-apps-request': Object.freeze(['dweb/discover-apps', 'turn.dweb.discover-apps', []]),
+  'dweb-publish-confirmed-app-request': Object.freeze(['dweb/publish-confirmed-app', 'turn.dweb.publish-confirmed-app', ['appId'], [], [], [], true]),
+  'dweb-install-confirmed-app-request': Object.freeze(['dweb/install-confirmed-app', 'turn.dweb.install-confirmed-app', ['uri', 'name'], [], [], [], true]),
+  'dweb-read-peers-request': Object.freeze(['dweb/read-peers', 'turn.dweb.read-peers', []]),
+  'dweb-set-peer-blocked-request': Object.freeze(['dweb/set-peer-blocked', 'turn.dweb.set-peer-blocked', ['did', 'block', 'reason'], [], [], [], true]),
+  'dweb-set-discovery-enabled-request': Object.freeze(['dweb/set-discovery-enabled', 'turn.dweb.set-discovery-enabled', ['enabled'], [], [], [], true]),
+  'dweb-run-mesh-program-request': Object.freeze(['dweb/run-mesh-program', 'turn.dweb.run-mesh-program', ['code', 'timeoutMs'], [], [], [], true]),
+});
 
 /** @param {unknown} message */
 export const actorWorkerMessageFits = (message) => {
@@ -111,35 +224,6 @@ export const describeActorExecution = (job, executionId) => describeExecution({
     preflightReply: job.preflightReply,
   },
 });
-
-const pruneEarlyAborts = (now = Date.now()) => {
-  for (const [runId, expiresAt] of abortedEarly) {
-    if (expiresAt > now) break;
-    abortedEarly.delete(runId);
-  }
-  while (abortedEarly.size > EARLY_ABORT_MAX) {
-    const oldest = abortedEarly.keys().next().value;
-    if (typeof oldest !== 'string') break;
-    abortedEarly.delete(oldest);
-  }
-};
-
-/** @param {string} runId */
-const rememberEarlyAbort = (runId) => {
-  const now = Date.now();
-  pruneEarlyAborts(now);
-  abortedEarly.delete(runId);
-  abortedEarly.set(runId, now + EARLY_ABORT_TTL_MS);
-  pruneEarlyAborts(now);
-};
-
-/** @param {string} runId */
-const consumeEarlyAbort = (runId) => {
-  pruneEarlyAborts();
-  if (!abortedEarly.has(runId)) return false;
-  abortedEarly.delete(runId);
-  return true;
-};
 
 /**
  * Carry the controller-minted call identity unchanged to the authority host.
@@ -672,437 +756,35 @@ export const runActor = async (job, {
           }
           return;
         }
-        if (m.type === 'actor-spawn-sync-request') {
-          await relayExactToolMessage(m, 'actor-spawn-sync-response', () =>
-            sendToSW('actor/spawn-sync', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.actor.spawn-sync'),
-              task: m.task, allowRecursion: m.allowRecursion,
-              grantedOperations: m.grantedOperations,
-              ...(m.tools === undefined ? {} : { tools: m.tools }),
-              ...(m.maxSteps === undefined ? {} : { maxSteps: m.maxSteps }),
-              ...(m.maxDepth === undefined ? {} : { maxDepth: m.maxDepth }),
-            }));
-          return;
-        }
-        if (m.type === 'actor-spawn-async-request') {
-          await relayExactToolMessage(m, 'actor-spawn-async-response', () =>
-            sendToSW('actor/spawn-async', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.actor.spawn-async'),
-              task: m.task, allowRecursion: m.allowRecursion,
-              grantedOperations: m.grantedOperations,
-              ...(m.tools === undefined ? {} : { tools: m.tools }),
-              ...(m.maxSteps === undefined ? {} : { maxSteps: m.maxSteps }),
-              ...(m.maxDepth === undefined ? {} : { maxDepth: m.maxDepth }),
-            }));
-          return;
-        }
-        if (m.type === 'actor-tasks-read-request') {
-          await relayExactToolMessage(m, 'actor-tasks-read-response', () =>
-            sendToSW('actor/tasks-read', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.actor.tasks'),
-            }));
-          return;
-        }
-        if (m.type === 'actor-task-cancel-request') {
-          await relayExactToolMessage(m, 'actor-task-cancel-response', () =>
-            sendToSW('actor/task-cancel', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.actor.cancel'),
-              taskId: m.taskId,
-            }));
-          return;
-        }
-        if (m.type === 'actor-message-deliver-request') {
-          await relayExactToolMessage(m, 'actor-message-deliver-response', () =>
-            sendToSW('actor/message-deliver', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.actor.message'),
-              to: m.to, message: m.message, oneShot: m.oneShot,
-              awaitReply: m.awaitReply, degradeToAsync: m.degradeToAsync,
-              awaitCapMs: m.awaitCapMs,
-            }));
-          return;
-        }
-        if (m.type === 'pod-resolve-request') {
-          await relayExactToolMessage(m, 'pod-resolve-response', () =>
-            sendToSW('pod/resolve', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.pod.resolve'),
-              podId: m.podId,
-              ...(typeof m.command === 'string' ? { command: m.command } : {}),
-            }));
-          return;
-        }
-        if (m.type === 'pod-read-remote-request') {
-          await relayExactToolMessage(m, 'pod-read-remote-response', () =>
-            sendToSW('pod/read-remote', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.pod.read-remote'),
-              podId: m.podId,
-            }));
-          return;
-        }
-        if (m.type === 'pod-confirm-git-request') {
-          await relayExactToolMessage(m, 'pod-confirm-git-response', () =>
-            sendToSW('pod/confirm-git', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.pod.confirm-git'),
-              op: m.op,
-            }));
-          return;
-        }
-        if (m.type === 'pod-exec-request') {
-          await relayExactToolMessage(m, 'pod-exec-response', () =>
-            sendToSW('pod/exec', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.pod.exec'),
-              command: m.command, podId: m.podId, timeoutMs: m.timeoutMs,
-              background: m.background, remoteGitGrant: m.remoteGitGrant,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'pod-status-request') {
-          await relayExactToolMessage(m, 'pod-status-response', () =>
-            sendToSW('pod/status', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.pod.status'),
-              podId: m.podId, jobId: m.jobId, stream: m.stream,
-              offset: m.offset, limit: m.limit,
-            }));
-          return;
-        }
-        if (m.type === 'pod-cancel-request') {
-          await relayExactToolMessage(m, 'pod-cancel-response', () =>
-            sendToSW('pod/cancel', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.pod.cancel'),
-              podId: m.podId, jobId: m.jobId,
-            }));
-          return;
-        }
-        if (m.type === 'pod-read-file-request') {
-          await relayExactToolMessage(m, 'pod-read-file-response', () =>
-            sendToSW('pod/read-file', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.pod.read-file'),
-              podId: m.podId, path: m.path,
-            }));
-          return;
-        }
-        if (m.type === 'pod-write-file-request') {
-          await relayExactToolMessage(m, 'pod-write-file-response', () =>
-            sendToSW('pod/write-file', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.pod.write-file'),
-              podId: m.podId, path: m.path, content: m.content,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'repository-read-pod-request') {
-          await relayExactToolMessage(m, 'repository-read-pod-response', () =>
-            sendToSW('repository/read-pod', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.read-pod'),
-              podId: m.podId,
-            }));
-          return;
-        }
-        if (m.type === 'repository-destroy-pod-request') {
-          await relayExactToolMessage(m, 'repository-destroy-pod-response', () =>
-            sendToSW('repository/destroy-pod', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.destroy-pod'),
-              podId: m.podId,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'repository-read-status-request') {
-          await relayExactToolMessage(m, 'repository-read-status-response', () =>
-            sendToSW('repository/read-status', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.read-status'),
-            }));
-          return;
-        }
-        if (m.type === 'repository-read-history-request') {
-          await relayExactToolMessage(m, 'repository-read-history-response', () =>
-            sendToSW('repository/read-history', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.read-history'),
-              depth: m.depth,
-            }));
-          return;
-        }
-        if (m.type === 'repository-read-remote-request') {
-          await relayExactToolMessage(m, 'repository-read-remote-response', () =>
-            sendToSW('repository/read-remote', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.read-remote'),
-            }));
-          return;
-        }
-        if (m.type === 'repository-read-diff-request') {
-          await relayExactToolMessage(m, 'repository-read-diff-response', () =>
-            sendToSW('repository/read-diff', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.read-diff'),
-              from: m.from, to: m.to,
-            }));
-          return;
-        }
-        if (m.type === 'repository-confirm-restore-request') {
-          await relayExactToolMessage(m, 'repository-confirm-restore-response', () =>
-            sendToSW('repository/confirm-restore', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.confirm-restore'),
-              to: m.to,
-            }));
-          return;
-        }
-        if (m.type === 'repository-checkpoint-request') {
-          await relayExactToolMessage(m, 'repository-checkpoint-response', () =>
-            sendToSW('repository/checkpoint', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.checkpoint'),
-              message: m.message,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'repository-branch-request') {
-          await relayExactToolMessage(m, 'repository-branch-response', () =>
-            sendToSW('repository/branch', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.branch'),
-              name: m.name,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'repository-checkout-request') {
-          await relayExactToolMessage(m, 'repository-checkout-response', () =>
-            sendToSW('repository/checkout', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.checkout'),
-              name: m.name,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'repository-restore-request') {
-          await relayExactToolMessage(m, 'repository-restore-response', () =>
-            sendToSW('repository/restore', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.restore'),
-              to: m.to,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'repository-confirm-remote-request') {
-          await relayExactToolMessage(m, 'repository-confirm-remote-response', () =>
-            sendToSW('repository/confirm-remote', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.confirm-remote'),
-              op: m.op, target: m.target, branch: m.branch,
-              ...(typeof m.url === 'string' ? { url: m.url } : {}),
-            }));
-          return;
-        }
-        if (m.type === 'repository-link-request') {
-          await relayExactToolMessage(m, 'repository-link-response', () =>
-            sendToSW('repository/link', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.link'),
-              url: m.url,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'repository-fetch-request') {
-          await relayExactToolMessage(m, 'repository-fetch-response', () =>
-            sendToSW('repository/fetch', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.fetch'),
-              target: m.target,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'repository-push-request') {
-          await relayExactToolMessage(m, 'repository-push-response', () =>
-            sendToSW('repository/push', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.repository.push'),
-              target: m.target, branch: m.branch,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'vm-read-request') {
-          await relayExactToolMessage(m, 'vm-read-response', () =>
-            sendToSW('vm/read', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.vm.read'),
-              vmId: m.vmId,
-            }));
-          return;
-        }
-        if (m.type === 'vm-list-request') {
-          await relayExactToolMessage(m, 'vm-list-response', () =>
-            sendToSW('vm/list', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.vm.list'),
-            }));
-          return;
-        }
-        if (m.type === 'vm-set-default-request') {
-          await relayExactToolMessage(m, 'vm-set-default-response', () =>
-            sendToSW('vm/set-default', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.vm.set-default'),
-              vmId: m.vmId,
-            }));
-          return;
-        }
-        if (m.type === 'vm-run-request') {
-          await relayExactToolMessage(m, 'vm-run-response', () =>
-            sendToSW('vm/run', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.vm.run'),
-              command: m.command, timeoutMs: m.timeoutMs, vmId: m.vmId,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'vm-import-file-request') {
-          await relayExactToolMessage(m, 'vm-import-file-response', () =>
-            sendToSW('vm/import-file', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.vm.import-file'),
-              url: m.url, path: m.path, maxBytes: m.maxBytes,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'vm-write-text-file-request') {
-          await relayExactToolMessage(m, 'vm-write-text-file-response', () =>
-            sendToSW('vm/write-text-file', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.vm.write-text-file'),
-              path: m.path, content: m.content,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'vm-destroy-request') {
-          await relayExactToolMessage(m, 'vm-destroy-response', () =>
-            sendToSW('vm/destroy', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.vm.destroy'),
-              vmId: m.vmId,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'notebook-read-request') {
-          await relayExactToolMessage(m, 'notebook-read-response', () =>
-            sendToSW('notebook/read', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.notebook.read'),
-              notebookId: m.notebookId,
-            }));
-          return;
-        }
-        if (m.type === 'notebook-list-request') {
-          await relayExactToolMessage(m, 'notebook-list-response', () =>
-            sendToSW('notebook/list', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.notebook.list'),
-            }));
-          return;
-        }
-        if (m.type === 'notebook-set-default-request') {
-          await relayExactToolMessage(m, 'notebook-set-default-response', () =>
-            sendToSW('notebook/set-default', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.notebook.set-default'),
-              notebookId: m.notebookId,
-            }));
-          return;
-        }
-        if (m.type === 'notebook-run-request') {
-          await relayExactToolMessage(m, 'notebook-run-response', () =>
-            sendToSW('notebook/run', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.notebook.run'),
-              code: m.code, timeoutMs: m.timeoutMs, notebookId: m.notebookId,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'notebook-write-file-request') {
-          await relayExactToolMessage(m, 'notebook-write-file-response', () =>
-            sendToSW('notebook/write-file', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.notebook.write-file'),
-              path: m.path, content: m.content, notebookId: m.notebookId,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'notebook-read-file-request') {
-          await relayExactToolMessage(m, 'notebook-read-file-response', () =>
-            sendToSW('notebook/read-file', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.notebook.read-file'),
-              path: m.path, notebookId: m.notebookId,
-            }));
-          return;
-        }
-        if (m.type === 'notebook-destroy-request') {
-          await relayExactToolMessage(m, 'notebook-destroy-response', () =>
-            sendToSW('notebook/destroy', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.notebook.destroy'),
-              notebookId: m.notebookId,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'app-update-request') {
-          await relayExactToolMessage(m, 'app-update-response', () =>
-            sendToSW('app/update', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.app.update'),
-              appId: m.appId, name: m.name, html: m.html, tags: m.tags,
-              entryFile: m.entryFile,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'app-open-request') {
-          await relayExactToolMessage(m, 'app-open-response', () =>
-            sendToSW('app/open', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.app.open'),
-              appId: m.appId,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'app-search-request') {
-          await relayExactToolMessage(m, 'app-search-response', () =>
-            sendToSW('app/search', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.app.search'),
-              query: m.query,
-            }));
-          return;
-        }
-        if (m.type === 'app-read-request') {
-          await relayExactToolMessage(m, 'app-read-response', () =>
-            sendToSW('app/read', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.app.read'),
-              appId: m.appId,
-            }));
-          return;
-        }
-        if (m.type === 'app-delete-request') {
-          await relayExactToolMessage(m, 'app-delete-response', () =>
-            sendToSW('app/delete', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.app.delete'),
-              appId: m.appId,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'app-write-file-request') {
-          await relayExactToolMessage(m, 'app-write-file-response', () =>
-            sendToSW('app/write-file', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.app.write-file'),
-              appId: m.appId, path: m.path, content: m.content,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'app-read-file-request') {
-          await relayExactToolMessage(m, 'app-read-file-response', () =>
-            sendToSW('app/read-file', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.app.read-file'),
-              appId: m.appId, path: m.path,
-            }));
-          return;
-        }
-        if (m.type === 'app-list-files-request') {
-          await relayExactToolMessage(m, 'app-list-files-response', () =>
-            sendToSW('app/list-files', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.app.list-files'),
-              appId: m.appId,
-            }));
-          return;
-        }
-        if (m.type === 'app-delete-file-request') {
-          await relayExactToolMessage(m, 'app-delete-file-response', () =>
-            sendToSW('app/delete-file', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.app.delete-file'),
-              appId: m.appId, path: m.path,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'app-observe-request') {
-          await relayExactToolMessage(m, 'app-observe-response', () =>
-            sendToSW('app/observe', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.app.observe'),
-            }));
-          return;
-        }
-        if (m.type === 'app-act-request') {
-          await relayExactToolMessage(m, 'app-act-response', () =>
-            sendToSW('app/act', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.app.act'),
-              action: m.action, params: m.params,
-            }), { observeResult: true });
+        const exactRelay = typeof m.type === 'string' && Object.hasOwn(EXACT_TOOL_RELAYS, m.type)
+          ? EXACT_TOOL_RELAYS[m.type] : null;
+        if (exactRelay) {
+          const [route, op, fields, optFields, strFields, arrFields, observeResult] = exactRelay;
+          const responseType = `${m.type.slice(0, -8)}-response`;
+          await relayExactToolMessage(m, responseType, () => {
+            /** @type {Record<string, unknown>} */
+            const payload = {
+              ...(relayToken ? { relayToken } : {}),
+              ...exactEffectBinding(m, op),
+            };
+            for (const key of fields) payload[key] = m[key];
+            if (optFields) {
+              for (const key of optFields) {
+                if (m[key] !== undefined) payload[key] = m[key];
+              }
+            }
+            if (strFields) {
+              for (const key of strFields) {
+                if (typeof m[key] === 'string') payload[key] = m[key];
+              }
+            }
+            if (arrFields) {
+              for (const key of arrFields) {
+                if (Array.isArray(m[key])) payload[key] = m[key];
+              }
+            }
+            return sendToSW(route, payload);
+          }, observeResult ? { observeResult: true } : undefined);
           return;
         }
         if (m.type === 'app-run-code-request') {
@@ -1131,125 +813,6 @@ export const runActor = async (job, {
           }
           return;
         }
-        if (m.type === 'memory-read-scope-request') {
-          await relayExactToolMessage(m, 'memory-read-scope-response', () =>
-            sendToSW('memory/read-scope', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.memory.read-scope'),
-              scope: m.scope,
-            }));
-          return;
-        }
-        if (m.type === 'memory-read-subtree-request') {
-          await relayExactToolMessage(m, 'memory-read-subtree-response', () =>
-            sendToSW('memory/read-subtree', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.memory.read-subtree'),
-              workspace: m.workspace, subpath: m.subpath,
-            }));
-          return;
-        }
-        if (m.type === 'memory-write-request') {
-          await relayExactToolMessage(m, 'memory-write-response', () =>
-            sendToSW('memory/write', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.memory.write'),
-              scope: m.scope, body: m.body,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'todo-read-request') {
-          await relayExactToolMessage(m, 'todo-read-response', () =>
-            sendToSW('todo/read', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.todo.read'),
-            }));
-          return;
-        }
-        if (m.type === 'todo-replace-request') {
-          await relayExactToolMessage(m, 'todo-replace-response', () =>
-            sendToSW('todo/replace', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.todo.replace'),
-              version: m.version, todos: m.todos,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'page-open-tab-request') {
-          await relayExactToolMessage(m, 'page-open-tab-response', () =>
-            sendToSW('page/open-tab', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.page.open-tab'),
-              args: m.args,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'page-read-request') {
-          await relayExactToolMessage(m, 'page-read-response', () =>
-            sendToSW('page/read', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.page.read'),
-              args: m.args,
-            }));
-          return;
-        }
-        if (m.type === 'page-snapshot-request') {
-          await relayExactToolMessage(m, 'page-snapshot-response', () =>
-            sendToSW('page/snapshot', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.page.snapshot'),
-              args: m.args,
-            }));
-          return;
-        }
-        if (m.type === 'page-read-state-request') {
-          await relayExactToolMessage(m, 'page-read-state-response', () =>
-            sendToSW('page/read-state', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.page.read-state'),
-              args: m.args,
-            }));
-          return;
-        }
-        if (m.type === 'page-watch-changes-request') {
-          await relayExactToolMessage(m, 'page-watch-changes-response', () =>
-            sendToSW('page/watch-changes', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.page.watch-changes'),
-              args: m.args,
-            }));
-          return;
-        }
-        if (m.type === 'page-query-dom-request') {
-          await relayExactToolMessage(m, 'page-query-dom-response', () =>
-            sendToSW('page/query-dom', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.page.query-dom'),
-              args: m.args,
-            }));
-          return;
-        }
-        if (m.type === 'page-navigate-request') {
-          await relayExactToolMessage(m, 'page-navigate-response', () =>
-            sendToSW('page/navigate', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.page.navigate'),
-              args: m.args,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'page-fill-request') {
-          await relayExactToolMessage(m, 'page-fill-response', () =>
-            sendToSW('page/fill', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.page.fill'),
-              args: m.args,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'page-click-request') {
-          await relayExactToolMessage(m, 'page-click-response', () =>
-            sendToSW('page/click', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.page.click'),
-              args: m.args,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'page-login-request') {
-          await relayExactToolMessage(m, 'page-login-response', () =>
-            sendToSW('page/login', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.page.login'),
-              args: m.args,
-            }), { observeResult: true });
-          return;
-        }
         if (m.type === 'page-run-program-request') {
           if (pageProgramSemanticToken) {
             w.postMessage({
@@ -1274,310 +837,6 @@ export const runActor = async (job, {
               pageProgramSemanticToken = null;
             }
           }
-          return;
-        }
-        if (m.type === 'page-capture-foreground-request') {
-          await relayExactToolMessage(m, 'page-capture-foreground-response', () =>
-            sendToSW('page/capture-foreground', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.page.capture-foreground'),
-              args: m.args,
-            }));
-          return;
-        }
-        if (m.type === 'page-capture-owned-request') {
-          await relayExactToolMessage(m, 'page-capture-owned-response', () =>
-            sendToSW('page/capture-owned', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.page.capture-owned'),
-              args: m.args,
-            }));
-          return;
-        }
-        if (m.type === 'resource-confirm-web-write-request') {
-          await relayExactToolMessage(m, 'resource-confirm-web-write-response', () =>
-            sendToSW('resource/confirm-web-write', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.resource.confirm-web-write'),
-              url: m.url, method: m.method, headers: m.headers, body: m.body,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'resource-request-web-text-request') {
-          await relayExactToolMessage(m, 'resource-request-web-text-response', () =>
-            sendToSW('resource/request-web-text', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.resource.request-web-text'),
-              url: m.url, method: m.method, headers: m.headers, body: m.body,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'resource-extract-markdown-request') {
-          await relayExactToolMessage(m, 'resource-extract-markdown-response', () =>
-            sendToSW('resource/extract-markdown', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.resource.extract-markdown'),
-              html: m.html, url: m.url,
-            }));
-          return;
-        }
-        if (m.type === 'resource-extract-document-request') {
-          await relayExactToolMessage(m, 'resource-extract-document-response', () =>
-            sendToSW('resource/extract-document', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.resource.extract-document'),
-              url: m.url, format: m.format, engine: m.engine,
-            }));
-          return;
-        }
-        if (m.type === 'resource-spill-result-request') {
-          await relayExactToolMessage(m, 'resource-spill-result-response', () =>
-            sendToSW('resource/spill-result', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.resource.spill-result'),
-              url: m.url, format: m.format, text: m.text, producer: m.producer,
-              fenced: m.fenced, originLabel: m.originLabel,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'resource-read-result-request') {
-          await relayExactToolMessage(m, 'resource-read-result-response', () =>
-            sendToSW('resource/read-result', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.resource.read-result'),
-              key: m.key,
-            }));
-          return;
-        }
-        if (m.type === 'site-client-read-request') {
-          await relayExactToolMessage(m, 'site-client-read-response', () =>
-            sendToSW('site-client/read', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.site-client.read'),
-              origin: m.origin,
-            }));
-          return;
-        }
-        if (m.type === 'site-client-run-request') {
-          await relayExactToolMessage(m, 'site-client-run-response', () =>
-            sendToSW('site-client/run', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.site-client.run'),
-              origin: m.origin, timeoutMs: m.timeoutMs,
-              ...Object.fromEntries(['code', 'mode', 'clientOperation', 'input', 'revision']
-                .filter(key => m[key] !== undefined).map(key => [key, m[key]])),
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'site-client-commit-request') {
-          await relayExactToolMessage(m, 'site-client-commit-response', () =>
-            sendToSW('site-client/commit', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.site-client.commit'),
-              origin: m.origin,
-              ...(typeof m.summary === 'string' ? { summary: m.summary } : {}),
-              ...(Array.isArray(m.endpoints) ? { endpoints: m.endpoints } : {}),
-              ...(m.auth !== undefined ? { auth: m.auth } : {}),
-              ...(m.deriver !== undefined ? { deriver: m.deriver } : {}),
-              ...(typeof m.body === 'string' ? { body: m.body } : {}),
-              ...(m.operations !== undefined ? { operations: m.operations } : {}),
-              ...(m.validationCases !== undefined ? { validationCases: m.validationCases } : {}),
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'site-client-capture-start-request') {
-          await relayExactToolMessage(m, 'site-client-capture-start-response', () =>
-            sendToSW('site-client/capture-start', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.site-client.capture-start'),
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'site-client-capture-stop-request') {
-          await relayExactToolMessage(m, 'site-client-capture-stop-response', () =>
-            sendToSW('site-client/capture-stop', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.site-client.capture-stop'),
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'execution-create-webvm-request') {
-          await relayExactToolMessage(m, 'execution-create-webvm-response', () =>
-            sendToSW('execution/create-webvm', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.execution.create-webvm'),
-              plan: m.plan,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'execution-create-notebook-request') {
-          await relayExactToolMessage(m, 'execution-create-notebook-response', () =>
-            sendToSW('execution/create-notebook', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.execution.create-notebook'),
-              plan: m.plan,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'execution-create-pod-request') {
-          await relayExactToolMessage(m, 'execution-create-pod-response', () =>
-            sendToSW('execution/create-pod', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.execution.create-pod'),
-              plan: m.plan,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'execution-create-app-request') {
-          await relayExactToolMessage(m, 'execution-create-app-response', () =>
-            sendToSW('execution/create-app', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.execution.create-app'),
-              plan: m.plan,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'execution-run-script-request') {
-          await relayExactToolMessage(m, 'execution-run-script-response', () =>
-            sendToSW('execution/run-script', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.execution.run-script'),
-              code: m.code, actors: m.actors, provider: m.provider,
-              workspace: m.workspace, timeoutMs: m.timeoutMs,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'execution-spill-script-request') {
-          await relayExactToolMessage(m, 'execution-spill-script-response', () =>
-            sendToSW('execution/spill-script', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.execution.spill-script'),
-              text: m.text, fenced: m.fenced, originLabel: m.originLabel,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'editing-read-target-request') {
-          await relayExactToolMessage(m, 'editing-read-target-response', () =>
-            sendToSW('editing/read-target', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.editing.read-target'),
-              kind: m.kind, targetId: m.targetId, path: m.path,
-            }));
-          return;
-        }
-        if (m.type === 'editing-write-target-request') {
-          await relayExactToolMessage(m, 'editing-write-target-response', () =>
-            sendToSW('editing/write-target', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.editing.write-target'),
-              kind: m.kind, targetId: m.targetId, path: m.path, content: m.content,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'introspection-actor-roster-request') {
-          await relayExactToolMessage(m, 'introspection-actor-roster-response', () =>
-            sendToSW('introspection/actor-roster', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.introspection.actor-roster'),
-            }));
-          return;
-        }
-        if (m.type === 'introspection-provider-posture-request') {
-          await relayExactToolMessage(m, 'introspection-provider-posture-response', () =>
-            sendToSW('introspection/provider-posture', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.introspection.provider-posture'),
-            }));
-          return;
-        }
-        if (m.type === 'introspection-storage-snapshot-request') {
-          await relayExactToolMessage(m, 'introspection-storage-snapshot-response', () =>
-            sendToSW('introspection/storage-snapshot', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.introspection.storage-snapshot'),
-              prefix: m.prefix,
-            }));
-          return;
-        }
-        if (m.type === 'introspection-automatable-tabs-request') {
-          await relayExactToolMessage(m, 'introspection-automatable-tabs-response', () =>
-            sendToSW('introspection/automatable-tabs', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.introspection.automatable-tabs'),
-            }));
-          return;
-        }
-        if (m.type === 'introspection-denylist-patterns-request') {
-          await relayExactToolMessage(m, 'introspection-denylist-patterns-response', () =>
-            sendToSW('introspection/denylist-patterns', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.introspection.denylist-patterns'),
-            }));
-          return;
-        }
-        if (m.type === 'introspection-audit-entries-request') {
-          await relayExactToolMessage(m, 'introspection-audit-entries-response', () =>
-            sendToSW('introspection/audit-entries', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.introspection.audit-entries'),
-            }));
-          return;
-        }
-        if (m.type === 'introspection-installed-skill-request') {
-          await relayExactToolMessage(m, 'introspection-installed-skill-response', () =>
-            sendToSW('introspection/installed-skill', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.introspection.installed-skill'),
-              name: m.name,
-            }));
-          return;
-        }
-        if (m.type === 'schedule-read-routines-request') {
-          await relayExactToolMessage(m, 'schedule-read-routines-response', () =>
-            sendToSW('schedule/read-routines', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.schedule.read-routines'),
-            }));
-          return;
-        }
-        if (m.type === 'schedule-arm-confirmed-routine-request') {
-          await relayExactToolMessage(m, 'schedule-arm-confirmed-routine-response', () =>
-            sendToSW('schedule/arm-confirmed-routine', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.schedule.arm-confirmed-routine'),
-              prompt: m.prompt, every: m.every, dailyAt: m.dailyAt, mode: m.mode,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'schedule-cancel-routine-request') {
-          await relayExactToolMessage(m, 'schedule-cancel-routine-response', () =>
-            sendToSW('schedule/cancel-routine', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.schedule.cancel-routine'), id: m.id,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'dweb-discover-apps-request') {
-          await relayExactToolMessage(m, 'dweb-discover-apps-response', () =>
-            sendToSW('dweb/discover-apps', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.dweb.discover-apps'),
-            }));
-          return;
-        }
-        if (m.type === 'dweb-publish-confirmed-app-request') {
-          await relayExactToolMessage(m, 'dweb-publish-confirmed-app-response', () =>
-            sendToSW('dweb/publish-confirmed-app', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.dweb.publish-confirmed-app'),
-              appId: m.appId,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'dweb-install-confirmed-app-request') {
-          await relayExactToolMessage(m, 'dweb-install-confirmed-app-response', () =>
-            sendToSW('dweb/install-confirmed-app', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.dweb.install-confirmed-app'),
-              uri: m.uri, name: m.name,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'dweb-read-peers-request') {
-          await relayExactToolMessage(m, 'dweb-read-peers-response', () =>
-            sendToSW('dweb/read-peers', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.dweb.read-peers'),
-            }));
-          return;
-        }
-        if (m.type === 'dweb-set-peer-blocked-request') {
-          await relayExactToolMessage(m, 'dweb-set-peer-blocked-response', () =>
-            sendToSW('dweb/set-peer-blocked', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.dweb.set-peer-blocked'),
-              did: m.did, block: m.block, reason: m.reason,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'dweb-set-discovery-enabled-request') {
-          await relayExactToolMessage(m, 'dweb-set-discovery-enabled-response', () =>
-            sendToSW('dweb/set-discovery-enabled', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.dweb.set-discovery-enabled'),
-              enabled: m.enabled,
-            }), { observeResult: true });
-          return;
-        }
-        if (m.type === 'dweb-run-mesh-program-request') {
-          await relayExactToolMessage(m, 'dweb-run-mesh-program-response', () =>
-            sendToSW('dweb/run-mesh-program', {
-              ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.dweb.run-mesh-program'),
-              code: m.code, timeoutMs: m.timeoutMs,
-            }), { observeResult: true });
           return;
         }
         if (m.type === 'actor-call-complete-request') {

@@ -13,7 +13,7 @@ export {
 } from './vault/errors.js';
 export { makeSafeFetch, HARDCODED_ALLOWLIST, originOf } from './fetch/safe-fetch.js';
 export {
-  makeWebFetch, withSessionScopedCredentials, withDpopCredentials, withWebRequestAuthority,
+  makeWebFetch, isRedirect, withSessionScopedCredentials, withDpopCredentials, withWebRequestAuthority,
 } from './fetch/web-fetch.js';
 export { originFromSecretName } from './fetch/origin-credentials.js';
 export { makeOriginCredentialRoutes } from './fetch/origin-credential-routes.js';

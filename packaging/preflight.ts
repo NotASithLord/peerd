@@ -120,12 +120,9 @@ const main = async () => {
   run('copy hygiene (no new em dashes / assistant authorship markers)', 'bun', ['run', 'check:copy']);
   run('vendor integrity (extension/vendor/ matches vendor.lock.json)', 'bun', ['run', 'check:vendor']);
   run('security invariants (manifest surface / dynamic code / message hosts)', 'bun', ['run', 'check:invariants']);
-  // Web target: stage it fresh from source, then prove the tree is import-closed
-  // (nothing curated reaches pruned chassis; the browser-polyfill shim is in
-  // place). This is what makes the web tree safely inherit upstream — an escape
-  // introduced upstream fails here instead of rotting the staged library silently.
-  run('web target build (from live source)', 'bun', ['run', 'package:web']);
-  run('web import-closure boundary', 'bun', ['run', 'check:web']);
+  // Web target: stage fresh from source and verify import-closure boundary
+  // (package:web invokes checkWebBoundary() internally).
+  run('web target build + import-closure boundary', 'bun', ['run', 'package:web']);
   // The functional badge comes from the actual passing JUnit aggregate. Treat
   // it like the other generated artifacts, while restoring any preflight
   // caller's existing bytes so this gate remains non-destructive.

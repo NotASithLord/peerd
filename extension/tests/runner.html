@@ -7,7 +7,7 @@
        runEval / the headless job runner do in the extension) — the runner is
        served over http where it would otherwise be blocked. Scoped to workers,
        so blob SCRIPTS in the page stay blocked. -->
-  <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; object-src 'self'">
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; object-src 'none'">
   <!-- Inline data: icon suppresses the favicon 404 when served outside
        the extension origin (e.g. via dev-server.sh). -->
   <link rel="icon" href="data:,">

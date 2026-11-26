@@ -23,7 +23,7 @@ import { createKernelTurnCustody } from './kernel-turn-custody.js';
 import { createLocalModelGenerationAuthority } from './local-model-generation-authority.js';
 import { makeKernelDemandRoutes } from './kernel-demand-routes.js';
 import { createProviderEgressAuthority } from './provider-egress-authority.js';
-import { HARDCODED_ALLOWLIST, makeSafeFetch } from '/peerd-egress/background.js';
+import { HARDCODED_ALLOWLIST, isRedirect, makeSafeFetch } from '/peerd-egress/background.js';
 import { costOf, hasPricing } from '/peerd-provider/background.js';
 import { createAuthorityEffectScheduler } from './authority-effect-scheduler.js';
 import { createAppDwebAuthority } from './app-dweb-authority.js';
@@ -146,6 +146,9 @@ export const createKernelDemandPlane = (deps) => {
     /** @type {RequestInit} */ init = {}) => {
     const policy = await deps.denylist.ready();
     const target = new URL(url);
+    if (target.protocol !== 'https:') {
+      throw new Error('Git network request requires https:');
+    }
     // why: repository remotes are controller-selected and may carry a bound
     // credential. The authority edge must reject LAN and metadata targets even
     // when the user confirms and the sensitive-origin denylist permits them.
@@ -156,7 +159,8 @@ export const createKernelDemandPlane = (deps) => {
       throw new Error('Git network request is blocked by the sensitive-origin policy');
     }
     const response = await globalThis.fetch(url, { ...init, redirect: 'manual' });
-    if (response.status >= 300 && response.status < 400) {
+    // why: MV3 SW redirect:'manual' turns 3xx into type:'opaqueredirect' with status 0.
+    if (isRedirect(response) || (response.status >= 300 && response.status < 400)) {
       await response.body?.cancel('Git redirects are blocked').catch(() => {});
       throw new Error('Git redirects are blocked');
     }

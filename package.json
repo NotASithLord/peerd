@@ -2,7 +2,7 @@
   "name": "peerd",
   "private": true,
   "type": "module",
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.5",
   "version": "0.10.0",
   "description": "Browser-native AI agent harness. Source runs directly with no development build step; Bun is used for tests and release tooling.",
   "license": "Apache-2.0",
@@ -87,8 +87,7 @@
     "verify:store": "bun packaging/verify-store-artifact.ts",
     "feeds": "bun packaging/gen-update-feeds.ts",
     "vendor:pako": "node scripts/vendor-pako-esm.mjs",
-    "vendor:codemirror": "bun run scripts/vendor-codemirror.ts",
-    "gtm": "bun gtm/run.ts"
+    "vendor:codemirror": "bun run scripts/vendor-codemirror.ts"
   },
   "devDependencies": {
     "@codemirror/autocomplete": "^6.20.3",
@@ -108,7 +107,7 @@
     "codemirror": "^6.0.2",
     "crx3": "2.0.0",
     "es-module-lexer": "^2.3.2",
-    "eslint": "10.9.0",
+    "eslint": "10.15.0",
     "fake-indexeddb": "^6.2.5",
     "globals": "^17.11.0",
     "puppeteer-core": "25.13.0",
@@ -120,6 +119,7 @@
     "fast-uri": "3.1.9",
     "image-size": "2.0.4",
     "js-yaml": "4.3.2",
+    "node-forge": "1.4.3",
     "shell-quote": "1.11.0"
   }
 }

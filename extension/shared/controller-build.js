@@ -1,3 +1,3 @@
 // @ts-check
 // Cold identity leaf. Protocol and structured-clone validation stay demand-owned.
-export const CONTROLLER_BUILD_DIGEST = '365a107a29a5fae5890698d361e096098c69ee1805246350df32fc8126e21cca';
+export const CONTROLLER_BUILD_DIGEST = '927ccdd52566c5decfa4309ed5d8656b512982d19deb121c4dfb8df32212d4aa';

@@ -339,7 +339,14 @@ const makePackagedFaultExtension = async () => {
 const waitFor = async (fn, budgetMs = 30_000) => {
   const deadline = Date.now() + budgetMs;
   while (Date.now() < deadline) {
-    const value = await withDeadline(Promise.resolve().then(fn), 5_000, 'lifecycle poll');
+    // why: invoke fn inside a non-tail frame rather than Promise.resolve().then(fn)
+    // so JavaScriptCore proper-tail-call elimination cannot collapse the call stack
+    // below puppeteer-core's 3-frame Error.prepareStackTrace lookup on Bun 1.4.5+.
+    const invoke = async () => {
+      const result = await fn();
+      return result;
+    };
+    const value = await withDeadline(invoke(), 5_000, 'lifecycle poll');
     if (value) return value;
     await new Promise((resolveWait) => setTimeout(resolveWait, 50));
   }

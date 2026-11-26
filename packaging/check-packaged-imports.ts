@@ -23,7 +23,7 @@ import {
   staticImportSpecifiers,
 } from './static-module-graph.ts';
 import {
-  PACKAGED_LAZY_ASSET_ENTRIES,
+  packagedLazyAssetEntries,
   packagedLazyModuleEntries,
   packagedUnavailableRuntimeModuleEdges,
 } from './lazy-entry-manifest.ts';
@@ -71,7 +71,12 @@ const unresolved = async (
 };
 
 /** Every module entry point that ships: each page's <script src> + the SW. */
-const entryPoints = (root: string, dweb: boolean, contributor: boolean): string[] => {
+const entryPoints = (
+  root: string,
+  dweb: boolean,
+  contributor: boolean,
+  browser: 'chrome' | 'firefox',
+): string[] => {
   const entries = new Set<string>();
   for (const f of walk(root)) {
     if (!f.endsWith('.html')) continue;
@@ -97,14 +102,14 @@ const entryPoints = (root: string, dweb: boolean, contributor: boolean): string[
   // the cold static graph by design. Seed the reviewed inventory explicitly;
   // unlike the old actor-worker special case, missing entries must fail instead
   // of being silently skipped.
-  for (const lazyEntry of packagedLazyModuleEntries(dweb, contributor)) {
+  for (const lazyEntry of packagedLazyModuleEntries(dweb, contributor, browser)) {
     entries.add(join(root, lazyEntry));
   }
   return [...entries];
 };
 
-const missingLazyAssets = (root: string): string[] =>
-  PACKAGED_LAZY_ASSET_ENTRIES.filter((entry) => !existsSync(join(root, entry)));
+const missingLazyAssets = (root: string, browser: 'chrome' | 'firefox'): string[] =>
+  packagedLazyAssetEntries(browser).filter((entry) => !existsSync(join(root, entry)));
 
 /**
  * Manifest-declared asset paths that must ship in the pruned tree: icons,
@@ -165,8 +170,8 @@ for (const channel of ['preview', 'store'] as const) {
     const root = join(REPO_ROOT, 'artifacts', 'staging', `${channel}-${browser}`);
     const dweb = dwebEnabledForTarget(channel, browser);
     const contributor = channel === 'preview';
-    const runtimeEntries = packagedLazyModuleEntries(dweb, contributor);
-    const entries = entryPoints(root, dweb, contributor);
+    const runtimeEntries = packagedLazyModuleEntries(dweb, contributor, browser);
+    const entries = entryPoints(root, dweb, contributor, browser);
     let chMiss = 0;
     for (const entry of entries) {
       const miss = await unresolved(entry, root);
@@ -178,7 +183,7 @@ for (const channel of ['preview', 'store'] as const) {
     }
     const assetMiss = missingManifestAssets(root);
     for (const a of assetMiss) { failed = true; console.error(`✗ [${channel}/${browser}] manifest asset missing — ${a}`); }
-    const lazyAssetMiss = missingLazyAssets(root);
+    const lazyAssetMiss = missingLazyAssets(root, browser);
     for (const a of lazyAssetMiss) { failed = true; console.error(`✗ [${channel}/${browser}] lazy asset missing: ${a}`); }
     const runtimeMiss = await uninventoriedRuntimeModuleEdges(
       root, runtimeEntries, packagedUnavailableRuntimeModuleEdges(channel, browser),

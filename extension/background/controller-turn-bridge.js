@@ -2040,8 +2040,8 @@ export const makeControllerTurnBridge = ({
             run, entry, operation, () =>
               ctx.podClient.resolveId({ sessionId: ctx.session?.sessionId, podId: value.podId }),
           ));
-          if (result?.ok === true && typeof result.value === 'string') {
-            entry.domainState.podId = result.value;
+          if (result?.ok === true && typeof result.value?.authorityValue === 'string') {
+            entry.domainState.podId = result.value.authorityValue;
             if (typeof value.command === 'string') entry.domainState.command = value.command;
           }
           return result;
@@ -2059,7 +2059,7 @@ export const makeControllerTurnBridge = ({
             run, entry, operation, () => typeof readRemote === 'function'
               ? readRemote({ kind: 'pod', id: value.podId }) : null,
           ));
-          if (result?.ok === true) entry.domainState.remote = result.value;
+          if (result?.ok === true) entry.domainState.remote = result.value?.authorityValue;
           return result;
         }
         case 'turn.pod.confirm-git': {
@@ -2088,7 +2088,7 @@ export const makeControllerTurnBridge = ({
           ));
           if (result?.ok === true
               && runIsLive(run)
-              && [true, 'yes_once', 'yes_session'].includes(result.value)) {
+              && [true, 'yes_once', 'yes_session'].includes(result.value?.authorityValue)) {
             entry.domainState.remoteGitGrant = { op: intent.op, url: target };
           }
           return result;
