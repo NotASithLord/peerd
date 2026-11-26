@@ -238,6 +238,10 @@ describe('fixed runtime module roots', () => {
         from: 'offscreen/offscreen.js', kind: 'dynamic-import',
         target: 'offscreen/dweb-base.js', targetCell: 'store/chrome',
       },
+      {
+        from: 'peerd-engine/single-module-linker.js', kind: 'dynamic-import',
+        target: 'vendor/rollup/rollup.browser.js', targetCell: 'store/chrome',
+      },
     ]);
   });
 

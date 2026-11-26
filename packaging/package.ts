@@ -64,6 +64,23 @@ import {
 // when absent — so store's home still mounts.
 const PRUNE_ALWAYS = [
   'tests', 'manifest.json', 'shared/channel-config.js', 'shared/build-config.js',
+  'vendor/pako/pako.min.js', 'vendor/vendor.lock.json',
+];
+// Browser-specific runtime prunes:
+//   firefox: lacks COOP/COEP SharedArrayBuffer isolation, so CheerpX WebVM and
+//            Wasmer pods cannot run (~10.3 MiB saved per XPI).
+//   chrome:  uses native blob-graph notebook loading (Rollup is Firefox-only,
+//            ~0.95 MiB) and supports Wasm tail calls since Chrome 112
+//            (cxcore-no-return-call is obsolete, ~1.94 MiB).
+const PRUNE_FIREFOX = [
+  'vendor/cheerpx', 'vendor/wasmer',
+  'engine-tabs/pod-tab/wasmer-worker.js',
+  'engine-tabs/pod-tab/wasmer-thread-worker.js',
+];
+const PRUNE_CHROME = [
+  'vendor/rollup',
+  'vendor/cheerpx/cxcore-no-return-call.js',
+  'vendor/cheerpx/cxcore-no-return-call.wasm',
 ];
 // The home Lab is a preview-only dev tool. Dweb source and prompt text are
 // separately pruned from every artifact without a working mesh host.
@@ -224,12 +241,19 @@ const shouldCopy = (
   const rel = relative(extensionDir, src);
   if (rel === '') return true;
   if (basename(src) === '.DS_Store') return false;
-  // why: .d.ts sidecars (e.g. vendor/browser-polyfill.d.ts) are dev-only
-  // type tooling — tsc reads them at check time; the browser loads the .js
-  // and ignores them. They must never ship in either artifact.
-  if (src.endsWith('.d.ts')) return false;
+  // why: .d.ts sidecars and .map source maps (e.g. vendor/wasmer/dist/*.map)
+  // are dev-only tooling — never ship them in release artifacts.
+  if (src.endsWith('.d.ts') || src.endsWith('.map')) return false;
+  // Vendor audit metadata lives in source for check:vendor, not in runtime zips.
+  if (rel.startsWith('vendor/') && (
+    basename(src) === 'SOURCE.txt'
+    || basename(src) === 'SHA256SUMS'
+    || basename(src) === 'VERSION'
+    || src.endsWith('.SHA256')
+  )) return false;
   const pruned = [
     ...PRUNE_ALWAYS,
+    ...(browser === 'firefox' ? PRUNE_FIREFOX : PRUNE_CHROME),
     ...(channel === 'store' ? PRUNE_STORE : []),
     ...(!dwebEnabledForTarget(channel, browser) ? PRUNE_DWEB : []),
     ...(channel === 'preview' && browser === 'chrome' ? [] : PRUNE_PREVIEW_CHROME),

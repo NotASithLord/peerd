@@ -1,4 +1,5 @@
 // @ts-check
+import { createEarlyAbortBuffer } from './early-aborts.js';
 // offscreen/job-runner.js — runs a HEADLESS JS job in a sealed Worker.
 //
 // The headless sibling of the Notebook tab's runEval (DECISIONS #25, "runJob"):
@@ -111,44 +112,9 @@ const liveJobs = new Map();
 // buildWorkerSource awaits resolver IO before liveJobs.set) would otherwise be
 // lost and the worker would run to its full wall-clock. Tombstone the runId;
 // registration checks it and kills immediately.
-/** @type {Map<string, { owner?: string, expiresAt: number }>} */
-const abortedEarly = new Map();
-// why bounded + expiring: abort IDs can arrive after a job already settled (or
-// from a stale SW). They are useful only for the short startup race; retaining
-// arbitrary IDs for the offscreen document's whole life is an unbounded leak.
-const EARLY_ABORT_MAX = 64;
-const EARLY_ABORT_TTL_MS = 60_000;
-
-const pruneEarlyAborts = (now = Date.now()) => {
-  for (const [id, entry] of abortedEarly) {
-    if (entry.expiresAt > now) break;   // insertion order is expiry order
-    abortedEarly.delete(id);
-  }
-  while (abortedEarly.size > EARLY_ABORT_MAX) {
-    const oldest = abortedEarly.keys().next().value;
-    if (typeof oldest !== 'string') break;
-    abortedEarly.delete(oldest);
-  }
-};
-
-/** @param {string} runId @param {string} [owner] */
-const rememberEarlyAbort = (runId, owner) => {
-  const now = Date.now();
-  pruneEarlyAborts(now);
-  // Refresh a duplicate at the back of the FIFO so its expiry stays ordered.
-  abortedEarly.delete(runId);
-  abortedEarly.set(runId, { ...(owner ? { owner } : {}), expiresAt: now + EARLY_ABORT_TTL_MS });
-  pruneEarlyAborts(now);
-};
-
-/** @param {string} runId @param {string} [owner] */
-const consumeEarlyAbort = (runId, owner) => {
-  pruneEarlyAborts();
-  const entry = abortedEarly.get(runId);
-  if (!entry || (entry.owner && entry.owner !== owner)) return false;
-  abortedEarly.delete(runId);
-  return true;
-};
+const abortedEarly = createEarlyAbortBuffer();
+const rememberEarlyAbort = abortedEarly.remember;
+const consumeEarlyAbort = abortedEarly.consume;
 
 /**
  * Terminate a live job by runId (Stop plumbing). Owner-bound when the caller

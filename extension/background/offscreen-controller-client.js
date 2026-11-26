@@ -1067,242 +1067,197 @@ export const makeSemanticControllerClient = ({
     });
   };
 
-  const callTurnUnleased = async (
-    /** @type {unknown} */ payload,
-    /** @type {unknown} */ lease,
-    /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {},
-  ) => {
-    if (!hasTurnAuthority) {
+  // why one shared leased-dispatch helper: callTurn, callSemantic, callRuntime,
+  // and callFeatureCapability all share the same lease, connect-failure,
+  // transport-failure, generation-retirement, and replay-safe startup-retry
+  // contract; centralizing it keeps error classification uniform.
+  /**
+   * @param {{
+   *   enabled: boolean,
+   *   unavailableCode: string,
+   *   startupCode: string,
+   *   transportCode: string,
+   *   lifetimeCode: string,
+   *   lifetimeFallbackCode: string,
+   *   capability: string,
+   *   payload: unknown,
+   *   options?: { signal?: AbortSignal, timeoutMs?: number },
+   *   replayable?: boolean,
+   *   retryStartup?: boolean,
+   *   mapDirectLoadTimeout?: boolean,
+   *   useTurnConnect?: boolean,
+   *   includeStartupError?: boolean,
+   *   includeLifetimeError?: boolean,
+   *   includeTransportError?: boolean,
+   *   includePhase?: boolean,
+   *   includeRetryableOnLifetime?: boolean,
+   *   lossGraceMs?: number | undefined,
+   *   unwrap?: (value: any) => any,
+   * }} spec
+   */
+  const invokeLeasedDispatch = async ({
+    enabled, unavailableCode, startupCode, transportCode, lifetimeCode,
+    lifetimeFallbackCode, capability, payload, options = {},
+    replayable = false, retryStartup = false, mapDirectLoadTimeout = false,
+    useTurnConnect = false, includeStartupError = false,
+    includeLifetimeError = false, includeTransportError = true,
+    includePhase = true, includeRetryableOnLifetime = false,
+    lossGraceMs = undefined, unwrap = (value) => value,
+  }) => {
+    if (!enabled) {
       return {
-        ok: false, code: 'controller-turn-authority-unavailable',
-        outcomeKnown: true, phase: 'startup',
+        ok: false, code: unavailableCode, outcomeKnown: true,
+        ...(includePhase ? { phase: 'startup' } : {}),
       };
     }
-    let client;
-    try { client = await getClientForTurn(lease, options.signal); }
-    catch (cause) {
-      return {
-        ok: false,
-        code: /** @type {{code?:string}} */ (cause)?.code === 'controller-direct-load-timeout'
-          ? 'controller-direct-load-timeout' : 'controller-turn-startup-failed',
-        error: STARTUP_UNAVAILABLE_USER_FAILURE,
-        outcomeKnown: true,
-        phase: 'startup',
-        retryable: true,
-      };
-    }
-    if (!client) return stopped('controller-call-aborted', true);
-    let result;
+    const runAttempt = async (/** @type {unknown} */ lease) => {
+      let client;
+      try {
+        client = useTurnConnect
+          ? await getClientForTurn(lease, options.signal)
+          : await getClient(lease);
+      } catch (cause) {
+        const code = mapDirectLoadTimeout
+          && /** @type {{code?:string}} */ (cause)?.code === 'controller-direct-load-timeout'
+          ? 'controller-direct-load-timeout' : startupCode;
+        return includeStartupError
+          ? {
+            ok: false, code, error: STARTUP_UNAVAILABLE_USER_FAILURE,
+            outcomeKnown: true, phase: 'startup', retryable: true,
+          }
+          : startupResult(code);
+      }
+      if (!client) return stopped('controller-call-aborted', true);
+      try {
+        const reply = await client.call(capability, payload, options);
+        if (reply?.outcomeKnown === false || controllerGenerationMustRetire(reply)) retire(client);
+        return unwrap(reply);
+      } catch (cause) {
+        retire(client);
+        return {
+          ok: false, code: transportCode,
+          ...(includeTransportError ? {
+            error: cause instanceof Error ? cause.message : String(cause),
+          } : {}),
+          outcomeKnown: false,
+          ...(includePhase ? { phase: 'run' } : {}),
+        };
+      }
+    };
     try {
-      result = await client.call('turn.run', payload, options);
-    } catch (cause) {
-      retire(client);
-      return {
-        ok: false,
-        code: 'controller-turn-transport-failed',
-        error: cause instanceof Error ? cause.message : String(cause),
-        outcomeKnown: false,
-        phase: 'run',
-      };
-    }
-    if (result?.outcomeKnown === false || controllerGenerationMustRetire(result)) retire(client);
-    return result;
-  };
-  const callTurn = async (
-    /** @type {unknown} */ payload,
-    /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {},
-  ) => {
-    try {
-      // why one startup retry: a bounded lease elsewhere can retire and
-      // replace the shared offscreen host between this lease's claim and the
-      // channel handshake, stranding the offer on the dying document. A
-      // startup-phase failure proves nothing was dispatched (Class A), so one
-      // fresh lease + connect against the successor host is replay-safe.
-      let attempts = 0;
-      for (;;) {
-        const result = await withControllerLease(
-          (/** @type {unknown} */ lease) => callTurnUnleased(payload, lease, options), {
-            outcomeKnownOnLoss: false,
-            code: 'controller-firefox-turn-lifetime-lost',
-            onLost: retireActiveOnLifetimeLoss,
-            lossGraceMs: 2_000,
-          },
-        );
-        attempts += 1;
-        if (result?.code !== 'controller-turn-startup-failed' || attempts > 1
+      for (let attempts = 0; ; attempts += 1) {
+        const result = await withControllerLease(runAttempt, {
+          outcomeKnownOnLoss: replayable,
+          code: lifetimeCode,
+          onLost: retireActiveOnLifetimeLoss,
+          ...(lossGraceMs !== undefined ? { lossGraceMs } : {}),
+        });
+        if (!retryStartup || result?.code !== startupCode || attempts >= 1
             || options.signal?.aborted) return result;
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
     } catch (cause) {
+      const known = /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== false;
       return {
         ok: false,
-        code: /** @type {{code?:string}} */ (cause)?.code
-          ?? 'controller-turn-lifetime-failed',
-        error: cause instanceof Error ? cause.message : String(cause),
-        outcomeKnown: /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== false,
-        phase: /** @type {{phase?:string}} */ (cause)?.phase ?? 'startup',
+        code: /** @type {{code?:string}} */ (cause)?.code ?? lifetimeFallbackCode,
+        ...(includeLifetimeError ? {
+          error: includeRetryableOnLifetime
+            ? (known ? STARTUP_UNAVAILABLE_USER_FAILURE : OUTCOME_UNKNOWN_USER_FAILURE)
+            : (cause instanceof Error ? cause.message : String(cause)),
+        } : {}),
+        outcomeKnown: known,
+        ...(includePhase ? {
+          phase: /** @type {{phase?:string}} */ (cause)?.phase ?? 'startup',
+        } : {}),
+        ...(includeRetryableOnLifetime ? { retryable: known } : {}),
       };
     }
   };
 
-  const callSemanticUnleased = async (/** @type {unknown} */ payload,
-    /** @type {unknown} */ lease) => {
-    if (!hasSemanticAuthority) {
-      return { ok: false, code: 'semantic-dispatch-authority-unavailable', outcomeKnown: true };
-    }
-    let client;
-    try { client = await getClient(lease); }
-    catch (cause) {
-      return startupResult(
-        /** @type {{code?:string}} */ (cause)?.code === 'controller-direct-load-timeout'
-          ? 'controller-direct-load-timeout' : 'semantic-dispatch-startup-failed',
-      );
-    }
-    try {
-      const result = await client.call('semantic.dispatch', payload, { timeoutMs: 30_000 });
-      if (result?.outcomeKnown === false || controllerGenerationMustRetire(result)) retire(client);
-      return result?.ok === true && Object.hasOwn(result, 'semanticResult')
-        ? result.semanticResult : result;
-    } catch {
-      retire(client);
-      return { ok: false, code: 'semantic-dispatch-transport-failed', outcomeKnown: false };
-    }
-  };
-  const callSemantic = async (/** @type {unknown} */ payload) => {
-    try {
-      // Same replay-safe startup retry as callTurn: a startup failure proves
-      // the semantic dispatch never left the kernel.
-      let attempts = 0;
-      for (;;) {
-        const result = await withControllerLease(
-          (/** @type {unknown} */ lease) => callSemanticUnleased(payload, lease), {
-            outcomeKnownOnLoss: false,
-            code: 'controller-firefox-semantic-lifetime-lost',
-            onLost: retireActiveOnLifetimeLoss,
-          },
-        );
-        attempts += 1;
-        if (result?.code !== 'semantic-dispatch-startup-failed' || attempts > 1) return result;
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-    } catch (cause) {
-      return {
-        ok: false,
-        code: /** @type {{code?:string}} */ (cause)?.code
-          ?? 'semantic-dispatch-lifetime-failed',
-        outcomeKnown: /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== false,
-      };
-    }
-  };
-  const callRuntime = async (
+  const callTurn = (
+    /** @type {unknown} */ payload,
+    /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {},
+  ) => invokeLeasedDispatch({
+    enabled: hasTurnAuthority,
+    unavailableCode: 'controller-turn-authority-unavailable',
+    startupCode: 'controller-turn-startup-failed',
+    transportCode: 'controller-turn-transport-failed',
+    lifetimeCode: 'controller-firefox-turn-lifetime-lost',
+    lifetimeFallbackCode: 'controller-turn-lifetime-failed',
+    capability: 'turn.run',
+    payload,
+    options,
+    retryStartup: true,
+    mapDirectLoadTimeout: true,
+    useTurnConnect: true,
+    includeStartupError: true,
+    includeLifetimeError: true,
+    lossGraceMs: 2_000,
+  });
+
+  const callSemantic = (/** @type {unknown} */ payload) => invokeLeasedDispatch({
+    enabled: hasSemanticAuthority,
+    unavailableCode: 'semantic-dispatch-authority-unavailable',
+    startupCode: 'semantic-dispatch-startup-failed',
+    transportCode: 'semantic-dispatch-transport-failed',
+    lifetimeCode: 'controller-firefox-semantic-lifetime-lost',
+    lifetimeFallbackCode: 'semantic-dispatch-lifetime-failed',
+    capability: 'semantic.dispatch',
+    payload,
+    options: { timeoutMs: 30_000 },
+    retryStartup: true,
+    mapDirectLoadTimeout: true,
+    includeTransportError: false,
+    includePhase: false,
+    unwrap: (result) => (result?.ok === true && Object.hasOwn(result, 'semanticResult')
+      ? result.semanticResult : result),
+  });
+
+  const callRuntime = (
     /** @type {unknown} */ payload,
     /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {},
   ) => {
-    if (!hasRuntimeAuthority) {
-      return {
-        ok: false, code: 'runtime-dispatch-authority-unavailable',
-        outcomeKnown: true, phase: 'startup',
-      };
-    }
     const replayable = parseRuntimeDispatch(payload)?.policy.authority.replayClass === 'A';
-    try {
-      return await withControllerLease(async (/** @type {unknown} */ lease) => {
-        let client;
-        try { client = await getClient(lease); }
-        catch {
-          return startupResult('runtime-dispatch-startup-failed');
-        }
-        try {
-          const result = await client.call(RUNTIME_DISPATCH_CAPABILITY, payload, options);
-          if (result?.outcomeKnown === false || controllerGenerationMustRetire(result)) {
-            retire(client);
-          }
-          return result;
-        } catch (cause) {
-          retire(client);
-          return {
-            ok: false, code: 'runtime-dispatch-transport-failed',
-            error: cause instanceof Error ? cause.message : String(cause),
-            outcomeKnown: false, phase: 'run',
-          };
-        }
-      }, {
-        outcomeKnownOnLoss: replayable,
-        code: 'controller-firefox-runtime-lifetime-lost',
-        onLost: retireActiveOnLifetimeLoss,
-        ...(!replayable ? { lossGraceMs: 2_000 } : {}),
-      });
-    } catch (cause) {
-      const known = /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== false;
-      return {
-        ok: false,
-        code: /** @type {{code?:string}} */ (cause)?.code
-          ?? 'runtime-dispatch-lifetime-failed',
-        error: known ? STARTUP_UNAVAILABLE_USER_FAILURE : OUTCOME_UNKNOWN_USER_FAILURE,
-        outcomeKnown: known,
-        phase: /** @type {{phase?:string}} */ (cause)?.phase ?? 'startup',
-        retryable: known,
-      };
-    }
+    return invokeLeasedDispatch({
+      enabled: hasRuntimeAuthority,
+      unavailableCode: 'runtime-dispatch-authority-unavailable',
+      startupCode: 'runtime-dispatch-startup-failed',
+      transportCode: 'runtime-dispatch-transport-failed',
+      lifetimeCode: 'controller-firefox-runtime-lifetime-lost',
+      lifetimeFallbackCode: 'runtime-dispatch-lifetime-failed',
+      capability: RUNTIME_DISPATCH_CAPABILITY,
+      payload,
+      options,
+      replayable,
+      includeLifetimeError: true,
+      includeRetryableOnLifetime: true,
+      lossGraceMs: replayable ? undefined : 2_000,
+    });
   };
-  const callFeatureCapability = async (
+
+  const callFeatureCapability = (
     /** @type {string} */ capability,
     /** @type {unknown} */ payload,
     /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {},
   ) => {
-    if (!hasFeatureAuthority) {
-      return {
-        ok: false, code: 'feature-dispatch-authority-unavailable',
-        outcomeKnown: true, phase: 'startup',
-      };
-    }
     const replayable = parseKernelFeatureCall(capability, payload)?.policy.replayClass === 'A';
-    try {
-      let attempts = 0;
-      for (;;) {
-        const result = await withControllerLease(async (/** @type {unknown} */ lease) => {
-          let client;
-          try { client = await getClient(lease); }
-          catch {
-            return startupResult('feature-dispatch-startup-failed');
-          }
-          try {
-            const reply = await client.call(capability, payload, options);
-            if (reply?.outcomeKnown === false || controllerGenerationMustRetire(reply)) {
-              retire(client);
-            }
-            return reply;
-          } catch (cause) {
-            retire(client);
-            return {
-              ok: false, code: 'feature-dispatch-transport-failed',
-              error: cause instanceof Error ? cause.message : String(cause),
-              outcomeKnown: false, phase: 'run',
-            };
-          }
-        }, {
-          outcomeKnownOnLoss: replayable,
-          code: 'controller-firefox-feature-lifetime-lost',
-          onLost: retireActiveOnLifetimeLoss,
-          ...(!replayable ? { lossGraceMs: 2_000 } : {}),
-        });
-        attempts += 1;
-        if (!replayable || result?.code !== 'feature-dispatch-startup-failed'
-            || attempts > 1) return result;
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-    } catch (cause) {
-      const known = /** @type {{outcomeKnown?:boolean}} */ (cause)?.outcomeKnown !== false;
-      return {
-        ok: false,
-        code: /** @type {{code?:string}} */ (cause)?.code
-          ?? 'feature-dispatch-lifetime-failed',
-        error: known ? STARTUP_UNAVAILABLE_USER_FAILURE : OUTCOME_UNKNOWN_USER_FAILURE,
-        outcomeKnown: known,
-        phase: /** @type {{phase?:string}} */ (cause)?.phase ?? 'startup',
-        retryable: known,
-      };
-    }
+    return invokeLeasedDispatch({
+      enabled: hasFeatureAuthority,
+      unavailableCode: 'feature-dispatch-authority-unavailable',
+      startupCode: 'feature-dispatch-startup-failed',
+      transportCode: 'feature-dispatch-transport-failed',
+      lifetimeCode: 'controller-firefox-feature-lifetime-lost',
+      lifetimeFallbackCode: 'feature-dispatch-lifetime-failed',
+      capability,
+      payload,
+      options,
+      replayable,
+      retryStartup: replayable,
+      includeLifetimeError: true,
+      includeRetryableOnLifetime: true,
+      lossGraceMs: replayable ? undefined : 2_000,
+    });
   };
   const callFeature = (/** @type {unknown} */ payload,
     /** @type {{signal?:AbortSignal,timeoutMs?:number}} */ options = {}) =>

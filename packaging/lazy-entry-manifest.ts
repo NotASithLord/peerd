@@ -136,6 +136,28 @@ export const PACKAGED_UNAVAILABLE_RUNTIME_MODULE_EDGES = Object.freeze([
       from: 'offscreen/offscreen.js', kind: 'dynamic-import' as const,
       target: 'offscreen/dweb-base.js', targetCell,
     })),
+  // Chrome uses native blob-graph notebook loading; Rollup is Firefox-only.
+  ...(['store/chrome', 'preview/chrome'] as const)
+    .map((targetCell) => Object.freeze({
+      from: 'peerd-engine/single-module-linker.js', kind: 'dynamic-import' as const,
+      target: 'vendor/rollup/rollup.browser.js', targetCell,
+    })),
+  // Firefox lacks COOP/COEP SharedArrayBuffer isolation; CheerpX & Wasmer are pruned.
+  ...(['store/firefox', 'preview/firefox'] as const)
+    .flatMap((targetCell) => [
+      Object.freeze({
+        from: 'engine-tabs/vm-tab/vm-tab.js', kind: 'dynamic-import' as const,
+        target: 'vendor/cheerpx/cx.esm.js', targetCell,
+      }),
+      Object.freeze({
+        from: 'engine-tabs/pod-tab/wasmer-host.js', kind: 'module-worker' as const,
+        target: 'engine-tabs/pod-tab/wasmer-worker.js', targetCell,
+      }),
+      Object.freeze({
+        from: 'engine-tabs/pod-tab/wasmer-host.js', kind: 'module-worker' as const,
+        target: 'engine-tabs/pod-tab/wasmer-thread-worker.js', targetCell,
+      }),
+    ]),
 ] as const);
 
 export const PACKAGED_LAZY_MODULE_ENTRIES = Object.freeze([
@@ -181,14 +203,61 @@ export const PACKAGED_LAZY_ASSET_ENTRIES = Object.freeze([
   'vendor/tesseract/worker.min.js',
 ] as const);
 
+const FIREFOX_EXCLUDED_MODULE_PREFIXES = [
+  'vendor/cheerpx/',
+  'vendor/wasmer/',
+  'engine-tabs/pod-tab/wasmer-worker.js',
+  'engine-tabs/pod-tab/wasmer-thread-worker.js',
+] as const;
+
+const CHROME_EXCLUDED_MODULE_PREFIXES = [
+  'vendor/rollup/',
+] as const;
+
+const FIREFOX_EXCLUDED_ASSET_PREFIXES = [
+  'vendor/cheerpx/',
+  'vendor/wasmer/',
+] as const;
+
+const CHROME_EXCLUDED_ASSET_PREFIXES = [
+  'vendor/rollup/',
+  'vendor/cheerpx/cxcore-no-return-call.',
+] as const;
+
 export const packagedLazyModuleEntries = (
   dweb: boolean,
   contributor = true,
-): readonly string[] => Object.freeze([
-  ...PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES,
-  ...(contributor ? PACKAGED_PREVIEW_LAZY_MODULE_ENTRIES : []),
-  ...(dweb ? PACKAGED_PREVIEW_CHROME_LAZY_MODULE_ENTRIES : []),
-]);
+  browser?: 'chrome' | 'firefox',
+): readonly string[] => {
+  const excluded = browser === 'firefox'
+    ? FIREFOX_EXCLUDED_MODULE_PREFIXES
+    : browser === 'chrome'
+      ? CHROME_EXCLUDED_MODULE_PREFIXES
+      : [];
+  const entries = [
+    ...PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES,
+    ...(contributor ? PACKAGED_PREVIEW_LAZY_MODULE_ENTRIES : []),
+    ...(dweb ? PACKAGED_PREVIEW_CHROME_LAZY_MODULE_ENTRIES : []),
+  ];
+  return Object.freeze(excluded.length
+    ? entries.filter((entry) => !excluded.some((prefix) => entry === prefix || entry.startsWith(prefix)))
+    : entries);
+};
+
+export const packagedLazyAssetEntries = (
+  browser?: 'chrome' | 'firefox',
+): readonly string[] => {
+  const excluded = browser === 'firefox'
+    ? FIREFOX_EXCLUDED_ASSET_PREFIXES
+    : browser === 'chrome'
+      ? CHROME_EXCLUDED_ASSET_PREFIXES
+      : [];
+  return Object.freeze(excluded.length
+    ? PACKAGED_LAZY_ASSET_ENTRIES.filter(
+      (entry) => !excluded.some((prefix) => entry.startsWith(prefix)),
+    )
+    : [...PACKAGED_LAZY_ASSET_ENTRIES]);
+};
 
 export const packagedUnavailableRuntimeModuleEdges = (
   channel: 'preview' | 'store',

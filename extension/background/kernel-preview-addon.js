@@ -1,5 +1,6 @@
 // @ts-check
 
+import { encodeDidKey } from '../shared/address/did.js';
 import { withDeadline } from '../shared/cold-util.js';
 import { sameDocumentUrlIgnoringHash } from '../shared/sender-trust.js';
 import { structuredClonePayloadFits } from '../shared/structured-clone-size.js';
@@ -170,7 +171,6 @@ const DWEB_SELF_SECRETS = Object.freeze([
 const MAX_DWEB_IDENTITY_BYTES = 64 * 1024;
 const MAX_DWEB_SELF_SECRET_BYTES = 256 * 1024;
 const MAX_DWEB_EFFECT_ARGUMENT_BYTES = MAX_DWEB_SELF_SECRET_BYTES + 512;
-const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const DWEB_EFFECT_OPERATIONS = new Set([
   'identity/read', 'identity/create', 'identity/policy', 'identity/commit',
   'self/read', 'self/write',
@@ -201,23 +201,7 @@ const dwebPersonDid = (stored) => {
   const material = JSON.parse(stored);
   const binary = atob(material.pub);
   if (binary.length !== 32) throw new Error('identity-material-malformed');
-  const bytes = Uint8Array.from([0xed, 0x01, ...Array.from(
-    binary, (character) => character.charCodeAt(0),
-  )]);
-  let zeros = 0;
-  while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
-  /** @type {number[]} */ const digits = [];
-  for (let index = zeros; index < bytes.length; index++) {
-    let carry = bytes[index];
-    for (let digit = 0; digit < digits.length; digit++) {
-      carry += digits[digit] << 8;
-      digits[digit] = carry % 58;
-      carry = Math.floor(carry / 58);
-    }
-    while (carry > 0) { digits.push(carry % 58); carry = Math.floor(carry / 58); }
-  }
-  return `did:key:z${'1'.repeat(zeros)}${digits.reverse()
-    .map((digit) => BASE58_ALPHABET[digit]).join('')}`;
+  return encodeDidKey(Uint8Array.from(binary, (character) => character.charCodeAt(0)));
 };
 
 /** @param {any[]} apps */

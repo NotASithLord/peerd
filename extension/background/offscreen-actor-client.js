@@ -1598,6 +1598,72 @@ export const makeOffscreenActorClient = ({
       if (callDispatches.size === 0) entry.grant.dispatchesByCall.delete(entry.effect.callId);
     }
   };
+  const handleActorSpawn = async (
+    /** @type {'sync'|'async'} */ mode,
+    /** @type {any} */ msg = {},
+    /** @type {unknown} */ sender = undefined,
+    /** @type {any} */ boundGrant = null,
+  ) => {
+    const operation = mode === 'sync' ? 'turn.actor.spawn-sync' : 'turn.actor.spawn-async';
+    const routeName = mode === 'sync' ? 'actor/spawn-sync' : 'actor/spawn-async';
+    const grant = grantFor(msg, sender, boundGrant);
+    const fields = ['task', 'allowRecursion',
+      'grantedToolNames', 'grantedOperations',
+      ...['tools', 'maxSteps', 'maxDepth'].filter((key) => Object.hasOwn(msg, key))];
+    const entry = await domainEntry(grant, msg, 'actor', fields);
+    if (!entry || entry.operation !== operation
+        || typeof msg.task !== 'string' || !msg.task || msg.task.length > 65_536
+        || typeof msg.allowRecursion !== 'boolean'
+        || msg.tools !== undefined && (!Array.isArray(msg.tools)
+          || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string'
+            || name.length === 0 || name.length > 128))
+        || !Array.isArray(msg.grantedToolNames)
+        || msg.grantedToolNames.length > 256
+        || msg.grantedToolNames.some((/** @type {unknown} */ name) => typeof name !== 'string'
+          || name.length > 128 || !grant.allowedToolNames.has(name))
+        || !Array.isArray(msg.grantedOperations)
+        || msg.grantedOperations.length > 256
+        || msg.grantedOperations.some((/** @type {unknown} */ op) => typeof op !== 'string'
+          || op.length > 128 || !grant.allowedOperations.has(op))
+        || msg.maxSteps !== undefined && !Number.isFinite(msg.maxSteps)
+        || msg.maxDepth !== undefined && !Number.isFinite(msg.maxDepth)) {
+      return refuseClaimedEntry(entry, {
+        ok: false, error: `${routeName}: authority mismatch`, outcomeKnown: true,
+      });
+    }
+    const spawn = mode === 'sync'
+      ? entry.ctx?.actorAuthority?.spawnSync
+      : entry.ctx?.actorAuthority?.spawnAsync;
+    const unavailable = mode === 'sync'
+      ? { refused: true, result: 'actor_orchestrator_unavailable' }
+      : { ok: false, error: 'async_actor_unavailable' };
+    return runDomainEffect(entry, operation, () =>
+      typeof spawn === 'function' ? spawn({
+        task: msg.task,
+        ...(msg.tools === undefined ? {} : { tools: msg.tools }),
+        ...(msg.maxSteps === undefined ? {} : { maxSteps: msg.maxSteps }),
+        ...(msg.maxDepth === undefined ? {} : { maxDepth: msg.maxDepth }),
+        allowRecursion: msg.allowRecursion,
+        grantedToolNames: [...new Set(msg.grantedToolNames)],
+        grantedOperations: [...new Set(msg.grantedOperations)],
+        parentSessionId: entry.ctx.session?.sessionId,
+        parentDepth: entry.ctx.session?.depth ?? 0,
+        parentInbound: entry.ctx.inbound === false ? false : true,
+        parentToolUseId: entry.effect.callId,
+      }) : unavailable,
+    HOST_EFFECT_OUTCOME.actorSpawn);
+  };
+
+  /** @param {string} routeName @param {string} method @param {any} [outcome] */
+  const pageRoute = (routeName, method, outcome = undefined) => async (
+    /** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined,
+    /** @type {any} */ boundGrant = null,
+  ) => {
+    const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
+    if (!entry) return { ok: false, error: `${routeName}: authority mismatch`, outcomeKnown: true };
+    return runDomainEffect(entry, routeName, () => entry.authority[method](), outcome);
+  };
+
   const stampActorCallResult = (
     /** @type {any} */ grant,
     /** @type {string} */ callId,
@@ -1900,92 +1966,10 @@ export const makeOffscreenActorClient = ({
         permitsProvider: (/** @type {string} */ providerId) => providerId === grant.provider,
       });
     },
-    'actor/spawn-sync': async (msg = {}, sender = undefined, boundGrant = null) => {
-      const grant = grantFor(msg, sender, boundGrant);
-      const fields = ['task', 'allowRecursion',
-        'grantedToolNames', 'grantedOperations',
-        ...['tools', 'maxSteps', 'maxDepth'].filter((key) => Object.hasOwn(msg, key))];
-      const entry = await domainEntry(grant, msg, 'actor', fields);
-      if (!entry || entry.operation !== 'turn.actor.spawn-sync'
-          || typeof msg.task !== 'string' || !msg.task || msg.task.length > 65_536
-          || typeof msg.allowRecursion !== 'boolean'
-          || msg.tools !== undefined && (!Array.isArray(msg.tools)
-            || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string'
-              || name.length === 0 || name.length > 128))
-          || !Array.isArray(msg.grantedToolNames)
-          || msg.grantedToolNames.length > 256
-          || msg.grantedToolNames.some((/** @type {unknown} */ name) => typeof name !== 'string'
-            || name.length > 128 || !grant.allowedToolNames.has(name))
-          || !Array.isArray(msg.grantedOperations)
-          || msg.grantedOperations.length > 256
-          || msg.grantedOperations.some((/** @type {unknown} */ operation) => typeof operation !== 'string'
-            || operation.length > 128 || !grant.allowedOperations.has(operation))
-          || msg.maxSteps !== undefined && !Number.isFinite(msg.maxSteps)
-          || msg.maxDepth !== undefined && !Number.isFinite(msg.maxDepth)) {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'actor/spawn-sync: authority mismatch', outcomeKnown: true,
-        });
-      }
-      const spawn = entry.ctx?.actorAuthority?.spawnSync;
-      return runDomainEffect(entry, 'turn.actor.spawn-sync', () =>
-        typeof spawn === 'function' ? spawn({
-          task: msg.task,
-          ...(msg.tools === undefined ? {} : { tools: msg.tools }),
-          ...(msg.maxSteps === undefined ? {} : { maxSteps: msg.maxSteps }),
-          ...(msg.maxDepth === undefined ? {} : { maxDepth: msg.maxDepth }),
-          allowRecursion: msg.allowRecursion,
-          grantedToolNames: [...new Set(msg.grantedToolNames)],
-          grantedOperations: [...new Set(msg.grantedOperations)],
-          parentSessionId: entry.ctx.session?.sessionId,
-          parentDepth: entry.ctx.session?.depth ?? 0,
-          parentInbound: entry.ctx.inbound === false ? false : true,
-          parentToolUseId: entry.effect.callId,
-        }) : { refused: true, result: 'actor_orchestrator_unavailable' },
-      HOST_EFFECT_OUTCOME.actorSpawn);
-    },
-    'actor/spawn-async': async (msg = {}, sender = undefined, boundGrant = null) => {
-      const grant = grantFor(msg, sender, boundGrant);
-      const fields = ['task', 'allowRecursion',
-        'grantedToolNames', 'grantedOperations',
-        ...['tools', 'maxSteps', 'maxDepth'].filter((key) => Object.hasOwn(msg, key))];
-      const entry = await domainEntry(grant, msg, 'actor', fields);
-      if (!entry || entry.operation !== 'turn.actor.spawn-async'
-          || typeof msg.task !== 'string' || !msg.task || msg.task.length > 65_536
-          || typeof msg.allowRecursion !== 'boolean'
-          || msg.tools !== undefined && (!Array.isArray(msg.tools)
-            || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string'
-              || name.length === 0 || name.length > 128))
-          || !Array.isArray(msg.grantedToolNames)
-          || msg.grantedToolNames.length > 256
-          || msg.grantedToolNames.some((/** @type {unknown} */ name) => typeof name !== 'string'
-            || name.length > 128 || !grant.allowedToolNames.has(name))
-          || !Array.isArray(msg.grantedOperations)
-          || msg.grantedOperations.length > 256
-          || msg.grantedOperations.some((/** @type {unknown} */ operation) => typeof operation !== 'string'
-            || operation.length > 128 || !grant.allowedOperations.has(operation))
-          || msg.maxSteps !== undefined && !Number.isFinite(msg.maxSteps)
-          || msg.maxDepth !== undefined && !Number.isFinite(msg.maxDepth)) {
-        return refuseClaimedEntry(entry, {
-          ok: false, error: 'actor/spawn-async: authority mismatch', outcomeKnown: true,
-        });
-      }
-      const spawn = entry.ctx?.actorAuthority?.spawnAsync;
-      return runDomainEffect(entry, 'turn.actor.spawn-async', () =>
-        typeof spawn === 'function' ? spawn({
-          task: msg.task,
-          ...(msg.tools === undefined ? {} : { tools: msg.tools }),
-          ...(msg.maxSteps === undefined ? {} : { maxSteps: msg.maxSteps }),
-          ...(msg.maxDepth === undefined ? {} : { maxDepth: msg.maxDepth }),
-          allowRecursion: msg.allowRecursion,
-          grantedToolNames: [...new Set(msg.grantedToolNames)],
-          grantedOperations: [...new Set(msg.grantedOperations)],
-          parentSessionId: entry.ctx.session?.sessionId,
-          parentDepth: entry.ctx.session?.depth ?? 0,
-          parentInbound: entry.ctx.inbound === false ? false : true,
-          parentToolUseId: entry.effect.callId,
-        }) : { ok: false, error: 'async_actor_unavailable' },
-      HOST_EFFECT_OUTCOME.actorSpawn);
-    },
+    'actor/spawn-sync': (msg = {}, sender = undefined, boundGrant = null) =>
+      handleActorSpawn('sync', msg, sender, boundGrant),
+    'actor/spawn-async': (msg = {}, sender = undefined, boundGrant = null) =>
+      handleActorSpawn('async', msg, sender, boundGrant),
     'actor/tasks-read': async (msg = {}, sender = undefined, boundGrant = null) => {
       const entry = await domainEntry(
         grantFor(msg, sender, boundGrant), msg, 'actor', [],
@@ -2785,66 +2769,16 @@ export const makeOffscreenActorClient = ({
       return runDomainEffect(entry, 'todo/replace', () =>
         entry.authority.replaceTodos(msg.version, msg.todos), HOST_EFFECT_OUTCOME.okResult);
     },
-    'page/open-tab': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
-      if (!entry) return { ok: false, error: 'page/open-tab: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/open-tab', () =>
-        entry.authority.openProtectedBackgroundTab(), HOST_EFFECT_OUTCOME.pageMutation);
-    },
-    'page/read': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
-      if (!entry) return { ok: false, error: 'page/read: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/read', () =>
-        entry.authority.readOwnedPage());
-    },
-    'page/snapshot': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
-      if (!entry) return { ok: false, error: 'page/snapshot: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/snapshot', () =>
-        entry.authority.captureOwnedAccessibilityTree());
-    },
-    'page/read-state': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
-      if (!entry) return { ok: false, error: 'page/read-state: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/read-state', () =>
-        entry.authority.readOwnedFrameworkState());
-    },
-    'page/watch-changes': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
-      if (!entry) return { ok: false, error: 'page/watch-changes: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/watch-changes', () =>
-        entry.authority.drainOwnedDomChanges());
-    },
-    'page/query-dom': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
-      if (!entry) return { ok: false, error: 'page/query-dom: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/query-dom', () =>
-        entry.authority.queryOwnedDom());
-    },
-    'page/navigate': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
-      if (!entry) return { ok: false, error: 'page/navigate: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/navigate', () =>
-        entry.authority.navigateOwnedTab(), HOST_EFFECT_OUTCOME.pageMutation);
-    },
-    'page/fill': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
-      if (!entry) return { ok: false, error: 'page/fill: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/fill', () =>
-        entry.authority.fillOwnedTarget(), HOST_EFFECT_OUTCOME.pageMutation);
-    },
-    'page/click': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
-      if (!entry) return { ok: false, error: 'page/click: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/click', () =>
-        entry.authority.clickOwnedTarget(), HOST_EFFECT_OUTCOME.pageMutation);
-    },
-    'page/login': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
-      if (!entry) return { ok: false, error: 'page/login: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/login', () =>
-        entry.authority.performConfirmedOwnedLogin(), HOST_EFFECT_OUTCOME.pageMutation);
-    },
+    'page/open-tab': pageRoute('page/open-tab', 'openProtectedBackgroundTab', HOST_EFFECT_OUTCOME.pageMutation),
+    'page/read': pageRoute('page/read', 'readOwnedPage'),
+    'page/snapshot': pageRoute('page/snapshot', 'captureOwnedAccessibilityTree'),
+    'page/read-state': pageRoute('page/read-state', 'readOwnedFrameworkState'),
+    'page/watch-changes': pageRoute('page/watch-changes', 'drainOwnedDomChanges'),
+    'page/query-dom': pageRoute('page/query-dom', 'queryOwnedDom'),
+    'page/navigate': pageRoute('page/navigate', 'navigateOwnedTab', HOST_EFFECT_OUTCOME.pageMutation),
+    'page/fill': pageRoute('page/fill', 'fillOwnedTarget', HOST_EFFECT_OUTCOME.pageMutation),
+    'page/click': pageRoute('page/click', 'clickOwnedTarget', HOST_EFFECT_OUTCOME.pageMutation),
+    'page/login': pageRoute('page/login', 'performConfirmedOwnedLogin', HOST_EFFECT_OUTCOME.pageMutation),
     'page/run-program': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = await pageEntry(
         grantFor(msg, sender, boundGrant), msg, ['args'], [], ['pageProgramSemanticToken'],
@@ -2859,18 +2793,8 @@ export const makeOffscreenActorClient = ({
       return runDomainEffect(entry, 'page/run-program', () =>
         entry.authority.runOwnedPageProgram(), HOST_EFFECT_OUTCOME.programRun);
     },
-    'page/capture-foreground': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
-      if (!entry) return { ok: false, error: 'page/capture-foreground: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/capture-foreground', () =>
-        entry.authority.captureForegroundPixels());
-    },
-    'page/capture-owned': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
-      const entry = await pageEntry(grantFor(msg, sender, boundGrant), msg, ['args']);
-      if (!entry) return { ok: false, error: 'page/capture-owned: authority mismatch', outcomeKnown: true };
-      return runDomainEffect(entry, 'page/capture-owned', () =>
-        entry.authority.captureOwnedTabPixels());
-    },
+    'page/capture-foreground': pageRoute('page/capture-foreground', 'captureForegroundPixels'),
+    'page/capture-owned': pageRoute('page/capture-owned', 'captureOwnedTabPixels'),
     'resource/confirm-web-write': async (/** @type {any} */ msg = {}, /** @type {unknown} */ sender = undefined, /** @type {any} */ boundGrant = null) => {
       const entry = await resourceEntry(
         grantFor(msg, sender, boundGrant), msg, ['url', 'method', 'headers', 'body'],
