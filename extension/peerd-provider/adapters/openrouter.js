@@ -1,5 +1,5 @@
 // @ts-check
-// OpenRouter adapter — OpenAI-compatible gateway + live model catalog/windows.
+// OpenRouter adapter: OpenAI-compatible gateway + live model catalog/windows.
 
 import { readModelWindow } from '../model-window.js';
 import { ProviderHttpError } from '../errors.js';

@@ -1,5 +1,5 @@
 // @ts-check
-// OpenAI adapter — direct BYOK access to api.openai.com via /chat/completions.
+// OpenAI adapter: direct BYOK access to api.openai.com via /chat/completions.
 
 import { callOpenAiCompatible, computeBackoffMs } from './openai-compat.js';
 

@@ -74,8 +74,8 @@ export async function* callOpenAiCompatible(config, args) {
   const body = transformBody ? transformBody(formatted) : formatted;
 
   // why two retry layers: connection-drop retry (TypeError rejections, up to
-  // 3 total attempts) rides inside this HTTP loop — orthogonal failure modes;
-  // a network drop never produces a Response for the status logic below.
+  // 3 total attempts) rides inside this HTTP loop. These are orthogonal failure
+  // modes: a network drop never produces a Response for the status logic below.
   for (let attempt = 1; ; attempt++) {
     const res = await openInitialResponseWithRetry(
       (requestSignal) => modelEgress.openInference({
@@ -86,7 +86,7 @@ export async function* callOpenAiCompatible(config, args) {
       }), {
         stopSignal: signal,
         timeoutMs: CONNECT_TIMEOUT_MS,
-        onTimeout: (ms) => new ProviderError(providerId, `the API did not respond within ${ms / 1000}s — it may be unreachable or down. Try again.`),
+        onTimeout: (ms) => new ProviderError(providerId, `the API did not respond within ${ms / 1000}s; it may be unreachable or down. Try again.`),
         sleepFn: _sleep,
       },
     );

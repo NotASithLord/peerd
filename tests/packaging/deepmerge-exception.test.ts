@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkDeepmergeException } from '../../packaging/check-deepmerge-exception.mjs';
 const lock = readFileSync(new URL('../../bun.lock', import.meta.url), 'utf8');
-const config = '[[IgnoredVulns]]\nid = "GHSA-gcqx-w48m-w2h4"\nignoreUntil = 2026-11-11T00:00:00Z\n';
+const config = '[[IgnoredVulns]]\nid = "GHSA-gcqx-w48m-w2h4"\nignoreUntil = 2026-12-09T00:00:00Z\n';
 const now = Date.parse('2026-10-28T00:00:00Z');
 let root: string;
 const put = (name: string, text: string) => writeFileSync(join(root, name), text);
@@ -16,12 +16,12 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 test('reviewed scope expires and removal is allowed', () => {
   expect(() => checkDeepmergeException(root, now)).not.toThrow();
-  expect(() => checkDeepmergeException(root, Date.parse('2026-11-11'))).toThrow('expired');
+  expect(() => checkDeepmergeException(root, Date.parse('2026-12-09'))).toThrow('expired');
   put('osv-scanner.toml', '');
   expect(() => checkDeepmergeException(root, Date.parse('2026-11-12'))).not.toThrow();
 });
 test('expiry extension requires review', () => {
-  put('osv-scanner.toml', config.replace('2026-11-11', '2026-11-12'));
+  put('osv-scanner.toml', config.replace('2026-12-09', '2026-12-10'));
   expect(() => checkDeepmergeException(root, now)).toThrow('expiry changed');
 });
 test('version and integrity changes require review', () => {

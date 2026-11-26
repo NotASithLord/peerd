@@ -1,5 +1,5 @@
 // @ts-check
-// Z.ai GLM adapter — OpenAI-compatible /chat/completions with bare GLM model ids.
+// Z.ai GLM adapter: OpenAI-compatible /chat/completions with bare GLM model ids.
 
 import { callOpenAiCompatible, computeBackoffMs } from './openai-compat.js';
 

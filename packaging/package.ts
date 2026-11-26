@@ -242,7 +242,7 @@ const shouldCopy = (
   if (rel === '') return true;
   if (basename(src) === '.DS_Store') return false;
   // why: .d.ts sidecars and .map source maps (e.g. vendor/wasmer/dist/*.map)
-  // are dev-only tooling — never ship them in release artifacts.
+  // are dev-only tooling; never ship them in release artifacts.
   if (src.endsWith('.d.ts') || src.endsWith('.map')) return false;
   // Vendor audit metadata lives in source for check:vendor, not in runtime zips.
   if (rel.startsWith('vendor/') && (
