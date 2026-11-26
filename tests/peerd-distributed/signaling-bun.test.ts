@@ -84,9 +84,9 @@ test('Bun server negotiates sparse membership without activating it for legacy/p
       expect(frame.length).toBeLessThan(64 * 1024);
       expect(new TextEncoder().encode(frame).byteLength).toBeGreaterThan(64 * 1024);
       oversized.ws.send(frame);
-      // Bun's native maxPayloadLength rejects before the handler can send its
-      // explicit 1009 close. The client observes an abnormal native termination.
-      expect(await tooLarge.promise).toBe(1006);
+      // Bun 1.4.0 terminated with 1006 when maxPayloadLength tripped before the
+      // handler closed; Bun 1.4.5+ emits the RFC 6455 1009 (Message Too Big) code.
+      expect([1006, 1009]).toContain(await tooLarge.promise);
       const finalBarrier = Promise.withResolvers<void>();
       legacy.ws.addEventListener('message', event => { const m = JSON.parse(String(event.data)); if (m.t === 'signal' && m.payload === 'finished') finalBarrier.resolve(); });
       peers[2]!.ws.send(JSON.stringify({ t: 'signal', to: legacy.reply.self, payload: 'finished' }));

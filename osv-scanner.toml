@@ -1,29 +1,3 @@
 # OSV scans build dependencies in bun.lock; the extension does not ship them.
-# The Firefox tool web-ext requires adbkit, which requires node-forge.
-# Desktop lint, signing, and tests do not use the affected Android bridge.
-# This exception remains restricted to the exact graph enforced by the guard.
-# Other advisories still fail the scan. Remove this exception when a fix is used.
-#
-# Exception approved by the repository owner on 2026-10-06 for this exact scope.
-# Renewed by the owner on 2026-10-26 for 14 days after re-triage: no patched
-# node-forge release; web-ext 10.8.0 still depends on adbkit 3.3.9. The reviewed
-# dependency versions, hashes, desktop-only scope and guards remain unchanged.
-# Reviewed only for web-ext 10.6.0 -> adbkit 3.3.9 -> node-forge 1.4.0.
-# Desktop lint/sign/test paths do not create adbkit's TCP-USB bridge.
-# Re-triage before changing these coordinates or enabling Android/bridge use.
-# Renewed by the owner on 2026-11-25 for 14 days after re-triage: desktop-only
-# web-ext 10.6.0 / adbkit 3.3.9 / node-forge 1.4.0 scope and guards unchanged.
-[[IgnoredVulns]]
-id = "GHSA-86w9-cpqp-85rv"
-ignoreUntil = 2026-12-09T00:00:00Z
-reason = "No upstream fix. Current web-ext desktop lint/sign/test commands do not invoke adbkit TCP-USB RSA authentication; reviewed for web-ext 10.6.0 / adbkit 3.3.9 / node-forge 1.4.0. Not a general node-forge safety claim."
-
-# Owner approved 2026-10-28, renewed 2026-11-25 through 2026-12-09. Build tools only:
-# addons-linter merges bundled schemas and literal patches; lint input is not
-# a schema merge input. Custom schema injection and new consumers require review.
-# Exact coordinates/integrities and usage tripwires are enforced by
-# packaging/check-deepmerge-exception.mjs. No general deepmerge safety claim.
-[[IgnoredVulns]]
-id = "GHSA-gcqx-w48m-w2h4"
-ignoreUntil = 2026-12-09T00:00:00Z
-reason = "No upstream patch. Reviewed addons-linter 10.10.0 uses deepmerge 4.3.1 only for bundled schemas and literal schema patches in desktop web-ext tooling; not shipped runtime. Exact dependency graph and schema-only usage guarded; re-triage any scope change."
+# No active vulnerability exceptions: eslint 10.15.0 (minimatch 11.x) and the
+# node-forge 1.4.3 override resolve all previously waived advisories.
