@@ -677,6 +677,7 @@ export const runActor = async (job, {
             sendToSW('actor/spawn-sync', {
               ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.actor.spawn-sync'),
               task: m.task, allowRecursion: m.allowRecursion,
+              grantedToolNames: m.grantedToolNames,
               grantedOperations: m.grantedOperations,
               ...(m.tools === undefined ? {} : { tools: m.tools }),
               ...(m.maxSteps === undefined ? {} : { maxSteps: m.maxSteps }),
@@ -689,6 +690,7 @@ export const runActor = async (job, {
             sendToSW('actor/spawn-async', {
               ...(relayToken ? { relayToken } : {}), ...exactEffectBinding(m, 'turn.actor.spawn-async'),
               task: m.task, allowRecursion: m.allowRecursion,
+              grantedToolNames: m.grantedToolNames,
               grantedOperations: m.grantedOperations,
               ...(m.tools === undefined ? {} : { tools: m.tools }),
               ...(m.maxSteps === undefined ? {} : { maxSteps: m.maxSteps }),

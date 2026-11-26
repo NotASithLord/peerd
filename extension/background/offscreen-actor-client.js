@@ -1907,21 +1907,24 @@ export const makeOffscreenActorClient = ({
         ...['tools', 'maxSteps', 'maxDepth'].filter((key) => Object.hasOwn(msg, key))];
       const entry = await domainEntry(grant, msg, 'actor', fields);
       if (!entry || entry.operation !== 'turn.actor.spawn-sync'
-          || typeof msg.task !== 'string' || !msg.task
+          || typeof msg.task !== 'string' || !msg.task || msg.task.length > 65_536
           || typeof msg.allowRecursion !== 'boolean'
           || msg.tools !== undefined && (!Array.isArray(msg.tools)
-            || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string'))
+            || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string'
+              || name.length === 0 || name.length > 128))
           || !Array.isArray(msg.grantedToolNames)
           || msg.grantedToolNames.length > 256
           || msg.grantedToolNames.some((/** @type {unknown} */ name) => typeof name !== 'string'
-            || !grant.allowedToolNames.has(name))
+            || name.length > 128 || !grant.allowedToolNames.has(name))
           || !Array.isArray(msg.grantedOperations)
           || msg.grantedOperations.length > 256
           || msg.grantedOperations.some((/** @type {unknown} */ operation) => typeof operation !== 'string'
-            || !grant.allowedOperations.has(operation))
+            || operation.length > 128 || !grant.allowedOperations.has(operation))
           || msg.maxSteps !== undefined && !Number.isFinite(msg.maxSteps)
           || msg.maxDepth !== undefined && !Number.isFinite(msg.maxDepth)) {
-        return { ok: false, error: 'actor/spawn-sync: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'actor/spawn-sync: authority mismatch', outcomeKnown: true,
+        });
       }
       const spawn = entry.ctx?.actorAuthority?.spawnSync;
       return runDomainEffect(entry, 'turn.actor.spawn-sync', () =>
@@ -1947,21 +1950,24 @@ export const makeOffscreenActorClient = ({
         ...['tools', 'maxSteps', 'maxDepth'].filter((key) => Object.hasOwn(msg, key))];
       const entry = await domainEntry(grant, msg, 'actor', fields);
       if (!entry || entry.operation !== 'turn.actor.spawn-async'
-          || typeof msg.task !== 'string' || !msg.task
+          || typeof msg.task !== 'string' || !msg.task || msg.task.length > 65_536
           || typeof msg.allowRecursion !== 'boolean'
           || msg.tools !== undefined && (!Array.isArray(msg.tools)
-            || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string'))
+            || msg.tools.some((/** @type {unknown} */ name) => typeof name !== 'string'
+              || name.length === 0 || name.length > 128))
           || !Array.isArray(msg.grantedToolNames)
           || msg.grantedToolNames.length > 256
           || msg.grantedToolNames.some((/** @type {unknown} */ name) => typeof name !== 'string'
-            || !grant.allowedToolNames.has(name))
+            || name.length > 128 || !grant.allowedToolNames.has(name))
           || !Array.isArray(msg.grantedOperations)
           || msg.grantedOperations.length > 256
           || msg.grantedOperations.some((/** @type {unknown} */ operation) => typeof operation !== 'string'
-            || !grant.allowedOperations.has(operation))
+            || operation.length > 128 || !grant.allowedOperations.has(operation))
           || msg.maxSteps !== undefined && !Number.isFinite(msg.maxSteps)
           || msg.maxDepth !== undefined && !Number.isFinite(msg.maxDepth)) {
-        return { ok: false, error: 'actor/spawn-async: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'actor/spawn-async: authority mismatch', outcomeKnown: true,
+        });
       }
       const spawn = entry.ctx?.actorAuthority?.spawnAsync;
       return runDomainEffect(entry, 'turn.actor.spawn-async', () =>
@@ -1985,7 +1991,9 @@ export const makeOffscreenActorClient = ({
         grantFor(msg, sender, boundGrant), msg, 'actor', [],
       );
       if (!entry || entry.operation !== 'turn.actor.tasks') {
-        return { ok: false, error: 'actor/tasks-read: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'actor/tasks-read: authority mismatch', outcomeKnown: true,
+        });
       }
       const read = entry.ctx?.actorAuthority?.listTasks;
       return runDomainEffect(entry, 'turn.actor.tasks', () =>
@@ -1997,7 +2005,9 @@ export const makeOffscreenActorClient = ({
       );
       if (!entry || entry.operation !== 'turn.actor.cancel'
           || typeof msg.taskId !== 'string' || !msg.taskId) {
-        return { ok: false, error: 'actor/task-cancel: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'actor/task-cancel: authority mismatch', outcomeKnown: true,
+        });
       }
       const cancel = entry.ctx?.actorAuthority?.cancelTask;
       return runDomainEffect(entry, 'turn.actor.cancel', () =>
@@ -2016,7 +2026,9 @@ export const makeOffscreenActorClient = ({
           || typeof msg.awaitReply !== 'boolean' || typeof msg.degradeToAsync !== 'boolean'
           || !Number.isSafeInteger(msg.awaitCapMs) || msg.awaitCapMs < 1
           || msg.awaitCapMs > 3 * 60_000) {
-        return { ok: false, error: 'actor/message-deliver: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'actor/message-deliver: authority mismatch', outcomeKnown: true,
+        });
       }
       const deliver = entry.ctx?.actorAuthority?.deliverMessage;
       return runDomainEffect(entry, 'turn.actor.message', () =>
@@ -2710,7 +2722,9 @@ export const makeOffscreenActorClient = ({
       if (!entry || typeof msg.appProgramSemanticToken !== 'string'
           || msg.appProgramSemanticToken.length < 8
           || msg.appProgramSemanticToken.length > 128) {
-        return { ok: false, error: 'app/run-code: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'app/run-code: authority mismatch', outcomeKnown: true,
+        });
       }
       return runDomainEffect(entry, 'app/run-code', () =>
         entry.authority.runCode(msg.code, msg.timeoutMs), HOST_EFFECT_OUTCOME.programRun);
@@ -2838,7 +2852,9 @@ export const makeOffscreenActorClient = ({
       if (!entry || typeof msg.pageProgramSemanticToken !== 'string'
           || msg.pageProgramSemanticToken.length < 8
           || msg.pageProgramSemanticToken.length > 128) {
-        return { ok: false, error: 'page/run-program: authority mismatch', outcomeKnown: true };
+        return refuseClaimedEntry(entry, {
+          ok: false, error: 'page/run-program: authority mismatch', outcomeKnown: true,
+        });
       }
       return runDomainEffect(entry, 'page/run-program', () =>
         entry.authority.runOwnedPageProgram(), HOST_EFFECT_OUTCOME.programRun);

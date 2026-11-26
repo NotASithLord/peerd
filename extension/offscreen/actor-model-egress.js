@@ -53,6 +53,7 @@ export const createActorModelEgress = ({
       const close = async () => {
         if (closed) return;
         closed = true;
+        request.signal?.removeEventListener('abort', abort);
         await checked(cancelInference({ streamId }), 'actor-model-cancel-failed').catch(() => {});
       };
       const abort = () => { void close(); };
@@ -83,7 +84,7 @@ export const createActorModelEgress = ({
         },
         cancel: close,
       }) : null;
-      if (!body) request.signal?.removeEventListener('abort', abort);
+      if (!body) void close();
       return new Response(body, {
         status: Number(opened.status),
         statusText: typeof opened.statusText === 'string' ? opened.statusText : '',
