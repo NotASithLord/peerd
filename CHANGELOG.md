@@ -10,6 +10,23 @@ and storage formats may move until the surface stabilizes.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-27
+
+### Added
+
+- Full-screen mode for Apps with a one-click return to peerd, first-tab peerd access, and Discover phase 2 polish with plain App names.
+- Automatic `peerd-release` repository dispatch hook from the release pipeline to `peerd-ai/prowser` (in addition to `peerd-site`) so browser builds pick up new extension releases immediately when `PROWSER_DISPATCH_TOKEN` is configured.
+
+### Fixed
+
+- Preserved `grantedToolNames` across nested `actor/spawn-sync` and `actor/spawn-async` calls, closed claim-drain leaks and added input length caps in `offscreen-actor-client.js`, hardened `repositoryWebFetch` (`https:` and `opaqueredirect` checks), fixed abort-listener and port leaks in `actor-model-egress.js`, and tightened `object-src` to `'none'` across extension manifests and HTML CSPs.
+- Retained routing replay IDs across sustained admitted traffic, recovered content across saturated meshes while bounding sparse provider traversal and rendezvous writes, validated WASI command compatibility before instantiation, and fixed backup startup contention and network-disable lifecycle races.
+- Pruned unused target-specific vendor bundles (~10.3 MiB per Firefox XPI, ~3.1 MiB per Chrome ZIP, ~6.0 MiB per web dist), unified OpenAI-compatible provider adapters and offscreen relay tables, standardized CI and tooling on Bun 1.4.5, and resolved all OSV dependency advisories with zero active waivers.
+
+### Validation and scope
+
+- Verified across the full CI matrix: Bun functional suite (`9836/9836`), Chrome in-browser suite (`1354/1354`), Firefox/Gecko suite (`1346/1346`), side-panel E2E (`639/639`) plus MV3 lifecycle faults, visual diff, CodeQL, OSV scan, Dependency review, and all store/preview package builds.
+
 ## [0.10.0] - 2026-10-28
 
 ### Added
