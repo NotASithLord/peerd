@@ -1157,6 +1157,48 @@ jobs:
               "${ASSETS[@]}"
           fi
 
+  notify-prowser:
+    name: Notify peerd-ai/prowser release hook
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release-notify
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner (audit egress)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - name: Dispatch the exact released tag to peerd-ai/prowser
+        env:
+          GH_TOKEN: ${{ secrets.PROWSER_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::PROWSER_DISPATCH_TOKEN is not set in release-notify; peerd-ai/prowser will pick up $GITHUB_REF_NAME on its next scheduled watch-upstream run."
+          else
+            dispatched=false
+            for attempt in 1 2 3; do
+              if gh api --method POST repos/peerd-ai/prowser/dispatches \
+                -f event_type=peerd-release \
+                -F "client_payload[tag]=$GITHUB_REF_NAME"; then
+                dispatched=true
+                break
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                delay=$((attempt * 10))
+                echo "::warning::prowser dispatch attempt $attempt failed; retrying in ${delay}s"
+                sleep "$delay"
+              fi
+            done
+            if [ "$dispatched" != true ]; then
+              echo "::warning::prowser dispatch failed after 3 attempts; scheduled watch-upstream remains the repair path"
+            else
+              echo "dispatched peerd release $GITHUB_REF_NAME to peerd-ai/prowser"
+            fi
+          fi
+
   notify-site:
     name: Notify peerd-site release hook
     needs: release

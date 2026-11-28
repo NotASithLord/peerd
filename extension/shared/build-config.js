@@ -3,11 +3,11 @@
 // Chrome offscreen documents do not expose runtime.getManifest, so these
 // Build facts are stamped into artifacts and the dev tree.
 
-export const EXTENSION_VERSION = "0.10.0";
+export const EXTENSION_VERSION = "0.10.1";
 export const BACKGROUND_MODULE_PATH = "background/vault-kernel-preview.js";
 /** @type {'chrome'|'firefox'} */
 export const BROWSER = "chrome";
 export const CHANNEL = "preview";
 export const DWEB_ENABLED = true;
 export const CHANNEL_DEFAULTS = Object.freeze({"voiceEnabled":false,"voiceVariant":"base","voiceEngine":"auto","voiceSilenceMs":1500,"voiceOnboardingDismissed":false,"ocrEnabled":false,"devMode":false,"reasoningEnabled":true,"reasoningEffort":"medium","webActorActionSurface":"code","providerName":"","providerModel":"","ollamaHost":"http://localhost:11434","openrouterModels":[],"advancedAutomationEnabled":true,"watchAgentTab":false,"frontDoorView":"panel","firstTabEnabled":false,"firstTabOffered":false,"runnerModel":"","prewalkEnabled":false,"enginePrewalkEnabled":false,"prewalkExecutorModel":"","spendLimitUsd":0,"pricingOverrides":{},"confirmWebWrites":true,"schemaValidatedReplies":false,"autoMemoryEnabled":true,"autoResumeInterruptedTurns":true,"providerFailoverEnabled":true,"providerFallbacks":[],"vaultAutoLockMs":2700000,"auditLogMaxEntries":20000,"autoUpdateEnabled":true,"dwebEnabled":false,"dwebDiscoveryEnabled":true,"dwebAgentEnabled":false});
-export const CONTROLLER_BUILD_DIGEST = '927ccdd52566c5decfa4309ed5d8656b512982d19deb121c4dfb8df32212d4aa';
+export const CONTROLLER_BUILD_DIGEST = '2e357e8c434bfeb7ac28d871f979f13b2fbd802a9b68fd60d41f51883775fa81';
