@@ -85,7 +85,6 @@ import './unit/engine-tabs/app-tab/full-screen.test.js';
 import './unit/red-team/sandbox-escape.test.js';
 
 // --- chassis: vm-tab ---
-import './unit/engine-tabs/vm-tab/firefox-webvm-note.test.js';
 import './unit/engine-tabs/vm-tab/disk-lock.test.js';
 import './unit/peerd-engine/repository.test.js';
 

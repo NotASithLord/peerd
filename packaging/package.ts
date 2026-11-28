@@ -67,20 +67,18 @@ const PRUNE_ALWAYS = [
   'vendor/pako/pako.min.js', 'vendor/vendor.lock.json',
 ];
 // Browser-specific runtime prunes:
-//   firefox: lacks COOP/COEP SharedArrayBuffer isolation, so CheerpX WebVM and
-//            Wasmer pods cannot run (~10.3 MiB saved per XPI).
+//   firefox: lacks COOP/COEP SharedArrayBuffer isolation, so threaded Wasmer
+//            pods cannot run (~5.2 MiB saved per XPI). unkernel uses single-CPU
+//            JSPI (no SharedArrayBuffer) and runs on Firefox 154+.
 //   chrome:  uses native blob-graph notebook loading (Rollup is Firefox-only,
-//            ~0.95 MiB) and supports Wasm tail calls since Chrome 112
-//            (cxcore-no-return-call is obsolete, ~1.94 MiB).
+//            ~0.95 MiB).
 const PRUNE_FIREFOX = [
-  'vendor/cheerpx', 'vendor/wasmer',
+  'vendor/wasmer',
   'engine-tabs/pod-tab/wasmer-worker.js',
   'engine-tabs/pod-tab/wasmer-thread-worker.js',
 ];
 const PRUNE_CHROME = [
   'vendor/rollup',
-  'vendor/cheerpx/cxcore-no-return-call.js',
-  'vendor/cheerpx/cxcore-no-return-call.wasm',
 ];
 // The home Lab is a preview-only dev tool. Dweb source and prompt text are
 // separately pruned from every artifact without a working mesh host.

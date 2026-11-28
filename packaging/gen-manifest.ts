@@ -47,10 +47,8 @@ export const targetBackgroundEntry = (
 // chromium manifests; keys Chrome owns get stripped from Firefox ones.
 const FIREFOX_ONLY_KEYS = ['browser_specific_settings', 'sidebar_action'];
 // COEP/COOP are Chromium-only MANIFEST keys (they cross-origin-isolate
-// extension pages so CheerpX gets SharedArrayBuffer). Firefox doesn't honor
-// them as manifest keys — left in, they're dead weight an AMO validator can
-// flag. (The WebVM is already non-functional on Firefox without isolation;
-// stripping the keys just keeps the manifest clean.)
+// extension pages for SharedArrayBuffer runtimes like Wasmer pods and threaded
+// Wasm). Firefox doesn't honor them as manifest keys; stripping keeps AMO clean.
 const CHROME_ONLY_KEYS = ['update_url', 'key', 'side_panel',
   'cross_origin_embedder_policy', 'cross_origin_opener_policy'];
 

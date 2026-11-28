@@ -12,7 +12,7 @@ describe('vm-tab disk lock', () => {
     const recordAt = boot.indexOf('record = await loadVmRecord()');
     const lockAt = boot.indexOf('await holdDiskLock(diskOverlayKey)');
     const refuseAt = boot.indexOf("history.replaceState(null, '', location.pathname)");
-    const mountAt = boot.indexOf('IDBDevice.create(diskOverlayKey)');
+    const mountAt = boot.indexOf('openDataDisk({');
     expect(recordAt).toBeGreaterThanOrEqual(0);
     expect(lockAt).toBeGreaterThan(recordAt);
     expect(refuseAt).toBeGreaterThan(lockAt);

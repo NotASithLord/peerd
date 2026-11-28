@@ -153,7 +153,7 @@ d('bash wrappers — control ops', () => {
     expect(r.captured?.request.url).toBe('peerd://pip-install');
     const j = pkgJson(r.captured);
     expect(j.packages).toEqual(['requests']);
-    expect(j.pyTags).toContain('i686');
+    expect(j.pyTags).toContain('aarch64');
   });
 });
 

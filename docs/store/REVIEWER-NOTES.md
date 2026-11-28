@@ -32,7 +32,7 @@ extension data through the extension.
    and ask "summarize this page", or "open hacker news and tell me the
    top three stories".
 4. VM demo: ask "boot a linux vm and run uname -a". First boot streams
-   the public Debian image from disks.webvm.io (see below).
+   the pinned Debian 13 aarch64 erofs image from updates.peerd.ai (see below).
 5. The Activity page shows tool outcomes, direct open-web fetches, and policy
    denials.
 
@@ -54,16 +54,17 @@ JavaScript or WebAssembly execution surfaces.
 
 Other network-loaded assets that a scan may flag are listed below:
 
-1. **CheerpX (x86-in-WASM runtime) is fully vendored** in
-   `vendor/cheerpx/`, version-pinned, with provenance and the SHA-256
-   of the entry file documented in `vendor/cheerpx/SOURCE.txt`. Every
-   vendored dependency in `vendor/` carries the same SOURCE.txt
+1. **unkernel (Linux 7.x in WebAssembly runtime) is fully vendored** in
+   `vendor/unkernel/`, version-pinned, with provenance and SHA-256 hashes
+   documented in `vendor/unkernel/SOURCE.txt` and `vendor/vendor.lock.json`.
+   Every vendored dependency in `vendor/` carries the same SOURCE.txt
    treatment. Packaged extension code is vanilla, unobfuscated ES modules.
-2. **`disks.webvm.io` (vm-tab)** streams a stock Debian *filesystem
-   image*. These bytes are interpreted as an ext2 disk by the sandboxed WASM VM.
-   It is data, not extension code, equivalent to a game loading an
-   asset file. It is the public image published by Leaning Technologies
-   (CheerpX's authors), fetched read-only when the user boots a VM.
+2. **`updates.peerd.ai/unkernel/` (vm-tab)** streams a pinned Debian 13.7 aarch64
+   *filesystem image* (`debian.erofs`). These bytes are interpreted as a read-only
+   EROFS disk by the sandboxed Wasm Linux kernel, with first-use size + head-hash
+   pinning and strict ETag validation on range reads. It is data, not extension
+   code, equivalent to a game loading an asset file, fetched read-only when the
+   user boots a VM.
 3. **`huggingface.co` (voice/model-store.js)** downloads the public
    Moonshine speech model when the user enables local voice. Every
    asset URL is pinned to a specific HF commit AND verified against a

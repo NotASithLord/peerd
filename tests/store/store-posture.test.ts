@@ -62,17 +62,17 @@ describe('store manifest posture', () => {
     expect(manifest.action?.default_icon?.['128']).toBeTruthy();
   });
 
-  test('connect-src is narrowed (no blanket wss:)', () => {
+  test('connect-src is narrowed (no blanket wss: and no legacy CheerpX WS host)', () => {
     const csp = manifest.content_security_policy?.extension_pages ?? '';
-    expect(csp).toContain('wss://disks.webvm.io');
+    expect(csp).not.toContain('wss://disks.webvm.io');
     // A bare `wss:` wildcard would let extension pages connect to any
-    // websocket host — exactly the flag we narrowed away.
+    // websocket host - exactly the flag we narrowed away.
     expect(csp).not.toMatch(/\bwss:(?!\/\/)/);
   });
 
   test('preview narrows connect-src too (pinned hosts only)', () => {
     const csp = preview.content_security_policy?.extension_pages ?? '';
-    expect(csp).toContain('wss://disks.webvm.io');
+    expect(csp).not.toContain('wss://disks.webvm.io');
     expect(csp).toContain('wss://bootstrap.peerd.ai');
     expect(csp).not.toMatch(/\bwss:(?!\/\/)/);
   });

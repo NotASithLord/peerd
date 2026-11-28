@@ -57,7 +57,7 @@ export const WEB_INCLUDE_FILES = [
 export const WEB_PRUNE_WITHIN = [
   'shared/channel-config.js',
   'vendor/onnxruntime-web',
-  'vendor/cheerpx',
+  'vendor/unkernel',
   'vendor/vad-web',
   'vendor/pdfjs',
   'vendor/xterm',

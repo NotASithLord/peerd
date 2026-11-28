@@ -97,7 +97,7 @@ describe('the baked orchestrator prompt (system-prompt.txt)', () => {
   test('the deep per-kind lore is relocated off the always-on prompt', () => {
     expect(base.includes('webvm specifics')).toBe(false);
     expect(base.includes('USE MITHRIL')).toBe(false);
-    expect(base.includes('CheerpX quirks (work around')).toBe(false);
+    expect(base.includes('unkernel notes:')).toBe(false);
   });
 
   test('routes browser-standard JS to Notebook without implying Node compatibility', () => {
@@ -203,7 +203,7 @@ describe('actorBlock (the per-kind tuned prompt)', () => {
   test('webvm carries the relocated shell lore', () => {
     const block = actorBlock('webvm');
     expect(block.includes('curl/wget')).toBe(true);
-    expect(block.includes('CheerpX quirks')).toBe(true);
+    expect(block.includes('unkernel notes:')).toBe(true);
     expect(block.includes('vm_import')).toBe(true);
   });
 
@@ -423,8 +423,8 @@ describe('the orchestrator prompt stays lean (lore lives in the actors)', () => 
     const base = await Bun.file('./extension/peerd-provider/system-prompt.txt').text();
     const vm = actorBlock('webvm');
     // The lore that left the main template is exactly what the actor now carries.
-    expect(base.includes('CheerpX quirks (work around')).toBe(false);
-    expect(vm.includes('CheerpX quirks')).toBe(true);
+    expect(base.includes('unkernel notes:')).toBe(false);
+    expect(vm.includes('unkernel notes:')).toBe(true);
   });
 });
 

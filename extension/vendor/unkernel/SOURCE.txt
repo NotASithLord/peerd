@@ -1,0 +1,15 @@
+Package:  unkernel
+Upstream: https://github.com/pithings/unkernel
+Release:  v0.2.0-261127-3b71fa5
+License:  MIT (JS SDK: web.mjs, _chunks/*.mjs) AND GPL-2.0-only (unkernel.wasm.gz Linux 7.3.4 kernel + busybox base initramfs)
+Notices:  LICENSE, LICENSE-MIT, THIRD-PARTY.md (shipped in artifacts)
+Script:   scripts/vendor-unkernel.sh (verified against scripts/vendor-unkernel.sha256)
+
+Source artifacts:
+  unkernel.tgz     sha256: eaab8bab3bd359b0e77865e187f2fa7b89ebc71d831f766f69886ec8f17bef42
+  unkernel.wasm.gz sha256: 176cd263030e7a46d14df2445003e0fce6fa9843ecce6be8edd82aecee8cda77
+
+Distro rootfs (streamed lazily via HTTP Range requests, pinned in vm-tab.js):
+  debian.erofs     Debian 13.7 aarch64 (debian-13.7-19d99edab284a175, 77,819,904 bytes)
+                   sha256: 18e863fd85a63b26f1b017ad76f560f169e8dde74619f0378f72bfaae22db30d
+  URL:             https://updates.peerd.ai/unkernel/v0.2.0-261127-3b71fa5/debian.erofs

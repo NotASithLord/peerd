@@ -12,15 +12,15 @@
   <!-- No header / no footer. The terminal IS the page.
        Identification is the tab title + amber favicon; reboot is Cmd-R. -->
 
-  <!-- Boot console: shown until CheerpX is ready, replaced by xterm below.
-       Styled as a shell from the first frame — dmesg log flowing from the
+  <!-- Boot console: shown until unkernel is ready, replaced by xterm below.
+       Styled as a shell from the first frame - dmesg log flowing from the
        top-left, the current stage as a live prompt line. The spinning peerd
        orb doubles as the prompt glyph and is the only color on screen. -->
   <div id="vm-boot" class="boot-card">
-    <div class="boot-banner" aria-hidden="true"><span class="peerd-brand"><span class="b-p">p</span><span class="b-e">e</span><span class="b-e2">e</span><span class="b-r">r</span><span class="b-d">d</span></span> · webvm — linux on webassembly · tty0</div>
+    <div class="boot-banner" aria-hidden="true"><span class="peerd-brand"><span class="b-p">p</span><span class="b-e">e</span><span class="b-e2">e</span><span class="b-r">r</span><span class="b-d">d</span></span> · webvm - linux on webassembly · tty0</div>
     <pre id="boot-log" class="boot-log"></pre>
     <div class="boot-prompt">
-      <span class="boot-spinner" aria-hidden="true"></span><h2 id="boot-stage">Starting…</h2><span id="boot-detail" class="muted">Streaming Debian disk image into IndexedDB. First boot takes ~10s.</span><span class="boot-caret" aria-hidden="true"></span>
+      <span class="boot-spinner" aria-hidden="true"></span><h2 id="boot-stage">Starting…</h2><span id="boot-detail" class="muted">Booting Linux on WebAssembly and streaming Debian rootfs.</span><span class="boot-caret" aria-hidden="true"></span>
     </div>
   </div>
 

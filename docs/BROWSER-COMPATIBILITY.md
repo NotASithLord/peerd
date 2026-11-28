@@ -17,7 +17,7 @@ check in this file must pass in a packaged extension.
 
 | Surface | Chromium | Firefox | Classification |
 |---|---|---|---|
-| WebVM and threaded WebAssembly | WebVM can boot in a cross-origin-isolated extension page | WebVM cannot boot from an extension page; WebAssembly that needs shared memory/threads is unavailable. Non-threaded WASI in Notebooks and Pods is unaffected | Blocked upstream |
+| WebVM (unkernel) and threaded WebAssembly | WebVM boots via WebAssembly JSPI and threaded WebAssembly runs in a cross-origin-isolated extension page | WebVM boots via WebAssembly JSPI on Firefox 154+ (no SharedArrayBuffer required); threaded WebAssembly (Wasmer pods) that needs shared memory/threads remains unavailable. Non-threaded WASI in Notebooks and Pods is unaffected | WebVM supported; threaded Wasm blocked upstream |
 | Pod JavaScript | `js` runs Web-standard JavaScript in a sealed module Worker | `js` is refused; the shell, OPFS, Git, HTTP bridge, and WASI remain available | Platform behavior under review plus a Peerd guard |
 | Apps | Opaque-origin manifest-sandbox runner is available | Available on Firefox 154 or later with the same no-network sandbox floor | Supported with packaged acceptance |
 | Headless/offscreen services | Headless `script`/`page_code`, site-client and A2A code runners, PDF/document conversion, rich HTML extraction, voice/local-model hosts, and per-actor Worker heaps are available | The sealed controller and per-actor Workers run from the event page and preserve their separate keyless heaps; voice has a background-page host. Sealed jobs, document/PDF conversion, rich HTML extraction, local WebGPU, and dweb/A2A hosts remain unavailable, so their dependent tools are not exposed | Isolation parity is implemented; hosted capability gaps remain |
@@ -31,21 +31,21 @@ a user or agent workflow.
 
 ### FF-COI: extension pages cannot opt into cross-origin isolation
 
-- **Peerd impact:** WebVM (CheerpX) cannot boot, and threaded WebAssembly cannot
-  share memory with Workers from a Firefox extension page. This does not block
-  ordinary WebAssembly or WASI Preview 1 commands.
+- **Peerd impact:** Threaded WebAssembly (Wasmer pods) cannot share memory with
+  Workers from a Firefox extension page. Single-CPU WebVM (unkernel) uses
+  WebAssembly JSPI rather than `SharedArrayBuffer`, so WebVM and non-threaded
+  WASI commands work on Firefox 154+.
 - **Upstream:** [Mozilla Bug 1673477](https://bugzilla.mozilla.org/show_bug.cgi?id=1673477)
   (`REOPENED`) and the cross-browser proposal in
   [WECG issue 1039](https://github.com/w3c/webextensions/issues/1039) (`OPEN`).
   Mozilla tracks per-extension process isolation separately in
   [Bug 1827085](https://bugzilla.mozilla.org/show_bug.cgi?id=1827085).
 - **Peerd guard:** Firefox packages strip the unsupported COOP/COEP manifest
-  keys in [`packaging/gen-manifest.ts`](../packaging/gen-manifest.ts), and the
-  WebVM preflight explains the limitation through
-  [`firefox-webvm-note.js`](../extension/engine-tabs/vm-tab/firefox-webvm-note.js).
+  keys in [`packaging/gen-manifest.ts`](../packaging/gen-manifest.ts) and prune
+  `vendor/wasmer`.
 - **Exit check:** a packaged Firefox extension page reports
   `crossOriginIsolated === true`, can transfer a `SharedArrayBuffer` to a Worker,
-  and passes the WebVM boot and threaded-WASM browser tests.
+  and passes the threaded-WASM browser tests.
 
 ### FF-MV3-WORKERS
 
