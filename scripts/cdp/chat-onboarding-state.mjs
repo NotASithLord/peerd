@@ -255,11 +255,11 @@ export const CHAT_ONBOARDING_STATES = [
         if (method === 'Target.attachedToTarget' && params.targetInfo?.type === 'page') {
           const session = params.sessionId;
           jobs.push((async () => {
-            await connection.send('Fetch.enable', { patterns: [{ urlPattern: '*/vendor/cheerpx/cx.esm.js' }] }, session);
+            await connection.send('Fetch.enable', { patterns: [{ urlPattern: '*/vendor/unkernel/web.mjs' }] }, session);
             await connection.send('Runtime.runIfWaitingForDebugger', {}, session);
           })().catch((cause) => { faultError = String(cause); }));
         }
-        if (method === 'Fetch.requestPaused' && params.request?.url?.endsWith('/vendor/cheerpx/cx.esm.js')) {
+        if (method === 'Fetch.requestPaused' && params.request?.url?.endsWith('/vendor/unkernel/web.mjs')) {
           faults.push({ url: params.request.url, at: Date.now(), sessionId: envelope.sessionId });
           void connection.send('Fetch.failRequest', { requestId: params.requestId, errorReason: 'Failed' }, envelope.sessionId)
             .catch((cause) => { faultError = String(cause); });
@@ -302,7 +302,7 @@ export const CHAT_ONBOARDING_STATES = [
           .some((item) => item.id === target.id && item.url === target.url);
         rec.check('the real failed VM tab stays open for its boot details', failed && retained, JSON.stringify(report));
         if (process.env.PEERD_REQUIRE_VM_MODULE_FAULT === '1') {
-          rec.check('strict isolation reaches the actual CheerpX module-wire fault', report.isolated === true && faults.length === 1, JSON.stringify(report));
+          rec.check('strict isolation reaches the actual unkernel module-wire fault', report.isolated === true && faults.length === 1, JSON.stringify(report));
           if (report.isolated !== true) throw new Error('PROBE-GAP: the strict VM module fault was not exercised');
         }
         if (process.env.PEERD_VISUAL_BASE_RENDER === '1') rec.observe('merge-base explicit VM failure result', report);

@@ -9928,7 +9928,7 @@ export const STATES = [
   // a user meets when an id is stale, an image pin mismatches, or cross-origin
   // isolation is unavailable, and it is the only explanation they get for why
   // their VM/Notebook/App/Pod did not start. It is also the one state reachable
-  // without booting CheerpX. The booted terminal / editor / render states remain
+  // without booting unkernel. The booted terminal / editor / render states remain
   // uncovered and want their own states with a seeded instance.
   {
     name: 'vm-tab-failed', kind: 'visual', phase: 'post-unlock',
@@ -9992,7 +9992,7 @@ export const STATES = [
     },
   },
   // why: hold the real disk lock in another document before this VM boots.
-  // No CheerpX device can open in either refusal case.
+  // No unkernel disk device can open in either refusal case.
   {
     name: 'vm-disk-ownership', kind: 'visual', phase: 'post-unlock', responder: null,
     async run(ctx, rec) {
@@ -10035,10 +10035,10 @@ export const STATES = [
           const refused = await waitFor(() => evalIn(page, `(() => {
             if (!document.querySelector('.boot-card.is-failed') || location.hash) return null;
             return { text: document.body.innerText, log: document.getElementById('boot-log')?.textContent,
-              cheerpxLoaded: performance.getEntriesByType('resource').some(entry => entry.name.includes('/cheerpx/')) };
+              unkernelLoaded: performance.getEntriesByType('resource').some(entry => entry.name.includes('/unkernel/')) };
           })()`), { budgetMs: 10_000, pollMs: 50 });
           rec.check(`${failure} disk ownership stops before the VM loads`,
-            !!refused && !refused.cheerpxLoaded && !refused.log?.includes('IDBDevice.create')
+            !!refused && !refused.unkernelLoaded && !refused.log?.includes('openDataDisk')
               && refused.text.includes(failure === 'busy' ? 'already open in another tab' : 'Could not lock the VM disk'),
             JSON.stringify(refused));
           const pinClock = () => evalIn(page, `(() => {
