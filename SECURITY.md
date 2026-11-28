@@ -126,7 +126,7 @@ never seen a login page for is unprotected (R15). And the strict structural
 reply format for web actors ships **off** by default (R14). The threat model
 states both plainly rather than counting them as defenses.
 
-- **Sandboxed execution.** WebVM uses CheerpX. Notebook and headless script
+- **Sandboxed execution.** WebVM uses unkernel (Linux 7.x on WebAssembly, no direct network). Notebook and headless script
   execution use sealed workers. Apps use opaque-origin sandboxed iframes and
   currently run only on Chrome. Store and web builds refuse direct remote
   JavaScript imports without requesting the module source. Preview targets may

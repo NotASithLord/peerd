@@ -60,7 +60,7 @@ between them.
 | Sealed controller Worker | Orchestrator loop, tool metadata and projection, semantic dispatch and gates, provider/model shaping, and result semantics. Chrome hosts it through the offscreen document; Firefox hosts it from the extension background page | No |
 | Offscreen document (`offscreen/`, Chrome) | A thin host supervisor for the sealed controller and isolated actor Workers, plus headless `script`, voice, and the dweb base network | No. Hosted Worker heaps are keyless |
 | Side panel (`sidepanel/`) | The chat UI, confirm prompts, settings | No |
-| Sandbox tabs (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) | WebVM (CheerpX), Notebook (sealed worker), App (opaque origin iframe) | No |
+| Sandbox tabs (`engine-tabs/vm-tab/`, `engine-tabs/notebook-tab/`, `engine-tabs/app-tab/`) | WebVM (unkernel), Notebook (sealed worker), App (opaque origin iframe) | No |
 | The mesh (`peerd-distributed/`, preview only) | WebRTC mesh, DHT, gossip, signed direct channels, A2A | No |
 
 The module map (`p`rovider, `e`gress, `e`ngine, `r`untime, `d`istributed) is in
@@ -240,7 +240,7 @@ Pins verify exact bytes and improve reproducibility. They do not grant trust or
 authority. Dynamic imports are refused in every package. Remote modules run
 inside a sealed worker. The store build strips
 the `debugger` permission and the dweb module, and CI verifies zero dweb traces.
-Accepted residuals: the CheerpX WebVM streams its root filesystem image from a
+Accepted residuals: the unkernel WebVM streams its read-only Debian rootfs image from a
 third-party host over WSS, which cannot be SRI-pinned. In Preview, an unpinned
 HTTPS module can change at its publisher's discretion.
 The separate Store risk where code is fetched as data and then executed through
@@ -914,10 +914,10 @@ evaluating peerd should know. Each cites where it lives in the code.
   `chrome.storage.session` for service-worker-restart resume. The stated threat model is
   that anything with in-origin execution already has service worker memory.
   (`peerd-egress/vault/vault.js`.)
-- R8. The CheerpX WebVM disk image is a live third-party dependency. The root filesystem
-  streams from a third-party host over WSS and cannot be SRI-pinned. A compromise of that
-  host feeds content into the VM the agent runs commands in. The Moonshine model, by
-  contrast, is SRI-verified. (`extension/vendor/cheerpx/SOURCE.txt`.)
+- R8. The unkernel WebVM rootfs image streams lazily over HTTPS Range requests from
+  `updates.peerd.ai/unkernel/` (pinned on first use by total size + 64 KiB head hash, with
+  strict ETag checks per range). The kernel and JS SDK themselves are fully vendored and
+  SHA-256 pinned in `extension/vendor/vendor.lock.json` (`extension/vendor/unkernel/SOURCE.txt`).
 - R9. The `<all_urls>` host permission. The manifest grants the broadest host reach.
   Which hosts the extension may actually fetch or script is a runtime concern (the egress
   allowlist and denylist), so a bug that bypasses the runtime gate has full-web reach at

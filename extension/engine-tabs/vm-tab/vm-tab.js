@@ -1,18 +1,19 @@
 // @ts-check
-// vm-tab — a discrete WebVM hosted in its own browser tab.
+// vm-tab - a discrete WebVM hosted in its own browser tab.
 //
 // Architecture:
-//   - The tab IS the VM. CheerpX + bash + xterm all live in this page.
+//   - The tab IS the VM. unkernel (Linux 7.x on WebAssembly) + bash + xterm
+//     all live in this page.
 //   - PTY bytes never leave the tab (xterm is right here).
 //   - Agent commands arrive via chrome.runtime.onMessage from the SW;
 //     we run them through the persistent bash via the marker protocol
 //     and reply with { exitCode, stdout, stderr, durationMs }.
 //   - HTTP marker (peerd-fetch) calls back to the SW via runtime
 //     sendMessage to use the same peerd-egress denylist + audit as
-//     the web tools.
+//     the web tools. Direct guest networking (`net`) is deliberately OFF.
 //
 // The VM's identity (vmId, name, disk overlay key) is read from the
-// registry via the SW (vm/get-meta → idbKV('vms')) on boot, keyed by the
+// registry via the SW (vm/get-meta -> idbKV('vms')) on boot, keyed by the
 // `#<vmId>` fragment in the URL. No URL params for cleanliness.
 
 import browser from '/shared/browser-api.js';
@@ -38,40 +39,22 @@ import { base64ToBytes } from '/shared/util.js';
 import { mountPullInPeerd } from '/shared/pull-in-peerd.js';
 import { stripChunk } from '/engine-tabs/vm-tab/marker-strip.js';
 import { ERRFILE_PREFIX, buildWrappedCommand, parseRunCapture } from '/engine-tabs/vm-tab/run-capture.js';
-import { buildFirefoxWebVmNote } from '/engine-tabs/vm-tab/firefox-webvm-note.js';
 import { holdDiskLock } from '/engine-tabs/vm-tab/disk-lock.js';
-
-// WebVM needs a cross-origin-isolated page (for SharedArrayBuffer). Chrome grants
-// it via the COOP/COEP manifest keys; Firefox doesn't honor them, so
-// packaging/gen-manifest.ts STRIPS them from every Firefox package — which makes
-// the shipped manifest itself the ground truth for "this build cannot isolate by
-// design". Feature-detect that (not a UA sniff): a UA-overridden Firefox or a
-// Gecko fork still gets the honest platform notice, and if Firefox one day
-// honors the keys and we ship them, an isolation failure correctly falls back to
-// the generic manifest error instead of masquerading as a platform limit.
-// (cast: COOP/COEP are Chromium-only manifest keys the polyfill's Firefox-shaped
-// WebExtensionManifest type doesn't declare — absence is exactly the signal.)
-const BUILD_CANNOT_ISOLATE = !(/** @type {Record<string, unknown>} */ (
-  /** @type {unknown} */ (browser.runtime.getManifest())
-)).cross_origin_embedder_policy;
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const STOCK_DEBIAN_IMAGE = 'wss://disks.webvm.io/debian_large_20230522_5044875331.ext2';
-// HTTPS byte-range variant of the SAME image (identical bytes → identical
-// ext2 block numbers, so existing per-VM overlays stay valid). Preferred
-// at boot: CheerpX's HttpBytesDevice + IDB overlay persistently CACHES the
-// base-image blocks it downloads, so repeat boots read from IndexedDB
-// instead of re-streaming from the network. The wss:// CloudDevice streams
-// with no persistent cache — kept only as a fallback.
-const STOCK_DEBIAN_IMAGE_HTTP = STOCK_DEBIAN_IMAGE.replace(/^wss:\/\//, 'https://');
-// The per-URL TOFU fingerprint store key now lives in
-// peerd-engine/image-pin.js (imported above) — the SW's artifact
-// export/import routes read the same key to carry the pin inside
-// vm-recipe envelopes (DESIGN-10). Pins stay global, not per-VM:
-// a published image URL must never change bytes for ANY consumer
+// Pinned Debian 13.7 aarch64 erofs image for unkernel v0.2.0-261127-3b71fa5.
+// Served over HTTPS with Range + CORS + CORP from peerd's immutable R2 edge;
+// read lazily block-by-block with strict ETag/size validation (HttpBase).
+const STOCK_DEBIAN_IMAGE_HTTP = 'https://updates.peerd.ai/unkernel/v0.2.0-261127-3b71fa5/debian.erofs';
+const UNKERNEL_WASM_GZ_PATH = 'vendor/unkernel/unkernel.wasm.gz';
+const DATA_DISK_VERSION = 'v1';
+// The per-URL TOFU fingerprint store key lives in peerd-engine/image-pin.js
+// (imported above) - the SW's artifact export/import routes read the same key
+// to carry the pin inside vm-recipe envelopes (DESIGN-10). Pins stay global,
+// not per-VM: a published image URL must never change bytes for ANY consumer.
 // A legitimate new image ships under a new URL and pins fresh automatically.
 
 /** @type {Record<string, any>} the tab owns these known-present elements */
@@ -157,24 +140,23 @@ const loadVmRecord = async () => {
 };
 
 // ---------------------------------------------------------------------------
-// CheerpX module loader
+// unkernel module loader
 // ---------------------------------------------------------------------------
 
-/** @type {Promise<any> | null} */ let cheerpxModulePromise = null;
-const loadCheerpx = () => {
-  if (!cheerpxModulePromise) {
-    cheerpxModulePromise = import('/vendor/cheerpx/cx.esm.js').catch((e) => {
-      cheerpxModulePromise = null;
+/** @type {Promise<any> | null} */ let unkernelModulePromise = null;
+const loadUnkernel = () => {
+  if (!unkernelModulePromise) {
+    unkernelModulePromise = import('/vendor/unkernel/web.mjs').catch((e) => {
+      unkernelModulePromise = null;
       throw e;
     });
   }
-  return cheerpxModulePromise;
+  return unkernelModulePromise;
 };
 
 // ---------------------------------------------------------------------------
-// Bash wrappers (peerd-fetch + curl/wget/git as bash functions, staged
-// via DataDevice then `source`d). Identical semantics to the previous
-// offscreen adapter -- the page they run in changed; the bash didn't.
+// Bash wrappers (peerd-fetch + curl/wget/git/npm/pip/gem as bash functions,
+// staged via MemoryFs mounted at /peerd-data then `source`d).
 // ---------------------------------------------------------------------------
 
 const WRAPPERS_BASH = `
@@ -184,6 +166,8 @@ const WRAPPERS_BASH = `
 # the persistent shell at boot, this turns it off session-wide. Logical "!"
 # (if ! cmd; [ ! -f x ]) is unaffected -- only the !history footgun goes away.
 set +H
+# Clear unkernel Debian's default sudo apt aliases so our apt shims win cleanly.
+unalias apt apt-get 2>/dev/null || true
 
 # ---- peerd-egress wrappers (bash functions) ------------------------------
 # Timeout for a single bridged request, in seconds (configurable). Bumped from
@@ -217,9 +201,8 @@ peerd-fetch() {
     cat "/peerd-data/peerderr\${id}" >&2
     return 1
   fi
-  # why: CheerpX denies writes to /dev/null and /dev/stdout. Map the common
-  # "discard" idiom (curl -o /dev/null) to a real discard, and /dev/stdout
-  # (or "-") to plain stdout, instead of failing on the redirect.
+  # Map the common discard idiom (curl -o /dev/null) directly, and /dev/stdout
+  # (or "-") to plain stdout, avoiding an extra copy.
   if [ -z "$out" ] || [ "$out" = "-" ] || [ "$out" = "/dev/stdout" ]; then
     cat "/peerd-data/peerdresp\${id}"
   elif [ "$out" = "/dev/null" ]; then
@@ -407,8 +390,7 @@ git() {
     return 1
   fi
   mkdir -p "$extract" "$dir" 2>>"$errf"
-  # why || true: CheerpX has no utimes(), so unzip warns + exits non-zero per
-  # file while still extracting correctly; judge by whether a dir appeared.
+  # Keep extraction tolerant of non-fatal metadata warnings; judge by whether a dir appeared.
   unzip -q -o "$tmp" -d "$extract" 2>>"$errf" || true
   local inner="$(ls -d "$extract"/*/ 2>>"$errf" | head -1)"
   if [ -n "$inner" ]; then
@@ -490,7 +472,7 @@ __peerd_node_add() {
       ''|*..*|/*|*/*/*) echo "$tool: skipping unsafe package name: $name" >&2; rm -f "$file"; continue ;;
     esac
     mkdir -p "node_modules/$name" 2>>"$errf"
-    # why || true: no utimes() in CheerpX → tar warns + exits non-zero per file
+    # Tolerate non-fatal tar metadata warnings on extraction.
     # while extracting correctly.
     tar -xzf "$file" -C "node_modules/$name" --strip-components=1 2>>"$errf" || true
     rm -f "$file"
@@ -540,7 +522,7 @@ pip() {
   fi
   shift
   local -a specs=()
-  local PEERD_PYTAGS='"i686"'
+  local PEERD_PYTAGS='"aarch64","manylinux_2_17_aarch64","manylinux2014_aarch64"'
   while [ $# -gt 0 ]; do
     case "$1" in
       -r|--requirement)
@@ -565,14 +547,10 @@ pip() {
   while IFS=$'\\t' read -r name version file; do [ -n "$name" ] && wheels="$wheels $file"; done < "$manifest"
   if [ -z "$wheels" ]; then echo "peerd-pip: nothing staged to install" >&2; rm -f "$manifest" "$errf"; return 1; fi
   # Install each pure-Python wheel by UNZIPPING it into a writable
-  # site-packages -- deliberately NOT via pip. On CheerpX pip install fails
-  # two ways: (1) its distro detection opens /dev/null for WRITE, which
-  # CheerpX denies (PermissionError); and (2) the host stages wheels as
-  # pkgstage_<id>_<name>.whl and pip derives the package name/version from the
-  # FILENAME, so the staging prefix breaks its .dist-info lookup. A
-  # py3-none-any wheel is just a zip already laid out for site-packages, so
-  # unzip == install (host-side resolution already staged every dependency,
-  # and the extracted .dist-info keeps pip list / importlib.metadata working).
+  # site-packages directory - deliberately NOT via pip, because the host stages
+  # wheels as pkgstage_<id>_<name>.whl and pip derives the package name/version
+  # from the filename. A py3-none-any wheel is just a zip already laid out for
+  # site-packages, so unzip == install (and preserves .dist-info).
   python3 -c '
 import site, os, sys, zipfile
 cands = list(getattr(site, "getsitepackages", lambda: [])()) + [site.getusersitepackages()]
@@ -664,20 +642,35 @@ const makeMarker = () =>
 const shellEscape = (/** @type {any} */ s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
 // ---------------------------------------------------------------------------
-// xterm + PTY + CheerpX boot
+// xterm + PTY + unkernel boot
 // ---------------------------------------------------------------------------
 
 /** @type {any} */
-let cx = null;
+let vm = null;
+/** @type {any} */
+let pty = null;
+/** @type {any} */
+let dataDisk = null;
+/** @type {any} */
+let peerdDataFs = null;
 /** @type {any} */
 let dataDev = null;
-// set once CheerpX's custom console is wired; null only during boot, before
-// any caller below can run. Cast the init so call sites read it as non-null.
-let cxRead = /** @type {(byte: number) => void} */ (/** @type {unknown} */ (null));
 /** @type {any} */
 let term = null;
 /** @type {any} */ let fitAddon = null;
 let syncConsoleSize = () => {};
+
+/** @param {string | Uint8Array} data */
+const writePty = (data) => {
+  if (!pty) return;
+  void pty.write(data).catch(() => {});
+};
+
+/** Best-effort disk sync so persistent ext4 writes flush to IndexedDB. */
+const syncDiskBestEffort = () => {
+  if (!vm || shellExit !== null) return;
+  void vm.sync({ timeout: 5000 }).catch(() => {});
+};
 
 let silentMode = false;
 let httpMarkerPending = '';
@@ -719,7 +712,7 @@ const emitStripped = (/** @type {string} */ text) => {
       activeRunCapture = null;
       // why timing: localize the "output showed, result lagged" gap. tailMs is the
       // time from the last output-only chunk to this completion marker — a large
-      // tail means CheerpX stalled between producing output and the marker (a VM-
+      // tail means the VM stalled between producing output and the marker (a VM-
       // side cost); a near-zero tail means the lag is DOWNSTREAM (the actor's reply
       // turn + the orchestrator turn), not the VM. totalMs is the whole run.
       const doneAt = Date.now();
@@ -978,10 +971,10 @@ const runViaShell = async (/** @type {string} */ cmd, /** @type {any} */ opts = 
     capture.resolve = resolve; capture.reject = reject;
     if (opts.signal) {
       abortListener = () => {
-        // Interrupt the still-running foreground command (Ctrl-C, then a newline)
-        // so a timed-out command actually STOPS — otherwise it keeps running in
+        // Interrupt the still-running foreground command (SIGINT + Ctrl-C + newline)
+        // so a timed-out command actually STOPS - otherwise it keeps running in
         // the persistent bash and its output bleeds into the next command.
-        try { cxRead(0x03); cxRead(0x0a); } catch { /* shell gone */ }
+        try { pty?.kill('SIGINT'); writePty('\x03\n'); } catch { /* shell gone */ }
         reject(new Error('aborted'));
       };
       opts.signal.addEventListener('abort', abortListener, { once: true });
@@ -992,7 +985,8 @@ const runViaShell = async (/** @type {string} */ cmd, /** @type {any} */ opts = 
   if (effectiveSilent) silentMode = true;
   const wrappedCmd = `\x15${buildWrappedCommand(cmd, marker, errFile)}`;
   try {
-    for (const byte of new TextEncoder().encode(wrappedCmd)) cxRead(byte);
+    if (!pty) throw new Error('persistent shell not started');
+    await pty.write(wrappedCmd);
     // parseRunCapture already sliced the echo off and split stdout/stderr.
     return await completion;
   } finally {
@@ -1042,23 +1036,15 @@ const installWrappers = async () => {
 };
 
 // ---------------------------------------------------------------------------
-// Base-image integrity pin (TOFU) — the imperative shell around
+// Base-image integrity pin (TOFU) - the imperative shell around
 // peerd-engine/image-pin.js.
 //
-// THE TRUST BOUNDARY, stated plainly: CheerpX's HttpBytesDevice /
-// CloudDevice stream the rootfs block-by-block from inside the vendored
-// runtime — there is no clean hook to verify the byte stream itself,
-// and full verification would need a per-block hash manifest plus a
-// custom block device (a wrong-layer hack against vendor internals; we
-// don't do it). What we verify instead, with our OWN single ranged
-// fetch before the device opens the URL: the image's total size and the
-// SHA-256 of its first 64 KiB, pinned on first use. That fails the boot
-// CLOSED on the failure mode that destroys user data — the bytes behind
-// the pinned URL changing under existing per-VM overlays (CheerpX
-// caches base blocks by block number with NO invalidation; a changed
-// base silently corrupts every overlay). It does NOT
-// defend a fully malicious host serving a faithful head + tampered
-// tail; that residual trust in disks.webvm.io is the documented gap.
+// THE TRUST BOUNDARY, stated plainly: unkernel's HttpBase streams the
+// read-only Debian EROFS rootfs lazily over HTTP Range requests with strict
+// ETag/size checks on every range. Before opening the disk, we fetch the first
+// 64 KiB + total size ourselves and pin them on first use. That fails the boot
+// CLOSED if the bytes behind the pinned URL ever change under existing per-VM
+// persistent data disks.
 // ---------------------------------------------------------------------------
 
 const sha256Hex = async (/** @type {any} */ buf) => {
@@ -1077,7 +1063,7 @@ const verifyImagePin = async (/** @type {string} */ url) => {
   let resp;
   try {
     // why bare fetch (not safeFetch/webFetch): this is the SAME host +
-    // bytes the vendored CheerpX device streams from this page — pinned
+    // bytes the vendored unkernel HttpBase streams from this page - pinned
     // infrastructure data verified by hash here, not agent-driven
     // egress; the egress allowlist semantics don't apply (same
     // precedent as voice/model-store's SRI-checked model download).
@@ -1191,39 +1177,53 @@ const boot = async () => {
     return;
   }
 
-  // 2. Pre-flight: cross-origin isolation (manifest already sets this)
-  const isolated = globalThis.crossOriginIsolated === true;
-  const sab = typeof SharedArrayBuffer !== 'undefined';
-  trace(isolated && sab ? 'info' : 'warn',
-    `crossOriginIsolated=${isolated} SharedArrayBuffer=${sab}`);
-  if (!isolated || !sab) {
-    // why: on Firefox this is expected, not a config error — an extension page
-    // can't be cross-origin isolated (Firefox bug 1673477), so the Firefox
-    // manifest ships without the (dead) COOP/COEP keys and there's no
-    // SharedArrayBuffer for CheerpX. Show the honest platform-limitation notice
-    // + the open threads instead of the misleading "manifest must declare…".
-    if (BUILD_CANNOT_ISOLATE) { failBootFirefoxWebVM(); return; }
-    failBoot('Cross-origin isolation is OFF',
-      new Error('manifest must declare cross_origin_embedder_policy + cross_origin_opener_policy'));
+  // 2. Load unkernel runtime + pre-flight JSPI support check
+  // Single-CPU unkernel uses WebAssembly JSPI (WebAssembly.Suspending), not
+  // SharedArrayBuffer, so WebVM runs on both Chrome 137+ and Firefox 153+.
+  setStage('Loading unkernel');
+  let mod;
+  try { mod = await loadUnkernel(); }
+  catch (e) { return failBoot('Failed to load unkernel module', e); }
+  const {
+    checkSupport,
+    createKernel,
+    openDistroDisk,
+    openDataDisk,
+    bundledBoot,
+    gunzipIfNeeded,
+    MemoryFs,
+    ConsoleRouter,
+  } = mod;
+  const support = await checkSupport();
+  trace(support.ok ? 'info' : 'warn',
+    `wasm=${support.wasm} bigint=${support.bigint} jspi=${support.jspi}`);
+  if (!support.ok) {
+    failBoot('WebAssembly JSPI unavailable',
+      new Error(`${support.problems.join('; ')}. WebVM requires Chrome/Edge 137+, Firefox 153+, or Safari 27+.`));
     return;
   }
+  trace('info', `unkernel module loaded; base image = ${STOCK_DEBIAN_IMAGE_HTTP}`);
 
-  // 3. Load CheerpX module
-  setStage('Loading CheerpX');
-  let mod;
-  try { mod = await loadCheerpx(); }
-  catch (e) { return failBoot('Failed to load CheerpX module', e); }
-  const { Linux, CloudDevice, HttpBytesDevice, IDBDevice, OverlayDevice, DataDevice } = mod;
-  trace('info', `CheerpX module loaded; base image = ${STOCK_DEBIAN_IMAGE_HTTP}`);
+  // 3. Decompress and compile the bundled Linux 7.x Wasm kernel
+  setStage('Compiling Linux kernel');
+  let kernelModule;
+  try {
+    const wasmUrl = browser.runtime.getURL(UNKERNEL_WASM_GZ_PATH);
+    // eslint-disable-next-line no-restricted-globals
+    const wasmResp = await fetch(wasmUrl);
+    if (!wasmResp.ok) throw new Error(`HTTP ${wasmResp.status} loading ${UNKERNEL_WASM_GZ_PATH}`);
+    const wasmBytes = await gunzipIfNeeded(await wasmResp.arrayBuffer());
+    kernelModule = await WebAssembly.compile(wasmBytes);
+    trace('info', `kernel compiled (${(wasmBytes.byteLength / (1024 * 1024)).toFixed(1)} MiB)`);
+  } catch (e) {
+    return failBoot('Failed to compile Linux kernel', e);
+  }
 
-  // 4. Integrity-pin the streamed rootfs (TOFU — see verifyImagePin's
-  //    trust-boundary comment). A mismatch fails the boot OUTRIGHT: no
-  //    HttpBytesDevice, and no wss:// CloudDevice fallback either — the
-  //    fallback streams the same published image, so once the cheap
-  //    evidence says the bytes changed, both paths would corrupt this
-  //    VM's existing overlay. Unverifiable (offline / non-206 / pin
-  //    store unavailable) only warns: offline boots from the overlay's
-  //    block cache must keep working.
+  // 4. Integrity-pin the streamed rootfs (TOFU - see verifyImagePin's
+  //    trust-boundary comment). A mismatch fails the boot OUTRIGHT: streaming
+  //    a changed base image under existing per-VM persistent data risks silent
+  //    overlay corruption. Unverifiable (offline / non-206 / pin store
+  //    unavailable) only warns.
   setStage('Verifying disk image');
   /** @type {any} */ let imagePin;
   try {
@@ -1239,96 +1239,147 @@ const boot = async () => {
         + `(${imagePin.mismatches.join(' + ')} differ). Streaming a different base `
         + `image under this VM's existing disk overlay would silently corrupt it, `
         + `so the boot was refused. If the image was legitimately republished, `
-        + `existing VMs cannot be migrated — create a new VM after clearing the `
+        + `existing VMs cannot be migrated - create a new VM after clearing the `
         + `stored pin (chrome.storage.local key '${IMAGE_PIN_STORAGE_KEY}').`,
       ),
     ));
   }
   if (imagePin.action === 'skipped') {
-    trace('warn', `image pin: verification skipped — ${imagePin.reason}`);
+    trace('warn', `image pin: verification skipped - ${imagePin.reason}`);
   } else {
     trace('info', `image pin: ${imagePin.action === 'record' ? 'recorded (first use)' : 'verified'} `
-      + `head=${imagePin.observed.headSha256.slice(0, 16)}… total=${imagePin.observed.totalBytes ?? 'unknown'}B`);
+      + `head=${imagePin.observed.headSha256.slice(0, 16)}... total=${imagePin.observed.totalBytes ?? 'unknown'}B`);
   }
 
-  // 5. Create devices. The per-VM IDB overlay holds this VM's writes AND —
-  //    when the base is an HttpBytesDevice — a persistent cache of the
-  //    base-image blocks CheerpX downloads, so repeat boots of this VM read
-  //    from IndexedDB instead of re-streaming the image. Prefer the HTTP
-  //    byte-range base for that caching; fall back to the wss:// streaming
-  //    CloudDevice (no persistent cache) if the HTTP image can't be opened,
-  //    so boot never regresses to a hard failure.
-  // TODO(shared-base-cache): the base-image blocks cache into the PER-VM
-  // overlay (diskOverlayKey), so multiple VMs each cache the same image
-  // separately. A shared read-only base cache (one IDBDevice shared across
-  // VMs) + per-VM write overlay (nested OverlayDevice) would dedupe it.
-  // Unverified: CheerpX doesn't document overlay nesting / per-layer
-  // read-through caching / multi-tab IDB sharing — needs real boot testing.
-  // Revisit if we ever add a v86 backend too (same dedupe question there).
-  // See ROADMAP.md "Shared WebVM base-image cache".
-  setStage('Mounting disk', `Streaming Debian image to ${diskOverlayKey}…`);
-  let baseDev, idbDev, overlayDev;
+  // 5. Open persistent per-VM ext4 data disk (IndexedDB) + lazy HTTP Range
+  //    Debian erofs distro image + host-backed 9p /peerd-data mount.
+  setStage('Mounting disk', `Opening ${diskOverlayKey} and streaming Debian image...`);
+  let distroDisk;
   try {
-    trace('info', `IDBDevice.create → ${diskOverlayKey}`);
-    idbDev = await IDBDevice.create(diskOverlayKey);
-    try {
-      trace('info', `HttpBytesDevice.create → ${STOCK_DEBIAN_IMAGE_HTTP}`);
-      baseDev = await HttpBytesDevice.create(STOCK_DEBIAN_IMAGE_HTTP);
-      trace('info', 'base image: HTTP byte-range (downloaded blocks cached in the IDB overlay)');
-    } catch (e) {
-      trace('warn', `HttpBytesDevice failed (${(/** @type {{ message?: string }} */ (e))?.message ?? String(e)}); falling back to wss:// CloudDevice (no persistent cache)`);
-      baseDev = await CloudDevice.create(STOCK_DEBIAN_IMAGE);
+    const bootBundle = bundledBoot(kernelModule);
+    if (!bootBundle.datadisk) {
+      throw new Error('bundled kernel has no unkernel.datadisk template');
     }
-    trace('info', 'OverlayDevice.create');
-    overlayDev = await OverlayDevice.create(baseDev, idbDev);
-    trace('info', 'DataDevice.create');
-    dataDev = await DataDevice.create();
+    trace('info', `openDataDisk -> ${diskOverlayKey} (${DATA_DISK_VERSION})`);
+    dataDisk = await openDataDisk({
+      name: diskOverlayKey,
+      version: DATA_DISK_VERSION,
+      template: bootBundle.datadisk,
+      log: (/** @type {string} */ msg) => trace('info', msg),
+      onError: (/** @type {any} */ err) => trace('warn', `data disk save failed: ${err?.message ?? String(err)}`),
+    });
+    if (dataDisk.notice) trace('warn', `data disk: ${dataDisk.notice}`);
+    trace('info', `openDistroDisk -> ${STOCK_DEBIAN_IMAGE_HTTP}`);
+    distroDisk = await openDistroDisk(STOCK_DEBIAN_IMAGE_HTTP, {
+      log: (/** @type {string} */ msg) => trace('info', msg),
+    });
+    peerdDataFs = new MemoryFs();
+    dataDev = {
+      writeFile: async (/** @type {string} */ path, /** @type {string | Uint8Array} */ content) => {
+        peerdDataFs.writeFile(path, content);
+      },
+      delete: async (/** @type {string} */ path) => {
+        peerdDataFs.rm(path, { force: true });
+      },
+    };
   } catch (e) {
     return failBoot('Disk setup failed', e);
   }
 
-  // 6. Linux.create
+  // 6. Boot Linux 7.x via unkernel.
+  // Deliberately omit `net`: all guest networking stays routed through peerd's
+  // audited, denylist-gated HTTP bridge (sw/web-fetch) over /peerd-data.
   setStage('Booting Linux');
   try {
-    trace('info', 'Linux.create');
-    cx = await Linux.create({
-      mounts: [
-        { type: 'ext2', path: '/', dev: overlayDev },
-        { type: 'dir', path: '/peerd-data', dev: dataDev },
-      ],
+    trace('info', 'createKernel');
+    vm = await createKernel({
+      kernel: kernelModule,
+      distro: distroDisk,
+      disks: [dataDisk],
+      mounts: {
+        '/peerd-data': { fs: peerdDataFs, readOnly: true },
+      },
+      jit: true,
+      onProgress: (/** @type {any} */ p) => {
+        if (p?.stage) trace('info', `kernel: ${p.stage}`);
+      },
     });
-    trace('info', 'Linux.create ok');
+    if (ConsoleRouter) {
+      const consoleRouter = new ConsoleRouter({
+        onKernelLine: (/** @type {string} */ line, /** @type {{ important?: boolean }} */ meta) => {
+          if (meta?.important) trace('warn', `[kernel] ${line}`);
+        },
+        onUserOutput: () => {},
+      });
+      vm.onOutput((/** @type {Uint8Array} */ bytes) => consoleRouter.write(bytes));
+    }
+    trace('info', `Linux booted (${vm.memoryMiB} MiB RAM)`);
   } catch (e) {
-    return failBoot('Linux.create failed', e);
+    return failBoot('Linux boot failed', e);
   }
 
-  // 7. PTY hookup
+  // 7. Spawn persistent interactive login bash on a real PTY (via kwtty/vsock)
   setStage('Starting shell');
   const decoder = new TextDecoder();
-  const shellOutput = (/** @type {any} */ buf, /** @type {any} */ vt) => {
-    if (vt !== 1 && vt !== undefined) return;
-    const bytes = (buf instanceof Uint8Array) ? buf
-      : (typeof buf === 'number') ? new Uint8Array([buf])
-      : new Uint8Array(buf);
-    const text = decoder.decode(bytes, { stream: true });
-    if (text) handleShellByte(text);
-  };
-  cxRead = cx.setCustomConsole(shellOutput, 80, 24);
   // why: an active command can change disk before exit. Reject without the safe retry flag.
   const shellEnded = (/** @type {number} */ status) => {
+    if (shellExit !== null) return;
     shellExit = status;
+    pty = null;
     const capture = activeRunCapture; activeRunCapture = null;
     capture?.reject(new VMNotReadyError(`persistent shell exited (${status}); command outcome unknown`));
     trace('warn', `persistent shell exited (${status})`);
   };
-  cx.run('/bin/bash', ['--login', '-i'], {
-    env: ['LANG=C.UTF-8', 'TERM=xterm', 'HOME=/home/user', 'USER=user'], cwd: '/home/user',
-  }).then((/** @type {any} */ result) => shellEnded(result.status), () => shellEnded(-1));
-  // why: retain the decoder and callback across resize. The vendor API sends no SIGWINCH.
-  syncConsoleSize = () => { cxRead = cx.setCustomConsole(shellOutput, term.cols, term.rows); };
+  vm.exited.then(
+    (/** @type {any} */ res) => shellEnded(res?.code ?? -1),
+    () => shellEnded(-1),
+  );
+  try {
+    pty = await vm.spawn('/bin/bash', ['--login', '-i'], {
+      cols: 80,
+      rows: 24,
+      term: 'xterm',
+      user: 'user',
+      cwd: '/home/user',
+      env: {
+        TERM: 'xterm',
+        HOME: '/home/user',
+        USER: 'user',
+        LANG: 'C.UTF-8',
+        LC_ALL: 'C.UTF-8',
+        KW_AUTO_APT: '0',
+        PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      },
+    });
+  } catch (e) {
+    return failBoot('Shell spawn failed', e);
+  }
+  pty.ended.then(
+    (/** @type {any} */ end) => shellEnded(end?.type === 'exit' ? end.code : -1),
+    () => shellEnded(-1),
+  );
+  // Drain pty.output continuously (unkernel applies backpressure if unread).
+  (async () => {
+    const reader = pty.output.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value, { stream: true });
+        if (text) handleShellByte(text);
+      }
+      const tail = decoder.decode();
+      if (tail) handleShellByte(tail);
+    } catch { /* pty closed */ }
+    finally { reader.releaseLock(); }
+  })();
+  // Real SIGWINCH resize over kwtty!
+  syncConsoleSize = () => {
+    if (pty && term?.cols && term?.rows) pty.resize(term.cols, term.rows);
+  };
 
   // 8. Wait briefly for the prompt to settle
-  await new Promise((r) => setTimeout(r, 600));
+  await new Promise((r) => setTimeout(r, 300));
   trace('info', 'persistent shell ready');
 
   // 9. Install wrappers (silent)
@@ -1353,10 +1404,6 @@ const boot = async () => {
   }
 
   // 10. Swap boot card for terminal
-  // why: trace BEFORE mountTerminal so the boot log makes it obvious if
-  // mounting is where we stall (xterm constructor, term.open, etc.).
-  // Previously the boot log went silent after "wrappers verified" on
-  // success too, which looked like a hang to users watching the chip.
   trace('info', 'mounting xterm');
   try {
     mountTerminal();
@@ -1371,7 +1418,7 @@ const boot = async () => {
   // HTTP-native capabilities aren't a surprise (and `peerd-net` is discoverable).
   emitToTerminal(`\r\n${bannerText()}\r\n\r\n`);
 
-  // 11. Announce ourselves so the SW can map vmId → tabId
+  // 11. Announce ourselves so the SW can map vmId -> tabId
   browser.runtime.sendMessage({ type: 'vm/tab-ready', vmId })
     .catch((e) => console.debug('[vm-tab] tab-ready send failed', e));
 };
@@ -1384,22 +1431,8 @@ const failBoot = (/** @type {string} */ stage, /** @type {any} */ err) => {
   void browser.runtime.sendMessage({ type: 'vm/tab-failed', vmId: vmId ?? location.hash.slice(1) }).catch(() => {});
 };
 
-// The Firefox WebVM-unavailable stop: not a "boot failed" error but a clear
-// "this browser can't host it yet" notice with the open bug + standards threads.
-// Idempotent — a re-run won't stack a second card.
-const failBootFirefoxWebVM = () => {
-  void browser.runtime.sendMessage({ type: 'vm/tab-failed', vmId: vmId ?? location.hash.slice(1) }).catch(() => {});
-  setStatus('WebVM unavailable', 'failed');
-  setStage('WebVM needs cross-origin isolation Firefox can’t grant yet');
-  DOM.bootCard.classList.add('is-failed');
-  trace('warn', 'WebVM unavailable on Firefox: an extension page can’t be cross-origin isolated, so there’s no SharedArrayBuffer for CheerpX. See Firefox bug 1673477 + w3c/webextensions.');
-  if (!DOM.bootCard.querySelector('.boot-firefox-note')) {
-    DOM.bootCard.appendChild(buildFirefoxWebVmNote());
-  }
-};
-
 // ---------------------------------------------------------------------------
-// xterm mount + input wiring (runs once CheerpX is ready)
+// xterm mount + input wiring (runs once unkernel is ready)
 // ---------------------------------------------------------------------------
 
 const mountTerminal = () => {
@@ -1461,10 +1494,9 @@ const mountTerminal = () => {
     preTerminalBuffer = null;
   }
 
-  // User keystrokes → bash stdin.
+  // User keystrokes -> bash stdin (UTF-8 native via unkernel kwtty).
   term.onData((/** @type {any} */ data) => {
-    if (!cxRead) return;
-    for (const byte of new TextEncoder().encode(data)) cxRead(byte);
+    writePty(data);
   });
 
   // Auto-resize.
@@ -1509,6 +1541,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
           const timer = setTimeout(() => ctrl.abort(), timeoutMs);
           try {
             const result = await runViaShell(msg.cmd, { signal: ctrl.signal });
+            syncDiskBestEffort();
             sendResponse({
               ok: true,
               result: {
@@ -1516,7 +1549,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
                 stderr: result.stderr,
                 exitCode: result.exitCode,
                 durationMs: Date.now() - start,
-                // VM-side timing breadcrumb (totalMs run, tailMs = output→marker lag);
+                // VM-side timing breadcrumb (totalMs run, tailMs = output->marker lag);
                 // the SW logs it so a slow report can be split VM-tail vs downstream.
                 timing: result.timing,
               },
@@ -1546,6 +1579,7 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
             if (r.exitCode !== 0) {
               sendResponse({ ok: false, error: `writeFile cp failed (exit ${r.exitCode}): ${r.stderr || r.stdout}` });
             } else {
+              await vm?.sync?.({ timeout: 5000 }).catch(() => {});
               sendResponse({ ok: true });
             }
           } catch (e) {
@@ -1560,7 +1594,9 @@ browser.runtime.onMessage.addListener(/** @type {any} */ ((/** @type {any} */ ms
         }
 
         case 'vm/reset': {
-          // Easiest path: reload the page. Disk overlay persists in IDB.
+          // Flush persistent disk and reload the page. Disk state persists in IDB.
+          try { await vm?.sync?.({ timeout: 3000 }); } catch { /* best effort */ }
+          try { await vm?.stop?.(); } catch { /* best effort */ }
           sendResponse({ ok: true });
           setTimeout(() => location.reload(), 50);
           return;
@@ -1589,13 +1625,17 @@ self.addEventListener('unhandledrejection', (e) => {
   trace('error', `unhandled rejection: ${e?.reason?.message ?? String(e?.reason)}`);
 });
 
+self.addEventListener('pagehide', () => {
+  syncDiskBestEffort();
+});
+
 // ---------------------------------------------------------------------------
 // Kickoff
 // ---------------------------------------------------------------------------
 //
 // Reboot is just Cmd-R (or Ctrl-R) -- the browser reloads the tab,
-// vm-tab.js runs again, CheerpX re-mounts the same IDB overlay so the
-// disk state is preserved. No reboot button needed.
+// vm-tab.js runs again, unkernel re-mounts the same IDB data disk so
+// the disk state is preserved. No reboot button needed.
 
 // A peerd-owned tab carries the trigger to pull the side panel in — so you can
 // keep chatting from this VM without a round-trip back to home. Mounted before

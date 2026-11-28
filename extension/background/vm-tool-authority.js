@@ -169,12 +169,17 @@ export const createVmToolAuthority = ({ binding, ctx, signal = ctx?.abortSignal,
       await new Promise((resolve) => setTimeout(resolve, 200));
       try {
         if (typeof indexedDB !== 'undefined' && typeof fresh.diskOverlayKey === 'string') {
-          await new Promise((resolve, reject) => {
-            const request = indexedDB.deleteDatabase(fresh.diskOverlayKey);
-            request.onsuccess = () => resolve(undefined);
-            request.onerror = () => reject(request.error ?? new Error('delete failed'));
-            request.onblocked = () => reject(new Error('disk overlay still open elsewhere'));
-          });
+          // Delete unkernel's data-disk IDB store (`kwdisk:<key>-v1`) and any
+          // legacy overlay store (`<key>`) left over from older versions.
+          const dbNames = [`kwdisk:${fresh.diskOverlayKey}-v1`, fresh.diskOverlayKey];
+          for (const dbName of dbNames) {
+            await new Promise((resolve, reject) => {
+              const request = indexedDB.deleteDatabase(dbName);
+              request.onsuccess = () => resolve(undefined);
+              request.onerror = () => reject(request.error ?? new Error('delete failed'));
+              request.onblocked = () => reject(new Error('disk overlay still open elsewhere'));
+            });
+          }
         }
       } catch (cause) {
         // Disk cleanup was historically best effort; catalog deletion remains the

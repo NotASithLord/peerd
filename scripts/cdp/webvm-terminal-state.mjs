@@ -12,7 +12,7 @@ const poll = async (name, check, budgetMs = 30_000) => {
   requireProof(value, name); return value;
 };
 
-// why: only the real web-security posture can establish a valid CheerpX boot.
+// why: exercise real extension security posture and JSPI boot on unkernel.
 export const openRealVm = async (extensionDir, name) => {
   const wire = [];
   let phase = { kind: 'create', issuedMain: false, issuedActor: false, token: '', command: '' };
@@ -58,10 +58,11 @@ export const openRealVm = async (extensionDir, name) => {
       const visible = await poll('The real VM did not reach its terminal.', () => evalIn(page, `({
         failed: !!document.querySelector('.boot-card.is-failed'),
         mounted: !!document.querySelector('#vm-terminal:not([hidden]) .xterm-helper-textarea'),
-        isolated: crossOriginIsolated, shared: typeof SharedArrayBuffer === 'function', origin: performance.timeOrigin,
+        jspi: typeof WebAssembly?.Suspending === 'function' && typeof WebAssembly?.promising === 'function',
+        origin: performance.timeOrigin,
         log: document.getElementById('boot-log')?.textContent?.slice(-2000),
       })`).then((value) => value.failed || value.mounted ? value : null).catch(() => null), 300_000);
-      requireProof(visible.mounted && visible.isolated && visible.shared, 'CheerpX did not boot in a real isolated page.', visible);
+      requireProof(visible.mounted && visible.jspi, 'unkernel did not boot in a real extension page.', visible);
       return visible;
     };
     await metrics(1280, 800); await boot();

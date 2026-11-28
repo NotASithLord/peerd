@@ -251,5 +251,5 @@ set by `minimumReleaseAge` in [`bunfig.toml`](bunfig.toml), alongside a
 malware scan on install.
 
 peerd is licensed under the [Apache License 2.0](LICENSE). Vendored components
-retain their own licenses. CheerpX is a proprietary runtime provided by Leaning
-Technologies and is not covered by peerd's Apache license.
+retain their own licenses. The WebVM runtime uses [unkernel](https://github.com/pithings/unkernel)
+(MIT JavaScript SDK and GPL-2.0-only Linux kernel bundle; notices in `extension/vendor/unkernel/`).

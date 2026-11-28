@@ -80,7 +80,7 @@ export default [
   {
     ignores: [
       'extension/vendor/**',       // vendored third-party — not our style
-      'extension/assets/webvm/**', // CheerpX runtime blobs
+      'extension/assets/webvm/**', // legacy WebVM runtime blobs
     ],
   },
 

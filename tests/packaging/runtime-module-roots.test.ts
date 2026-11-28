@@ -92,24 +92,15 @@ describe('fixed runtime module roots', () => {
   test('supported runtime-selected children are explicit package assets', () => {
     const requirements = [
       {
-        selector: 'vendor/cheerpx/cx_esm.js',
+        selector: 'engine-tabs/vm-tab/vm-tab.js',
+        assets: ['vendor/unkernel/unkernel.wasm.gz'],
+      },
+      {
+        selector: 'vendor/unkernel/web.mjs',
         assets: [
-          'vendor/cheerpx/cheerpOS.js',
-          'vendor/cheerpx/cxbridge.js',
-          'vendor/cheerpx/cxcore.js',
-          'vendor/cheerpx/cxcore-no-return-call.js',
-          'vendor/cheerpx/workerclock.js',
-          'vendor/cheerpx/tun/direct.js',
-          'vendor/cheerpx/tun/tailscale_tun_auto.js',
+          'vendor/unkernel/_chunks/vk-host.mjs',
+          'vendor/unkernel/_chunks/vk-shader.mjs',
         ],
-      },
-      {
-        selector: 'vendor/cheerpx/cxcore.js',
-        assets: ['vendor/cheerpx/cxcore.wasm'],
-      },
-      {
-        selector: 'vendor/cheerpx/cxcore-no-return-call.js',
-        assets: ['vendor/cheerpx/cxcore-no-return-call.wasm'],
       },
       {
         selector: 'engine-tabs/app-tab/app-tab.js',
@@ -154,15 +145,9 @@ describe('fixed runtime module roots', () => {
       ...CONTROLLER_BUILD_ASSETS,
     ]);
     for (const entry of [
-      'vendor/cheerpx/cheerpOS.js',
-      'vendor/cheerpx/cxbridge.js',
-      'vendor/cheerpx/cxcore.js',
-      'vendor/cheerpx/cxcore.wasm',
-      'vendor/cheerpx/cxcore-no-return-call.js',
-      'vendor/cheerpx/cxcore-no-return-call.wasm',
-      'vendor/cheerpx/workerclock.js',
-      'vendor/cheerpx/tun/direct.js',
-      'vendor/cheerpx/tun/tailscale_tun_auto.js',
+      'vendor/unkernel/unkernel.wasm.gz',
+      'vendor/unkernel/_chunks/vk-host.mjs',
+      'vendor/unkernel/_chunks/vk-shader.mjs',
       'vendor/mithril/mithril.js',
       'vendor/rollup/bindings_wasm_bg.wasm',
       'engine-tabs/pod-tab/pod-realm-seal.js',

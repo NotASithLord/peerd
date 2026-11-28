@@ -64,7 +64,7 @@ export const PACKAGED_MANDATORY_LAZY_MODULE_ENTRIES = Object.freeze([
   'peerd-engine/export.js',
 
   // Vendor module roots selected by authored runtime loaders.
-  'vendor/cheerpx/cx.esm.js',
+  'vendor/unkernel/web.mjs',
   'vendor/isomorphic-git/index.js',
   'vendor/muse-glimmer/muse-glimmer.js',
   'vendor/pdfjs/pdf.min.mjs',
@@ -142,13 +142,10 @@ export const PACKAGED_UNAVAILABLE_RUNTIME_MODULE_EDGES = Object.freeze([
       from: 'peerd-engine/single-module-linker.js', kind: 'dynamic-import' as const,
       target: 'vendor/rollup/rollup.browser.js', targetCell,
     })),
-  // Firefox lacks COOP/COEP SharedArrayBuffer isolation; CheerpX & Wasmer are pruned.
+  // Firefox lacks COOP/COEP SharedArrayBuffer isolation; Wasmer pods are pruned.
+  // unkernel runs via JSPI without SharedArrayBuffer and ships on Firefox too.
   ...(['store/firefox', 'preview/firefox'] as const)
     .flatMap((targetCell) => [
-      Object.freeze({
-        from: 'engine-tabs/vm-tab/vm-tab.js', kind: 'dynamic-import' as const,
-        target: 'vendor/cheerpx/cx.esm.js', targetCell,
-      }),
       Object.freeze({
         from: 'engine-tabs/pod-tab/wasmer-host.js', kind: 'module-worker' as const,
         target: 'engine-tabs/pod-tab/wasmer-worker.js', targetCell,
@@ -170,19 +167,11 @@ export const PACKAGED_LAZY_MODULE_ENTRIES = Object.freeze([
 // static graph. Packaging verifies byte presence rather than treating opaque
 // vendor selection as an authored ES-module graph.
 export const PACKAGED_LAZY_ASSET_ENTRIES = Object.freeze([
-  // CheerpX's vendored runtime selects these children internally rather than
-  // exposing browser-resolvable static imports.
-  'vendor/cheerpx/cheerpOS.js',
-  'vendor/cheerpx/cxbridge.js',
-  'vendor/cheerpx/cxcore.js',
-  'vendor/cheerpx/cxcore.wasm',
-  'vendor/cheerpx/cxcore-no-return-call.js',
-  'vendor/cheerpx/cxcore-no-return-call.wasm',
-  'vendor/cheerpx/workerclock.js',
-  // Linux.create requires these imports to resolve even though Peerd never
-  // initializes the optional Tailscale implementation behind the auto entry.
-  'vendor/cheerpx/tun/direct.js',
-  'vendor/cheerpx/tun/tailscale_tun_auto.js',
+  // unkernel loads its gzipped Linux 7.x Wasm kernel bundle at runtime and
+  // keeps optional Vulkan chunks adjacent to web.mjs.
+  'vendor/unkernel/unkernel.wasm.gz',
+  'vendor/unkernel/_chunks/vk-host.mjs',
+  'vendor/unkernel/_chunks/vk-shader.mjs',
   // Apps fetch this canonical body as text and project its footer to a classic script.
   'vendor/mithril/mithril.js',
   // Rollup resolves its WASM binding relative to the lazily imported module.
@@ -204,7 +193,6 @@ export const PACKAGED_LAZY_ASSET_ENTRIES = Object.freeze([
 ] as const);
 
 const FIREFOX_EXCLUDED_MODULE_PREFIXES = [
-  'vendor/cheerpx/',
   'vendor/wasmer/',
   'engine-tabs/pod-tab/wasmer-worker.js',
   'engine-tabs/pod-tab/wasmer-thread-worker.js',
@@ -215,13 +203,11 @@ const CHROME_EXCLUDED_MODULE_PREFIXES = [
 ] as const;
 
 const FIREFOX_EXCLUDED_ASSET_PREFIXES = [
-  'vendor/cheerpx/',
   'vendor/wasmer/',
 ] as const;
 
 const CHROME_EXCLUDED_ASSET_PREFIXES = [
   'vendor/rollup/',
-  'vendor/cheerpx/cxcore-no-return-call.',
 ] as const;
 
 export const packagedLazyModuleEntries = (

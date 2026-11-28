@@ -384,15 +384,15 @@ const ACTOR_TYPE_FRAMING = Object.freeze({
 // Kind-specific operating knowledge only. Capability names come from the
 // manifest so this prose cannot become a second, drifting tool inventory.
 const ACTOR_TYPE_LORE = Object.freeze({
-  webvm: `Your VM is stock Debian (i686) + python3/pip, git, jq, the POSIX toolchain
-and Python stdlib in a persistent \`bash --login -i\`. Raw sockets and live apt repos
-are unavailable. HTTP(S), git snapshots and named package installs work through audited
-wrappers: curl/wget, git clone, pip install, npm install <named packages>, gem install,
-and peerd-fetch. Use vm_import for bulk or binary input.
-CheerpX quirks: use bash rather than \`sh -c\` for wrapper subshells; /dev/null and
-/dev/stdout may deny writes, chmod may fail on created files, and stdout/exit are merged.
-Surface denylist and HTTP failures literally. If a normally quick command times out, the
-VM may be wedged: do not pile up retries; report it so the parent can replace the VM.`,
+  webvm: `Your VM is Debian 13 (aarch64, Linux 7.x on unkernel) in a persistent
+\`bash --login -i\`. Raw sockets and live apt repos are unavailable. HTTP(S), git
+snapshots and named package installs work through audited wrappers: curl/wget,
+git clone, pip install, npm install <named packages>, gem install, and
+peerd-fetch. Use vm_import for bulk or binary input.
+unkernel notes: use bash rather than \`sh -c\` for wrapper subshells (wrappers are
+exported bash functions). Surface denylist and HTTP failures literally. If a
+normally quick command times out, the VM may be wedged: do not pile up retries;
+report it so the parent can replace the VM.`,
   notebook: `Your Notebook is a sealed Web Worker + OPFS — vanilla JS, no DOM, network
 via peerd.egress.fetch. For parsing, transforms, numerical work, exercising a library.
 RETURN a structured result: the body runs as an async function, so \`return <value>\` hands

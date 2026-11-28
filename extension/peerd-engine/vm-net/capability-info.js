@@ -24,7 +24,7 @@ export const NET_CAPABILITIES = Object.freeze({
     { what: 'nc / telnet', detail: 'no raw TCP/UDP' },
     { what: 'ping / traceroute', detail: 'no ICMP' },
     { what: 'apt-get install / apt update', detail: 'no live repos — bake into a custom image, or use pip/npm' },
-    { what: 'native pip builds (numpy, pandas…)', detail: 'no 32-bit toolchain — bake from apt into a custom image' },
+    { what: 'native pip builds (numpy, pandas…)', detail: 'no native build toolchain - bake into a custom image' },
   ]),
 });
 

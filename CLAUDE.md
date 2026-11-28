@@ -31,7 +31,7 @@ Each maps to one letter and color in the brand wordmark:
 |---|---|---|---|
 | `p` | cyan    | `peerd-provider/`     | Model adapters (Anthropic, OpenRouter, OpenAI, Z.ai GLM keyed; Ollama and the on-device WebGPU runner keyless - `registry.js` is the live list) |
 | `e` | red     | `peerd-egress/`       | Security: vault, allowlist (`safeFetch`), denylist, audit |
-| `e` | amber   | `peerd-engine/`       | Execution instances - Sandboxes. FOUR kinds run in their own visible tab: WebVMs (CheerpX Linux), Notebooks (sealed JS worker + OPFS), Pods, Apps (opaque-origin iframe). A fifth, the **headless worker** (`script`), runs the Notebook's sealed worker offscreen with no tab - the agent's own quick compute, and the only kind with no registry because it persists no instances. Also here: browser-native Git (`repository/`, exported from `index.js`). The sandbox is the isolate; a tab is one way to host it (taxonomy in `registry-factory.js`). |
+| `e` | amber   | `peerd-engine/`       | Execution instances - Sandboxes. FOUR kinds run in their own visible tab: WebVMs (unkernel Linux), Notebooks (sealed JS worker + OPFS), Pods, Apps (opaque-origin iframe). A fifth, the **headless worker** (`script`), runs the Notebook's sealed worker offscreen with no tab - the agent's own quick compute, and the only kind with no registry because it persists no instances. Also here: browser-native Git (`repository/`, exported from `index.js`). The sandbox is the isolate; a tab is one way to host it (taxonomy in `registry-factory.js`). |
 | `r` | green   | `peerd-runtime/`      | Agent loop, tools + per-environment actors (`message_actor`), sessions, profiles, skills, memory, permissions (Plan/Act), review, goal mode (autonomous loop), composer, cost, transfer, voice, clock, web tool policy |
 | `d` | magenta | `peerd-distributed/` | The dweb. An always-on P2P base network (offscreen mesh + DHT + gossip), did:key identity, signed content addressing, the dwapp bridge, and a peer-to-peer app store that **users AND the agent** build, share, and run dwapps on. Chrome preview only until Firefox has a mesh host. |
 
@@ -292,7 +292,7 @@ exists today:
    conversions, streaming, error handling.
 4. **`peerd-engine`** - Sandboxes: five execution kinds (taxonomy in
    `registry-factory.js`). Four are hosted in their own visible tab -
-   WebVM (CheerpX), Notebook (sealed JS worker + OPFS), Pod, App
+   WebVM (unkernel), Notebook (sealed JS worker + OPFS), Pod, App
    (opaque-origin iframe) - each with a registry in `peerd-engine`, a
    runtime in its tab page under `engine-tabs/` (`vm-tab/`,
    `notebook-tab/`, `pod-tab/`, `app-tab/`), and a tab tracker + RPC
@@ -405,7 +405,7 @@ gotchas to know going in:
   offscreen doc (`peerd-runtime/voice/`).
 - Sandboxes - five execution kinds (taxonomy in the `peerd-engine/` code).
   Four run in their
-  own browser tab - WebVM (CheerpX), Notebook (sealed JS worker + OPFS),
+  own browser tab - WebVM (unkernel), Notebook (sealed JS worker + OPFS),
   Pod, App (opaque-origin iframe) - each with its own registry + tab
   tracker + RPC client. The fifth, the headless worker (`script`), is the
   same sealed worker run offscreen with no tab, for the agent's own quick

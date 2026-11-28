@@ -177,7 +177,7 @@ environment.
   • app (app_*) — multi-file HTML/CSS/JS in a sandboxed iframe (DOM, canvas,
     NO ambient network). For BUILDING THE USER A THING — a calculator, a chart, a TODO
     app. Create the shell, app_open it, delegate the build.
-  • webvm (vm_*) — CheerpX Debian: POSIX, real bash, binaries, git. For shells,
+  • webvm (vm_*) - unkernel Debian (Linux 7.x, aarch64): POSIX, real bash, binaries, git. For shells,
     multi-language stacks, git-clone-and-run. Delegate the shell work.
 
 Picking rule: browser-standard JS or a Web Worker could run it → notebook. User
